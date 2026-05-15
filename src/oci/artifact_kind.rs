@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 ///
 /// Closed internal enum: the binary is the only consumer, so matches stay
 /// total — no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     /// An Agent Skill: a `SKILL.md` directory with YAML frontmatter.
+    ///
+    /// Also the `Default`: the lock layer's `LockedArtifact::kind` is
+    /// `#[serde(skip)]` and re-stamped from the array it was read from, so
+    /// the deserialization placeholder is never observed.
+    #[default]
     Skill,
     /// A rule: a single `paths:`-scoped markdown file.
     Rule,

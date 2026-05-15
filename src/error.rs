@@ -9,6 +9,8 @@
 //! each known kind to a typed [`ExitCode`].
 
 use crate::cli::exit_code::ExitCode;
+use crate::config::config_error::{ConfigError, ConfigErrorKind};
+use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::digest::error::DigestError;
 use crate::oci::identifier::error::IdentifierError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
@@ -28,6 +30,12 @@ pub enum Error {
 
     #[error(transparent)]
     PinnedIdentifier(#[from] PinnedIdentifierError),
+
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+
+    #[error(transparent)]
+    Lock(#[from] LockError),
 }
 
 /// Maps an error chain to a process exit code.
@@ -45,10 +53,49 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Identifier(_) => ExitCode::DataError,
                 Error::Digest(_) => ExitCode::DataError,
                 Error::PinnedIdentifier(_) => ExitCode::DataError,
+                Error::Config(ce) => classify_config(ce),
+                Error::Lock(le) => classify_lock(le),
             };
         }
     }
     ExitCode::Failure
+}
+
+/// Map a config-tier error to an exit code.
+fn classify_config(err: &ConfigError) -> ExitCode {
+    match &err.kind {
+        ConfigErrorKind::TomlParse(_)
+        | ConfigErrorKind::FileTooLarge { .. }
+        | ConfigErrorKind::UnsupportedDeclarationHashVersion { .. } => ExitCode::ConfigError,
+        ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
+        ConfigErrorKind::ArtifactValueMissingRegistry { .. } | ConfigErrorKind::ArtifactValueInvalid { .. } => {
+            ExitCode::DataError
+        }
+        ConfigErrorKind::ConfigAlreadyExists => ExitCode::UsageError,
+        ConfigErrorKind::Io(io) => classify_io(io),
+    }
+}
+
+/// Map a lock-tier error to an exit code.
+fn classify_lock(err: &LockError) -> ExitCode {
+    match &err.kind {
+        LockErrorKind::Locked => ExitCode::TempFail,
+        LockErrorKind::TomlParse(_)
+        | LockErrorKind::TomlSerialize(_)
+        | LockErrorKind::FileTooLarge { .. }
+        | LockErrorKind::UnsupportedVersion { .. } => ExitCode::ConfigError,
+        LockErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
+        LockErrorKind::Io(io) => classify_io(io),
+    }
+}
+
+/// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
+fn classify_io(io: &std::io::Error) -> ExitCode {
+    if io.kind() == std::io::ErrorKind::PermissionDenied {
+        ExitCode::NoPermission
+    } else {
+        ExitCode::IoError
+    }
 }
 
 #[cfg(test)]

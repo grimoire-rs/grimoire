@@ -72,6 +72,13 @@ fn home_dir() -> Option<PathBuf> {
     non_empty_var(key).map(PathBuf::from)
 }
 
+/// The directory the project-scope config walk-up stops at (inclusive):
+/// the user's home directory, if it can be determined. `None` lets the
+/// walk run to the filesystem root.
+pub fn home_dir_for_ceiling() -> Option<PathBuf> {
+    home_dir()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,10 +19,13 @@
 
 mod app;
 mod cli;
+mod config;
 mod context;
 mod env;
 mod error;
+mod lock;
 mod oci;
+mod store;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
