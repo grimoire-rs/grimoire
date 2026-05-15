@@ -1,69 +1,91 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Where an artifact lands on disk for a given editor.
+//! The set of editor targets an install/update writes to.
 //!
-//! This milestone supports exactly one editor (`claude`): a skill installs
-//! as a directory `<root>/skills/<name>/`, a rule as a single file
-//! `<root>/rules/<name>.md`. The multi-editor `EditorTarget` enum is Phase
-//! 5; the surface here is deliberately minimal but factored so Phase 5 can
-//! extend it without reshaping call sites.
+//! Phase 4 supported exactly one editor (`claude`); Phase 5 makes this a
+//! list of [`EditorTarget`]s (default `[claude]`) rooted at a workspace.
+//! The installer iterates the targets, materializing each artifact into
+//! every selected editor's layout. The Claude-only default path behaves
+//! identically to Phase 4.
 
 use std::path::{Path, PathBuf};
 
 use crate::oci::ArtifactKind;
 
-use super::install_error::{InstallError, InstallErrorKind};
+use super::editor_target::EditorTarget;
+use super::install_error::InstallError;
 
-/// The only editor supported this milestone.
-const SUPPORTED_EDITOR: &str = "claude";
-
-/// The default editor root directory name (`claude` ⇒ `.claude`).
-const CLAUDE_ROOT: &str = ".claude";
-
-/// Resolves install paths for one editor under a workspace root.
+/// One or more editor targets rooted at a workspace.
 #[derive(Debug, Clone)]
 pub struct InstallTarget {
-    /// Absolute editor root, e.g. `<workspace>/.claude`.
-    editor_root: PathBuf,
+    workspace: PathBuf,
+    editors: Vec<EditorTarget>,
 }
 
 impl InstallTarget {
-    /// Build a target for `editor` (only `"claude"`, or `None` ⇒ default
-    /// `"claude"`) rooted at `workspace`.
+    /// Build a target for the given editors rooted at `workspace`.
+    ///
+    /// `editors` defaults to `[Claude]` when empty so call sites with no
+    /// `--target` keep the Phase-4 behavior.
+    pub fn new(workspace: &Path, editors: Vec<EditorTarget>) -> Self {
+        let editors = if editors.is_empty() {
+            vec![EditorTarget::Claude]
+        } else {
+            editors
+        };
+        Self {
+            workspace: workspace.to_path_buf(),
+            editors,
+        }
+    }
+
+    /// Parse a comma-separated / repeated `--target` list (each value may
+    /// itself be a comma list) into an [`InstallTarget`]. An empty list
+    /// (no flag) falls back to `config_default` then `claude`.
     ///
     /// # Errors
     ///
-    /// [`InstallErrorKind::UnsupportedEditor`] for any editor other than
-    /// `claude`.
-    pub fn new(workspace: &Path, editor: Option<&str>) -> Result<Self, InstallError> {
-        let editor = editor.unwrap_or(SUPPORTED_EDITOR);
-        if editor != SUPPORTED_EDITOR {
-            return Err(InstallError::without_reference(InstallErrorKind::UnsupportedEditor(
-                editor.to_string(),
-            )));
+    /// [`super::install_error::InstallErrorKind::UnsupportedEditor`] for
+    /// an unknown editor name.
+    pub fn parse(workspace: &Path, flag_values: &[String], config_default: Option<&str>) -> Result<Self, InstallError> {
+        let raw: Vec<String> = if flag_values.is_empty() {
+            config_default
+                .map(|d| d.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_else(|| vec!["claude".to_string()])
+        } else {
+            flag_values
+                .iter()
+                .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
+                .collect()
+        };
+
+        let mut editors = Vec::new();
+        for name in raw {
+            if name.is_empty() {
+                continue;
+            }
+            let editor: EditorTarget = name.parse()?;
+            if !editors.contains(&editor) {
+                editors.push(editor);
+            }
         }
-        Ok(Self {
-            editor_root: workspace.join(CLAUDE_ROOT),
-        })
+        Ok(Self::new(workspace, editors))
     }
 
-    /// The on-disk path the named artifact of `kind` installs to.
-    ///
-    /// A skill resolves to its directory `<root>/skills/<name>/`; a rule
-    /// to its file `<root>/rules/<name>.md`. Both are content-hashed at
-    /// this path by the installer.
-    pub fn path_for(&self, kind: ArtifactKind, name: &str) -> PathBuf {
-        let base = self.editor_root.join(kind.subdir());
-        match kind {
-            ArtifactKind::Skill => base.join(name),
-            ArtifactKind::Rule => base.join(format!("{name}.md")),
-        }
+    /// The editor targets, in declared order (deduplicated).
+    pub fn editors(&self) -> &[EditorTarget] {
+        &self.editors
     }
 
-    /// The editor root directory (`<workspace>/.claude`).
-    pub fn editor_root(&self) -> &Path {
-        &self.editor_root
+    /// The workspace root the editor roots sit under.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// The install path for `(kind, name)` under `editor`.
+    pub fn path_for(&self, editor: EditorTarget, kind: ArtifactKind, name: &str) -> PathBuf {
+        editor.path_for(&self.workspace, kind, name)
     }
 }
 
@@ -72,35 +94,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_skill_path_is_directory_under_skills() {
-        let t = InstallTarget::new(Path::new("/work"), Some("claude")).unwrap();
+    fn empty_defaults_to_claude() {
+        let t = InstallTarget::new(Path::new("/w"), vec![]);
+        assert_eq!(t.editors(), &[EditorTarget::Claude]);
+    }
+
+    #[test]
+    fn parse_comma_list_dedups_and_orders() {
+        let t = InstallTarget::parse(Path::new("/w"), &["claude,copilot".to_string()], None).unwrap();
+        assert_eq!(t.editors(), &[EditorTarget::Claude, EditorTarget::Copilot]);
+        // Repeated flag values merge.
+        let t2 = InstallTarget::parse(
+            Path::new("/w"),
+            &["copilot".to_string(), "copilot".to_string(), "claude".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(t2.editors(), &[EditorTarget::Copilot, EditorTarget::Claude]);
+    }
+
+    #[test]
+    fn parse_falls_back_to_config_default() {
+        let t = InstallTarget::parse(Path::new("/w"), &[], Some("opencode")).unwrap();
+        assert_eq!(t.editors(), &[EditorTarget::OpenCode]);
+        let t2 = InstallTarget::parse(Path::new("/w"), &[], None).unwrap();
+        assert_eq!(t2.editors(), &[EditorTarget::Claude]);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_editor() {
+        assert!(InstallTarget::parse(Path::new("/w"), &["vscode".to_string()], None).is_err());
+    }
+
+    #[test]
+    fn path_for_delegates_to_editor() {
+        let t = InstallTarget::new(Path::new("/w"), vec![EditorTarget::Copilot]);
         assert_eq!(
-            t.path_for(ArtifactKind::Skill, "code-review"),
-            PathBuf::from("/work/.claude/skills/code-review")
+            t.path_for(EditorTarget::Copilot, ArtifactKind::Rule, "rust-style"),
+            PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
         );
-    }
-
-    #[test]
-    fn claude_rule_path_is_md_file_under_rules() {
-        let t = InstallTarget::new(Path::new("/work"), Some("claude")).unwrap();
-        assert_eq!(
-            t.path_for(ArtifactKind::Rule, "rust-style"),
-            PathBuf::from("/work/.claude/rules/rust-style.md")
-        );
-    }
-
-    #[test]
-    fn default_editor_is_claude() {
-        let t = InstallTarget::new(Path::new("/w"), None).unwrap();
-        assert_eq!(t.editor_root(), Path::new("/w/.claude"));
-    }
-
-    #[test]
-    fn unknown_editor_rejected() {
-        let err = InstallTarget::new(Path::new("/w"), Some("vscode")).expect_err("must reject");
-        let InstallErrorKind::UnsupportedEditor(name) = err.kind else {
-            panic!("expected UnsupportedEditor, got {:?}", err.kind);
-        };
-        assert_eq!(name, "vscode");
     }
 }

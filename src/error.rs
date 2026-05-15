@@ -17,7 +17,9 @@ use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
 use crate::oci::identifier::error::IdentifierError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
+use crate::oci::release::{ReleaseError, ReleaseErrorKind};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
+use crate::skill::skill_error::{SkillError, SkillErrorKind};
 
 /// Top-level Grimoire error. Subsystem errors compose in via `#[from]`.
 ///
@@ -51,6 +53,12 @@ pub enum Error {
     Install(#[from] InstallError),
 
     #[error(transparent)]
+    Skill(#[from] SkillError),
+
+    #[error(transparent)]
+    Release(#[from] ReleaseError),
+
+    #[error(transparent)]
     Command(#[from] CommandError),
 }
 
@@ -74,6 +82,8 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Access(ae) => classify_access(ae),
                 Error::Resolve(re) => classify_resolve(re),
                 Error::Install(ie) => classify_install(ie),
+                Error::Skill(se) => classify_skill(se),
+                Error::Release(re) => classify_release(re),
                 Error::Command(ce) => match ce {
                     CommandError::LockMissing { .. } => ExitCode::NotFound,
                     CommandError::LockStale { .. } => ExitCode::DataError,
@@ -143,6 +153,28 @@ fn classify_install(err: &InstallError) -> ExitCode {
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedEditor(_) => ExitCode::ConfigError,
+    }
+}
+
+/// Map a skill-standard-tier error to an exit code. A spec/parse/mismatch
+/// failure is bad input data (65); an I/O failure is I/O / NoPermission.
+fn classify_skill(err: &SkillError) -> ExitCode {
+    match &err.kind {
+        SkillErrorKind::MissingSkillMd
+        | SkillErrorKind::NameMismatch { .. }
+        | SkillErrorKind::NameInvalid(_)
+        | SkillErrorKind::DescriptionInvalid(_)
+        | SkillErrorKind::FrontmatterParse(_)
+        | SkillErrorKind::MissingFrontmatter => ExitCode::DataError,
+        SkillErrorKind::Io(io) => classify_io(io),
+    }
+}
+
+/// Map a release-tier error to an exit code. A bad version or a refused
+/// tag overwrite is a data error (65).
+fn classify_release(err: &ReleaseError) -> ExitCode {
+    match &err.kind {
+        ReleaseErrorKind::InvalidVersion { .. } | ReleaseErrorKind::TagExists { .. } => ExitCode::DataError,
     }
 }
 

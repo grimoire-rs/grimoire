@@ -11,6 +11,7 @@
 //! the local-modification refusal.
 
 pub mod content_hash;
+pub mod editor_target;
 pub mod install_error;
 pub mod install_state;
 pub mod installer;
@@ -19,6 +20,8 @@ pub mod target;
 
 #[allow(unused_imports)]
 pub use content_hash::content_hash;
+#[allow(unused_imports)]
+pub use editor_target::{EditorTarget, MaterializedFile};
 #[allow(unused_imports)]
 pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]

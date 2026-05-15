@@ -68,7 +68,8 @@ pub struct ArtifactInstall {
 /// `force` overrides the integrity gate (a locally modified artifact is
 /// overwritten instead of refused). The first hard error for an artifact
 /// is recorded against that artifact; siblings still process so the report
-/// reflects the whole set.
+/// reflects the whole set. Each artifact is materialized into every
+/// editor target the [`InstallTarget`] selects.
 pub async fn install_all<M: ArtifactMaterializer>(
     lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
@@ -91,44 +92,62 @@ pub async fn install_all<M: ArtifactMaterializer>(
             name: artifact.name.clone(),
             id: artifact.pinned.as_identifier().clone(),
         };
-        let dest = target.path_for(kind, &artifact.name);
-        let result = install_one(artifact, kind, access, materializer, &dest, state, force).await;
+        // The primary editor's path is the report target (back-compat).
+        let primary = target
+            .editors()
+            .first()
+            .copied()
+            .unwrap_or(crate::install::editor_target::EditorTarget::Claude);
+        let report_target = target.path_for(primary, kind, &artifact.name);
+        let result = install_one(artifact, kind, access, materializer, target, state, force).await;
         results.push(ArtifactInstall {
             reference,
-            target: dest,
+            target: report_target,
             result,
         });
     }
     results
 }
 
-/// Install one artifact through the integrity gate.
+/// Install one artifact into every selected editor through the integrity
+/// gate.
 async fn install_one<M: ArtifactMaterializer>(
     artifact: &LockedArtifact,
     kind: ArtifactKind,
     access: &Arc<dyn OciAccess>,
     materializer: &M,
-    dest: &std::path::Path,
+    target: &InstallTarget,
     state: &mut InstallState,
     force: bool,
 ) -> Result<InstallOutcome, crate::error::Error> {
-    let recorded = state.get(kind, &artifact.name).cloned();
+    use crate::install::install_state::EditorRecord;
 
-    // Integrity gate: a prior record + present target whose content drifted
-    // from what was recorded is a local modification. Refuse unless forced.
-    if let Some(rec) = &recorded
-        && dest.exists()
-    {
-        let actual = content_hash(dest).map_err(|e| target_io(dest, e))?;
-        if actual != rec.content_hash {
-            if !force {
-                return Ok(InstallOutcome::Refused {
-                    recorded: rec.content_hash.clone(),
-                    actual,
-                });
+    let recorded = state.get(kind, &artifact.name).cloned();
+    let pinned_str = artifact.pinned.strip_advisory().to_string();
+
+    // Integrity gate: for every editor output a prior record described,
+    // an on-disk content hash that drifted from what was recorded is a
+    // local modification. Refuse unless forced; if every output is intact
+    // and the pin is unchanged the install is a no-op.
+    if let Some(rec) = &recorded {
+        let mut all_intact = true;
+        for out in rec.editor_outputs() {
+            if out.target.exists() {
+                let actual = content_hash(&out.target).map_err(|e| target_io(&out.target, e))?;
+                if actual != out.content_hash {
+                    if !force {
+                        return Ok(InstallOutcome::Refused {
+                            recorded: out.content_hash.clone(),
+                            actual,
+                        });
+                    }
+                    all_intact = false;
+                }
+            } else {
+                all_intact = false;
             }
-        } else if rec.pinned.eq_content(&artifact.pinned) {
-            // Same pin, intact content — nothing to do.
+        }
+        if all_intact && rec.pinned.eq_content(&artifact.pinned) {
             return Ok(InstallOutcome::AlreadyInstalled);
         }
     }
@@ -178,56 +197,75 @@ async fn install_one<M: ArtifactMaterializer>(
         .into());
     }
 
-    // Materialize into a sibling temp dir, then atomically swap it over the
-    // target so a crash never leaves a half-written artifact.
-    let parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+    // Materialize the canonical tree once into a temp dir; every editor
+    // target then transforms/copies from that single extracted tree.
     let staging = tempfile::Builder::new()
         .prefix(".grim-staging-")
-        .tempdir_in(parent)
-        .map_err(|e| target_io(parent, e))?;
-
-    // Materialize into a single child of the staging dir so we can swap a
-    // directory (skill) or pick the lone file (rule) uniformly.
+        .tempdir_in(std::env::temp_dir())
+        .map_err(|e| target_io(std::env::temp_dir().as_path(), e))?;
     let materialized_root = staging.path().join("content");
     materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
 
-    let new_path = match kind {
+    let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&artifact.name),
         ArtifactKind::Rule => materialized_root.join(format!("{}.md", artifact.name)),
     };
-    if !new_path.exists() {
+    if !canonical.exists() {
         return Err(
             InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
                 "artifact '{}' ({kind}) did not produce the expected '{}' entry",
                 artifact.name,
-                new_path.display()
+                canonical.display()
             )))
             .into(),
         );
     }
 
-    // Swap atomically: remove any existing target, then rename. Both live
-    // under the same parent (single volume), so the rename is atomic.
-    if dest.exists() {
-        remove_path(dest).map_err(|e| target_io(dest, e))?;
-    }
-    fsync_tree(&new_path).map_err(|e| target_io(&new_path, e))?;
-    std::fs::rename(&new_path, dest).map_err(|e| target_io(dest, e))?;
-    #[cfg(unix)]
-    if !parent.as_os_str().is_empty() {
-        std::fs::File::open(parent)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| target_io(parent, e))?;
+    // Materialize into every selected editor's final path, replacing any
+    // prior output, and hash each editor output for the integrity record.
+    let mut editor_records = Vec::with_capacity(target.editors().len());
+    for editor in target.editors() {
+        let dest = target.path_for(*editor, kind, &artifact.name);
+        if dest.exists() {
+            remove_path(&dest).map_err(|e| target_io(&dest, e))?;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+        }
+        editor
+            .materialize(kind, &artifact.name, &canonical, &dest, &pinned_str)
+            .map_err(crate::error::Error::from)?;
+        fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
+        #[cfg(unix)]
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| target_io(parent, e))?;
+        }
+        let installed_hash = content_hash(&dest).map_err(|e| target_io(&dest, e))?;
+        editor_records.push(EditorRecord {
+            editor: editor.to_string(),
+            target: dest,
+            content_hash: installed_hash,
+        });
     }
 
-    let installed_hash = content_hash(dest).map_err(|e| target_io(dest, e))?;
+    // `target`/`content_hash` mirror the primary (first) editor so the
+    // status report and the Phase-4 single-editor contract are preserved.
+    #[allow(clippy::expect_used)]
+    let primary = editor_records
+        .first()
+        .cloned()
+        .expect("InstallTarget always has at least one editor (defaults to claude)");
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
         pinned: artifact.pinned.clone(),
-        content_hash: installed_hash,
-        target: dest.to_path_buf(),
+        content_hash: primary.content_hash,
+        target: primary.target,
+        editors: editor_records,
     });
 
     Ok(if recorded.is_some() {
@@ -326,6 +364,15 @@ mod tests {
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(Vec::new())
         }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
     }
 
     /// Mock that serves a manifest but no layer blob.
@@ -349,6 +396,15 @@ mod tests {
         }
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
         }
     }
 
@@ -375,6 +431,15 @@ mod tests {
         }
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
         }
     }
 
@@ -422,7 +487,7 @@ mod tests {
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), Some("claude")).unwrap();
+        let target = InstallTarget::new(dir.path(), vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -442,7 +507,7 @@ mod tests {
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), Some("claude")).unwrap();
+        let target = InstallTarget::new(dir.path(), vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -468,7 +533,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blob_v1 = rule_tar("rust-style", b"v1\n");
         let lock_v1 = lock_of(vec![locked_rule("rust-style", &blob_v1)]);
-        let target = InstallTarget::new(dir.path(), Some("claude")).unwrap();
+        let target = InstallTarget::new(dir.path(), vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -505,7 +570,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
-        let target = InstallTarget::new(dir.path(), Some("claude")).unwrap();
+        let target = InstallTarget::new(dir.path(), vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -533,7 +598,7 @@ mod tests {
         // The manifest advertises the layer digest of `blob`, but the
         // registry serves `tampered` bytes — a corrupt-registry scenario.
         let wrong = rule_tar("rust-style", b"tampered\n");
-        let target = InstallTarget::new(dir.path(), Some("claude")).unwrap();
+        let target = InstallTarget::new(dir.path(), vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 

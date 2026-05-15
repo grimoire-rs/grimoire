@@ -143,20 +143,25 @@ fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
-    if !record.target.exists() {
+    let outputs = record.editor_outputs();
+    // Any missing editor output ⇒ the artifact is not fully installed.
+    if outputs.iter().any(|o| !o.target.exists()) {
         return ArtifactStatus::Missing;
     }
-    match content_hash(&record.target) {
-        Ok(actual) if actual != record.content_hash => ArtifactStatus::Modified,
-        Ok(_) => {
-            if record.pinned.eq_content(&locked.pinned) {
-                ArtifactStatus::Installed
-            } else {
-                ArtifactStatus::Outdated
-            }
+    // Any drifted editor output (canonical OR generated — the recorded
+    // hash for a generated target is over its expected bytes) ⇒ modified.
+    for out in &outputs {
+        match content_hash(&out.target) {
+            Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
+            Ok(_) => {}
+            // An unreadable target is effectively gone for reporting.
+            Err(_) => return ArtifactStatus::Missing,
         }
-        // An unreadable target is effectively gone for reporting purposes.
-        Err(_) => ArtifactStatus::Missing,
+    }
+    if record.pinned.eq_content(&locked.pinned) {
+        ArtifactStatus::Installed
+    } else {
+        ArtifactStatus::Outdated
     }
 }
 
@@ -217,6 +222,7 @@ mod tests {
             pinned: pinned('a'),
             content_hash: hash.clone(),
             target: target.clone(),
+            editors: vec![],
         });
 
         // Same pin, intact content ⇒ installed.

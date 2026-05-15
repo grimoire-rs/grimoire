@@ -26,7 +26,17 @@ use super::super::access::{OciAccess, Operation};
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
 use oci_client::errors::{OciDistributionError, OciErrorCode};
+use oci_client::manifest::{OciDescriptor, OciImageManifest};
 use oci_client::secrets::RegistryAuth;
+
+use crate::oci::manifest::Descriptor;
+
+/// The media type of a Grimoire artifact layer (single uncompressed tar).
+const GRIMOIRE_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
+/// The media type of the OCI image config blob.
+const OCI_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
+/// The media type of an OCI image manifest.
+const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
 /// Real OCI registry access backed by `oci-client`.
 pub struct RegistryClient {
@@ -176,6 +186,26 @@ fn lookup_failure(err: OciDistributionError) -> Option<AccessErrorKind> {
     }
 }
 
+/// Build the `oci-client` descriptor for one Grimoire [`Descriptor`].
+fn oci_descriptor(d: &Descriptor) -> OciDescriptor {
+    OciDescriptor {
+        media_type: d.media_type.clone(),
+        digest: d.digest.to_string(),
+        size: i64::try_from(d.size).unwrap_or(i64::MAX),
+        urls: None,
+        annotations: None,
+    }
+}
+
+impl RegistryClient {
+    /// A tiny, deterministic OCI image config blob. Grimoire artifacts
+    /// carry their real metadata in manifest annotations; the config blob
+    /// only has to exist and be content-addressable.
+    fn config_blob() -> Vec<u8> {
+        br#"{"architecture":"","os":""}"#.to_vec()
+    }
+}
+
 #[async_trait]
 impl OciAccess for RegistryClient {
     async fn resolve_digest(&self, id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
@@ -299,6 +329,146 @@ impl OciAccess for RegistryClient {
             // implement the catalog is not a hard failure here.
             Err(_) => Ok(Vec::new()),
         }
+    }
+
+    async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+        let reference = reference_for(repo);
+        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        self.client
+            .store_auth_if_needed(reference.resolve_registry(), &auth)
+            .await;
+
+        let digest = crate::oci::Algorithm::Sha256.hash(bytes);
+        let digest_str = digest.to_string();
+        // `oci-client` skips the upload when the blob already exists, so a
+        // re-push of identical content is an idempotent no-op success.
+        self.client
+            .push_blob(&reference, bytes.to_vec(), &digest_str)
+            .await
+            .map_err(|e| AccessError::with_identifier(repo.clone(), registry_or_auth(e)))?;
+        Ok(digest)
+    }
+
+    async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
+        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let registry_ref = reference_for(repo);
+        self.client
+            .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
+            .await;
+
+        // The config blob is pushed inline; Grimoire's real metadata lives
+        // in the manifest annotations, not the config.
+        let config = Self::config_blob();
+        let config_digest = self.push_blob(repo, &config).await?;
+
+        let image = OciImageManifest {
+            schema_version: 2,
+            media_type: Some(OCI_MANIFEST_MEDIA_TYPE.to_string()),
+            config: OciDescriptor {
+                media_type: OCI_CONFIG_MEDIA_TYPE.to_string(),
+                digest: config_digest.to_string(),
+                size: i64::try_from(config.len()).unwrap_or(i64::MAX),
+                urls: None,
+                annotations: None,
+            },
+            layers: manifest.layers.iter().map(oci_descriptor).collect(),
+            subject: None,
+            artifact_type: None,
+            annotations: if manifest.annotations.is_empty() {
+                None
+            } else {
+                Some(manifest.annotations.clone())
+            },
+        };
+
+        // Serialize the manifest ourselves and PUT those exact bytes by
+        // digest: the manifest digest a registry stores is the hash of the
+        // bytes it received, so controlling the bytes makes the returned
+        // digest deterministic and the push idempotent.
+        let body = serde_json::to_vec(&image).map_err(|e| {
+            AccessError::with_identifier(
+                repo.clone(),
+                AccessErrorKind::InvalidManifest(format!("cannot serialize manifest: {e}")),
+            )
+        })?;
+        let manifest_digest = crate::oci::Algorithm::Sha256.hash(&body);
+
+        let by_digest = Reference::with_digest(
+            repo.registry().to_string(),
+            repo.repository().to_string(),
+            manifest_digest.to_string(),
+        );
+        let content_type = OCI_MANIFEST_MEDIA_TYPE.parse().map_err(|_| {
+            AccessError::with_identifier(
+                repo.clone(),
+                AccessErrorKind::InvalidManifest("bad content type".to_string()),
+            )
+        })?;
+        self.client
+            .push_manifest_raw(&by_digest, body, content_type)
+            .await
+            .map_err(|e| AccessError::with_identifier(repo.clone(), registry_or_auth(e)))?;
+        Ok(manifest_digest)
+    }
+
+    async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError> {
+        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let registry_ref = reference_for(repo);
+        self.client
+            .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
+            .await;
+
+        // Pull the manifest by digest and re-PUT the identical bytes under
+        // `tag` so the floating tag points at exactly `manifest_digest`.
+        let by_digest = Reference::with_digest(
+            repo.registry().to_string(),
+            repo.repository().to_string(),
+            manifest_digest.to_string(),
+        );
+        let (body, _digest) = self
+            .client
+            .pull_manifest_raw(&by_digest, &auth, &[OCI_MANIFEST_MEDIA_TYPE, GRIMOIRE_LAYER_MEDIA_TYPE])
+            .await
+            .map_err(|e| AccessError::with_identifier(repo.clone(), registry_or_auth(e)))?;
+
+        let by_tag = Reference::with_tag(
+            repo.registry().to_string(),
+            repo.repository().to_string(),
+            tag.to_string(),
+        );
+        let content_type = OCI_MANIFEST_MEDIA_TYPE.parse().map_err(|_| {
+            AccessError::with_identifier(
+                repo.clone(),
+                AccessErrorKind::InvalidManifest("bad content type".to_string()),
+            )
+        })?;
+        self.client
+            .push_manifest_raw(&by_tag, body.to_vec(), content_type)
+            .await
+            .map_err(|e| AccessError::with_identifier(repo.clone(), registry_or_auth(e)))?;
+        Ok(())
+    }
+}
+
+/// Classify an `oci-client` error from a push/pull path: an auth failure
+/// stays terminal, everything else (including a rare push-time
+/// not-found) is a transport (`Registry`) failure — a push has no benign
+/// absence.
+fn registry_or_auth(err: OciDistributionError) -> AccessErrorKind {
+    match &err {
+        OciDistributionError::AuthenticationFailure(_) | OciDistributionError::UnauthorizedError { .. } => {
+            AccessErrorKind::Authentication(Box::new(err))
+        }
+        OciDistributionError::ServerError { code: 401 | 403, .. } => AccessErrorKind::Authentication(Box::new(err)),
+        OciDistributionError::RegistryError { envelope, .. }
+            if envelope
+                .errors
+                .iter()
+                .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)) =>
+        {
+            AccessErrorKind::Authentication(Box::new(err))
+        }
+        _ => AccessErrorKind::Registry(Box::new(err)),
     }
 }
 

@@ -398,6 +398,15 @@ mod tests {
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(Vec::new())
         }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"manifest"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _tag: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
     }
 
     fn digest() -> Digest {

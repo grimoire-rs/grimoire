@@ -65,6 +65,26 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             render(&r, format)?;
             c
         }
+        Command::Build(args) => {
+            let (r, c) = crate::command::build::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        Command::Release(args) => {
+            let (r, c) = crate::command::release::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        Command::Add(args) => {
+            let (r, c) = crate::command::add::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        Command::Remove(args) => {
+            let (r, c) = crate::command::remove::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
     };
 
     Ok(code)

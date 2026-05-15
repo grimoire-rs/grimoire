@@ -29,6 +29,7 @@ mod install;
 mod lock;
 mod oci;
 mod resolve;
+mod skill;
 mod store;
 
 use clap::error::ErrorKind;
@@ -36,9 +37,13 @@ use clap::{Parser, Subcommand};
 
 use crate::cli::exit_code::ExitCode;
 use crate::cli::options::GlobalOptions;
+use crate::command::add::AddArgs;
+use crate::command::build::BuildArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
+use crate::command::release::ReleaseArgs;
+use crate::command::remove::RemoveArgs;
 use crate::command::status::StatusArgs;
 use crate::command::update::UpdateArgs;
 use crate::error::classify_error;
@@ -70,6 +75,14 @@ pub enum Command {
     Update(UpdateArgs),
     /// Report the state of every declared artifact.
     Status(StatusArgs),
+    /// Validate and pack a local skill/rule (no push).
+    Build(BuildArgs),
+    /// Validate, pack, and push a skill/rule with cascade tags.
+    Release(ReleaseArgs),
+    /// Declare a skill/rule in the config and lock it.
+    Add(AddArgs),
+    /// Undeclare a skill/rule from the config and lock.
+    Remove(RemoveArgs),
 }
 
 fn main() -> std::process::ExitCode {

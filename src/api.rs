@@ -9,21 +9,33 @@
 //! headers; `print_json` emits a pretty JSON array (or, for `init`, a
 //! single object) with no wrapper.
 
+pub mod add_report;
 pub mod artifact_status;
+pub mod build_report;
 pub mod init_report;
 pub mod install_report;
 pub mod lock_report;
+pub mod release_report;
+pub mod remove_report;
 pub mod status_report;
 pub mod update_report;
 
 #[allow(unused_imports)]
+pub use add_report::{AddReport, AddStatus};
+#[allow(unused_imports)]
 pub use artifact_status::{ArtifactStatus, InitStatus, InstallStatus, LockAction, UpdateAction};
+#[allow(unused_imports)]
+pub use build_report::{BuildReport, BuildStatus};
 #[allow(unused_imports)]
 pub use init_report::InitReport;
 #[allow(unused_imports)]
 pub use install_report::{InstallEntry, InstallReport};
 #[allow(unused_imports)]
 pub use lock_report::{LockEntry, LockReport};
+#[allow(unused_imports)]
+pub use release_report::ReleaseReport;
+#[allow(unused_imports)]
+pub use remove_report::{RemoveReport, RemoveStatus};
 #[allow(unused_imports)]
 pub use status_report::{StatusEntry, StatusReport};
 #[allow(unused_imports)]

@@ -51,6 +51,11 @@ pub struct UpdateArgs {
     /// Explicit project config path.
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Editor target(s) to re-materialize into (comma-separated,
+    /// repeatable). Defaults to the config `editor` option, then `claude`.
+    #[arg(long = "target")]
+    pub target: Vec<String>,
 }
 
 /// Run `grim update`.
@@ -96,10 +101,15 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
-    // Re-materialize with force so a changed digest overwrites the prior
-    // (canonical, machine-managed) content. A user-modified file is still
-    // overwritten on update — that is the rolling-release contract.
-    let target = super::grim(InstallTarget::new(&scope.workspace, scope.options.editor.as_deref()))?;
+    // Re-materialize with force so a changed digest (rolling release)
+    // overwrites the prior machine-managed content; `--force` is implied
+    // by `update` (the Phase-4 rolling-release contract). A user edit is
+    // overwritten — `status` still surfaces it as `modified` beforehand.
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        &args.target,
+        scope.options.editor.as_deref(),
+    ))?;
     let mut state = InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
     let outcomes = install_all(&new_lock, &access, &materializer, &target, &mut state, true).await;
@@ -107,6 +117,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 
     // Build the report before surfacing any error so it reflects the new
     // lock; then propagate the first hard install error if there was one.
+    // (`update` forces re-materialization, so there are no `Refused`
+    // outcomes — a hard error is a fetch/IO/integrity failure.)
     let report = build_report(&new_lock, previous.as_ref());
     for o in outcomes {
         if let Err(e) = o.result {

@@ -5,12 +5,14 @@
 //! artifact kind/reference model.
 
 pub mod access;
+pub mod annotations;
 pub mod artifact_kind;
 pub mod digest;
 pub mod identifier;
 pub mod manifest;
 pub mod pinned_identifier;
 pub mod reference;
+pub mod release;
 pub mod tag_cache;
 
 // Convenience re-exports for the subsystems landing in Phases 2–6.

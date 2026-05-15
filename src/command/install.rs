@@ -39,6 +39,12 @@ pub struct InstallArgs {
     /// Overwrite a locally modified artifact instead of refusing it.
     #[arg(long)]
     pub force: bool,
+
+    /// Editor target(s) to materialize into (comma-separated, repeatable;
+    /// `claude`, `opencode`, `copilot`). Defaults to the config `editor`
+    /// option, then `claude`.
+    #[arg(long = "target")]
+    pub target: Vec<String>,
 }
 
 /// Run `grim install`.
@@ -57,7 +63,11 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
 
     let lock = require_fresh_lock(&scope)?;
 
-    let target = super::grim(InstallTarget::new(&scope.workspace, scope.options.editor.as_deref()))?;
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        &args.target,
+        scope.options.editor.as_deref(),
+    ))?;
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;

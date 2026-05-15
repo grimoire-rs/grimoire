@@ -17,6 +17,8 @@
 
 pub mod cached_access;
 pub mod error;
+#[cfg(test)]
+pub mod memory_registry;
 pub mod registry_client;
 
 use async_trait::async_trait;
@@ -103,6 +105,19 @@ pub trait OciAccess: Send + Sync {
     /// List the repository catalog for `registry`. An unsupported or
     /// missing catalog endpoint yields an empty list, not an error.
     async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError>;
+
+    /// Push a blob into `repo`'s registry, returning its content digest.
+    ///
+    /// Idempotent: re-pushing identical bytes is a no-op success that
+    /// returns the same digest.
+    async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError>;
+
+    /// Push `manifest` into `repo`'s registry, returning the manifest
+    /// digest. The blobs `manifest` references must already be pushed.
+    async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError>;
+
+    /// Point `tag` in `repo`'s registry at `manifest_digest`.
+    async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError>;
 }
 
 #[cfg(test)]

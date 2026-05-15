@@ -8,10 +8,14 @@
 //! [`crate::cli::printer::Printable`]. `anyhow` is used here (the
 //! application boundary); the lib subsystems stay on `thiserror`.
 
+pub mod add;
+pub mod build;
 pub mod command_error;
 pub mod init;
 pub mod install;
 pub mod lock;
+pub mod release;
+pub mod remove;
 pub mod scope_resolution;
 pub mod status;
 pub mod update;

@@ -169,6 +169,29 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
         }
         self.inner.list_catalog(registry).await
     }
+
+    async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+        let digest = self.inner.push_blob(repo, bytes).await?;
+        // Mirror the just-pushed blob into the content store so a
+        // subsequent install resolves it from cache without a round-trip.
+        if let Err(e) = self.blobs.put(&digest, bytes) {
+            return Err(Self::io_err(repo, e));
+        }
+        Ok(digest)
+    }
+
+    async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
+        // Pure pass-through: a manifest push is authoritative and has no
+        // cache representation in this milestone.
+        self.inner.push_manifest(repo, manifest).await
+    }
+
+    async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError> {
+        // Deliberately do NOT cache the tag pointer on push: a release is
+        // authoritative, and `update` must re-resolve floating tags from
+        // the registry rather than serve a stale just-written pin.
+        self.inner.put_tag(repo, tag, manifest_digest).await
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +230,15 @@ mod tests {
         }
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(vec!["acme/x".to_string()])
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(self.digest.clone())
+        }
+        async fn put_tag(&self, _repo: &Identifier, _tag: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
         }
     }
 
