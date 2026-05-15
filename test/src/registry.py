@@ -134,6 +134,25 @@ def push_artifact(
     )
 
 
+def tag_digest(repo: str, tag: str) -> str:
+    """Return the manifest digest a ``tag`` currently resolves to.
+
+    Issues a manifest ``GET`` (``HEAD`` is not universally enabled on
+    ``registry:2``) and reads the ``Docker-Content-Digest`` header — the
+    authoritative answer to "what does this floating tag point at right
+    now", used to assert a rolling release actually moved the cascade.
+    """
+    req = urllib.request.Request(
+        f"{REGISTRY_BASE}/v2/{repo}/manifests/{tag}",
+        headers={"Accept": _MANIFEST_MEDIA_TYPE},
+    )
+    with urllib.request.urlopen(req) as resp:
+        header = resp.headers.get("Docker-Content-Digest")
+        if header:
+            return header
+        return _sha256(resp.read())
+
+
 def retag(repo: str, tag: str, target_digest: str) -> PublishedArtifact:
     """Re-point ``tag`` at an existing manifest ``target_digest``.
 

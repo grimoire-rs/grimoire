@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.helpers import write_config
+from src.registry import tag_digest
 
 
 def _write(p: Path, body: str) -> None:
@@ -62,6 +63,69 @@ def test_release_pushes_with_cascade_tags(
         f"all cascade tags must pin the same digest, got {pins}"
     )
     assert rows  # status renders the declared set
+
+
+def test_rerelease_moves_preexisting_floating_tags(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A higher re-release must MOVE the pre-existing ``:1``/``:latest``.
+
+    The rolling-release headline: ``1.0.0`` is published (cascade creates
+    ``:1``/``:latest`` ⇒ digest A). A different-content ``1.1.0`` is then
+    released to the SAME repo. ``:1.1.0``/``:1.1`` are new, but ``:1`` and
+    ``:latest`` already exist at digest A — the cascade must re-point them
+    at the new digest B, otherwise a project pinning the floating ``:1``
+    tag never rolls forward.
+    """
+    repo = f"{registry}/{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    repo_path = f"{unique_repo}/code-review"
+
+    skill = _local_skill(project_dir)
+    v1 = runner.json("release", str(skill), f"{repo}:1.0.0")
+    digest_a = v1["manifest_digest"]
+    for tag in ("1.0.0", "1.0", "1", "latest"):
+        assert tag_digest(repo_path, tag) == digest_a, (
+            f"1.0.0 cascade must put {tag} at digest A"
+        )
+
+    # Lock the project against the floating :1 tag while it still points
+    # at digest A — captures the pre-roll pin so a later plain update can
+    # be observed rolling forward.
+    write_config(project_dir, skills={"code-review": f"{repo}:1"})
+    runner.run("lock", check=False)
+    assert digest_a in (project_dir / "grimoire.lock").read_text(), (
+        "lock at :1 must pin digest A before the rolling release"
+    )
+
+    # Different content, higher version, same repo.
+    (skill / "scripts/run.sh").write_text("echo v1.1.0 CHANGED\n")
+    v2 = runner.json("release", str(skill), f"{repo}:1.1.0")
+    digest_b = v2["manifest_digest"]
+    assert digest_b != digest_a, "1.1.0 must produce a different digest"
+    # New tags created at B; pre-existing :1 and :latest MOVED to B;
+    # the older minor :1.0 / exact :1.0.0 stay at A (immutable history).
+    assert tag_digest(repo_path, "1.1.0") == digest_b
+    assert tag_digest(repo_path, "1.1") == digest_b
+    assert tag_digest(repo_path, "1") == digest_b, (
+        "pre-existing major tag :1 must roll forward to the new digest"
+    )
+    assert tag_digest(repo_path, "latest") == digest_b, (
+        "pre-existing :latest must roll forward to the new digest"
+    )
+    assert tag_digest(repo_path, "1.0.0") == digest_a
+    assert tag_digest(repo_path, "1.0") == digest_a
+
+    # End-to-end rolling release: the project pinned the floating :1 tag
+    # at digest A above; a plain `grim update` (no names) must roll it
+    # forward to B now that the cascade moved :1.
+    rows = runner.json("update")
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["code-review"]["action"] == "updated", (
+        "plain `grim update` must roll the floating :1 pin forward"
+    )
+    assert digest_b in (project_dir / "grimoire.lock").read_text()
 
 
 def test_release_dry_run_does_not_push(
