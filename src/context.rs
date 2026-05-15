@@ -9,9 +9,15 @@
 //! variables (the CLI is authoritative).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::cli::options::GlobalOptions;
 use crate::env;
+use crate::oci::access::cached_access::CachedAccess;
+use crate::oci::access::registry_client::RegistryClient;
+use crate::oci::access::{AccessMode, OciAccess};
+use crate::oci::tag_cache::TagCache;
+use crate::store::{BlobStore, GrimPaths};
 
 /// Resolved configuration for a single `grim` invocation.
 ///
@@ -63,6 +69,66 @@ impl Context {
     /// Whether mutable lookups route to the remote registry.
     pub fn remote(&self) -> bool {
         self.remote
+    }
+
+    /// The resolved cache-routing mode for this invocation. Offline wins
+    /// over remote (the stricter guarantee), matching [`AccessMode`].
+    pub fn access_mode(&self) -> AccessMode {
+        if self.offline {
+            AccessMode::Offline
+        } else if self.remote {
+            AccessMode::Remote
+        } else {
+            AccessMode::Default
+        }
+    }
+
+    /// Typed view of the `$GRIM_HOME` layout for this invocation.
+    pub fn paths(&self) -> GrimPaths {
+        GrimPaths::new(self.grim_home.clone())
+    }
+
+    /// Build the OCI-access seam: a real registry client behind the
+    /// persistent tag + blob cache, routed by [`Self::access_mode`].
+    ///
+    /// `ensure_layout` is called here so the cache directories exist (and
+    /// the single-volume invariant is asserted) before the first lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
+    /// created. Callers route it through the install-tier `TargetIo` error
+    /// so it classifies as an I/O exit code, not the generic fall-through.
+    pub fn access(&self) -> std::io::Result<Arc<dyn OciAccess>> {
+        self.access_with_mode(self.access_mode())
+    }
+
+    /// The access mode `update` uses: it re-resolves floating tags, so it
+    /// must skip the cached tag pointer (`Remote`) — unless the invocation
+    /// is offline, where the stricter offline guarantee still wins.
+    pub fn update_access_mode(&self) -> AccessMode {
+        match self.access_mode() {
+            AccessMode::Offline => AccessMode::Offline,
+            _ => AccessMode::Remote,
+        }
+    }
+
+    /// Build the OCI-access seam with an explicit routing `mode`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
+    /// created.
+    pub fn access_with_mode(&self, mode: AccessMode) -> std::io::Result<Arc<dyn OciAccess>> {
+        let paths = self.paths();
+        paths.ensure_layout()?;
+        let cached = CachedAccess::new(
+            RegistryClient::new(),
+            TagCache::new(paths.tags_dir()),
+            BlobStore::new(paths.blobs_dir()),
+            mode,
+        );
+        Ok(Arc::new(cached))
     }
 }
 

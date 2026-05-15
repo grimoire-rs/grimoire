@@ -40,9 +40,10 @@ class GrimRunner:
     host state into ``grim``.
     """
 
-    def __init__(self, binary: Path, grim_home: Path):
+    def __init__(self, binary: Path, grim_home: Path, cwd: Path | None = None):
         self.binary = binary
         self.grim_home = grim_home
+        self.cwd = cwd
         self.env: dict[str, str] = {
             "GRIM_HOME": str(grim_home),
             "PATH": os.environ.get("PATH", ""),
@@ -72,6 +73,7 @@ class GrimRunner:
             capture_output=True,
             text=True,
             env=self.env,
+            cwd=str(self.cwd) if self.cwd else None,
         )
         if check and result.returncode != 0:
             raise AssertionError(

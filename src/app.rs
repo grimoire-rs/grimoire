@@ -4,13 +4,16 @@
 //! Post-parse application entry point.
 //!
 //! `main.rs` keeps clap parsing and the `EX_USAGE` (64) mapping; once a
-//! [`Cli`] is parsed, all real work happens here. Phase 1 only handles the
-//! existing `version` / bare-invocation behaviour, returning a typed
+//! [`Cli`] is parsed, all real work happens here: build the per-invocation
+//! [`Context`], dispatch the subcommand, render the resulting report
+//! through [`Printable`] honouring `--format`, and surface the typed
 //! [`ExitCode`].
 
 use std::io::Write;
 
 use crate::cli::exit_code::ExitCode;
+use crate::cli::options::OutputFormat;
+use crate::cli::printer::Printable;
 use crate::context::Context;
 use crate::{Cli, Command};
 
@@ -21,24 +24,58 @@ use crate::{Cli, Command};
 /// Returns any error a command produces; `main.rs` logs it with `{err:#}`
 /// and classifies it into an exit code.
 pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
-    // Built once per invocation. Unused in Phase 1's two paths, but the
-    // construction itself is the seam later commands hang off of.
-    let _ctx = Context::new(&cli.global);
+    let ctx = Context::new(&cli.global);
+    let format = cli.global.format;
 
-    match cli.command {
-        Some(Command::Version) => {
-            let mut out = std::io::stdout().lock();
-            writeln!(out, "grim {}", env!("CARGO_PKG_VERSION"))?;
-            Ok(ExitCode::Success)
+    let Some(command) = cli.command else {
+        // Bare `grim` prints help and exits successfully so backend
+        // callers get a stable, zero-exit discovery path.
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        cmd.print_help()?;
+        println!();
+        return Ok(ExitCode::Success);
+    };
+
+    // `Printable` has generic methods (not object-safe), so render inside
+    // each arm with the concrete report type rather than boxing.
+    let code = match command {
+        Command::Init(args) => {
+            let (r, c) = crate::command::init::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
         }
-        None => {
-            // Bare `grim` prints help and exits successfully so backend
-            // callers get a stable, zero-exit discovery path.
-            use clap::CommandFactory;
-            let mut cmd = Cli::command();
-            cmd.print_help()?;
-            println!();
-            Ok(ExitCode::Success)
+        Command::Lock(args) => {
+            let (r, c) = crate::command::lock::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
         }
+        Command::Install(args) => {
+            let (r, c) = crate::command::install::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        Command::Update(args) => {
+            let (r, c) = crate::command::update::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        Command::Status(args) => {
+            let (r, c) = crate::command::status::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+    };
+
+    Ok(code)
+}
+
+/// Render `report` to stdout in the requested format.
+fn render<R: Printable>(report: &R, format: OutputFormat) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    match format {
+        OutputFormat::Plain => report.print_plain(&mut out)?,
+        OutputFormat::Json => report.print_json(&mut out)?,
     }
+    out.flush()
 }

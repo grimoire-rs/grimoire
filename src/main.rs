@@ -17,12 +17,15 @@
 // `--all-targets`, so scope the allowance to `cfg(test)` here.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod api;
 mod app;
 mod cli;
+mod command;
 mod config;
 mod context;
 mod env;
 mod error;
+mod install;
 mod lock;
 mod oci;
 mod resolve;
@@ -33,6 +36,11 @@ use clap::{Parser, Subcommand};
 
 use crate::cli::exit_code::ExitCode;
 use crate::cli::options::GlobalOptions;
+use crate::command::init::InitArgs;
+use crate::command::install::InstallArgs;
+use crate::command::lock::LockArgs;
+use crate::command::status::StatusArgs;
+use crate::command::update::UpdateArgs;
 use crate::error::classify_error;
 
 #[derive(Parser)]
@@ -52,8 +60,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Print version information.
-    Version,
+    /// Create a fresh `grimoire.toml`.
+    Init(InitArgs),
+    /// Resolve declared floating tags to pinned digests in `grimoire.lock`.
+    Lock(LockArgs),
+    /// Materialize the locked artifacts into the editor.
+    Install(InstallArgs),
+    /// Re-resolve floating tags and re-materialize changed artifacts.
+    Update(UpdateArgs),
+    /// Report the state of every declared artifact.
+    Status(StatusArgs),
 }
 
 fn main() -> std::process::ExitCode {

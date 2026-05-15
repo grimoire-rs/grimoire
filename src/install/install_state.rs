@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Grimoire Authors
+
+//! Persisted install state: what is installed, pinned to what, hashed to
+//! what, and where.
+//!
+//! One JSON file per scope under `$GRIM_HOME/state/`:
+//! `global.json` for the global scope, `projects/<sha256-of-canonical-
+//! config-path>.json` for a project scope. The file is version-enveloped
+//! via `serde_repr` (an unknown version is rejected, never silently reset)
+//! and written through the shared atomic-write primitive.
+//!
+//! The in-memory map is keyed by `(ArtifactKind, name)`. JSON object keys
+//! cannot be a tuple, so on disk the records are a list sorted by
+//! `(kind, name)` for byte-stability; the list is folded back into the map
+//! on load.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use sha2::Digest as _;
+
+use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
+use crate::store::atomic_write::atomic_write;
+
+/// On-disk install-state envelope version.
+///
+/// Closed internal on-disk discriminant — not `#[non_exhaustive]`, per the
+/// project convention. An unknown discriminant fails deserialization at
+/// the `serde_repr` layer with no silent fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum InstallStateVersion {
+    /// Version 1 of the on-disk format.
+    V1 = 1,
+}
+
+/// One installed artifact's recorded state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRecord {
+    /// Skill or rule.
+    pub kind: ArtifactKind,
+    /// Config binding name.
+    pub name: String,
+    /// The pin the artifact was installed from.
+    pub pinned: PinnedIdentifier,
+    /// The content hash of the materialized tree at install time.
+    pub content_hash: Digest,
+    /// The on-disk path the artifact was installed to.
+    pub target: PathBuf,
+}
+
+/// Versioned envelope persisted at the scope's state file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallStateFile {
+    version: InstallStateVersion,
+    /// Records sorted by `(kind, name)` for byte-stable output.
+    records: Vec<InstallRecord>,
+}
+
+/// In-memory install state for one scope, with its backing file path.
+#[derive(Debug, Clone)]
+pub struct InstallState {
+    path: PathBuf,
+    records: BTreeMap<(ArtifactKind, String), InstallRecord>,
+}
+
+impl InstallState {
+    /// The global-scope state file under `state_dir`.
+    pub fn global_path(state_dir: &Path) -> PathBuf {
+        state_dir.join("global.json")
+    }
+
+    /// The project-scope state file for `canonical_config_path` under
+    /// `state_dir`: `projects/<sha256-of-path>.json`.
+    pub fn project_path(state_dir: &Path, canonical_config_path: &Path) -> PathBuf {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(canonical_config_path.to_string_lossy().as_bytes());
+        let hex = hex::encode(hasher.finalize());
+        state_dir.join("projects").join(format!("{hex}.json"))
+    }
+
+    /// An empty state backed by `scope_path` (nothing installed yet).
+    pub fn empty(scope_path: &Path) -> Self {
+        Self {
+            path: scope_path.to_path_buf(),
+            records: BTreeMap::new(),
+        }
+    }
+
+    /// Load the state at `scope_path`. An absent file yields empty state
+    /// (a never-installed scope is not an error).
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::Error`] for a read failure; an unknown version or a
+    /// corrupt file is surfaced as [`std::io::ErrorKind::InvalidData`].
+    pub fn load(scope_path: &Path) -> std::io::Result<Self> {
+        let bytes = match std::fs::read(scope_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    path: scope_path.to_path_buf(),
+                    records: BTreeMap::new(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        let file: InstallStateFile =
+            serde_json::from_slice(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let records = file
+            .records
+            .into_iter()
+            .map(|r| ((r.kind, r.name.clone()), r))
+            .collect();
+        Ok(Self {
+            path: scope_path.to_path_buf(),
+            records,
+        })
+    }
+
+    /// The recorded state for `(kind, name)`, if installed.
+    pub fn get(&self, kind: ArtifactKind, name: &str) -> Option<&InstallRecord> {
+        self.records.get(&(kind, name.to_string()))
+    }
+
+    /// Insert or replace the record for an artifact.
+    pub fn record(&mut self, record: InstallRecord) {
+        self.records.insert((record.kind, record.name.clone()), record);
+    }
+
+    /// Atomically persist the state to its backing file.
+    ///
+    /// # Errors
+    ///
+    /// Serialization or atomic-write I/O failure.
+    pub fn save(&self) -> std::io::Result<()> {
+        let mut records: Vec<InstallRecord> = self.records.values().cloned().collect();
+        records.sort_by(|a, b| (a.kind, a.name.as_str()).cmp(&(b.kind, b.name.as_str())));
+        let file = InstallStateFile {
+            version: InstallStateVersion::V1,
+            records,
+        };
+        let bytes =
+            serde_json::to_vec_pretty(&file).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        atomic_write(&self.path, &bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::{Algorithm, Identifier};
+
+    fn pinned(repo: &str, byte: char) -> PinnedIdentifier {
+        let id = Identifier::new_registry(repo, "localhost:5000")
+            .clone_with_digest(Digest::Sha256(std::iter::repeat_n(byte, 64).collect()));
+        PinnedIdentifier::try_from(id).unwrap()
+    }
+
+    fn record(name: &str, kind: ArtifactKind) -> InstallRecord {
+        InstallRecord {
+            kind,
+            name: name.to_string(),
+            pinned: pinned(name, 'a'),
+            content_hash: Algorithm::Sha256.hash(name.as_bytes()),
+            target: PathBuf::from(format!("/w/.claude/{}/{name}", kind.subdir())),
+        }
+    }
+
+    #[test]
+    fn round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state/global.json");
+        let mut st = InstallState::load(&path).unwrap();
+        assert!(st.get(ArtifactKind::Skill, "code-review").is_none());
+        st.record(record("code-review", ArtifactKind::Skill));
+        st.record(record("rust-style", ArtifactKind::Rule));
+        st.save().unwrap();
+
+        let reloaded = InstallState::load(&path).unwrap();
+        let got = reloaded.get(ArtifactKind::Skill, "code-review").expect("present");
+        assert_eq!(got.name, "code-review");
+        assert_eq!(got.kind, ArtifactKind::Skill);
+        assert!(reloaded.get(ArtifactKind::Rule, "rust-style").is_some());
+    }
+
+    #[test]
+    fn absent_file_is_empty_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = InstallState::load(&dir.path().join("nope.json")).unwrap();
+        assert!(st.get(ArtifactKind::Skill, "x").is_none());
+    }
+
+    #[test]
+    fn unknown_version_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("global.json");
+        std::fs::write(&path, r#"{"version":99,"records":[]}"#).unwrap();
+        let err = InstallState::load(&path).expect_err("unknown version must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn save_is_byte_stable_regardless_of_insert_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("a.json");
+        let p2 = dir.path().join("b.json");
+
+        let mut s1 = InstallState::load(&p1).unwrap();
+        s1.record(record("zeta", ArtifactKind::Skill));
+        s1.record(record("alpha", ArtifactKind::Skill));
+        s1.save().unwrap();
+
+        let mut s2 = InstallState::load(&p2).unwrap();
+        s2.record(record("alpha", ArtifactKind::Skill));
+        s2.record(record("zeta", ArtifactKind::Skill));
+        s2.save().unwrap();
+
+        assert_eq!(std::fs::read(&p1).unwrap(), std::fs::read(&p2).unwrap());
+    }
+
+    #[test]
+    fn project_path_is_hash_of_config_path() {
+        let dir = Path::new("/grim/state");
+        let a = InstallState::project_path(dir, Path::new("/proj/grimoire.toml"));
+        let b = InstallState::project_path(dir, Path::new("/proj/grimoire.toml"));
+        let c = InstallState::project_path(dir, Path::new("/other/grimoire.toml"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a.starts_with("/grim/state/projects"));
+        assert!(a.extension().is_some_and(|e| e == "json"));
+    }
+}

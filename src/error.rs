@@ -9,7 +9,9 @@
 //! each known kind to a typed [`ExitCode`].
 
 use crate::cli::exit_code::ExitCode;
+use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
+use crate::install::install_error::{InstallError, InstallErrorKind};
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
@@ -44,6 +46,12 @@ pub enum Error {
 
     #[error(transparent)]
     Resolve(#[from] ResolveError),
+
+    #[error(transparent)]
+    Install(#[from] InstallError),
+
+    #[error(transparent)]
+    Command(#[from] CommandError),
 }
 
 /// Maps an error chain to a process exit code.
@@ -65,6 +73,11 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Lock(le) => classify_lock(le),
                 Error::Access(ae) => classify_access(ae),
                 Error::Resolve(re) => classify_resolve(re),
+                Error::Install(ie) => classify_install(ie),
+                Error::Command(ce) => match ce {
+                    CommandError::LockMissing { .. } => ExitCode::NotFound,
+                    CommandError::LockStale { .. } => ExitCode::DataError,
+                },
             };
         }
     }
@@ -121,6 +134,18 @@ fn classify_resolve(err: &ResolveError) -> ExitCode {
     }
 }
 
+/// Map an install-tier error to an exit code.
+fn classify_install(err: &InstallError) -> ExitCode {
+    match &err.kind {
+        InstallErrorKind::BlobMissing => ExitCode::NotFound,
+        InstallErrorKind::IntegrityMismatch { .. }
+        | InstallErrorKind::BlobDigestMismatch { .. }
+        | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
+        InstallErrorKind::TargetIo { source, .. } => classify_io(source),
+        InstallErrorKind::UnsupportedEditor(_) => ExitCode::ConfigError,
+    }
+}
+
 /// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
 fn classify_io(io: &std::io::Error) -> ExitCode {
     if io.kind() == std::io::ErrorKind::PermissionDenied {
@@ -158,6 +183,41 @@ mod tests {
         let inner = PinnedIdentifier::try_from(id).unwrap_err();
         let err: anyhow::Error = Error::from(inner).into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn install_errors_classify_per_kind() {
+        use crate::install::install_error::{InstallError, InstallErrorKind};
+
+        let cases = [
+            (InstallErrorKind::BlobMissing, ExitCode::NotFound),
+            (
+                InstallErrorKind::IntegrityMismatch {
+                    recorded: Digest::Sha256("a".repeat(64)),
+                    actual: Digest::Sha256("b".repeat(64)),
+                },
+                ExitCode::DataError,
+            ),
+            (
+                InstallErrorKind::MaterializeFailed("bad tar".to_string()),
+                ExitCode::DataError,
+            ),
+            (
+                InstallErrorKind::UnsupportedEditor("vscode".to_string()),
+                ExitCode::ConfigError,
+            ),
+            (
+                InstallErrorKind::TargetIo {
+                    path: std::path::PathBuf::from("/x"),
+                    source: std::io::Error::other("disk full"),
+                },
+                ExitCode::IoError,
+            ),
+        ];
+        for (kind, expected) in cases {
+            let err: anyhow::Error = Error::from(InstallError::without_reference(kind)).into();
+            assert_eq!(classify_error(&err), expected);
+        }
     }
 
     #[test]
