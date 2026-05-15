@@ -16,10 +16,19 @@ use std::io::IsTerminal;
 use clap::Args;
 
 use crate::cli::exit_code::ExitCode;
+use crate::config::scope::ConfigScope;
 use crate::context::Context;
-use crate::tui::app::{self, TuiContext};
+use crate::tui::app::{self, ScopeSwap, TuiContext};
 
 use super::scope_resolution;
+
+/// Human label for a scope (shown in the TUI title).
+fn scope_label(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Project => "project",
+        ConfigScope::Global => "global",
+    }
+}
 
 /// `grim tui` arguments.
 #[derive(Debug, Args)]
@@ -59,6 +68,22 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let access = super::access_seam(ctx)?;
 
+    // Resolve the *other* scope too so the TUI can toggle Global ⇄
+    // Project at runtime. It is best-effort: if the alternate scope
+    // cannot be resolved (e.g. no project config discoverable), the
+    // toggle is simply disabled rather than failing the whole TUI.
+    let alt = scope_resolution::resolve(ctx, !args.global, args.config.as_deref())
+        .ok()
+        .filter(|other| other.scope != scope.scope)
+        .map(|other| ScopeSwap {
+            scope: other.scope,
+            workspace: other.workspace.clone(),
+            lock_path: other.lock_path.clone(),
+            state_path: other.state_path.clone(),
+            editor_default: other.options.editor.clone(),
+            label: scope_label(other.scope).to_string(),
+        });
+
     let tui_ctx = TuiContext {
         registry,
         catalog_path: ctx.paths().catalog_file(),
@@ -69,6 +94,8 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         lock_path: scope.lock_path.clone(),
         state_path: scope.state_path.clone(),
         editor_default: scope.options.editor.clone(),
+        scope_label: scope_label(scope.scope).to_string(),
+        alt,
     };
 
     app::run(tui_ctx).await?;

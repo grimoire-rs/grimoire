@@ -41,6 +41,8 @@ pub enum TuiInput {
     MarkAll,
     /// Clear all marks.
     ClearMarks,
+    /// Toggle the active scope (Global ⇄ Project).
+    ScopeToggle,
     /// Rebuild the catalog.
     Refresh,
     /// Quit the TUI.
@@ -71,6 +73,8 @@ pub enum TuiAction {
     Batch { op: BatchOp, rows: Vec<usize> },
     /// Rebuild the catalog from the registry.
     Refresh,
+    /// Toggle the active scope (Global ⇄ Project) and recompute states.
+    ToggleScope,
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -127,6 +131,7 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         | TuiInput::Mark
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
+        | TuiInput::ScopeToggle
         | TuiInput::Refresh => TuiAction::None,
     }
 }
@@ -186,6 +191,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
+        TuiInput::Char('g') | TuiInput::ScopeToggle => TuiAction::ToggleScope,
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
         TuiInput::Backspace => TuiAction::None,
@@ -357,6 +363,16 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Char(' ')), TuiAction::None);
         assert_eq!(s.query, " ", "space is a literal query char in search");
         assert!(s.marked.is_empty(), "no marking while typing");
+    }
+
+    #[test]
+    fn scope_toggle_emits_action_and_is_literal_in_search() {
+        let mut s = seeded();
+        assert_eq!(handle(&mut s, TuiInput::Char('g')), TuiAction::ToggleScope);
+        assert_eq!(handle(&mut s, TuiInput::ScopeToggle), TuiAction::ToggleScope);
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('g')), TuiAction::None);
+        assert_eq!(s.query, "g");
     }
 
     #[test]

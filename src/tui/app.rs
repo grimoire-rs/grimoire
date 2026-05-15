@@ -66,6 +66,53 @@ pub struct TuiContext {
     pub state_path: std::path::PathBuf,
     /// The editor target(s) to materialize into.
     pub editor_default: Option<String>,
+    /// Human label for the active scope (`project` / `global`), shown in
+    /// the title.
+    pub scope_label: String,
+    /// The *other* scope, if one is resolvable — enables the runtime
+    /// Global ⇄ Project toggle. `None` ⇒ toggle is a no-op (e.g. no
+    /// project config discoverable).
+    pub alt: Option<ScopeSwap>,
+}
+
+/// The scope-dependent fields that swap when the user toggles scope.
+/// Everything else in [`TuiContext`] (registry, catalog, access) is
+/// scope-independent.
+pub struct ScopeSwap {
+    /// Which scope this is.
+    pub scope: ConfigScope,
+    /// The workspace root targets are rooted at.
+    pub workspace: std::path::PathBuf,
+    /// The scope's lock path.
+    pub lock_path: std::path::PathBuf,
+    /// The scope's install-state path.
+    pub state_path: std::path::PathBuf,
+    /// The editor target(s) to materialize into.
+    pub editor_default: Option<String>,
+    /// Human label (`project` / `global`).
+    pub label: String,
+}
+
+impl TuiContext {
+    /// Swap the active scope-dependent fields with [`Self::alt`]. A no-op
+    /// when no alternate scope was resolvable. The previously-active
+    /// fields become the new `alt`, so toggling again returns.
+    fn toggle_scope(&mut self) -> bool {
+        let Some(alt) = self.alt.take() else {
+            return false;
+        };
+        let now_alt = ScopeSwap {
+            scope: self.scope,
+            workspace: std::mem::replace(&mut self.workspace, alt.workspace),
+            lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
+            state_path: std::mem::replace(&mut self.state_path, alt.state_path),
+            editor_default: std::mem::replace(&mut self.editor_default, alt.editor_default),
+            label: std::mem::replace(&mut self.scope_label, alt.label),
+        };
+        self.scope = alt.scope;
+        self.alt = Some(now_alt);
+        true
+    }
 }
 
 /// Restores the terminal on drop — even if the body panics or returns an
@@ -94,13 +141,14 @@ impl Drop for TerminalGuard {
 /// A terminal-setup or draw I/O failure. Catalog-load and install/update
 /// failures are surfaced *in* the status line, not as a hard error — the
 /// TUI degrades rather than crashing (offline included).
-pub async fn run(ctx: TuiContext) -> anyhow::Result<()> {
+pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::new();
     state.set_offline(ctx.offline);
+    state.set_scope_label(&ctx.scope_label);
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -134,6 +182,15 @@ pub async fn run(ctx: TuiContext) -> anyhow::Result<()> {
             }
             TuiAction::Batch { op, rows } => {
                 run_batch(&ctx, &mut state, &rows, op).await;
+            }
+            TuiAction::ToggleScope => {
+                if ctx.toggle_scope() {
+                    state.set_scope_label(&ctx.scope_label);
+                    recompute_states(&ctx, &mut state);
+                    state.set_status(format!("scope: {}", ctx.scope_label));
+                } else {
+                    state.set_status("no alternate scope to switch to");
+                }
             }
         }
         terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -248,6 +305,18 @@ fn derive_artifact_state(
         ArtifactState::Installed
     } else {
         ArtifactState::Outdated
+    }
+}
+
+/// Recompute every row's [`ArtifactState`] against the currently-active
+/// scope's lock + install-state (used after a scope toggle — the catalog
+/// itself is scope-independent, only the per-row state changes).
+fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
+    let (lock, install_state) = load_scope_for_badges(ctx);
+    for r in &mut state.rows {
+        if let Some((registry, repository)) = split_repo(&r.repo) {
+            r.state = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
+        }
     }
 }
 

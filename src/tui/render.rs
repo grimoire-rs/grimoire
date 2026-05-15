@@ -94,10 +94,15 @@ pub struct RenderModel {
 
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
 pub fn frame(state: &TuiState) -> RenderModel {
-    let title = if state.offline {
-        "grim — catalog [offline]".to_string()
+    let scope = if state.scope_label.is_empty() {
+        String::new()
     } else {
-        "grim — catalog".to_string()
+        format!(" [{}]", state.scope_label)
+    };
+    let title = if state.offline {
+        format!("grim — catalog{scope} [offline]")
+    } else {
+        format!("grim — catalog{scope}")
     };
 
     let search = match state.mode {
@@ -150,7 +155,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else if state.loading {
         "loading catalog…".to_string()
     } else if state.marked.is_empty() {
-        "↑/↓ move  space mark  / search  i install  u update  d delete  r refresh  q quit".to_string()
+        "↑/↓ move  space mark  / search  i install  u update  d delete  g scope  r refresh  q quit".to_string()
     } else {
         format!(
             "{} marked  i install  u update  d delete  a all  c clear  q quit",

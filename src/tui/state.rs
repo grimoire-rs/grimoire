@@ -100,6 +100,8 @@ pub struct TuiState {
     /// Marked rows for batch actions, as indices into `rows` (stable
     /// across filter changes — a mark survives a query edit).
     pub marked: std::collections::BTreeSet<usize>,
+    /// The active scope label (`project` / `global`), shown in the title.
+    pub scope_label: String,
 }
 
 impl Default for TuiState {
@@ -114,6 +116,7 @@ impl Default for TuiState {
             offline: false,
             status_line: String::new(),
             marked: std::collections::BTreeSet::new(),
+            scope_label: String::new(),
         }
     }
 }
@@ -193,6 +196,11 @@ impl TuiState {
     /// Set the offline indicator.
     pub fn set_offline(&mut self, offline: bool) {
         self.offline = offline;
+    }
+
+    /// Set the active-scope label shown in the title.
+    pub fn set_scope_label(&mut self, label: impl Into<String>) {
+        self.scope_label = label.into();
     }
 
     /// Replace the status line.
