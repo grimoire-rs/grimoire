@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Grimoire Authors
+
+//! The pure TUI screen model and its transitions.
+//!
+//! This module is deliberately free of ratatui, crossterm, and `std::io`
+//! — every transition is a pure function over [`TuiState`] so the screen
+//! logic is exhaustively unit-testable without a terminal. The render loop
+//! ([`super::app`]) drives these transitions; [`super::render`] projects
+//! the state for display.
+
+use crate::install::status_badge::StatusBadge;
+
+/// Which interaction mode the screen is in.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Browsing the list; navigation keys move the selection.
+    List,
+    /// Editing the search box; character keys edit the query.
+    Search,
+    /// Viewing the selected row's detail pane.
+    Detail,
+}
+
+/// One catalog row, projected from a [`crate::catalog::registry_catalog::CatalogEntry`]
+/// plus the scope-derived install badge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiRow {
+    /// `skill` / `rule`, or `-` when the manifest declared no kind.
+    pub kind: String,
+    /// `registry/repository` reference.
+    pub repo: String,
+    /// Catalog description (empty string when absent).
+    pub description: String,
+    /// Catalog keywords.
+    pub keywords: Vec<String>,
+    /// The representative tag (empty string when absent).
+    pub latest_tag: String,
+    /// The install status of this repository in the active scope.
+    pub badge: StatusBadge,
+}
+
+/// The whole screen model.
+#[derive(Debug, Clone)]
+pub struct TuiState {
+    /// Every catalog row (unfiltered).
+    pub rows: Vec<TuiRow>,
+    /// Indices into `rows` matching the current query, in row order.
+    pub filtered: Vec<usize>,
+    /// Selection index *into `filtered`* (not into `rows`).
+    pub selected: usize,
+    /// The live search query.
+    pub query: String,
+    /// Current interaction mode.
+    pub mode: Mode,
+    /// Whether a catalog load is in flight.
+    pub loading: bool,
+    /// Whether the catalog was served offline (cached / possibly stale).
+    pub offline: bool,
+    /// A one-line status / hint shown at the bottom.
+    pub status_line: String,
+}
+
+impl Default for TuiState {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            filtered: Vec::new(),
+            selected: 0,
+            query: String::new(),
+            mode: Mode::List,
+            loading: true,
+            offline: false,
+            status_line: String::new(),
+        }
+    }
+}
+
+impl TuiState {
+    /// A fresh state in the loading phase.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the catalog rows (a load completed). The filter is
+    /// recomputed against the current query and the selection is clamped.
+    pub fn set_rows(&mut self, rows: Vec<TuiRow>) {
+        self.rows = rows;
+        self.loading = false;
+        self.recompute_filter();
+        self.selected = 0;
+    }
+
+    /// Set the loading flag.
+    pub fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+    }
+
+    /// Set the offline indicator.
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
+    }
+
+    /// Replace the status line.
+    pub fn set_status(&mut self, line: impl Into<String>) {
+        self.status_line = line.into();
+    }
+
+    /// Apply a new query string and recompute the filter, clamping the
+    /// selection so it stays in range.
+    pub fn apply_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
+        self.recompute_filter();
+        self.clamp_selection();
+    }
+
+    /// Move the selection by `delta` (saturating at both ends — never
+    /// wraps, never out of range).
+    pub fn move_selection(&mut self, delta: i64) {
+        if self.filtered.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let max = self.filtered.len() as i64 - 1;
+        let next = (self.selected as i64 + delta).clamp(0, max);
+        self.selected = next as usize;
+    }
+
+    /// Enter the detail pane for the current selection. A no-op when there
+    /// is no selectable row.
+    pub fn enter_detail(&mut self) {
+        if self.selected_row().is_some() {
+            self.mode = Mode::Detail;
+        }
+    }
+
+    /// Enter search-edit mode.
+    pub fn enter_search(&mut self) {
+        self.mode = Mode::Search;
+    }
+
+    /// Leave detail / search and return to the list.
+    pub fn back(&mut self) {
+        self.mode = Mode::List;
+    }
+
+    /// The currently selected row, if any.
+    pub fn selected_row(&self) -> Option<&TuiRow> {
+        self.filtered.get(self.selected).and_then(|&i| self.rows.get(i))
+    }
+
+    /// Recompute `filtered` from `rows` against the current query
+    /// (case-insensitive substring over repo / description / keywords).
+    fn recompute_filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                q.is_empty()
+                    || r.repo.to_lowercase().contains(&q)
+                    || r.description.to_lowercase().contains(&q)
+                    || r.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+            })
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    /// Clamp the selection into the current filtered range.
+    fn clamp_selection(&mut self) {
+        if self.filtered.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len() - 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(repo: &str, desc: &str, kw: &[&str], badge: StatusBadge) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            repo: repo.to_string(),
+            description: desc.to_string(),
+            keywords: kw.iter().map(|s| s.to_string()).collect(),
+            latest_tag: "latest".to_string(),
+            badge,
+        }
+    }
+
+    fn seeded() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("r/alpha", "first thing", &["rust"], StatusBadge::Installed),
+            row("r/beta", "second thing", &["python"], StatusBadge::NotInstalled),
+            row("r/gamma", "third thing", &["rust", "lint"], StatusBadge::Outdated),
+        ]);
+        s
+    }
+
+    #[test]
+    fn set_rows_clears_loading_and_resets_selection() {
+        let s = seeded();
+        assert!(!s.loading);
+        assert_eq!(s.filtered.len(), 3);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn query_filters_rows_and_clamps_selection() {
+        let mut s = seeded();
+        s.move_selection(2); // select gamma (index 2)
+        assert_eq!(s.selected, 2);
+        s.apply_query("rust");
+        // alpha + gamma match; selection clamped to last (index 1).
+        assert_eq!(s.filtered.len(), 2);
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.selected_row().unwrap().repo, "r/gamma");
+    }
+
+    #[test]
+    fn empty_query_matches_all() {
+        let mut s = seeded();
+        s.apply_query("zzz");
+        assert!(s.filtered.is_empty());
+        assert!(s.selected_row().is_none());
+        s.apply_query("");
+        assert_eq!(s.filtered.len(), 3);
+    }
+
+    #[test]
+    fn selection_saturates_at_bounds() {
+        let mut s = seeded();
+        s.move_selection(-5);
+        assert_eq!(s.selected, 0);
+        s.move_selection(99);
+        assert_eq!(s.selected, 2);
+        s.move_selection(99);
+        assert_eq!(s.selected, 2, "never out of range");
+    }
+
+    #[test]
+    fn selection_on_empty_filter_is_zero_and_safe() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.move_selection(3);
+        assert_eq!(s.selected, 0);
+        assert!(s.selected_row().is_none());
+    }
+
+    #[test]
+    fn mode_transitions_enter_and_back() {
+        let mut s = seeded();
+        assert_eq!(s.mode, Mode::List);
+        s.enter_search();
+        assert_eq!(s.mode, Mode::Search);
+        s.back();
+        assert_eq!(s.mode, Mode::List);
+        s.enter_detail();
+        assert_eq!(s.mode, Mode::Detail);
+        s.back();
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    #[test]
+    fn enter_detail_is_noop_without_selection() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.enter_detail();
+        assert_eq!(s.mode, Mode::List, "no row ⇒ stays in list");
+    }
+
+    #[test]
+    fn keyword_match_is_case_insensitive() {
+        let mut s = seeded();
+        s.apply_query("LINT");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "r/gamma");
+    }
+}

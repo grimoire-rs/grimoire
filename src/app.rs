@@ -85,6 +85,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             render(&r, format)?;
             c
         }
+        Command::Search(args) => {
+            let (r, c) = crate::command::search::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
+        // `tui` diverges into a full-screen session: it owns the terminal
+        // and emits no structured report (exempt from `Printable`).
+        Command::Tui(args) => crate::command::tui::run(&ctx, &args).await?,
     };
 
     Ok(code)

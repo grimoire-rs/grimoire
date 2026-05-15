@@ -8,6 +8,7 @@
 //! taxonomy. It walks the `anyhow` chain, downcasts to [`Error`], and maps
 //! each known kind to a typed [`ExitCode`].
 
+use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
@@ -59,6 +60,9 @@ pub enum Error {
     Release(#[from] ReleaseError),
 
     #[error(transparent)]
+    Catalog(#[from] CatalogError),
+
+    #[error(transparent)]
     Command(#[from] CommandError),
 }
 
@@ -84,9 +88,11 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Install(ie) => classify_install(ie),
                 Error::Skill(se) => classify_skill(se),
                 Error::Release(re) => classify_release(re),
+                Error::Catalog(ce) => classify_catalog(ce),
                 Error::Command(ce) => match ce {
                     CommandError::LockMissing { .. } => ExitCode::NotFound,
                     CommandError::LockStale { .. } => ExitCode::DataError,
+                    CommandError::NoRegistry => ExitCode::ConfigError,
                 },
             };
         }
@@ -175,6 +181,17 @@ fn classify_skill(err: &SkillError) -> ExitCode {
 fn classify_release(err: &ReleaseError) -> ExitCode {
     match &err.kind {
         ReleaseErrorKind::InvalidVersion { .. } | ReleaseErrorKind::TagExists { .. } => ExitCode::DataError,
+    }
+}
+
+/// Map a catalog-tier error to an exit code. A parse / unknown-version
+/// failure is bad on-disk data (65); an I/O failure is I/O / NoPermission;
+/// an OCI-access failure delegates to the access classifier.
+fn classify_catalog(err: &CatalogError) -> ExitCode {
+    match &err.kind {
+        CatalogErrorKind::Parse(_) | CatalogErrorKind::UnsupportedVersion { .. } => ExitCode::DataError,
+        CatalogErrorKind::Io(io) => classify_io(io),
+        CatalogErrorKind::Access(ae) => classify_access(ae),
     }
 }
 

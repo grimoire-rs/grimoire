@@ -168,6 +168,14 @@ impl InstallState {
         self.records.get(&(kind, name.to_string()))
     }
 
+    /// Iterate every recorded artifact (order: `(kind, name)`).
+    ///
+    /// Used by the catalog badge derivation, which keys on the pinned
+    /// repository rather than the config binding name.
+    pub fn iter_records(&self) -> impl Iterator<Item = &InstallRecord> {
+        self.records.values()
+    }
+
     /// Insert or replace the record for an artifact.
     pub fn record(&mut self, record: InstallRecord) {
         self.records.insert((record.kind, record.name.clone()), record);

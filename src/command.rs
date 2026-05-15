@@ -17,7 +17,9 @@ pub mod lock;
 pub mod release;
 pub mod remove;
 pub mod scope_resolution;
+pub mod search;
 pub mod status;
+pub mod tui;
 pub mod update;
 
 #[allow(unused_imports)]

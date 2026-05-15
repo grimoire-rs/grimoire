@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+"""`grim search` acceptance tests — catalog query over the real registry.
+
+The catalog is *bounded*: the query is a case-insensitive repository-name
+prefilter (a registry-wide manifest walk is an explicit cut-line), so a
+search uses a term present in the unique repo path. State is data:
+`search` always exits 0 (no results ⇒ empty array). The interactive TUI
+render loop is not acceptance-tested (its decision logic is covered by
+headless Rust unit tests); only the non-TTY guard of `grim tui` is
+smoke-checked here.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from src.helpers import make_artifact, write_config
+from src.registry import REGISTRY_HOST
+
+
+def test_search_finds_matching_entries_with_kind_and_status(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# CR\n"},
+        tag="latest",
+        annotations={
+            "com.grimoire.keywords": "review,quality",
+            "org.opencontainers.image.description": "Review code quality",
+        },
+    )
+    make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# rust\n"},
+        tag="latest",
+        annotations={
+            "com.grimoire.keywords": "rust,lint",
+            "org.opencontainers.image.description": "Rust style rules",
+        },
+    )
+    runner = grim_at(project_dir)
+
+    # The unique-repo segment is in the repo *name*, so the bounded
+    # name-prefilter scopes the build to just this test's repos.
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    by_repo = {r["repo"]: r for r in rows}
+    sk = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/code-review")
+    )
+    ru = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/rust-style")
+    )
+    assert sk["kind"] == "skill"
+    assert sk["status"] == "not-installed"
+    assert sk["description"] == "Review code quality"
+    assert ru["kind"] == "rule"
+
+
+def test_search_query_miss_is_empty_array_exit_0(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    make_artifact(
+        f"{unique_repo}/thing",
+        "skill",
+        {"thing/SKILL.md": "---\nname: thing\n---\n# t\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "--format",
+        "json",
+        "search",
+        "zzz-no-such-repo-zzz-",
+        "--registry",
+        REGISTRY_HOST,
+        "--refresh",
+        check=False,
+    )
+    assert result.returncode == 0
+    arr = json.loads(result.stdout)
+    assert isinstance(arr, list)
+    assert arr == []
+
+
+def test_search_refresh_repopulates(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(project_dir)
+    # Cold catalog before the artifact exists (scoped to this repo).
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    assert rows == []
+
+    make_artifact(
+        f"{unique_repo}/late",
+        "skill",
+        {"late/SKILL.md": "---\nname: late\n---\n# l\n"},
+        tag="latest",
+    )
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    assert [r for r in rows if r["repo"].endswith(f"{unique_repo}/late")], (
+        f"--refresh must repopulate the catalog, got {rows}"
+    )
+
+
+def test_search_status_flips_to_installed_after_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    art = make_artifact(
+        f"{unique_repo}/installable",
+        "skill",
+        {"installable/SKILL.md": "---\nname: installable\n---\n# i\n"},
+        tag="latest",
+    )
+    write_config(project_dir, skills={"installable": art.fq})
+    runner = grim_at(project_dir)
+
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    match = [
+        r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")
+    ]
+    assert match, f"expected the installed repo in results, got {rows}"
+    assert match[0]["status"] == "installed", match[0]
+
+
+def test_search_offline_serves_cached_exit_0(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    make_artifact(
+        f"{unique_repo}/cached",
+        "skill",
+        {"cached/SKILL.md": "---\nname: cached\n---\n# c\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    # Warm the catalog cache online (scoped to this repo).
+    warm = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    assert [r for r in warm if r["repo"].endswith(f"{unique_repo}/cached")]
+
+    result = runner.run(
+        "--format",
+        "json",
+        "--offline",
+        "search",
+        unique_repo,
+        "--registry",
+        REGISTRY_HOST,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"offline search must exit 0, got {result.returncode}; "
+        f"{result.stderr}"
+    )
+    arr = json.loads(result.stdout)
+    assert [r for r in arr if r["repo"].endswith(f"{unique_repo}/cached")], (
+        f"offline must serve the warm cache, got {arr}"
+    )
+
+
+def test_tui_non_tty_exits_0_with_message(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim tui` under a non-TTY stdout must not enter raw mode."""
+    runner = grim_at(project_dir)
+    result = runner.run("tui", "--registry", REGISTRY_HOST, check=False)
+    assert result.returncode == 0, (
+        f"non-TTY tui must exit 0, got {result.returncode}; {result.stderr}"
+    )
+    assert (
+        "not a TTY" in result.stdout
+        or "interactive terminal" in result.stdout
+    )

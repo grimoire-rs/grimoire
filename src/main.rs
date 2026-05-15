@@ -19,6 +19,7 @@
 
 mod api;
 mod app;
+mod catalog;
 mod cli;
 mod command;
 mod config;
@@ -31,6 +32,7 @@ mod oci;
 mod resolve;
 mod skill;
 mod store;
+mod tui;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
@@ -44,7 +46,9 @@ use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
+use crate::command::search::SearchArgs;
 use crate::command::status::StatusArgs;
+use crate::command::tui::TuiArgs;
 use crate::command::update::UpdateArgs;
 use crate::error::classify_error;
 
@@ -83,6 +87,10 @@ pub enum Command {
     Add(AddArgs),
     /// Undeclare a skill/rule from the config and lock.
     Remove(RemoveArgs),
+    /// Search the registry catalog for skills and rules.
+    Search(SearchArgs),
+    /// Browse the registry catalog in an interactive TUI.
+    Tui(TuiArgs),
 }
 
 fn main() -> std::process::ExitCode {

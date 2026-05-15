@@ -17,6 +17,7 @@ pub mod install_report;
 pub mod lock_report;
 pub mod release_report;
 pub mod remove_report;
+pub mod search_report;
 pub mod status_report;
 pub mod update_report;
 
@@ -36,6 +37,8 @@ pub use lock_report::{LockEntry, LockReport};
 pub use release_report::ReleaseReport;
 #[allow(unused_imports)]
 pub use remove_report::{RemoveReport, RemoveStatus};
+#[allow(unused_imports)]
+pub use search_report::{SearchEntry, SearchReport};
 #[allow(unused_imports)]
 pub use status_report::{StatusEntry, StatusReport};
 #[allow(unused_imports)]

@@ -24,6 +24,12 @@ pub enum CommandError {
         "grimoire.lock is stale (declaration_hash {locked} does not match current {current}); run `grim lock` before installing"
     )]
     LockStale { locked: String, current: String },
+
+    /// `search` / `tui` need a registry but none could be resolved from
+    /// `--registry`, the config `default_registry` option, or
+    /// `GRIM_DEFAULT_REGISTRY`.
+    #[error("no registry to search; pass --registry or set GRIM_DEFAULT_REGISTRY")]
+    NoRegistry,
 }
 
 #[cfg(test)]

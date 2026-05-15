@@ -16,6 +16,7 @@ pub mod install_error;
 pub mod install_state;
 pub mod installer;
 pub mod materializer;
+pub mod status_badge;
 pub mod target;
 
 #[allow(unused_imports)]
@@ -30,5 +31,7 @@ pub use install_state::{InstallRecord, InstallState};
 pub use installer::{ArtifactInstall, InstallOutcome, install_all};
 #[allow(unused_imports)]
 pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
+#[allow(unused_imports)]
+pub use status_badge::{StatusBadge, derive_badge};
 #[allow(unused_imports)]
 pub use target::InstallTarget;

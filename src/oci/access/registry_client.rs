@@ -306,29 +306,72 @@ impl OciAccess for RegistryClient {
     async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
         // `oci-client` 0.16 has no catalog API. Issue the distribution
         // spec request directly; an unsupported/absent endpoint degrades
-        // to an empty list (Phase 6 owns real catalog handling).
+        // to an empty list.
+        //
+        // The `_catalog` response is paginated: registries cap the page
+        // size and advertise the next page via a `Link: <…>; rel="next"`
+        // header (distribution spec §catalog). Follow the cursor, but only
+        // up to a bounded number of pages: a registry can advertise tens
+        // of thousands of repositories and walking every page is neither
+        // fast nor useful for a *bounded* catalog (the catalog layer caps
+        // and prefilters anyway). A truncated listing is an explicit
+        // cut-line — the catalog is a best-effort index, not a mirror.
+        const PAGE_SIZE: usize = 1000;
+        const MAX_PAGES: usize = 8;
+
         #[derive(serde::Deserialize)]
         struct Catalog {
             #[serde(default)]
             repositories: Vec<String>,
         }
 
-        let url = format!("{}://{registry}/v2/_catalog", Self::scheme_for(registry));
-        let resp = match self.http.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
+        let scheme = Self::scheme_for(registry);
+        let mut next: Option<String> = Some(format!("{scheme}://{registry}/v2/_catalog?n={PAGE_SIZE}"));
+        let mut all: Vec<String> = Vec::new();
+        let mut pages = 0;
+
+        while let Some(url) = next.take() {
+            pages += 1;
+            if pages > MAX_PAGES {
+                break;
             }
-        };
-        if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
-            return Ok(Vec::new());
+            let resp = match self.http.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    // A mid-walk transport failure on a *busy* catalog is
+                    // not worth aborting search/tui for: return what was
+                    // collected so far (degrade, never crash).
+                    if all.is_empty() {
+                        return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
+                    }
+                    break;
+                }
+            };
+            if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
+                // An unsupported endpoint on page 1 ⇒ empty catalog.
+                break;
+            }
+            // Parse the `Link` header before consuming the body.
+            let link_next = resp
+                .headers()
+                .get(reqwest::header::LINK)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_next_link)
+                .map(|rel| absolutize_link(scheme, registry, &rel));
+            match resp.json::<Catalog>().await {
+                Ok(catalog) => {
+                    if catalog.repositories.is_empty() {
+                        break;
+                    }
+                    all.extend(catalog.repositories);
+                }
+                // A non-JSON / unexpected body from a registry that does
+                // not implement the catalog is not a hard failure.
+                Err(_) => break,
+            }
+            next = link_next;
         }
-        match resp.json::<Catalog>().await {
-            Ok(catalog) => Ok(catalog.repositories),
-            // A non-JSON or unexpected body from a registry that does not
-            // implement the catalog is not a hard failure here.
-            Err(_) => Ok(Vec::new()),
-        }
+        Ok(all)
     }
 
     async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
@@ -450,6 +493,39 @@ impl OciAccess for RegistryClient {
     }
 }
 
+/// Extract the `rel="next"` target from an RFC 8288 `Link` header.
+///
+/// A catalog `Link` looks like `</v2/_catalog?last=foo&n=100>; rel="next"`
+/// (possibly comma-separated with other relations). Returns the raw URL
+/// reference between the angle brackets of the `next` link, if present.
+fn parse_next_link(header: &str) -> Option<String> {
+    for part in header.split(',') {
+        let part = part.trim();
+        let (target, params) = part.split_once('>')?;
+        let target = target.trim_start_matches('<');
+        if params.split(';').any(|p| {
+            let p = p.trim().replace(['"', ' '], "");
+            p == "rel=next"
+        }) {
+            return Some(target.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a possibly-relative `Link` target against the registry origin.
+/// Registries return an absolute-path reference (`/v2/_catalog?…`); a
+/// fully-qualified URL is passed through unchanged.
+fn absolutize_link(scheme: &str, registry: &str, link: &str) -> String {
+    if link.starts_with("http://") || link.starts_with("https://") {
+        link.to_string()
+    } else if let Some(rest) = link.strip_prefix('/') {
+        format!("{scheme}://{registry}/{rest}")
+    } else {
+        format!("{scheme}://{registry}/{link}")
+    }
+}
+
 /// Classify an `oci-client` error from a push/pull path: an auth failure
 /// stays terminal, everything else (including a rare push-time
 /// not-found) is a transport (`Registry`) failure — a push has no benign
@@ -530,6 +606,40 @@ mod tests {
             message: "down".to_string(),
         };
         assert!(matches!(classify(err), Classified::Registry(_)));
+    }
+
+    #[test]
+    fn parse_next_link_extracts_next_target() {
+        let h = r#"</v2/_catalog?last=grim-test%2Fzz&n=100>; rel="next""#;
+        assert_eq!(
+            parse_next_link(h),
+            Some("/v2/_catalog?last=grim-test%2Fzz&n=100".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_next_link_ignores_other_relations_and_absent_next() {
+        assert_eq!(parse_next_link(r#"</v2/_catalog?n=1>; rel="prev""#), None);
+        assert_eq!(parse_next_link(""), None);
+        // Multi-relation header: pick only the `next` one.
+        let h = r#"</a>; rel="prev", </v2/_catalog?last=x>; rel="next""#;
+        assert_eq!(parse_next_link(h), Some("/v2/_catalog?last=x".to_string()));
+    }
+
+    #[test]
+    fn absolutize_link_handles_relative_and_absolute() {
+        assert_eq!(
+            absolutize_link("http", "localhost:5000", "/v2/_catalog?last=x"),
+            "http://localhost:5000/v2/_catalog?last=x"
+        );
+        assert_eq!(
+            absolutize_link("https", "ghcr.io", "https://ghcr.io/v2/_catalog?last=y"),
+            "https://ghcr.io/v2/_catalog?last=y"
+        );
+        assert_eq!(
+            absolutize_link("http", "localhost:5000", "v2/_catalog"),
+            "http://localhost:5000/v2/_catalog"
+        );
     }
 
     #[test]
