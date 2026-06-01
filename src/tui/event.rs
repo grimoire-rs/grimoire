@@ -43,8 +43,16 @@ pub enum TuiInput {
     ClearMarks,
     /// Toggle the active scope (Global ⇄ Project).
     ScopeToggle,
+    /// Toggle the flat list ⇄ grouped tree view.
+    ViewToggle,
+    /// Expand the selected tree group.
+    Expand,
+    /// Collapse the selected tree group.
+    Collapse,
     /// Show the keybinding help overlay.
     Help,
+    /// Open the version picker for the selected row.
+    Versions,
     /// Rebuild the catalog.
     Refresh,
     /// Quit the TUI.
@@ -77,6 +85,8 @@ pub enum TuiAction {
     Refresh,
     /// Toggle the active scope (Global ⇄ Project) and recompute states.
     ToggleScope,
+    /// Lazily fetch the tag list for `row` and feed it to the open picker.
+    LoadVersions { row: usize },
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -92,7 +102,33 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match state.mode {
         Mode::Search => handle_search(state, input),
         Mode::Help => handle_help(state, input),
+        Mode::VersionPick => handle_picker(state, input),
         Mode::List | Mode::Detail => handle_browse(state, input),
+    }
+}
+
+/// Version-picker keys: navigate the tag list, `Enter` pins the highlighted
+/// tag, `Esc` / `v` cancels, `q` quits the TUI.
+fn handle_picker(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Up => {
+            state.picker_move(-1);
+            TuiAction::None
+        }
+        TuiInput::Down => {
+            state.picker_move(1);
+            TuiAction::None
+        }
+        TuiInput::Enter => {
+            state.confirm_version();
+            TuiAction::None
+        }
+        TuiInput::Esc | TuiInput::Char('v') | TuiInput::Versions => {
+            state.cancel_version();
+            TuiAction::None
+        }
+        TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        _ => TuiAction::None,
     }
 }
 
@@ -146,7 +182,11 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
         | TuiInput::ScopeToggle
+        | TuiInput::ViewToggle
+        | TuiInput::Expand
+        | TuiInput::Collapse
         | TuiInput::Help
+        | TuiInput::Versions
         | TuiInput::Refresh => TuiAction::None,
     }
 }
@@ -174,7 +214,13 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Enter => {
-            state.enter_detail();
+            // On a tree group, Enter folds/unfolds it; on a leaf (or in
+            // flat view) it opens the detail pane as before.
+            if state.selected_is_group() {
+                state.toggle_collapse_selected();
+            } else {
+                state.enter_detail();
+            }
             TuiAction::None
         }
         TuiInput::Esc => {
@@ -207,10 +253,26 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
         TuiInput::Char('g') | TuiInput::ScopeToggle => TuiAction::ToggleScope,
+        TuiInput::Char('t') | TuiInput::ViewToggle => {
+            state.toggle_view_mode();
+            TuiAction::None
+        }
+        TuiInput::Expand => {
+            state.expand_selected();
+            TuiAction::None
+        }
+        TuiInput::Collapse => {
+            state.collapse_selected();
+            TuiAction::None
+        }
         TuiInput::Char('?') | TuiInput::Help => {
             state.enter_help();
             TuiAction::None
         }
+        TuiInput::Char('v') | TuiInput::Versions => match state.open_version_pick() {
+            Some(row) => TuiAction::LoadVersions { row },
+            None => TuiAction::None,
+        },
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
         TuiInput::Backspace => TuiAction::None,
@@ -229,6 +291,8 @@ mod tests {
             description: "d".to_string(),
             keywords: vec!["kw".to_string()],
             latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
             state: ArtifactState::NotInstalled,
         }
     }
@@ -409,6 +473,34 @@ mod tests {
     }
 
     #[test]
+    fn version_key_opens_picker_and_loads_then_picks() {
+        let mut s = seeded();
+        s.move_selection(1);
+        assert_eq!(handle(&mut s, TuiInput::Char('v')), TuiAction::LoadVersions { row: 1 });
+        assert_eq!(s.mode, Mode::VersionPick);
+        // App feeds tags back; picker keys navigate + commit.
+        s.set_picker_tags(vec!["3.0.0".to_string(), "2.0.0".to_string()]);
+        assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.rows[1].pinned_version.as_deref(), Some("2.0.0"));
+        // 'v' is a literal query char while searching, never the picker.
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('v')), TuiAction::None);
+        assert_eq!(s.query, "v");
+    }
+
+    #[test]
+    fn picker_esc_cancels_without_pinning() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('v'));
+        s.set_picker_tags(vec!["1.0.0".to_string()]);
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.rows[0].pinned_version, None);
+    }
+
+    #[test]
     fn refresh_emits_refresh() {
         let mut s = seeded();
         assert_eq!(handle(&mut s, TuiInput::Char('r')), TuiAction::Refresh);
@@ -447,5 +539,60 @@ mod tests {
         let mut s = seeded();
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(handle(&mut s, TuiInput::Quit), TuiAction::Quit);
+    }
+
+    fn tree_state() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_default_registry(Some("reg".to_string()));
+        s.set_rows(vec![row("reg/acme/a"), row("reg/acme/b")]);
+        s
+    }
+
+    #[test]
+    fn t_toggles_tree_and_group_action_targets_descendants() {
+        let mut s = tree_state();
+        assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        // Selection rests on the `acme` group ⇒ one keypress acts on all.
+        assert!(s.selected_is_group());
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![0, 1]
+            }
+        );
+        // The abstract input maps the same as the hotkey.
+        let mut s2 = tree_state();
+        assert_eq!(handle(&mut s2, TuiInput::ViewToggle), TuiAction::None);
+        assert_eq!(s2.view_mode, crate::tui::state::ViewMode::Tree);
+    }
+
+    #[test]
+    fn enter_folds_a_group_and_expand_collapse_inputs_work() {
+        let mut s = tree_state();
+        handle(&mut s, TuiInput::Char('t')); // → tree
+        // Enter on a group folds it (it does NOT open the detail pane).
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.flattened().len(), 1, "descendants hidden");
+        // Expand re-opens it; Collapse folds it again.
+        assert_eq!(handle(&mut s, TuiInput::Expand), TuiAction::None);
+        assert_eq!(s.flattened().len(), 3);
+        assert_eq!(handle(&mut s, TuiInput::Collapse), TuiAction::None);
+        assert_eq!(s.flattened().len(), 1);
+    }
+
+    #[test]
+    fn t_is_a_literal_query_char_while_searching() {
+        let mut s = tree_state();
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
+        assert_eq!(s.query, "t");
+        assert_eq!(
+            s.view_mode,
+            crate::tui::state::ViewMode::Flat,
+            "search never enters tree"
+        );
     }
 }

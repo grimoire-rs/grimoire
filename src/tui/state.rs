@@ -9,6 +9,8 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
+use super::tree;
+
 /// The install state of a catalog repository relative to the active
 /// scope, as shown in the TUI.
 ///
@@ -60,6 +62,34 @@ pub enum Mode {
     Detail,
     /// Viewing the keybinding help overlay.
     Help,
+    /// Choosing a specific version for the selected row from a popup.
+    VersionPick,
+}
+
+/// Which catalog view the list is showing.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// The flat, filterable list (the default; search operates here).
+    Flat,
+    /// The collapsible tree grouped by the OCI identifier path.
+    Tree,
+}
+
+/// The modal version picker: the row it targets, the fetched tags, and the
+/// in-popup selection. `tags` is empty while the lazy registry lookup is
+/// still in flight (`loading`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionPicker {
+    /// The `rows` index this picker pins a version onto.
+    pub row: usize,
+    /// Available tags, highest concrete version first; empty while loading.
+    pub tags: Vec<String>,
+    /// Selection index into `tags`.
+    pub selected: usize,
+    /// Whether the tag list is still being fetched from the registry.
+    pub loading: bool,
 }
 
 /// One catalog row, projected from a [`crate::catalog::registry_catalog::CatalogEntry`]
@@ -74,8 +104,15 @@ pub struct TuiRow {
     pub description: String,
     /// Catalog keywords.
     pub keywords: Vec<String>,
-    /// The representative tag (empty string when absent).
+    /// The representative tag (empty string when absent) — may be the
+    /// moving `latest` pointer; used as the resolution fallback.
     pub latest_tag: String,
+    /// The highest concrete version to display in the Tag column (falls
+    /// back to `latest_tag` when no semver tag exists).
+    pub version: String,
+    /// A user-pinned version chosen via the picker; when set, install /
+    /// update target this tag instead of the default resolution.
+    pub pinned_version: Option<String>,
     /// The install status of this repository in the active scope.
     pub state: ArtifactState,
 }
@@ -104,6 +141,16 @@ pub struct TuiState {
     pub marked: std::collections::BTreeSet<usize>,
     /// The active scope label (`project` / `global`), shown in the title.
     pub scope_label: String,
+    /// The active version picker, when [`Mode::VersionPick`].
+    pub picker: Option<VersionPicker>,
+    /// Whether the list is flat or the grouped tree.
+    pub view_mode: ViewMode,
+    /// Collapsed group keys (tree mode). Persists across rebuilds and
+    /// scope toggles — an unknown key (after a reload) is simply inert.
+    pub collapsed: std::collections::BTreeSet<String>,
+    /// The effective default registry; when a row's registry host equals
+    /// it the registry root is elided from the tree (shorter names).
+    pub default_registry: Option<String>,
 }
 
 impl Default for TuiState {
@@ -119,6 +166,10 @@ impl Default for TuiState {
             status_line: String::new(),
             marked: std::collections::BTreeSet::new(),
             scope_label: String::new(),
+            picker: None,
+            view_mode: ViewMode::Flat,
+            collapsed: std::collections::BTreeSet::new(),
+            default_registry: None,
         }
     }
 }
@@ -141,9 +192,42 @@ impl TuiState {
         self.marked.clear();
     }
 
-    /// The `rows` index of the current selection, if any.
+    /// The flattened tree lines for the current rows + collapsed set.
+    /// Rebuilt on demand (no cache) so a group rollup always reflects the
+    /// freshest per-row state, including after an install/update/scope
+    /// change mutates `rows` in place.
+    pub fn flattened(&self) -> Vec<tree::DisplayRow> {
+        let t = tree::build(&self.rows, self.default_registry.as_deref());
+        tree::flatten(&t, &self.collapsed)
+    }
+
+    /// Number of selectable lines in the active view.
+    fn display_len(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Flat => self.filtered.len(),
+            ViewMode::Tree => self.flattened().len(),
+        }
+    }
+
+    /// The `rows` index of the current selection, if any. In tree mode a
+    /// group line has no single row, so this is `None` there.
     pub fn selected_row_index(&self) -> Option<usize> {
-        self.filtered.get(self.selected).copied()
+        match self.view_mode {
+            ViewMode::Flat => self.filtered.get(self.selected).copied(),
+            ViewMode::Tree => match self.flattened().get(self.selected)? {
+                tree::DisplayRow::Leaf { row, .. } => Some(*row),
+                tree::DisplayRow::Group { .. } => None,
+            },
+        }
+    }
+
+    /// Whether the current selection is a tree group line.
+    pub fn selected_is_group(&self) -> bool {
+        self.view_mode == ViewMode::Tree
+            && matches!(
+                self.flattened().get(self.selected),
+                Some(tree::DisplayRow::Group { .. })
+            )
     }
 
     /// Whether the row at `rows` index `i` is marked.
@@ -151,9 +235,25 @@ impl TuiState {
         self.marked.contains(&i)
     }
 
-    /// Toggle the mark on the currently-selected row. No-op without a
-    /// selectable row.
+    /// Toggle the mark on the current selection. On a tree group this
+    /// marks every descendant leaf (smart toggle: clears them instead
+    /// when all are already marked). No-op without a selectable target.
     pub fn toggle_mark_selected(&mut self) {
+        if self.view_mode == ViewMode::Tree
+            && let Some(tree::DisplayRow::Group { rows, .. }) = self.flattened().get(self.selected)
+        {
+            if rows.is_empty() {
+                return;
+            }
+            if rows.iter().all(|i| self.marked.contains(i)) {
+                for i in rows {
+                    self.marked.remove(i);
+                }
+            } else {
+                self.marked.extend(rows.iter().copied());
+            }
+            return;
+        }
         if let Some(i) = self.selected_row_index()
             && !self.marked.insert(i)
         {
@@ -183,11 +283,19 @@ impl TuiState {
     /// when non-empty, otherwise the single selected row. Always returned
     /// sorted and de-duplicated for deterministic, stable batch order.
     pub fn action_targets(&self) -> Vec<usize> {
-        if self.marked.is_empty() {
-            self.selected_row_index().into_iter().collect()
-        } else {
-            self.marked.iter().copied().collect()
+        if !self.marked.is_empty() {
+            return self.marked.iter().copied().collect();
         }
+        // No marks: the single selection — or, on a tree group, every
+        // descendant leaf (act on a whole group with one keypress).
+        if self.view_mode == ViewMode::Tree {
+            return match self.flattened().get(self.selected) {
+                Some(tree::DisplayRow::Leaf { row, .. }) => vec![*row],
+                Some(tree::DisplayRow::Group { rows, .. }) => rows.clone(),
+                None => Vec::new(),
+            };
+        }
+        self.selected_row_index().into_iter().collect()
     }
 
     /// Set the loading flag.
@@ -221,13 +329,75 @@ impl TuiState {
     /// Move the selection by `delta` (saturating at both ends — never
     /// wraps, never out of range).
     pub fn move_selection(&mut self, delta: i64) {
-        if self.filtered.is_empty() {
+        let len = self.display_len();
+        if len == 0 {
             self.selected = 0;
             return;
         }
-        let max = self.filtered.len() as i64 - 1;
+        let max = len as i64 - 1;
         let next = (self.selected as i64 + delta).clamp(0, max);
         self.selected = next as usize;
+    }
+
+    /// Clamp the selection into the active view's visible range (used
+    /// after a collapse/expand changes how many lines are visible).
+    fn clamp_display_selection(&mut self) {
+        let len = self.display_len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    /// Set the effective default registry (elided as the tree root).
+    pub fn set_default_registry(&mut self, registry: Option<String>) {
+        self.default_registry = registry;
+    }
+
+    /// Flip between the flat list and the grouped tree. A no-op while
+    /// searching — search operates on the flat list only.
+    pub fn toggle_view_mode(&mut self) {
+        if self.mode == Mode::Search {
+            return;
+        }
+        self.view_mode = match self.view_mode {
+            ViewMode::Flat => ViewMode::Tree,
+            ViewMode::Tree => ViewMode::Flat,
+        };
+        self.selected = 0;
+    }
+
+    /// Collapse or expand the selected tree group. No-op unless a group
+    /// line is selected in tree mode.
+    pub fn toggle_collapse_selected(&mut self) {
+        if let Some(tree::DisplayRow::Group { key, collapsed, .. }) = self.flattened().get(self.selected) {
+            if *collapsed {
+                self.collapsed.remove(key);
+            } else {
+                let key = key.clone();
+                self.collapsed.insert(key);
+            }
+            self.clamp_display_selection();
+        }
+    }
+
+    /// Expand the selected tree group (if collapsed). No-op otherwise.
+    pub fn expand_selected(&mut self) {
+        if let Some(tree::DisplayRow::Group { key, .. }) = self.flattened().get(self.selected) {
+            let key = key.clone();
+            self.collapsed.remove(&key);
+            self.clamp_display_selection();
+        }
+    }
+
+    /// Collapse the selected tree group (if expanded). No-op otherwise.
+    pub fn collapse_selected(&mut self) {
+        if let Some(tree::DisplayRow::Group { key, .. }) = self.flattened().get(self.selected) {
+            let key = key.clone();
+            self.collapsed.insert(key);
+            self.clamp_display_selection();
+        }
     }
 
     /// Enter the detail pane for the current selection. A no-op when there
@@ -238,8 +408,13 @@ impl TuiState {
         }
     }
 
-    /// Enter search-edit mode.
+    /// Enter search-edit mode. Search operates on the flat list, so this
+    /// drops out of tree view (the user re-presses `t` to return).
     pub fn enter_search(&mut self) {
+        if self.view_mode == ViewMode::Tree {
+            self.view_mode = ViewMode::Flat;
+            self.selected = 0;
+        }
         self.mode = Mode::Search;
     }
 
@@ -253,9 +428,65 @@ impl TuiState {
         self.mode = Mode::List;
     }
 
-    /// The currently selected row, if any.
+    /// Open the version picker for the current selection. Returns the
+    /// `rows` index whose tags the app must lazily fetch, or `None` when
+    /// there is no selectable row (then it is a no-op).
+    pub fn open_version_pick(&mut self) -> Option<usize> {
+        let i = self.selected_row_index()?;
+        self.mode = Mode::VersionPick;
+        self.picker = Some(VersionPicker {
+            row: i,
+            tags: Vec::new(),
+            selected: 0,
+            loading: true,
+        });
+        Some(i)
+    }
+
+    /// Populate the open picker with fetched `tags` (highest version
+    /// first). The selection lands on the row's currently-pinned version
+    /// if present, else the top. No-op when no picker is open.
+    pub fn set_picker_tags(&mut self, tags: Vec<String>) {
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        let pinned = self.rows.get(p.row).and_then(|r| r.pinned_version.clone());
+        p.selected = pinned.and_then(|v| tags.iter().position(|t| *t == v)).unwrap_or(0);
+        p.tags = tags;
+        p.loading = false;
+    }
+
+    /// Move the picker selection by `delta`, saturating within the tag
+    /// list. No-op when no picker is open or it is still loading.
+    pub fn picker_move(&mut self, delta: i64) {
+        if let Some(p) = self.picker.as_mut()
+            && !p.tags.is_empty()
+        {
+            let max = p.tags.len() as i64 - 1;
+            p.selected = (p.selected as i64 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// Commit the picked tag as the target row's `pinned_version` and
+    /// return to the list. No-op (just closes) when the list is empty.
+    pub fn confirm_version(&mut self) {
+        if let Some(p) = self.picker.take()
+            && let (Some(tag), Some(row)) = (p.tags.get(p.selected), self.rows.get_mut(p.row))
+        {
+            row.pinned_version = Some(tag.clone());
+        }
+        self.mode = Mode::List;
+    }
+
+    /// Close the picker without changing the pin.
+    pub fn cancel_version(&mut self) {
+        self.picker = None;
+        self.mode = Mode::List;
+    }
+
+    /// The currently selected row, if any (a tree group has none).
     pub fn selected_row(&self) -> Option<&TuiRow> {
-        self.filtered.get(self.selected).and_then(|&i| self.rows.get(i))
+        self.selected_row_index().and_then(|i| self.rows.get(i))
     }
 
     /// Recompute `filtered` from `rows` against the current query
@@ -297,6 +528,8 @@ mod tests {
             description: desc.to_string(),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
             latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
             state,
         }
     }
@@ -427,6 +660,48 @@ mod tests {
     }
 
     #[test]
+    fn version_picker_pins_selected_tag() {
+        let mut s = seeded();
+        // Open on the selected row (index 0), then load tags.
+        assert_eq!(s.open_version_pick(), Some(0));
+        assert_eq!(s.mode, Mode::VersionPick);
+        assert!(s.picker.as_ref().unwrap().loading);
+        s.set_picker_tags(vec!["2.0.0".to_string(), "1.0.0".to_string()]);
+        let p = s.picker.as_ref().unwrap();
+        assert!(!p.loading);
+        assert_eq!(p.selected, 0, "no prior pin ⇒ top of the list");
+        s.picker_move(1);
+        s.picker_move(5); // saturates
+        s.confirm_version();
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.picker.is_none());
+        assert_eq!(s.rows[0].pinned_version.as_deref(), Some("1.0.0"));
+        // Reopening positions the selection on the existing pin.
+        s.open_version_pick();
+        s.set_picker_tags(vec!["2.0.0".to_string(), "1.0.0".to_string()]);
+        assert_eq!(s.picker.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn version_picker_cancel_keeps_pin_unchanged() {
+        let mut s = seeded();
+        s.open_version_pick();
+        s.set_picker_tags(vec!["9.9.9".to_string()]);
+        s.cancel_version();
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.picker.is_none());
+        assert_eq!(s.rows[0].pinned_version, None);
+    }
+
+    #[test]
+    fn open_version_pick_is_noop_without_selection() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        assert_eq!(s.open_version_pick(), None);
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    #[test]
     fn enter_detail_is_noop_without_selection() {
         let mut s = TuiState::new();
         s.set_rows(vec![]);
@@ -440,5 +715,78 @@ mod tests {
         s.apply_query("LINT");
         assert_eq!(s.filtered.len(), 1);
         assert_eq!(s.selected_row().unwrap().repo, "r/gamma");
+    }
+
+    fn tree_seeded() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_default_registry(Some("reg".to_string()));
+        s.set_rows(vec![
+            row("reg/acme/alpha", "a", &[], ArtifactState::Installed),
+            row("reg/acme/beta", "b", &[], ArtifactState::NotInstalled),
+            row("reg/other", "c", &[], ArtifactState::Installed),
+        ]);
+        s
+    }
+
+    #[test]
+    fn view_toggle_flips_and_is_inert_while_searching() {
+        let mut s = tree_seeded();
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        s.move_selection(2);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert_eq!(s.selected, 0, "selection resets on view switch");
+        // Entering search forces back to the flat list.
+        s.enter_search();
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        s.toggle_view_mode(); // no-op while searching
+        assert_eq!(s.view_mode, ViewMode::Flat);
+    }
+
+    #[test]
+    fn tree_group_selection_targets_every_descendant() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode();
+        // Flattened: [acme(group,0), alpha(leaf,1), beta(leaf,1), other(leaf,0)].
+        assert!(s.selected_is_group());
+        // No marks ⇒ the group action targets both descendant leaves.
+        assert_eq!(s.action_targets(), vec![0, 1]);
+        // Space on a group marks every descendant; again clears them.
+        s.toggle_mark_selected();
+        assert!(s.is_row_marked(0) && s.is_row_marked(1));
+        assert!(!s.is_row_marked(2));
+        s.toggle_mark_selected();
+        assert!(s.marked.is_empty(), "smart toggle clears a fully-marked group");
+        // A leaf selection targets just its row.
+        s.move_selection(3); // the top-level `other` leaf (rows index 2)
+        assert!(!s.selected_is_group());
+        assert_eq!(s.action_targets(), vec![2]);
+    }
+
+    #[test]
+    fn collapse_hides_descendants_and_clamps_selection() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode();
+        s.move_selection(3); // select the last visible line
+        assert_eq!(s.selected, 3);
+        // Collapsing `acme` removes alpha+beta ⇒ 2 visible lines; the
+        // selection clamps back into range.
+        s.selected = 0;
+        s.collapse_selected();
+        assert!(s.collapsed.contains("acme"));
+        assert_eq!(s.flattened().len(), 2);
+        s.move_selection(99);
+        assert_eq!(s.selected, 1, "selection stays in the collapsed range");
+        s.expand_selected(); // selection is on `other`, not a group ⇒ no-op
+        assert!(s.collapsed.contains("acme"));
+    }
+
+    #[test]
+    fn marks_survive_view_toggle() {
+        let mut s = tree_seeded();
+        s.toggle_mark_selected(); // flat: mark rows index 0
+        assert!(s.is_row_marked(0));
+        s.toggle_view_mode();
+        assert!(s.is_row_marked(0), "marks are keyed by row index, not view");
     }
 }

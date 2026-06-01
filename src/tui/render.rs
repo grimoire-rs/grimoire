@@ -11,12 +11,13 @@
 //! makes the ratatui code a trivial, decision-free sink.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::state::{ArtifactState, Mode, TuiState};
+use super::state::{ArtifactState, Mode, TuiState, ViewMode};
+use super::tree::DisplayRow;
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
 /// concrete ratatui [`Color`]; keeping it abstract preserves the headless
@@ -45,7 +46,7 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
         ArtifactState::NotInstalled => ("·", "not-installed", ColorKey::NotInstalled),
         ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
-        ArtifactState::IntegrityMissing => ("⚠", "integrity-missing", ColorKey::IntegrityMissing),
+        ArtifactState::IntegrityMissing => ("✘", "integrity-missing", ColorKey::IntegrityMissing),
     }
 }
 
@@ -63,6 +64,15 @@ fn kind_glyph(kind: &str) -> &'static str {
 const W_KIND: usize = 8;
 const W_REPO: usize = 46;
 const W_TAG: usize = 12;
+/// Status column width — wide enough for the longest label
+/// (`✘ integrity-missing`, 19 chars) so the header underline spans the
+/// full column instead of stopping at `Status`.
+const W_STATUS: usize = 19;
+/// Total terminal columns the Catalog needs to show every fixed-width
+/// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + status,
+/// plus 2 block borders. Selection is shown by row highlight (no leading
+/// symbol). Sized to exactly this side-by-side so Detail gets all slack.
+const CATALOG_WIDTH: u16 = (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS) as u16 + 2 /* borders */;
 
 /// Truncate `s` to `width` *display chars* (ellipsis on overflow) then
 /// left-pad to exactly `width`, so every cell is the same width and the
@@ -90,110 +100,298 @@ pub struct RenderRow {
     pub status_color: ColorKey,
 }
 
+/// The modal version-picker overlay, projected for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerView {
+    /// The popup title (e.g. `Versions — r/alpha`).
+    pub title: String,
+    /// Whether the tag list is still loading.
+    pub loading: bool,
+    /// The orderable tag list (highest version near the top).
+    pub tags: Vec<String>,
+    /// Selection index into `tags`.
+    pub selected: usize,
+    /// The row's currently-pinned tag, marked in the list when present.
+    pub pinned: Option<String>,
+}
+
 /// A plain, ratatui-free description of the whole screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderModel {
     /// The title bar text.
     pub title: String,
-    /// The search input line (e.g. `Search: rust`).
+    /// The search input line (the query, or a placeholder hint).
     pub search: String,
+    /// Whether `search` is the grayed-out placeholder (no query yet, not
+    /// editing) rather than a real query.
+    pub search_placeholder: bool,
+    /// The active scope label (`project` / `global`), shown in its own
+    /// box beside the search; empty when no scope is resolvable.
+    pub scope: String,
     /// Static column headers for the list.
     pub headers: [&'static str; 4],
     /// The visible (filtered) rows.
     pub rows: Vec<RenderRow>,
     /// The detail-pane text for the selected row (multi-line).
     pub detail: String,
-    /// The bottom status / hint line.
+    /// The bottom status line — transient only (loading, counts, batch
+    /// results, marked-set actions). Empty when idle.
     pub status: String,
+    /// The persistent compact keybinding summary (the widest tier),
+    /// right-aligned on the legend line so `? help` is always visible (it
+    /// no longer lives in `status`, which transient messages overwrite).
+    pub hint: String,
+    /// Hint variants widest → narrowest. [`draw`] picks the widest tier
+    /// that fits the current terminal width, degrading down to `? help`
+    /// on a very narrow terminal. Pure data — the width fit is mechanical.
+    pub hint_tiers: Vec<String>,
     /// The one-line glyph legend (what each status symbol means).
     pub legend: String,
     /// Whether the detail pane is the focused element.
     pub detail_focused: bool,
     /// Whether the help overlay is showing.
     pub show_help: bool,
+    /// The version-picker overlay, when [`Mode::VersionPick`].
+    pub picker: Option<PickerView>,
+}
+
+/// Pick the widest hint tier whose text (plus a one-cell right margin)
+/// fits in `avail` columns. Falls back to the narrowest tier (`? help`)
+/// when even that does not fit, so help stays discoverable at any width.
+fn fit_hint(tiers: &[String], avail: usize) -> String {
+    tiers
+        .iter()
+        // `count + 1 <= avail` (text + one-cell right margin), simplified.
+        .find(|h| h.chars().count() < avail)
+        .or_else(|| tiers.last())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Drop a leading `default_registry/` from a reference for display only
+/// (the stored `repo` keeps the full reference for search and actions).
+fn strip_default_registry<'a>(repo: &'a str, default_registry: Option<&str>) -> &'a str {
+    if let Some(reg) = default_registry
+        && let Some(rest) = repo.strip_prefix(reg)
+        && let Some(rest) = rest.strip_prefix('/')
+    {
+        return rest;
+    }
+    repo
+}
+
+/// Build the visible cells for one catalog leaf. `repo_text` is the
+/// Repo-column content (the full reference in flat mode, the indented
+/// bare name in tree mode); everything else is identical, so flat and
+/// tree share one projection.
+fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked: bool) -> RenderRow {
+    let (glyph, label, color) = status_view(r.state);
+    // A user-pinned version shows with a leading `*`; otherwise the
+    // explicit highest version, falling back to the tag.
+    let tag_cell = match &r.pinned_version {
+        Some(p) => format!("*{p}"),
+        None if !r.version.is_empty() => r.version.clone(),
+        None => r.latest_tag.clone(),
+    };
+    RenderRow {
+        columns: [
+            fit(repo_text, W_REPO),
+            fit(&format!("{} {}", kind_glyph(&r.kind), r.kind), W_KIND),
+            fit(&tag_cell, W_TAG),
+            format!("{glyph} {label}"),
+        ],
+        selected,
+        marked,
+        status_color: color,
+    }
+}
+
+/// Project the flattened tree into render rows: a group header (indented,
+/// expand glyph, install rollup) or an indented leaf showing the bare
+/// name (the registry/path prefix is the parent chain).
+fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
+    state
+        .flattened()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(pos, d)| match d {
+            DisplayRow::Group {
+                label,
+                depth,
+                collapsed,
+                rollup,
+                rows,
+                ..
+            } => {
+                let arrow = if collapsed { "▸" } else { "▾" };
+                let indent = "  ".repeat(depth);
+                let (glyph, _, color) = status_view(rollup.worst());
+                let all_marked = !rows.is_empty() && rows.iter().all(|i| state.is_row_marked(*i));
+                Some(RenderRow {
+                    columns: [
+                        fit(&format!("{indent}{arrow} {label}"), W_REPO),
+                        fit("", W_KIND),
+                        fit("", W_TAG),
+                        format!("{glyph} {}/{} installed", rollup.installed, rollup.total),
+                    ],
+                    selected: pos == state.selected,
+                    marked: all_marked,
+                    status_color: color,
+                })
+            }
+            DisplayRow::Leaf { label, depth, row, .. } => {
+                let r = state.rows.get(row)?;
+                let indent = "  ".repeat(depth);
+                Some(render_leaf(
+                    r,
+                    &format!("{indent}{label}"),
+                    pos == state.selected,
+                    state.is_row_marked(row),
+                ))
+            }
+        })
+        .collect()
+}
+
+/// The detail-pane text for the current tree-group selection (a group has
+/// no single row, so the flat detail does not apply).
+fn group_detail(state: &TuiState) -> String {
+    match state.flattened().into_iter().nth(state.selected) {
+        Some(DisplayRow::Group { key, label, rollup, .. }) => format!(
+            "{label}\n\npath: {key}\n\nentries: {}\ninstalled: {}\noutdated: {}\nmodified: {}\nintegrity-missing: {}\nnot-installed: {}",
+            rollup.total,
+            rollup.installed,
+            rollup.outdated,
+            rollup.modified,
+            rollup.integrity_missing,
+            rollup.not_installed,
+        ),
+        _ => "no selection".to_string(),
+    }
 }
 
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
 pub fn frame(state: &TuiState) -> RenderModel {
-    let scope = if state.scope_label.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", state.scope_label)
-    };
     let title = if state.offline {
-        format!("grim — catalog{scope} [offline]")
+        "Grimoire [offline]".to_string()
     } else {
-        format!("grim — catalog{scope}")
+        "Grimoire".to_string()
     };
 
-    let search = match state.mode {
-        Mode::Search => format!("Search: {}_", state.query),
-        _ => format!("Search: {}", state.query),
+    // Search shows the live query (cursor `_` while editing); when there
+    // is no query and we are not editing, a grayed placeholder advertises
+    // the `/` shortcut so the box never looks dead.
+    let (search, search_placeholder) = if state.mode == Mode::Search {
+        (format!("{}_", state.query), false)
+    } else if state.query.is_empty() {
+        ("type / to search".to_string(), true)
+    } else {
+        (state.query.clone(), false)
     };
 
-    let rows: Vec<RenderRow> = state
-        .filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
-        .map(|(pos, i, r)| {
-            let (glyph, label, color) = status_view(r.state);
-            RenderRow {
-                columns: [
-                    fit(&format!("{} {}", kind_glyph(&r.kind), r.kind), W_KIND),
-                    fit(&r.repo, W_REPO),
-                    fit(&r.latest_tag, W_TAG),
-                    format!("{glyph} {label}"),
-                ],
-                selected: pos == state.selected,
-                marked: state.is_row_marked(i),
-                status_color: color,
+    let rows: Vec<RenderRow> = if state.view_mode == ViewMode::Tree && !state.loading {
+        tree_render_rows(state)
+    } else {
+        state
+            .filtered
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
+            .map(|(pos, i, r)| {
+                let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
+                render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
+            })
+            .collect()
+    };
+
+    let detail = if state.view_mode == ViewMode::Tree && state.selected_is_group() {
+        group_detail(state)
+    } else {
+        match state.selected_row() {
+            Some(r) => {
+                let kw = if r.keywords.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.keywords.join(", ")
+                };
+                let version = if !r.version.is_empty() {
+                    r.version.as_str()
+                } else if !r.latest_tag.is_empty() {
+                    r.latest_tag.as_str()
+                } else {
+                    "-"
+                };
+                let pinned = match &r.pinned_version {
+                    Some(p) => format!("\npinned: {p}"),
+                    None => String::new(),
+                };
+                format!(
+                    "{}\n\n{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
+                    r.repo,
+                    if r.description.is_empty() { "-" } else { &r.description },
+                    kw,
+                    version,
+                    pinned,
+                    r.state
+                )
             }
-        })
-        .collect();
-
-    let detail = match state.selected_row() {
-        Some(r) => {
-            let kw = if r.keywords.is_empty() {
-                "-".to_string()
-            } else {
-                r.keywords.join(", ")
-            };
-            format!(
-                "{}\n\n{}\n\nkeywords: {}\ntag: {}\nstatus: {}",
-                r.repo,
-                if r.description.is_empty() { "-" } else { &r.description },
-                kw,
-                if r.latest_tag.is_empty() { "-" } else { &r.latest_tag },
-                r.state
-            )
+            None => "no selection".to_string(),
         }
-        None => "no selection".to_string(),
     };
 
+    // Status is transient only — loading / counts / batch results, or the
+    // marked-set action keys (contextual). The always-on key summary lives
+    // in `hint` so a transient message can never hide `? help`.
     let status = if !state.status_line.is_empty() {
         state.status_line.clone()
     } else if state.loading {
         "loading catalog…".to_string()
     } else if state.marked.is_empty() {
-        "↑/↓ move  space mark  i/u/d act  g scope  / search  r refresh  ? help  q quit".to_string()
+        String::new()
     } else {
         format!(
-            "{} marked  i install  u update  d delete  a all  c clear  ? help  q quit",
+            "{} marked — i install · u update · d delete · a all · c clear",
             state.marked.len()
         )
     };
 
+    // Widest → narrowest. `draw` picks the widest that fits; the last
+    // (`? help`) is the irreducible minimum so help is always discoverable.
+    let hint_tiers = vec![
+        "↑↓ move · space mark · i/u/d act · v versions · g scope · t tree · / search · ? help · q quit".to_string(),
+        "↑↓ move · i/u/d act · v ver · g scope · t tree · / search · ? help · q quit".to_string(),
+        "↑↓ · i/u/d · v · g · t · / · ? help · q".to_string(),
+        "i/u/d v g t / ? q".to_string(),
+        "? help".to_string(),
+    ];
+    let hint = hint_tiers[0].clone();
+
+    let picker = state.picker.as_ref().map(|p| {
+        let repo = state.rows.get(p.row).map(|r| r.repo.clone()).unwrap_or_default();
+        PickerView {
+            title: format!("Versions — {repo}"),
+            loading: p.loading,
+            tags: p.tags.clone(),
+            selected: p.selected,
+            pinned: state.rows.get(p.row).and_then(|r| r.pinned_version.clone()),
+        }
+    });
+
     RenderModel {
         title,
         search,
-        headers: ["Kind", "Repo", "Tag", "Status"],
+        search_placeholder,
+        scope: state.scope_label.clone(),
+        headers: ["Repo", "Kind", "Tag", "Status"],
         rows,
         detail,
         status,
-        legend: "✓ installed   ↑ outdated   ✱ modified   ⚠ integrity-missing   · not-installed".to_string(),
+        hint,
+        hint_tiers,
+        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed".to_string(),
         detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
+        picker,
     }
 }
 
@@ -205,44 +403,111 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         .constraints([
             Constraint::Length(1), // title
             Constraint::Length(3), // search box
-            Constraint::Min(3),    // list
-            Constraint::Length(8), // detail pane
+            Constraint::Min(3),    // content (list [+ detail])
             Constraint::Length(1), // legend
-            Constraint::Length(1), // status
         ])
         .split(f.area());
 
+    // Responsive content split: on a wide terminal the Detail pane sits to
+    // the right of the Catalog (taller, more readable); on a narrow one it
+    // falls back to a short band below it.
+    // Side-by-side once there is room for the full Catalog plus a usable
+    // Detail column; the Catalog takes exactly its natural width and
+    // Detail absorbs all remaining space.
+    const DETAIL_MIN_WIDTH: u16 = 30;
+    let (list_area, detail_area) = if chunks[2].width >= CATALOG_WIDTH + DETAIL_MIN_WIDTH {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(CATALOG_WIDTH), Constraint::Min(DETAIL_MIN_WIDTH)])
+            .split(chunks[2]);
+        (cols[0], cols[1])
+    } else {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(8)])
+            .split(chunks[2]);
+        (rows[0], rows[1])
+    };
+    let legend_chunk = chunks[3];
+
     let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 
-    // Title — bright, scope segment stands out (it carries `[scope]`).
+    // Title row: app title left, transient status right-aligned on the
+    // same line (it used to own a dedicated bottom row).
+    // Title centered across the whole line; transient status right-aligned
+    // over the same row (short, so it never collides with the centered
+    // title in practice).
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             model.title.clone(),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ))),
+        )))
+        .alignment(Alignment::Center),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            model.status.clone(),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Right),
         chunks[0],
     );
 
+    // Search row: scope-mode box on the left, query box on the right.
+    let search_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(26), Constraint::Min(20)])
+        .split(chunks[1]);
+
+    // Scope box: just the active mode in caps. The toggle key lives in
+    // the legend hint and the help overlay, not here.
+    let (scope_text, scope_color) = match model.scope.as_str() {
+        "project" => ("PROJECT MODE", Color::Green),
+        "global" => ("GLOBAL MODE", Color::Magenta),
+        _ => ("— no scope —", Color::DarkGray),
+    };
     f.render_widget(
-        Paragraph::new(Span::styled(model.search.clone(), Style::default().fg(Color::White))).block(
+        Paragraph::new(Line::from(Span::styled(
+            scope_text,
+            Style::default().fg(scope_color).add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(scope_color))
+                .title(Span::styled("Scope", accent)),
+        ),
+        search_row[0],
+    );
+
+    let search_style = if model.search_placeholder {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(model.search.clone(), search_style)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Blue))
                 .title(Span::styled("Search", accent)),
         ),
-        chunks[1],
+        search_row[1],
     );
 
     let header = ListItem::new(Line::from(Span::styled(
         format!(
-            "   {:<kw$}  {:<rw$}  {:<tw$}  {}",
+            "  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
             model.headers[0],
             model.headers[1],
             model.headers[2],
             model.headers[3],
-            kw = W_KIND,
             rw = W_REPO,
+            kw = W_KIND,
             tw = W_TAG,
+            sw = W_STATUS,
         ),
         accent.add_modifier(Modifier::UNDERLINED),
     )));
@@ -256,14 +521,14 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         // fixed-width from `fit()` so the table never skews.
         let line = Line::from(vec![
             Span::styled(
-                if r.marked { " ▣ " } else { "   " }.to_string(),
+                if r.marked { "▣ " } else { "  " }.to_string(),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!("{}  ", r.columns[0]), Style::default().fg(Color::White)),
             Span::styled(
-                format!("{}  ", r.columns[0]),
+                format!("{}  ", r.columns[1]),
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{}  ", r.columns[1]), Style::default().fg(Color::White)),
             Span::styled(format!("{}  ", r.columns[2]), Style::default().fg(Color::Yellow)),
             Span::styled(
                 r.columns[3].clone(),
@@ -281,7 +546,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                 .border_style(Style::default().fg(Color::Blue))
                 .title(Span::styled("Catalog", accent)),
         )
-        .highlight_symbol("▶ ")
+        .highlight_symbol("")
         .highlight_style(
             Style::default()
                 .bg(Color::Indexed(236))
@@ -290,30 +555,110 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         );
     let mut list_state = ListState::default();
     list_state.select(selected_index);
-    f.render_stateful_widget(list, chunks[2], &mut list_state);
+    f.render_stateful_widget(list, list_area, &mut list_state);
 
     let detail_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if model.detail_focused { Color::Cyan } else { Color::Blue }))
         .title(Span::styled("Detail", accent));
     f.render_widget(
-        Paragraph::new(Span::styled(model.detail.clone(), Style::default().fg(Color::White))).block(detail_block),
-        chunks[3],
+        Paragraph::new(Span::styled(model.detail.clone(), Style::default().fg(Color::White)))
+            .block(detail_block)
+            .wrap(Wrap { trim: false }),
+        detail_area,
     );
 
-    f.render_widget(Paragraph::new(legend_line()), chunks[4]);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            model.status.clone(),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )),
-        chunks[5],
-    );
+    // Legend left, persistent key summary right — same line, so `? help`
+    // is always on screen. Width-responsive: pick the widest hint tier
+    // that fits; if the glyph legend then has no room, drop it and give
+    // the whole line to the hint (still degrading down to `? help`).
+    let avail = legend_chunk.width as usize;
+    let hint = fit_hint(&model.hint_tiers, avail);
+    let hint_w = hint.chars().count() as u16;
+    let legend_w = model.legend.chars().count();
+    if legend_w + 2 + hint.chars().count() <= avail {
+        let legend_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(10), Constraint::Length(hint_w + 1)])
+            .split(legend_chunk);
+        f.render_widget(Paragraph::new(legend_line()), legend_row[0]);
+        f.render_widget(
+            Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))).alignment(Alignment::Right),
+            legend_row[1],
+        );
+    } else {
+        // Too narrow for the glyph legend — keep only the key hint.
+        f.render_widget(
+            Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))).alignment(Alignment::Right),
+            legend_chunk,
+        );
+    }
 
     if model.show_help {
         draw_help(f);
     }
+    if let Some(p) = &model.picker {
+        draw_picker(f, p);
+    }
+}
+
+/// A centered version-picker popup: the tag list (highest version near the
+/// top), the current pin marked, the selection highlighted.
+fn draw_picker(f: &mut Frame, p: &PickerView) {
+    let body: Vec<ListItem> = if p.loading {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  loading versions…",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        )))]
+    } else {
+        p.tags
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let is_pinned = p.pinned.as_deref() == Some(t.as_str());
+                let mark = if is_pinned { "● " } else { "  " };
+                let style = if i == p.selected {
+                    Style::default()
+                        .bg(Color::Indexed(236))
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_pinned {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(Line::from(Span::styled(format!("{mark}{t}"), style)))
+            })
+            .collect()
+    };
+    let area = centered_rect(50, 60, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        List::new(body).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    format!(" {} ", p.title),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )),
+        ),
+        area,
+    );
+    // One-line footer hint inside the popup's bottom border region.
+    let hint_area = Rect {
+        x: area.x + 2,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "↑↓ select · enter pin · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+        hint_area,
+    );
 }
 
 /// The status-glyph legend as colored spans (each glyph in its state
@@ -323,7 +668,7 @@ fn legend_line() -> Line<'static> {
         ("✓ installed", ColorKey::Installed),
         ("  ↑ outdated", ColorKey::Outdated),
         ("  ✱ modified", ColorKey::Modified),
-        ("  ⚠ integrity-missing", ColorKey::IntegrityMissing),
+        ("  ✘ integrity-missing", ColorKey::IntegrityMissing),
         ("  · not-installed", ColorKey::NotInstalled),
     ];
     Line::from(
@@ -338,10 +683,13 @@ fn legend_line() -> Line<'static> {
 fn draw_help(f: &mut Frame) {
     let rows = [
         ("↑ / ↓", "move selection"),
-        ("space", "mark / unmark the selected row"),
+        ("space", "mark / unmark the row (or whole group, in tree)"),
         ("a / c", "mark all visible / clear marks"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
+        ("v", "pick a specific version for the selected row"),
         ("g", "toggle scope: project ⇄ global"),
+        ("t", "toggle the tree / flat view"),
+        ("→ / ←", "expand / collapse a group (tree view)"),
         ("/", "search; type to filter, enter to commit"),
         ("enter", "open the detail pane"),
         ("r", "refresh the catalog from the registry"),
@@ -425,6 +773,8 @@ mod tests {
             description: "review code".to_string(),
             keywords: vec!["rust".to_string(), "lint".to_string()],
             latest_tag: "latest".to_string(),
+            version: "2.1.0".to_string(),
+            pinned_version: None,
             state,
         }
     }
@@ -437,26 +787,34 @@ mod tests {
             row("r/beta", ArtifactState::NotInstalled),
         ]);
         let m = frame(&s);
-        assert_eq!(m.title, "grim — catalog");
-        assert_eq!(m.search, "Search: ");
-        assert_eq!(m.headers, ["Kind", "Repo", "Tag", "Status"]);
+        assert_eq!(m.title, "Grimoire");
+        assert_eq!(m.search, "type / to search");
+        assert!(m.search_placeholder);
+        assert_eq!(m.scope, "");
+        assert_eq!(m.headers, ["Repo", "Kind", "Tag", "Status"]);
         assert_eq!(m.rows.len(), 2);
         // Columns are fixed-width (padded/truncated by `fit`) so the
-        // table aligns; status keeps its glyph+label verbatim.
-        assert_eq!(m.rows[0].columns[0], fit("◆ skill", W_KIND));
-        assert_eq!(m.rows[0].columns[1], fit("r/alpha", W_REPO));
-        assert_eq!(m.rows[0].columns[2], fit("latest", W_TAG));
+        // table aligns; status keeps its glyph+label verbatim. Repo is
+        // the first column, kind second.
+        assert_eq!(m.rows[0].columns[0], fit("r/alpha", W_REPO));
+        assert_eq!(m.rows[0].columns[1], fit("◆ skill", W_KIND));
+        // The Tag column shows the explicit version, not `latest`.
+        assert_eq!(m.rows[0].columns[2], fit("2.1.0", W_TAG));
         assert_eq!(m.rows[0].columns[3], "✓ installed");
-        assert_eq!(m.rows[0].columns[1].chars().count(), W_REPO);
+        assert_eq!(m.rows[0].columns[0].chars().count(), W_REPO);
         assert_eq!(m.rows[0].status_color, ColorKey::Installed);
         assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
         assert!(m.rows[0].selected, "first row selected by default");
         assert!(!m.rows[1].selected);
         assert!(m.detail.contains("r/alpha"));
         assert!(m.detail.contains("keywords: rust, lint"));
+        assert!(m.detail.contains("version: 2.1.0"));
         assert!(m.detail.contains("status: installed"));
         assert!(!m.detail_focused);
-        assert!(m.status.contains("quit"));
+        // Idle: status is empty; the key summary lives in `hint`.
+        assert_eq!(m.status, "");
+        assert!(m.hint.contains("quit"));
+        assert!(m.hint.contains("? help"));
         assert!(m.legend.contains("integrity-missing"));
     }
 
@@ -474,7 +832,7 @@ mod tests {
             (ArtifactState::Modified, "✱", "modified", ColorKey::Modified),
             (
                 ArtifactState::IntegrityMissing,
-                "⚠",
+                "✘",
                 "integrity-missing",
                 ColorKey::IntegrityMissing,
             ),
@@ -512,7 +870,7 @@ mod tests {
         s.set_offline(true);
         assert!(s.loading);
         let m = frame(&s);
-        assert_eq!(m.title, "grim — catalog [offline]");
+        assert_eq!(m.title, "Grimoire [offline]");
         assert_eq!(m.status, "loading catalog…");
         assert!(m.rows.is_empty());
         assert_eq!(m.detail, "no selection");
@@ -525,11 +883,65 @@ mod tests {
         s.enter_search();
         s.apply_query("al");
         let m = frame(&s);
-        assert_eq!(m.search, "Search: al_");
+        assert_eq!(m.search, "al_");
+        assert!(!m.search_placeholder);
         s.back();
         s.enter_detail();
         let m2 = frame(&s);
         assert!(m2.detail_focused);
+    }
+
+    #[test]
+    fn frame_projects_scope_label_and_persistent_hint() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        s.set_scope_label("project");
+        let m = frame(&s);
+        assert_eq!(m.scope, "project");
+        // The key summary is always present even with an empty status.
+        assert!(m.status.is_empty());
+        assert!(m.hint.contains("g scope"));
+    }
+
+    #[test]
+    fn fit_hint_degrades_to_minimum() {
+        let m = frame(&{
+            let mut s = TuiState::new();
+            s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+            s
+        });
+        let t = &m.hint_tiers;
+        assert!(t.len() >= 2);
+        assert_eq!(t.last().unwrap(), "? help");
+        // Wide terminal ⇒ the full (widest) tier.
+        assert_eq!(fit_hint(t, 200), t[0]);
+        // Zero width ⇒ still the minimum, never empty.
+        assert_eq!(fit_hint(t, 0), "? help");
+        // A mid width picks a middle tier (narrower than full, fits).
+        let mid = fit_hint(t, 40);
+        assert!(mid.chars().count() < 40);
+        assert!(mid.contains("? help"));
+    }
+
+    #[test]
+    fn frame_projects_picker_and_pinned_tag() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
+        // No picker when not in version-pick mode.
+        assert!(frame(&s).picker.is_none());
+        s.open_version_pick();
+        s.set_picker_tags(vec!["latest".to_string(), "2.1.0".to_string()]);
+        let m = frame(&s);
+        let p = m.picker.expect("picker projected in version-pick mode");
+        assert!(p.title.contains("r/alpha"));
+        assert!(!p.loading);
+        assert_eq!(p.tags, vec!["latest".to_string(), "2.1.0".to_string()]);
+        // Pin the second tag; the Tag column shows it with a `*` marker.
+        s.picker_move(1);
+        s.confirm_version();
+        let m2 = frame(&s);
+        assert_eq!(m2.rows[0].columns[2], fit("*2.1.0", W_TAG));
+        assert!(m2.detail.contains("pinned: 2.1.0"));
     }
 
     #[test]
@@ -538,5 +950,56 @@ mod tests {
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.set_status("installed r/a");
         assert_eq!(frame(&s).status, "installed r/a");
+    }
+
+    #[test]
+    fn frame_tree_view_projects_groups_indented_leaves_and_rollup() {
+        let mut s = TuiState::new();
+        s.set_default_registry(Some("reg".to_string()));
+        s.set_rows(vec![
+            row("reg/acme/code.review", ArtifactState::Installed),
+            row("reg/acme/lint", ArtifactState::NotInstalled),
+        ]);
+        s.toggle_view_mode();
+        let m = frame(&s);
+        // reg elided ⇒ acme ▸ code ▸ review (leaf), and acme ▸ lint (leaf).
+        assert_eq!(m.rows.len(), 4);
+        assert!(m.rows[0].columns[0].starts_with("▾ acme"), "expanded group header");
+        assert!(m.rows[0].columns[3].contains("1/2 installed"), "group rollup");
+        assert!(m.rows[1].columns[0].starts_with("  ▾ code"), "nested group is indented");
+        // The leaf shows the bare name (not the full registry/repo path).
+        assert!(m.rows[2].columns[0].trim_start().starts_with("review"));
+        assert!(!m.rows[2].columns[0].contains('/'), "leaf is the name only");
+        // A selected group projects its rollup into the detail pane.
+        assert!(m.detail.contains("path: acme"));
+        assert!(m.detail.contains("entries: 2"));
+    }
+
+    #[test]
+    fn flat_view_strips_default_registry_prefix() {
+        let mut s = TuiState::new();
+        s.set_default_registry(Some("localhost:5000".to_string()));
+        s.set_rows(vec![
+            row("localhost:5000/acme/tool", ArtifactState::Installed),
+            row("ghcr.io/other/tool", ArtifactState::Installed),
+        ]);
+        let m = frame(&s);
+        // Default registry dropped for display…
+        assert_eq!(m.rows[0].columns[0], fit("acme/tool", W_REPO));
+        // …but a non-default registry keeps its host.
+        assert_eq!(m.rows[1].columns[0], fit("ghcr.io/other/tool", W_REPO));
+    }
+
+    #[test]
+    fn frame_flat_view_is_unchanged_by_tree_support() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("reg/acme/tool", ArtifactState::Installed)]);
+        let m = frame(&s);
+        assert_eq!(m.rows.len(), 1);
+        assert_eq!(
+            m.rows[0].columns[0],
+            fit("reg/acme/tool", W_REPO),
+            "flat keeps the full ref"
+        );
     }
 }

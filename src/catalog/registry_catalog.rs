@@ -76,9 +76,15 @@ pub struct CatalogEntry {
     /// `com.grimoire.keywords` split on commas (trimmed, empties dropped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    /// The representative tag the metadata was read from.
+    /// The representative tag the metadata was read from (may be the
+    /// moving `latest` pointer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_tag: Option<String>,
+    /// The highest *concrete* semver tag, if any tag parses as semver.
+    /// Distinct from [`Self::latest_tag`]: this never returns the moving
+    /// `latest` pointer, so the UI can show an explicit version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// RFC3339 UTC timestamp this entry was fetched.
     pub fetched_at: String,
 }
@@ -340,13 +346,14 @@ impl Catalog {
     /// shared registry full of non-Grimoire repos still yields a catalog.
     async fn build_entry(registry: &str, repository: &str, access: &dyn OciAccess) -> CatalogEntry {
         let fetched_at = now_rfc3339();
-        let bare = |latest_tag: Option<String>| CatalogEntry {
+        let bare = |latest_tag: Option<String>, version: Option<String>| CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
             kind: None,
             description: None,
             keywords: Vec::new(),
             latest_tag,
+            version,
             fetched_at: fetched_at.clone(),
         };
 
@@ -354,10 +361,13 @@ impl Catalog {
 
         let tags = match access.list_tags(&base).await {
             Ok(t) => t.unwrap_or_default(),
-            Err(_) => return bare(None),
+            Err(_) => return bare(None, None),
         };
+        // Highest concrete semver (never the moving `latest`); reused for
+        // every degraded path below now that the tag list is known.
+        let version = pick_highest_version(&tags);
         let Some(tag) = pick_latest_tag(&tags) else {
-            return bare(None);
+            return bare(None, None);
         };
 
         let tagged = base.clone_with_tag(tag.clone());
@@ -367,20 +377,20 @@ impl Catalog {
             .await
         {
             Ok(Some(d)) => d,
-            Ok(None) | Err(_) => return bare(Some(tag)),
+            Ok(None) | Err(_) => return bare(Some(tag), version.clone()),
         };
         let pinned = match PinnedIdentifier::try_from(tagged.clone_with_digest(digest)) {
             Ok(p) => p,
             // Unreachable in practice (we just attached a digest); be
             // defensive rather than panic in a catalog walk.
-            Err(_) => return bare(Some(tag)),
+            Err(_) => return bare(Some(tag), version.clone()),
         };
 
         // A foreign repo (image index, private, transient) ⇒ bare entry,
         // never a hard catalog failure.
         let manifest = match access.fetch_manifest(&pinned).await {
             Ok(m) => m,
-            Err(_) => return bare(Some(tag)),
+            Err(_) => return bare(Some(tag), version.clone()),
         };
         let (kind, description, keywords) = manifest
             .map(|m| {
@@ -408,6 +418,7 @@ impl Catalog {
             description,
             keywords,
             latest_tag: Some(tag),
+            version,
             fetched_at,
         }
     }
@@ -439,6 +450,29 @@ pub fn pick_latest_tag(tags: &[String]) -> Option<String> {
     let mut sorted: Vec<&String> = tags.iter().collect();
     sorted.sort();
     sorted.first().map(|s| (*s).clone())
+}
+
+/// Pick the highest *concrete* semver tag from `tags`, ignoring the moving
+/// `latest` pointer entirely. `None` when no tag parses as semver — the UI
+/// then falls back to whatever [`pick_latest_tag`] chose. Unlike
+/// [`pick_latest_tag`] this never returns `latest`, so callers can show an
+/// explicit version a user can pin.
+pub fn pick_highest_version(tags: &[String]) -> Option<String> {
+    let mut highest: Option<(semver::Version, &String)> = None;
+    for t in tags {
+        if t == "latest" {
+            continue;
+        }
+        // OCI tags normalize `+` → `_`; semver build metadata uses `+`.
+        let candidate = t.replace('_', "+");
+        if let Ok(v) = semver::Version::parse(&candidate) {
+            match &highest {
+                Some((hv, _)) if &v <= hv => {}
+                _ => highest = Some((v, t)),
+            }
+        }
+    }
+    highest.map(|(_, t)| t.clone())
 }
 
 /// Whether an RFC3339 `built_at` is within [`CATALOG_TTL_SECONDS`] of
@@ -516,6 +550,23 @@ mod tests {
         assert_eq!(pick_latest_tag(&[]), None);
     }
 
+    // ── pick_highest_version ─────────────────────────────────────────
+
+    #[test]
+    fn highest_version_ignores_latest_pointer() {
+        let tags = vec!["latest".to_string(), "1.0.0".to_string(), "2.3.1".to_string()];
+        // `pick_latest_tag` returns `latest`; the concrete picker does not.
+        assert_eq!(pick_latest_tag(&tags), Some("latest".to_string()));
+        assert_eq!(pick_highest_version(&tags), Some("2.3.1".to_string()));
+    }
+
+    #[test]
+    fn highest_version_none_without_semver() {
+        let tags = vec!["latest".to_string(), "stable".to_string()];
+        assert_eq!(pick_highest_version(&tags), None);
+        assert_eq!(pick_highest_version(&[]), None);
+    }
+
     // ── TTL freshness ────────────────────────────────────────────────
 
     #[test]
@@ -552,6 +603,7 @@ mod tests {
                 description: Some("Review code.".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
                 latest_tag: Some("latest".to_string()),
+                version: Some("1.2.0".to_string()),
                 fetched_at: ts(10),
             },
         );
@@ -841,6 +893,7 @@ mod tests {
             description: Some("Review code quality".to_string()),
             keywords: vec!["lint".to_string()],
             latest_tag: Some("latest".to_string()),
+            version: None,
             fetched_at: ts(1),
         };
         assert!(e.matches(""), "empty query matches all");

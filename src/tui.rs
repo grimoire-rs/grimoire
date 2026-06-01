@@ -16,6 +16,7 @@ pub mod app;
 pub mod event;
 pub mod render;
 pub mod state;
+pub mod tree;
 
 #[allow(unused_imports)]
 pub use event::{TuiAction, TuiInput, handle};

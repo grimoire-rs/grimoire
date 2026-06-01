@@ -47,7 +47,8 @@ use std::collections::BTreeMap;
 /// Everything the TUI needs to load the catalog and reuse the install
 /// path, resolved once by `command/tui.rs` before raw mode is entered.
 pub struct TuiContext {
-    /// The registry whose catalog is browsed.
+    /// The registry whose catalog is browsed. Also the effective default
+    /// registry: its host is elided as the tree root so names stay short.
     pub registry: String,
     /// The catalog cache file (`$GRIM_HOME/catalog.json`).
     pub catalog_path: std::path::PathBuf,
@@ -149,6 +150,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     let mut state = TuiState::new();
     state.set_offline(ctx.offline);
     state.set_scope_label(&ctx.scope_label);
+    // The browsed registry is the effective default: eliding its host
+    // from the tree root keeps leaf names short (the user's ask).
+    state.set_default_registry(Some(ctx.registry.clone()));
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -160,7 +164,14 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let ev = event::read()?;
+        // A terminal resize must redraw immediately — the layout is
+        // recomputed every `draw`, but only key events reached it before.
+        if let Event::Resize(..) = ev {
+            terminal.draw(|f| draw(f, &frame(&state)))?;
+            continue;
+        }
+        let Event::Key(key) = ev else {
             continue;
         };
         // Only act on key *press* (Windows emits press+release).
@@ -183,11 +194,16 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             TuiAction::Batch { op, rows } => {
                 run_batch(&ctx, &mut state, &rows, op).await;
             }
+            TuiAction::LoadVersions { row } => {
+                load_versions(&ctx, &mut state, row).await;
+            }
             TuiAction::ToggleScope => {
                 if ctx.toggle_scope() {
                     state.set_scope_label(&ctx.scope_label);
                     recompute_states(&ctx, &mut state);
-                    state.set_status(format!("scope: {}", ctx.scope_label));
+                    // The colored MODE box already shows the active scope
+                    // — no redundant title-bar status.
+                    state.set_status("");
                 } else {
                     state.set_status("no alternate scope to switch to");
                 }
@@ -205,6 +221,8 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
     Some(match key.code {
         KeyCode::Up => TuiInput::Up,
         KeyCode::Down => TuiInput::Down,
+        KeyCode::Right => TuiInput::Expand,
+        KeyCode::Left => TuiInput::Collapse,
         KeyCode::Enter => TuiInput::Enter,
         KeyCode::Esc => TuiInput::Esc,
         KeyCode::Backspace => TuiInput::Backspace,
@@ -255,6 +273,10 @@ fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &Ins
             description: e.description.clone().unwrap_or_default(),
             keywords: e.keywords.clone(),
             latest_tag: e.latest_tag.clone().unwrap_or_default(),
+            // Show the explicit highest version; fall back to the
+            // representative tag when no semver tag exists.
+            version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
+            pinned_version: None,
             state: derive_artifact_state(&e.registry, &e.repository, lock, state),
         })
         .collect()
@@ -325,6 +347,58 @@ fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallStat
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = InstallState::load(&ctx.state_path).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
     (lock, state)
+}
+
+/// Lazily fetch the tag list for `row` and feed it to the open picker.
+/// Degrades to a status-line message (and a closed picker) on any failure
+/// — never a crash, offline included.
+async fn load_versions(ctx: &TuiContext, state: &mut TuiState, row: usize) {
+    let Some(r) = state.rows.get(row).cloned() else {
+        state.cancel_version();
+        return;
+    };
+    let Some((registry, repository)) = split_repo(&r.repo) else {
+        state.set_status(format!("malformed catalog repo: {}", r.repo));
+        state.cancel_version();
+        return;
+    };
+    let id = Identifier::new_registry(repository, registry);
+    match ctx.access.list_tags(&id).await {
+        Ok(Some(tags)) if !tags.is_empty() => state.set_picker_tags(order_tags(tags)),
+        Ok(_) => {
+            state.set_status(format!("no tags for {}", r.repo));
+            state.cancel_version();
+        }
+        Err(e) => {
+            state.set_status(format!("tag lookup failed: {e}"));
+            state.cancel_version();
+        }
+    }
+}
+
+/// Order tags for the picker: the moving `latest` pointer first (if
+/// present), then concrete semver descending, then everything else
+/// lexicographically — so the newest explicit version is near the top.
+fn order_tags(tags: Vec<String>) -> Vec<String> {
+    let mut latest = Vec::new();
+    let mut semver: Vec<(semver::Version, String)> = Vec::new();
+    let mut other = Vec::new();
+    for t in tags {
+        if t == "latest" {
+            latest.push(t);
+        } else if let Ok(v) = semver::Version::parse(&t.replace('_', "+")) {
+            semver.push((v, t));
+        } else {
+            other.push(t);
+        }
+    }
+    semver.sort_by(|a, b| b.0.cmp(&a.0));
+    other.sort();
+    latest
+        .into_iter()
+        .chain(semver.into_iter().map(|(_, t)| t))
+        .chain(other)
+        .collect()
 }
 
 /// Run a batch [`BatchOp`] over `rows` indices (the marked set, or the
@@ -444,11 +518,14 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         _ => ArtifactKind::Skill,
     };
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
-    let tag = if row.latest_tag.is_empty() {
-        "latest".to_string()
-    } else {
-        row.latest_tag.clone()
-    };
+    // A user-pinned version (chosen in the picker) wins; otherwise the
+    // representative tag, otherwise the conventional `latest`.
+    let tag = row
+        .pinned_version
+        .clone()
+        .filter(|t| !t.is_empty())
+        .or_else(|| Some(row.latest_tag.clone()).filter(|t| !t.is_empty()))
+        .unwrap_or_else(|| "latest".to_string());
     let id = Identifier::new_registry(repository.clone(), registry).clone_with_tag(tag);
 
     // A single-artifact desired set — exactly the shape the commands feed
