@@ -64,8 +64,11 @@ applies.
 | `GRIM_REMOTE` | Route mutable lookups to the live registry (same as `--remote`). | `false` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
 
-Command-line flags always win over the matching environment variable, which in
-turn wins over the config file.
+A command-line flag always wins. Where a setting also has a config option, the
+config option wins over the environment variable: the registry resolves as
+`--registry`, then the `default_registry` option, then `GRIM_DEFAULT_REGISTRY`.
+The `--offline` and `--remote` toggles have no config-file counterpart — the
+flag or its `GRIM_OFFLINE` / `GRIM_REMOTE` variable applies.
 
 ## Data layout
 
