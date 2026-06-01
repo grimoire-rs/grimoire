@@ -1,0 +1,16 @@
+[book]
+title = "Grimoire"
+authors = ["The Grimoire Authors"]
+description = "An OCI-backed package manager for AI skills and rules"
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/michael-herwig/grimoire"
+edit-url-template = "https://github.com/michael-herwig/grimoire/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
