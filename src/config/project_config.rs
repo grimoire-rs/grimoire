@@ -74,6 +74,8 @@ struct RawConfig {
     skills: BTreeMap<String, String>,
     #[serde(default)]
     rules: BTreeMap<String, String>,
+    #[serde(default)]
+    bundles: BTreeMap<String, String>,
 }
 
 impl ProjectConfig {
@@ -141,9 +143,12 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     let skills = parse_artifact_map(&raw.skills, &path)?;
     let rules = parse_artifact_map(&raw.rules, &path)?;
+    // Bundle references validate exactly like skills/rules: a
+    // fully-qualified identifier, bare entries defaulting to `:latest`.
+    let bundles = parse_artifact_map(&raw.bundles, &path)?;
     Ok(ProjectConfig {
         options: raw.options,
-        set: DesiredSet::from_parts(skills, rules),
+        set: DesiredSet::from_parts_with_bundles(skills, rules, bundles),
     })
 }
 
@@ -241,6 +246,39 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
         let cfg = ProjectConfig::from_toml_str("").expect("empty parses");
         assert!(cfg.set.skills.is_empty());
         assert!(cfg.set.rules.is_empty());
+        assert!(cfg.set.bundles.is_empty());
+    }
+
+    #[test]
+    fn parse_bundles_table_ok() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[bundles]
+python-stack = "ghcr.io/acme/bundles/python-stack:1.0.0"
+
+[skills]
+code-review = "ghcr.io/acme/skills/code-review:stable"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.set.bundles.len(), 1);
+        assert_eq!(
+            cfg.set.bundles.get("python-stack").unwrap().to_string(),
+            "ghcr.io/acme/bundles/python-stack:1.0.0"
+        );
+        assert_eq!(cfg.set.skills.len(), 1);
+    }
+
+    #[test]
+    fn bare_bundle_defaults_to_latest() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[bundles]
+stack = "ghcr.io/acme/bundles/stack"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.set.bundles.get("stack").unwrap().tag(), Some("latest"));
     }
 
     #[test]

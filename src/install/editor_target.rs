@@ -91,6 +91,8 @@ impl EditorTarget {
             (_, ArtifactKind::Skill) => root.join("skills").join(name),
             (Self::Claude | Self::OpenCode, ArtifactKind::Rule) => root.join("rules").join(format!("{name}.md")),
             (Self::Copilot, ArtifactKind::Rule) => root.join("instructions").join(format!("{name}.instructions.md")),
+            // Bundles never materialize; they expand into members.
+            (_, ArtifactKind::Bundle) => unreachable!("bundles are never materialized; they expand into members"),
         }
     }
 
@@ -118,6 +120,8 @@ impl EditorTarget {
         match kind {
             ArtifactKind::Skill => self.materialize_skill(artifact_root, dest),
             ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned),
+            // Bundles never materialize; they expand into members.
+            ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
         }
     }
 

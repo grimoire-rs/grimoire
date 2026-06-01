@@ -185,11 +185,11 @@ mod tests {
     fn locked(name: &str, byte: char) -> LockedArtifact {
         let id = Identifier::new_registry(name, "localhost:5000")
             .clone_with_digest(Digest::Sha256(std::iter::repeat_n(byte, 64).collect()));
-        LockedArtifact {
-            name: name.to_string(),
-            kind: ArtifactKind::Skill,
-            pinned: PinnedIdentifier::try_from(id).unwrap(),
-        }
+        LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Skill,
+            PinnedIdentifier::try_from(id).unwrap(),
+        )
     }
 
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {

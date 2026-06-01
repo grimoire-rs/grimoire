@@ -83,6 +83,32 @@ pub fn annotations_for_rule(
     a
 }
 
+/// Build the manifest annotation map for a bundle.
+///
+/// A bundle has no frontmatter: the title is its `name`, the description is
+/// a deterministic summary of the member count. Deterministic (no
+/// wall-clock `created`) so re-release is idempotent — see
+/// [`annotations_for_skill`].
+pub fn annotations_for_bundle(
+    name: &str,
+    version: &str,
+    member_count: usize,
+    source: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), name.to_string());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        format!("grimoire bundle of {member_count} members"),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    if let Some(src) = source {
+        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    }
+    a.insert("com.grimoire.kind".to_string(), "bundle".to_string());
+    a
+}
+
 /// Extract a `keywords` value from a rule's forward-compat `extra` map,
 /// accepting either a scalar string or a YAML sequence of strings.
 fn keywords_from_extra(fm: &RuleFrontmatter) -> Option<String> {

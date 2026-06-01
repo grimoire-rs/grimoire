@@ -30,17 +30,27 @@ pub const DECLARATION_HASH_VERSION: u8 = 1;
 ///
 /// Algorithm (v1):
 /// 1. Build the canonical JSON object
-///    `{"rules":{name:idstr,...},"skills":{name:idstr,...}}` where every
-///    `idstr` is the `Display` form of the parsed identifier
-///    (`registry/repo[:tag][@digest]`).
+///    `{["bundles":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
+///    where every `idstr` is the `Display` form of the parsed identifier
+///    (`registry/repo[:tag][@digest]`). The `bundles` key is emitted
+///    **only when at least one bundle is declared**, so a bundle-free
+///    declaration hashes identically to one written before bundles
+///    existed — existing locks stay valid with no version bump.
 /// 2. Serialize via RFC 8785 JCS — object keys sorted, strings
 ///    JSON-escaped, no whitespace.
 /// 3. SHA-256 the UTF-8 bytes (reusing the Phase-1 [`Algorithm::Sha256`]).
 /// 4. Return `"sha256:<hex>"`.
 pub fn declaration_hash(set: &DesiredSet) -> String {
-    // Two top-level keys; "rules" sorts before "skills" so emit in that
-    // order to satisfy JCS without a generic sort pass for the root.
+    // Top-level keys in JCS (sorted) order: "bundles" < "rules" < "skills".
+    // "bundles" is omitted entirely when empty so the canonical form — and
+    // thus the hash — matches the pre-bundles algorithm for any config that
+    // declares no bundles.
     let mut canonical = String::from("{");
+    if !set.bundles.is_empty() {
+        canonical.push_str("\"bundles\":");
+        push_canonical_table(&mut canonical, &set.bundles);
+        canonical.push(',');
+    }
     canonical.push_str("\"rules\":");
     push_canonical_table(&mut canonical, &set.rules);
     canonical.push(',');
@@ -177,6 +187,46 @@ mod tests {
         let tagged = set(&[("x", "ghcr.io/acme/x:1")], &[]);
         let pinned = set(&[("x", &format!("ghcr.io/acme/x@sha256:{hex}"))], &[]);
         assert_ne!(declaration_hash(&tagged), declaration_hash(&pinned));
+    }
+
+    fn set_with_bundles(skills: &[(&str, &str)], rules: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
+        let mut s = BTreeMap::new();
+        for (k, v) in skills {
+            s.insert((*k).to_string(), id(v));
+        }
+        let mut r = BTreeMap::new();
+        for (k, v) in rules {
+            r.insert((*k).to_string(), id(v));
+        }
+        let mut b = BTreeMap::new();
+        for (k, v) in bundles {
+            b.insert((*k).to_string(), id(v));
+        }
+        DesiredSet::from_parts_with_bundles(s, r, b)
+    }
+
+    #[test]
+    fn empty_bundles_hashes_identically_to_pre_bundles() {
+        // A declaration with an empty bundles map must hash exactly the
+        // same as one constructed without the field, so locks written
+        // before bundles existed stay valid (no version bump).
+        let without = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let with_empty = set_with_bundles(&[("x", "ghcr.io/acme/x:1")], &[], &[]);
+        assert_eq!(declaration_hash(&without), declaration_hash(&with_empty));
+    }
+
+    #[test]
+    fn declaring_a_bundle_changes_the_hash() {
+        let base = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let with_bundle = set_with_bundles(&[("x", "ghcr.io/acme/x:1")], &[], &[("stack", "ghcr.io/acme/stack:1")]);
+        assert_ne!(declaration_hash(&base), declaration_hash(&with_bundle));
+    }
+
+    #[test]
+    fn bundle_hash_is_deterministic() {
+        let a = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
+        let b = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
+        assert_eq!(declaration_hash(&a), declaration_hash(&b));
     }
 
     // Frozen corpus: captured from a run and baked in by hand. Changing

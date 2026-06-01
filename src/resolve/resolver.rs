@@ -12,9 +12,13 @@
 //! Fully transactional: the first failure aborts every sibling task and
 //! the function returns that error — no partial lock is ever produced.
 
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
+
+use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, MAX_BUNDLE_MEMBERS};
+use crate::skill::SkillName;
 
 use super::resolve_error::{ResolveError, ResolveErrorKind};
 use super::resolve_options::ResolveOptions;
@@ -47,7 +51,7 @@ pub async fn resolve_lock(
     options: &ResolveOptions,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
-    let work = collect_work(set);
+    let work = build_work(set, access, options).await?;
     let mut resolved = resolve_work(work, access, options).await?;
     sort_locked(&mut resolved);
     Ok(build_lock(resolved, set))
@@ -91,11 +95,13 @@ pub async fn resolve_lock_partial(
         ));
     }
 
-    let all_work = collect_work(set);
+    // Expand bundles + merge so a requested name can be a bundle member.
+    let all_work = build_work(set, access, options).await?;
 
-    // Validate every requested name is declared.
+    // Validate every requested name is an effective artifact (direct or a
+    // bundle member).
     for name in names {
-        if !all_work.iter().any(|r| &r.name == name) {
+        if !all_work.iter().any(|w| &w.reference.name == name) {
             let reference = ArtifactRef {
                 kind: ArtifactKind::Skill,
                 name: name.clone(),
@@ -108,9 +114,9 @@ pub async fn resolve_lock_partial(
     }
 
     // Re-resolve only the named subset.
-    let selected: Vec<ArtifactRef> = all_work
+    let selected: Vec<WorkItem> = all_work
         .into_iter()
-        .filter(|r| names.iter().any(|n| n == &r.name))
+        .filter(|w| names.iter().any(|n| n == &w.reference.name))
         .collect();
     let resolved = resolve_work(selected, access, options).await?;
 
@@ -154,10 +160,298 @@ fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
     work
 }
 
-/// Spawn one task per artifact, each wrapped in a per-artifact timeout.
+/// A unit of resolution work: the reference to pin plus, for a bundle
+/// member, the provenance to stamp on the resulting lock entry.
+#[derive(Debug)]
+struct WorkItem {
+    reference: ArtifactRef,
+    /// `(bundle registry/repo, bundle tag)` when this item came from a
+    /// bundle expansion; `None` for a direct `[skills]`/`[rules]` entry.
+    bundle: Option<(String, String)>,
+}
+
+/// One member produced by expanding a declared bundle.
+#[derive(Debug)]
+struct ExpandedMember {
+    kind: ArtifactKind,
+    name: String,
+    id: Identifier,
+    bundle_repo: String,
+    bundle_tag: String,
+}
+
+/// Build the full work list: direct declarations plus the members of every
+/// declared bundle, after applying the conflict policy.
+///
+/// Conflict policy, per `(kind, name)`:
+/// - a direct `[skills]`/`[rules]` declaration always wins over any bundle;
+/// - multiple bundles that agree on the identifier coalesce to one entry;
+/// - multiple bundles that disagree fail closed with
+///   [`ResolveErrorKind::BundleConflict`].
+async fn build_work(
+    set: &DesiredSet,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+) -> Result<Vec<WorkItem>, ResolveError> {
+    let mut work: Vec<WorkItem> = collect_work(set)
+        .into_iter()
+        .map(|reference| WorkItem {
+            reference,
+            bundle: None,
+        })
+        .collect();
+
+    // Fast path: no bundles ⇒ no bundle I/O at all.
+    if set.bundles.is_empty() {
+        return Ok(work);
+    }
+
+    let direct_keys: HashSet<(ArtifactKind, String)> = work
+        .iter()
+        .map(|w| (w.reference.kind, w.reference.name.clone()))
+        .collect();
+
+    let members = expand_bundles(set, access, options).await?;
+    work.extend(merge_bundle_members(&direct_keys, members)?);
+    Ok(work)
+}
+
+/// Apply the bundle conflict policy to expanded members, returning the work
+/// items for those that survive. Pure (no I/O) so it is unit-tested
+/// directly.
+///
+/// Per `(kind, name)`:
+/// - skip members already declared directly (direct wins);
+/// - coalesce members that all share one identifier;
+/// - fail closed with [`ResolveErrorKind::BundleConflict`] when two bundles
+///   disagree.
+// The sibling resolution functions return the same `ResolveError` without
+// tripping `result_large_err` because they are `async` (their signature is
+// a `Future`, which the lint does not inspect). This is the one sync
+// function on the path, so the suppression lives here rather than reshaping
+// the shared error type.
+#[allow(clippy::result_large_err)]
+fn merge_bundle_members(
+    direct_keys: &HashSet<(ArtifactKind, String)>,
+    members: Vec<ExpandedMember>,
+) -> Result<Vec<WorkItem>, ResolveError> {
+    // Group by (kind, name); `BTreeMap` keeps iteration deterministic.
+    let mut by_key: BTreeMap<(ArtifactKind, String), Vec<ExpandedMember>> = BTreeMap::new();
+    for member in members {
+        by_key
+            .entry((member.kind, member.name.clone()))
+            .or_default()
+            .push(member);
+    }
+
+    let mut work = Vec::new();
+    for ((kind, name), group) in by_key {
+        // A direct declaration overrides any bundle member.
+        if direct_keys.contains(&(kind, name.clone())) {
+            continue;
+        }
+        let first = &group[0];
+        let all_agree = group.iter().all(|m| m.id == first.id);
+        if !all_agree {
+            let mut sources: Vec<String> = group
+                .iter()
+                .map(|m| format!("{} from {}:{}", m.id, m.bundle_repo, m.bundle_tag))
+                .collect();
+            sources.sort();
+            sources.dedup();
+            let reference = ArtifactRef {
+                kind,
+                name,
+                id: first.id.clone(),
+            };
+            return Err(ResolveError::new(
+                reference,
+                ResolveErrorKind::BundleConflict {
+                    sources: sources.join(", "),
+                },
+            ));
+        }
+        work.push(WorkItem {
+            reference: ArtifactRef {
+                kind,
+                name,
+                id: first.id.clone(),
+            },
+            bundle: Some((first.bundle_repo.clone(), first.bundle_tag.clone())),
+        });
+    }
+
+    Ok(work)
+}
+
+/// Fetch and parse every declared bundle, returning its flattened members.
+///
+/// Each bundle is resolved fresh (its tag → digest), its manifest and
+/// single members-layer fetched, and the JSON members document parsed.
+/// A nested bundle member or an unparseable member id is rejected.
+async fn expand_bundles(
+    set: &DesiredSet,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+) -> Result<Vec<ExpandedMember>, ResolveError> {
+    let mut out = Vec::new();
+    for (cfg_name, bundle_id) in &set.bundles {
+        let bundle_ref = ArtifactRef {
+            kind: ArtifactKind::Bundle,
+            name: cfg_name.clone(),
+            id: bundle_id.clone(),
+        };
+
+        // Bound the WHOLE fetch chain (tag resolve + manifest + blob) by the
+        // per-artifact timeout, so a hung registry on any leg cannot stall
+        // the resolve indefinitely (the per-artifact-timeout contract).
+        let blob = match tokio::time::timeout(
+            options.per_artifact_timeout,
+            fetch_bundle_layer(&bundle_ref, bundle_id, access, options),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_elapsed) => return Err(ResolveError::new(bundle_ref, ResolveErrorKind::ResolveTimeout)),
+        };
+
+        let bundle_manifest = BundleManifest::from_layer_bytes(&blob)
+            .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
+
+        if bundle_manifest.members.len() > MAX_BUNDLE_MEMBERS {
+            return Err(ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!(
+                    "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
+                    bundle_manifest.members.len()
+                )),
+            ));
+        }
+
+        let bundle_repo = bundle_id.registry_repository();
+        let bundle_tag = bundle_provenance_tag(bundle_id);
+
+        for member in bundle_manifest.members {
+            if member.kind == ArtifactKind::Bundle {
+                return Err(ResolveError::new(
+                    bundle_ref.clone(),
+                    ResolveErrorKind::BundleInvalid(format!("nested bundle member '{}' is not supported", member.name)),
+                ));
+            }
+            // The member name is registry-controlled and flows into a
+            // filesystem install path; validate it against the same charset
+            // as a declared name so it cannot traverse out of the workspace
+            // (CWE-22).
+            SkillName::parse(&member.name).map_err(|e| {
+                ResolveError::new(
+                    bundle_ref.clone(),
+                    ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
+                )
+            })?;
+            let id = Identifier::parse(&member.id).map_err(|_| {
+                ResolveError::new(
+                    bundle_ref.clone(),
+                    ResolveErrorKind::BundleInvalid(format!(
+                        "member '{}' has an invalid identifier '{}'",
+                        member.name, member.id
+                    )),
+                )
+            })?;
+            out.push(ExpandedMember {
+                kind: member.kind,
+                name: member.name,
+                id,
+                bundle_repo: bundle_repo.clone(),
+                bundle_tag: bundle_tag.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch and integrity-check a bundle's members-layer blob: resolve the tag
+/// to a digest, fetch the manifest, then the single layer — rejecting an
+/// oversized layer by its descriptor before any bytes transfer, and again
+/// after, to bound memory against a hostile registry (CWE-770).
+async fn fetch_bundle_layer(
+    bundle_ref: &ArtifactRef,
+    bundle_id: &Identifier,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+) -> Result<Vec<u8>, ResolveError> {
+    let digest = match retry_chain(bundle_ref, access, options).await {
+        Ok(digest) => digest,
+        Err(mut e) => {
+            // A missing bundle tag reads clearer as BundleNotFound.
+            if matches!(e.kind, ResolveErrorKind::TagNotFound) {
+                e.kind = ResolveErrorKind::BundleNotFound;
+            }
+            return Err(e);
+        }
+    };
+
+    let pinned_id = bundle_id.clone_with_digest(digest);
+    #[allow(clippy::expect_used)]
+    let pinned = PinnedIdentifier::try_from(pinned_id)
+        .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
+
+    let manifest = access
+        .fetch_manifest(&pinned)
+        .await
+        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::RegistryUnreachable(e)))?
+        .ok_or_else(|| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleNotFound))?;
+
+    let layer = manifest.single_layer().ok_or_else(|| {
+        ResolveError::new(
+            bundle_ref.clone(),
+            ResolveErrorKind::BundleInvalid("expected exactly one members layer".to_string()),
+        )
+    })?;
+
+    // Pre-reject by the (untrusted) descriptor size before transferring.
+    if layer.size > BUNDLE_LAYER_SIZE_LIMIT {
+        return Err(oversize_error(bundle_ref, layer.size));
+    }
+
+    let blob = access
+        .fetch_blob(bundle_id, &layer.digest)
+        .await
+        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::RegistryUnreachable(e)))?
+        .ok_or_else(|| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleNotFound))?;
+
+    // Re-check the actual bytes: the descriptor size is not authoritative.
+    if blob.len() as u64 > BUNDLE_LAYER_SIZE_LIMIT {
+        return Err(oversize_error(bundle_ref, blob.len() as u64));
+    }
+    Ok(blob)
+}
+
+/// The provenance tag recorded for a bundle member: the bundle's own tag,
+/// or its short digest when the bundle is declared digest-only — never a
+/// fabricated `latest`.
+fn bundle_provenance_tag(bundle_id: &Identifier) -> String {
+    match bundle_id.tag() {
+        Some(tag) => tag.to_string(),
+        None => bundle_id
+            .digest()
+            .map(|d| d.to_short_string())
+            .unwrap_or_else(|| "latest".to_string()),
+    }
+}
+
+fn oversize_error(bundle_ref: &ArtifactRef, size: u64) -> ResolveError {
+    ResolveError::new(
+        bundle_ref.clone(),
+        ResolveErrorKind::BundleInvalid(format!(
+            "members layer is {size} bytes, exceeds the limit of {BUNDLE_LAYER_SIZE_LIMIT} bytes"
+        )),
+    )
+}
+
+/// Spawn one task per work item, each wrapped in a per-artifact timeout.
 /// `JoinSet` provides fail-fast: the first error aborts the rest.
 async fn resolve_work(
-    work: Vec<ArtifactRef>,
+    work: Vec<WorkItem>,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
 ) -> Result<Vec<LockedArtifact>, ResolveError> {
@@ -166,10 +460,10 @@ async fn resolve_work(
     }
 
     let mut set: JoinSet<Result<LockedArtifact, ResolveError>> = JoinSet::new();
-    for reference in work {
+    for item in work {
         let access = Arc::clone(access);
         let options = options.clone();
-        set.spawn(async move { resolve_one(reference, access, options).await });
+        set.spawn(async move { resolve_one(item, access, options).await });
     }
 
     let mut resolved = Vec::new();
@@ -191,12 +485,14 @@ async fn resolve_work(
     Ok(resolved)
 }
 
-/// Resolve one artifact, wrapping the retry chain in a timeout.
+/// Resolve one work item, wrapping the retry chain in a timeout and
+/// stamping any bundle provenance onto the resulting lock entry.
 async fn resolve_one(
-    reference: ArtifactRef,
+    item: WorkItem,
     access: Arc<dyn OciAccess>,
     options: ResolveOptions,
 ) -> Result<LockedArtifact, ResolveError> {
+    let WorkItem { reference, bundle } = item;
     let timeout = options.per_artifact_timeout;
     let digest = match tokio::time::timeout(timeout, retry_chain(&reference, &access, &options)).await {
         Ok(Ok(digest)) => digest,
@@ -214,10 +510,17 @@ async fn resolve_one(
     let pinned = PinnedIdentifier::try_from(pinned_id)
         .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
 
+    let (bundle, bundle_tag) = match bundle {
+        Some((repo, tag)) => (Some(repo), Some(tag)),
+        None => (None, None),
+    };
+
     Ok(LockedArtifact {
         name: reference.name,
         kind: reference.kind,
         pinned,
+        bundle,
+        bundle_tag,
     })
 }
 
@@ -616,19 +919,19 @@ mod tests {
         let prev_b_id = Identifier::parse("ghcr.io/acme/b:1")
             .unwrap()
             .clone_with_digest(old_b_digest.clone());
-        let prev_b = LockedArtifact {
-            name: "b".to_string(),
-            kind: ArtifactKind::Skill,
-            pinned: PinnedIdentifier::try_from(prev_b_id).unwrap(),
-        };
+        let prev_b = LockedArtifact::direct(
+            "b".to_string(),
+            ArtifactKind::Skill,
+            PinnedIdentifier::try_from(prev_b_id).unwrap(),
+        );
         let prev_a_id = Identifier::parse("ghcr.io/acme/a:1")
             .unwrap()
             .clone_with_digest(Algorithm::Sha256.hash(b"old-a"));
-        let prev_a = LockedArtifact {
-            name: "a".to_string(),
-            kind: ArtifactKind::Skill,
-            pinned: PinnedIdentifier::try_from(prev_a_id).unwrap(),
-        };
+        let prev_a = LockedArtifact::direct(
+            "a".to_string(),
+            ArtifactKind::Skill,
+            PinnedIdentifier::try_from(prev_a_id).unwrap(),
+        );
         let previous = GrimoireLock {
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
@@ -690,5 +993,124 @@ mod tests {
         .await
         .expect_err("undeclared name must be rejected");
         assert!(matches!(err.kind, ResolveErrorKind::TagNotFound));
+    }
+
+    // ── Bundle conflict engine (pure merge) ──────────────────────────────
+
+    fn member(kind: ArtifactKind, name: &str, id: &str, bundle: &str, tag: &str) -> ExpandedMember {
+        ExpandedMember {
+            kind,
+            name: name.to_string(),
+            id: Identifier::parse(id).unwrap(),
+            bundle_repo: bundle.to_string(),
+            bundle_tag: tag.to_string(),
+        }
+    }
+
+    fn no_direct() -> HashSet<(ArtifactKind, String)> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn merge_single_member_becomes_work_with_provenance() {
+        let members = vec![member(
+            ArtifactKind::Skill,
+            "code-review",
+            "ghcr.io/acme/code-review:stable",
+            "ghcr.io/acme/python-stack",
+            "1.0.0",
+        )];
+        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].reference.name, "code-review");
+        assert_eq!(
+            work[0].bundle,
+            Some(("ghcr.io/acme/python-stack".to_string(), "1.0.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn merge_direct_declaration_wins_over_bundle() {
+        let mut direct = HashSet::new();
+        direct.insert((ArtifactKind::Skill, "code-review".to_string()));
+        let members = vec![member(
+            ArtifactKind::Skill,
+            "code-review",
+            "ghcr.io/acme/code-review:other",
+            "ghcr.io/acme/stack",
+            "1",
+        )];
+        let work = merge_bundle_members(&direct, members).expect("merge ok");
+        assert!(work.is_empty(), "the direct declaration overrides the bundle member");
+    }
+
+    #[test]
+    fn merge_agreeing_bundles_coalesce() {
+        let members = vec![
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:stable",
+                "ghcr.io/acme/stack-a",
+                "1",
+            ),
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:stable",
+                "ghcr.io/acme/stack-b",
+                "2",
+            ),
+        ];
+        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
+        assert_eq!(work.len(), 1, "identical members coalesce to one entry");
+    }
+
+    #[test]
+    fn merge_disagreeing_bundles_fail_closed() {
+        let members = vec![
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:stable",
+                "ghcr.io/acme/stack-a",
+                "1",
+            ),
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:1.4",
+                "ghcr.io/acme/stack-b",
+                "2",
+            ),
+        ];
+        let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
+        assert!(matches!(err.kind, ResolveErrorKind::BundleConflict { .. }));
+        assert_eq!(err.reference.name, "code-review");
+    }
+
+    #[test]
+    fn merge_distinguishes_skill_and_rule_with_same_name() {
+        let members = vec![
+            member(ArtifactKind::Skill, "x", "ghcr.io/acme/x:1", "ghcr.io/acme/s", "1"),
+            member(ArtifactKind::Rule, "x", "ghcr.io/acme/x-rule:1", "ghcr.io/acme/s", "1"),
+        ];
+        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
+        assert_eq!(work.len(), 2, "skill x and rule x are distinct keys");
+    }
+
+    #[test]
+    fn provenance_tag_uses_digest_when_bundle_is_digest_pinned() {
+        let tagged = Identifier::parse("ghcr.io/acme/stack:1.0").unwrap();
+        assert_eq!(bundle_provenance_tag(&tagged), "1.0");
+
+        let hex = "a".repeat(64);
+        let pinned = Identifier::parse(&format!("ghcr.io/acme/stack@sha256:{hex}")).unwrap();
+        let tag = bundle_provenance_tag(&pinned);
+        assert!(
+            tag.starts_with("sha256:"),
+            "digest-pinned bundle records its digest, got {tag}"
+        );
+        assert_ne!(tag, "latest", "must not fabricate a `latest` tag");
     }
 }

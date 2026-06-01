@@ -52,14 +52,19 @@ grim init --registry ghcr.io/acme
 ## grim add {#add}
 
 `grim add <kind> <name> <reference>` declares a skill or rule and immediately
-pins it in the lock. `<kind>` is `skill` or `rule`, `<name>` is the local
-binding you reuse in later commands, and `<reference>` is `registry/repo:tag`
-or `registry/repo@sha256:…`.
+pins it in the lock. `<kind>` is `skill`, `rule`, or `bundle`, `<name>` is the
+local binding you reuse in later commands, and `<reference>` is
+`registry/repo:tag` or `registry/repo@sha256:…`.
 
 ```sh
 grim add skill code-review ghcr.io/acme/code-review:1
 grim add rule rust-style ghcr.io/acme/rust-style:2
+grim add bundle python-stack ghcr.io/acme/python-stack:1
 ```
+
+Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
+its members into the lock. `grim remove bundle <name>` undeclares the bundle and
+drops the members it contributed.
 
 ## grim lock {#lock}
 
@@ -93,8 +98,9 @@ grim update code-review rust-style
 ## grim status {#status}
 
 Reports each declared artifact's state — installed, outdated, locally modified,
-integrity-missing, or not installed. Pair with `--format json` to drive
-automation.
+integrity-missing, or not installed. The `Source` column shows each artifact's
+[provenance](./concepts.md#bundles): `direct` or the bundle it came from. Pair
+with `--format json` to drive automation.
 
 ## grim remove {#remove}
 
@@ -134,20 +140,24 @@ grim tui --registry ghcr.io/acme
 
 ## grim build {#build}
 
-`grim build <path>` validates and packs a local skill directory or rule `.md`
-file without pushing it — a dry run for authors. `--kind <skill|rule>` forces
-the artifact kind instead of auto-detecting it from the path.
+`grim build <path>` validates and packs a local skill directory, rule `.md`
+file, or bundle `.toml` file without pushing it — a dry run for authors.
+`--kind <skill|rule|bundle>` forces the artifact kind instead of auto-detecting
+it from the path.
 
 ## grim release {#release}
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact,
 applying cascade tags (for example, a `1.2.3` release also moves `1`, `1.2`,
 and `latest`). `--dry-run` prints the push plan without pushing; `--force`
-moves an existing exact-version tag that points at a different digest. See
-[Publishing](./publishing.md) for the full workflow.
+moves an existing exact-version tag that points at a different digest. A
+`.toml` path publishes a [bundle](./concepts.md#bundles); `--pin` then freezes
+its floating members to digests. See [Publishing](./publishing.md) for the full
+workflow.
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
+grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 ```
 
 ## grim login {#login}

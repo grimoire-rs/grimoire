@@ -7,6 +7,7 @@
 pub mod access;
 pub mod annotations;
 pub mod artifact_kind;
+pub mod bundle;
 pub mod digest;
 pub mod identifier;
 pub mod manifest;

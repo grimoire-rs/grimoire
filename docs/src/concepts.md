@@ -46,6 +46,47 @@ rolls the pins forward when a newer version appears behind the same tag.
 The lock also stores a hash of the declaration it was generated from, so
 Grimoire can tell when `grimoire.toml` has drifted ahead of the lock.
 
+## Bundles {#bundles}
+
+Declaring the same dozen skills and rules in every repository does not scale.
+Teams end up copying a block of `grimoire.toml` between projects, and when the
+approved set changes someone has to chase down every copy.
+
+A **bundle** is a curated set of members — skills and rules — published as its
+own OCI artifact. You declare the bundle once in `[bundles]`, and on
+[`grim lock`](./commands.md#lock) it **expands** into its members, which are
+pinned into the lock exactly like a direct declaration. Update the published
+bundle, re-lock, and every project that declares it moves together.
+
+Each locked member records its **provenance** — `direct` for something you
+declared yourself, or the bundle it came from — which [`grim status`](./commands.md#status)
+surfaces so you always know why an artifact is installed.
+
+### Conflict policy {#bundle-conflicts}
+
+Because a member is keyed by `(kind, name)`, two sources can name the same slot.
+Grimoire resolves that deterministically:
+
+- a **direct** `[skills]`/`[rules]` declaration always wins over any bundle —
+  this is how you override a single member without forking the bundle;
+- two bundles that name a member at the **same** identifier coalesce to one
+  entry;
+- two bundles that **disagree** fail closed: `grim lock` stops with a conflict
+  error and asks you to declare the member directly to choose one.
+
+Failing closed is deliberate. Silently picking a winner would let an unrelated
+bundle bump change what a project installs without anyone noticing.
+
+### Floating versus pinned members {#bundle-pinning}
+
+A bundle's members can themselves be floating tags or exact digests. A floating
+member is re-resolved fresh on every consumer `grim lock`, so reproducibility
+comes from the consumer's own lock. Publishing with
+[`grim release --pin`](./publishing.md#bundles) instead freezes every floating
+member to a digest at publish time, so the bundle is reproducible on its own —
+the stronger guarantee for air-gapped or tunneled networks that cannot
+re-resolve a tag. See [Publishing](./publishing.md#bundles).
+
 ## Scopes
 
 Grimoire works in two scopes. The **project** scope is the `grimoire.toml`

@@ -72,6 +72,28 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
 
     let mut entries = Vec::new();
+
+    // Declared bundles: one row each so the user sees what they declared.
+    // A bundle never installs itself — its state reflects whether it has
+    // been expanded into a fresh lock.
+    for name in scope.set.bundles.keys() {
+        let state = if !lock_matches_config {
+            ArtifactStatus::Stale
+        } else if lock.is_none() {
+            ArtifactStatus::Missing
+        } else {
+            ArtifactStatus::Installed
+        };
+        entries.push(StatusEntry {
+            kind: ArtifactKind::Bundle,
+            name: name.clone(),
+            source: "direct".to_string(),
+            pinned: None,
+            state,
+        });
+    }
+
+    // Directly-declared skills and rules.
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
@@ -79,9 +101,28 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
+            source: "direct".to_string(),
             pinned: locked.map(|l| l.pinned.clone()),
             state,
         });
+    }
+
+    // Members contributed by bundles: read straight from the lock (they are
+    // not in the declared skill/rule maps). A directly-declared name always
+    // resolves to a `direct` lock entry, so these never duplicate the rows
+    // above.
+    if let Some(l) = lock.as_ref() {
+        for member in l.skills.iter().chain(l.rules.iter()).filter(|a| a.is_from_bundle()) {
+            let st = derive_state(member.kind, &member.name, Some(member), &state, lock_matches_config);
+            let repo = member.bundle.clone().unwrap_or_default();
+            entries.push(StatusEntry {
+                kind: member.kind,
+                name: member.name.clone(),
+                source: format!("bundle: {repo}"),
+                pinned: Some(member.pinned.clone()),
+                state: st,
+            });
+        }
     }
 
     Ok((StatusReport::new(entries), ExitCode::Success))
@@ -179,11 +220,7 @@ mod tests {
     }
 
     fn locked(byte: char) -> LockedArtifact {
-        LockedArtifact {
-            name: "x".to_string(),
-            kind: ArtifactKind::Rule,
-            pinned: pinned(byte),
-        }
+        LockedArtifact::direct("x".to_string(), ArtifactKind::Rule, pinned(byte))
     }
 
     #[test]

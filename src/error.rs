@@ -149,10 +149,13 @@ fn classify_access(err: &AccessError) -> ExitCode {
 /// Map a resolution-tier error to an exit code.
 fn classify_resolve(err: &ResolveError) -> ExitCode {
     match &err.kind {
-        ResolveErrorKind::TagNotFound => ExitCode::NotFound,
+        ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound => ExitCode::NotFound,
         ResolveErrorKind::AuthFailure(_) => ExitCode::AuthError,
         ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => ExitCode::Unavailable,
-        ResolveErrorKind::StaleLock { .. } => ExitCode::DataError,
+        ResolveErrorKind::StaleLock { .. } | ResolveErrorKind::BundleInvalid(_) => ExitCode::DataError,
+        // A bundle conflict is a misconfiguration of the user's own
+        // declaration (two bundles disagree), not malformed external data.
+        ResolveErrorKind::BundleConflict { .. } => ExitCode::ConfigError,
     }
 }
 

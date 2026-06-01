@@ -26,6 +26,24 @@ rust-style = "ghcr.io/acme/rust-style:2"
 [install target](./concepts.md#editors). Unknown keys are rejected on parse, so
 a typo surfaces immediately rather than silently doing nothing.
 
+An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
+mapping a binding name to a bundle reference. A bundle expands into its member
+skills and rules at lock time:
+
+```toml
+[bundles]
+python-stack = "ghcr.io/acme/python-stack:1"
+
+[skills]
+# A direct declaration overrides a bundle member of the same name.
+code-review = "ghcr.io/acme/code-review:2"
+```
+
+Bundle references follow the same rules as skills and rules — a bare reference
+defaults to `:latest`. Per `(kind, name)`, a direct declaration wins over any
+bundle, agreeing bundles coalesce, and disagreeing bundles fail closed; see the
+[conflict policy](./concepts.md#bundle-conflicts).
+
 ## `grimoire.lock`
 
 The lockfile pins every declared tag to an exact digest and records the
@@ -46,6 +64,11 @@ pinned = "ghcr.io/acme/code-review@sha256:…"
 name = "rust-style"
 pinned = "ghcr.io/acme/rust-style@sha256:…"
 ```
+
+A member that came from a [bundle](./concepts.md#bundles) additionally carries
+`bundle` and `bundle_tag` fields recording its origin; a directly-declared entry
+omits them, so a bundle-free lock is byte-identical to one written before
+bundles existed.
 
 ## Scopes on disk
 

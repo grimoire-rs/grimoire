@@ -209,6 +209,9 @@ async fn install_one<M: ArtifactMaterializer>(
     let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&artifact.name),
         ArtifactKind::Rule => materialized_root.join(format!("{}.md", artifact.name)),
+        // Bundles expand into members at resolve time and never enter the
+        // lock, so the installer never sees one.
+        ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
     };
     if !canonical.exists() {
         return Err(
@@ -456,11 +459,11 @@ mod tests {
     fn locked_rule(name: &str, blob: &[u8]) -> LockedArtifact {
         let digest = Algorithm::Sha256.hash(blob);
         let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(digest);
-        LockedArtifact {
-            name: name.to_string(),
-            kind: ArtifactKind::Rule,
-            pinned: PinnedIdentifier::try_from(id).unwrap(),
-        }
+        LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Rule,
+            PinnedIdentifier::try_from(id).unwrap(),
+        )
     }
 
     fn lock_of(rules: Vec<LockedArtifact>) -> GrimoireLock {

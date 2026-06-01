@@ -29,8 +29,8 @@ use super::scope_resolution;
 /// `grim add` arguments.
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// `skill` or `rule`.
-    #[arg(value_parser = ["skill", "rule"])]
+    /// `skill`, `rule`, or `bundle`.
+    #[arg(value_parser = ["skill", "rule", "bundle"])]
     pub kind: String,
 
     /// The config binding name.
@@ -55,10 +55,10 @@ pub struct AddArgs {
 /// Config (78/79/74), invalid reference (65), or lock/resolve failures
 /// propagate via the typed error chain.
 pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, ExitCode)> {
-    let kind = if args.kind == "skill" {
-        ArtifactKind::Skill
-    } else {
-        ArtifactKind::Rule
+    let kind = match args.kind.as_str() {
+        "skill" => ArtifactKind::Skill,
+        "bundle" => ArtifactKind::Bundle,
+        _ => ArtifactKind::Rule,
     };
 
     let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
@@ -86,6 +86,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         ArtifactKind::Rule => {
             set.rules.insert(args.name.clone(), id.clone());
         }
+        ArtifactKind::Bundle => {
+            set.bundles.insert(args.name.clone(), id.clone());
+        }
     }
     set.invalidate_declaration_hash_cache();
 
@@ -98,44 +101,57 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // `add` always leaves a consistent lock).
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = lock_io::load(&scope.lock_path).ok();
-    let new_lock = match &previous {
-        Some(prev) => {
-            match resolve_lock_partial(
-                &set,
-                prev,
-                &access,
-                std::slice::from_ref(&args.name),
-                scope.scope,
-                &ResolveOptions::default(),
-            )
-            .await
-            {
-                Ok(lock) => lock,
-                Err(e)
-                    if matches!(
-                        e.kind,
-                        crate::resolve::resolve_error::ResolveErrorKind::StaleLock { .. }
-                    ) =>
+    // A bundle declaration expands into members whose names differ from the
+    // bundle's binding name, so a partial relock keyed on the bundle name
+    // cannot work — always do a full resolve for bundles.
+    let new_lock = if kind == ArtifactKind::Bundle {
+        super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
+    } else {
+        match &previous {
+            Some(prev) => {
+                match resolve_lock_partial(
+                    &set,
+                    prev,
+                    &access,
+                    std::slice::from_ref(&args.name),
+                    scope.scope,
+                    &ResolveOptions::default(),
+                )
+                .await
                 {
-                    // The added entry made the predecessor stale; a full
-                    // resolve is the correct recovery (every entry is
-                    // declared, so this is consistent).
-                    super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
+                    Ok(lock) => lock,
+                    Err(e)
+                        if matches!(
+                            e.kind,
+                            crate::resolve::resolve_error::ResolveErrorKind::StaleLock { .. }
+                        ) =>
+                    {
+                        // The added entry made the predecessor stale; a full
+                        // resolve is the correct recovery (every entry is
+                        // declared, so this is consistent).
+                        super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
+                    }
+                    Err(e) => return Err(crate::error::Error::from(e).into()),
                 }
-                Err(e) => return Err(crate::error::Error::from(e).into()),
             }
+            None => super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?,
         }
-        None => super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?,
     };
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
-    let pinned = new_lock
-        .skills
-        .iter()
-        .chain(new_lock.rules.iter())
-        .find(|a| a.kind == kind && a.name == args.name)
-        .map(|a| a.pinned.strip_advisory().to_string())
-        .unwrap_or_else(|| id.to_string());
+    // A bundle has no single pinned member to report; surface the bundle
+    // reference itself. A skill/rule reports the digest it resolved to.
+    let pinned = if kind == ArtifactKind::Bundle {
+        id.to_string()
+    } else {
+        new_lock
+            .skills
+            .iter()
+            .chain(new_lock.rules.iter())
+            .find(|a| a.kind == kind && a.name == args.name)
+            .map(|a| a.pinned.strip_advisory().to_string())
+            .unwrap_or_else(|| id.to_string())
+    };
 
     Ok((AddReport::new(kind, args.name.clone(), pinned), ExitCode::Success))
 }
@@ -152,8 +168,11 @@ pub(crate) fn parse_reference(
 }
 
 /// Re-serialize the declaration to `path` as the shared
-/// `[options]`/`[skills]`/`[rules]` schema. Atomic via the store
-/// primitive so a crash never truncates the config.
+/// `[options]`/`[bundles]`/`[skills]`/`[rules]` schema. Atomic via the
+/// store primitive so a crash never truncates the config. The `[bundles]`
+/// table is emitted only when at least one bundle is declared, so a
+/// bundle-free config is byte-identical to one written before bundles
+/// existed.
 pub(crate) fn write_config(
     path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
@@ -169,6 +188,13 @@ pub(crate) fn write_config(
         }
         if let Some(e) = &options.editor {
             let _ = writeln!(out, "editor = \"{e}\"");
+        }
+        out.push('\n');
+    }
+    if !set.bundles.is_empty() {
+        out.push_str("[bundles]\n");
+        for (name, id) in &set.bundles {
+            let _ = writeln!(out, "{name} = \"{id}\"");
         }
         out.push('\n');
     }

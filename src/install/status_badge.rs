@@ -116,11 +116,11 @@ mod tests {
                 generated_by: "grim test".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
             },
-            skills: vec![LockedArtifact {
-                name: "x".to_string(),
-                kind: ArtifactKind::Skill,
-                pinned: pinned(repo, byte),
-            }],
+            skills: vec![LockedArtifact::direct(
+                "x".to_string(),
+                ArtifactKind::Skill,
+                pinned(repo, byte),
+            )],
             rules: vec![],
         }
     }

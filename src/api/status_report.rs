@@ -3,12 +3,13 @@
 
 //! `grim status` output.
 //!
-//! Plain format: 4-column table (Kind | Name | Pinned | State).
+//! Plain format: 5-column table (Kind | Name | Source | Pinned | State).
 //!
-//! JSON format: an array of `{kind, name, pinned, state}` objects (the
-//! report wraps a `Vec`, serialized to the bare array — no wrapper
+//! JSON format: an array of `{kind, name, source, pinned, state}` objects
+//! (the report wraps a `Vec`, serialized to the bare array — no wrapper
 //! object, per subsystem-cli-api.md). `pinned` is `null` when the
-//! artifact is declared but not yet locked.
+//! artifact is declared but not yet locked. `source` is `"direct"` for a
+//! declared artifact or `"bundle: <registry/repo>"` for a bundle member.
 
 use std::io::{self, Write};
 
@@ -25,6 +26,9 @@ pub struct StatusEntry {
     #[serde(serialize_with = "serialize_kind")]
     pub kind: ArtifactKind,
     pub name: String,
+    /// Provenance: `"direct"` for a declared artifact, or
+    /// `"bundle: <registry/repo>"` for a member contributed by a bundle.
+    pub source: String,
     /// The locked pin, if the artifact is locked.
     #[serde(serialize_with = "serialize_opt_pinned")]
     pub pinned: Option<PinnedIdentifier>,
@@ -70,6 +74,7 @@ impl Printable for StatusReport {
                 vec![
                     e.kind.to_string(),
                     e.name.clone(),
+                    e.source.clone(),
                     e.pinned
                         .as_ref()
                         .map(|p| p.strip_advisory().to_string())
@@ -78,7 +83,7 @@ impl Printable for StatusReport {
                 ]
             })
             .collect();
-        print_table(w, &["Kind", "Name", "Pinned", "State"], &rows)
+        print_table(w, &["Kind", "Name", "Source", "Pinned", "State"], &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -103,12 +108,14 @@ mod tests {
             StatusEntry {
                 kind: ArtifactKind::Skill,
                 name: "code-review".to_string(),
+                source: "direct".to_string(),
                 pinned: Some(pinned("code-review")),
                 state: ArtifactStatus::Installed,
             },
             StatusEntry {
                 kind: ArtifactKind::Rule,
                 name: "rust-style".to_string(),
+                source: "bundle: ghcr.io/acme/stack".to_string(),
                 pinned: None,
                 state: ArtifactStatus::Missing,
             },
@@ -117,6 +124,8 @@ mod tests {
         r.print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.lines().next().unwrap().starts_with("Kind"));
+        assert!(out.contains("Source"));
+        assert!(out.contains("bundle: ghcr.io/acme/stack"));
         assert!(out.contains("installed"));
         assert!(out.contains("missing"));
     }
@@ -126,6 +135,7 @@ mod tests {
         let r = StatusReport::new(vec![StatusEntry {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
+            source: "direct".to_string(),
             pinned: None,
             state: ArtifactStatus::Stale,
         }]);
@@ -134,6 +144,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v.is_array());
         assert!(v[0]["pinned"].is_null());
+        assert_eq!(v[0]["source"], "direct");
         assert_eq!(v[0]["state"], "stale");
     }
 }

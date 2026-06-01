@@ -70,6 +70,24 @@ pub enum ResolveErrorKind {
     #[error("resolve timed out")]
     ResolveTimeout,
 
+    /// A declared bundle could not be fetched: its tag did not resolve, or
+    /// its manifest/layer was missing on the registry.
+    #[error("bundle not found")]
+    BundleNotFound,
+
+    /// A bundle resolved but its members document is malformed (missing
+    /// layer, invalid JSON, a nested bundle, or an unparseable member id).
+    #[error("invalid bundle: {0}")]
+    BundleInvalid(String),
+
+    /// The same `(kind, name)` member is declared by two or more bundles
+    /// with conflicting identifiers. Fail-closed: the user resolves it by
+    /// declaring the member directly to choose one.
+    #[error(
+        "declared by multiple bundles with conflicting versions ({sources}); declare it directly in [skills]/[rules] to choose one"
+    )]
+    BundleConflict { sources: String },
+
     /// Partial-resolve refused: the predecessor lock's declaration hash
     /// does not match the current declaration. Both are surfaced so an
     /// operator can diff the lock against the live config.

@@ -79,6 +79,10 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let declared = match kind {
         ArtifactKind::Skill => set.skills.remove(&args.name).is_some(),
         ArtifactKind::Rule => set.rules.remove(&args.name).is_some(),
+        // Bundles do not materialize, so there is nothing to uninstall; the
+        // `--kind` parser excludes "bundle", so this is unreachable. Fail
+        // loud rather than silently skip if the parser ever gains it.
+        ArtifactKind::Bundle => unreachable!("uninstall does not accept bundles; use `grim remove bundle <name>`"),
     };
     if declared {
         set.invalidate_declaration_hash_cache();
@@ -88,6 +92,8 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             match kind {
                 ArtifactKind::Skill => new_lock.skills.retain(|a| a.name != args.name),
                 ArtifactKind::Rule => new_lock.rules.retain(|a| a.name != args.name),
+                // Unreachable: the `--kind` parser excludes "bundle".
+                ArtifactKind::Bundle => unreachable!("uninstall does not accept bundles"),
             }
             new_lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
             super::grim(lock_io::save(&scope.lock_path, &new_lock, Some(&previous)))?;

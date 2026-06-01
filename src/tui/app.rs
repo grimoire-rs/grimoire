@@ -488,6 +488,9 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         match kind {
             ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
             ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
+            // The TUI lists individual skills/rules; bundles are not
+            // browsable or installable through it.
+            ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
         }
         lock_io::save(&ctx.lock_path, &lock, Some(&previous))
             .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -539,6 +542,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         ArtifactKind::Rule => {
             rules.insert(name.clone(), id);
         }
+        ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
     }
     let set = DesiredSet::from_parts(skills, rules);
 
@@ -603,6 +607,7 @@ fn merge_and_save_lock(
     let bucket = match kind {
         ArtifactKind::Skill => &mut lock.skills,
         ArtifactKind::Rule => &mut lock.rules,
+        ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
     };
     match bucket.iter_mut().find(|a| a.name == name) {
         Some(slot) => *slot = entry,

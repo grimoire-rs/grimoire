@@ -126,6 +126,13 @@ impl Identifier {
         &self.repository
     }
 
+    /// Returns the `registry/repository` location string (no tag, no
+    /// digest) — the stable identity used for bundle provenance and the
+    /// OCI `source` annotation.
+    pub fn registry_repository(&self) -> String {
+        format!("{}/{}", self.registry, self.repository)
+    }
+
     /// Returns the last segment of the repository path as the package name.
     pub fn name(&self) -> &str {
         self.repository.rsplit('/').next().unwrap_or(&self.repository)

@@ -21,6 +21,11 @@ pub enum ArtifactKind {
     Skill,
     /// A rule: a single `paths:`-scoped markdown file.
     Rule,
+    /// A bundle: a curated set of skill/rule members, declared in
+    /// `[bundles]` and expanded into its members at resolve time. A bundle
+    /// is never materialized or written to the lock itself — only the
+    /// members it expands to are.
+    Bundle,
 }
 
 impl ArtifactKind {
@@ -29,15 +34,16 @@ impl ArtifactKind {
         match self {
             Self::Skill => "skills",
             Self::Rule => "rules",
+            Self::Bundle => "bundles",
         }
     }
 
     /// Whether the artifact materializes as a directory tree (skill) rather
-    /// than a single file (rule).
+    /// than a single file (rule). Bundles never materialize.
     pub fn is_dir_artifact(self) -> bool {
         match self {
             Self::Skill => true,
-            Self::Rule => false,
+            Self::Rule | Self::Bundle => false,
         }
     }
 }
@@ -47,6 +53,7 @@ impl std::fmt::Display for ArtifactKind {
         f.write_str(match self {
             Self::Skill => "skill",
             Self::Rule => "rule",
+            Self::Bundle => "bundle",
         })
     }
 }
@@ -59,18 +66,25 @@ mod tests {
     fn subdir_and_dir_artifact() {
         assert_eq!(ArtifactKind::Skill.subdir(), "skills");
         assert_eq!(ArtifactKind::Rule.subdir(), "rules");
+        assert_eq!(ArtifactKind::Bundle.subdir(), "bundles");
         assert!(ArtifactKind::Skill.is_dir_artifact());
         assert!(!ArtifactKind::Rule.is_dir_artifact());
+        assert!(!ArtifactKind::Bundle.is_dir_artifact());
     }
 
     #[test]
     fn display_and_serde_are_lowercase_and_agree() {
         assert_eq!(ArtifactKind::Skill.to_string(), "skill");
         assert_eq!(ArtifactKind::Rule.to_string(), "rule");
+        assert_eq!(ArtifactKind::Bundle.to_string(), "bundle");
         assert_eq!(serde_json::to_string(&ArtifactKind::Skill).unwrap(), "\"skill\"");
         assert_eq!(
             serde_json::from_str::<ArtifactKind>("\"rule\"").unwrap(),
             ArtifactKind::Rule
+        );
+        assert_eq!(
+            serde_json::from_str::<ArtifactKind>("\"bundle\"").unwrap(),
+            ArtifactKind::Bundle
         );
     }
 }

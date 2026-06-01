@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -41,13 +42,19 @@ def write_config(
     project_dir: Path,
     skills: dict[str, str] | None = None,
     rules: dict[str, str] | None = None,
+    bundles: dict[str, str] | None = None,
 ) -> Path:
-    """Write a ``grimoire.toml`` with the given skill/rule references.
+    """Write a ``grimoire.toml`` with the given skill/rule/bundle refs.
 
     Each value is a fully-qualified ``registry/repo:tag`` (or ``@digest``)
     string, exactly as a user would write it. Returns the config path.
     """
-    lines: list[str] = ["[skills]"]
+    lines: list[str] = []
+    if bundles:
+        lines.append("[bundles]")
+        for name, ref in bundles.items():
+            lines.append(f'{name} = "{ref}"')
+    lines.append("[skills]")
     for name, ref in (skills or {}).items():
         lines.append(f'{name} = "{ref}"')
     lines.append("[rules]")
@@ -56,6 +63,24 @@ def write_config(
     cfg = project_dir / "grimoire.toml"
     cfg.write_text("\n".join(lines) + "\n")
     return cfg
+
+
+def make_bundle(
+    repo: str,
+    members: list[tuple[str, str, str]],
+    tag: str = "latest",
+) -> PublishedArtifact:
+    """Build and push a bundle artifact.
+
+    ``members`` is a list of ``(kind, name, id)`` tuples, where ``kind`` is
+    ``"skill"`` or ``"rule"``, ``name`` is the binding name, and ``id`` is
+    the fully-qualified member reference (floating tag or ``@digest``). The
+    bundle's single layer is the JSON members document Grimoire reads on
+    expansion.
+    """
+    doc = {"members": [{"kind": k, "name": n, "id": i} for (k, n, i) in members]}
+    layer = json.dumps(doc).encode()
+    return push_artifact(repo, tag, layer, "bundle")
 
 
 def make_artifact(

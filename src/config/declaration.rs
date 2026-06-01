@@ -44,6 +44,10 @@ pub struct DesiredSet {
     pub skills: BTreeMap<String, Identifier>,
     /// Declared rules, keyed by config name.
     pub rules: BTreeMap<String, Identifier>,
+    /// Declared bundles, keyed by config name. A bundle expands into its
+    /// member skills/rules at resolve time; the identifier is the bundle
+    /// artifact reference (floating tag or pinned digest).
+    pub bundles: BTreeMap<String, Identifier>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -62,6 +66,7 @@ impl Clone for DesiredSet {
         Self {
             skills: self.skills.clone(),
             rules: self.rules.clone(),
+            bundles: self.bundles.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -70,19 +75,29 @@ impl Clone for DesiredSet {
 impl PartialEq for DesiredSet {
     fn eq(&self, other: &Self) -> bool {
         // The cache is derived; equality speaks to declared content only.
-        self.skills == other.skills && self.rules == other.rules
+        self.skills == other.skills && self.rules == other.rules && self.bundles == other.bundles
     }
 }
 
 impl Eq for DesiredSet {}
 
 impl DesiredSet {
-    /// Construct from explicit maps (fixtures, programmatic callers). The
-    /// declaration-hash cache starts empty.
+    /// Construct from explicit skill/rule maps with no bundles (fixtures,
+    /// programmatic callers). The declaration-hash cache starts empty.
     pub fn from_parts(skills: BTreeMap<String, Identifier>, rules: BTreeMap<String, Identifier>) -> Self {
+        Self::from_parts_with_bundles(skills, rules, BTreeMap::new())
+    }
+
+    /// Construct from explicit skill, rule, and bundle maps.
+    pub fn from_parts_with_bundles(
+        skills: BTreeMap<String, Identifier>,
+        rules: BTreeMap<String, Identifier>,
+        bundles: BTreeMap<String, Identifier>,
+    ) -> Self {
         Self {
             skills,
             rules,
+            bundles,
             declaration_hash_cache: OnceLock::new(),
         }
     }

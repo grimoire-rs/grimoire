@@ -7,9 +7,10 @@ others can [`grim add`](./commands.md#add).
 ## Author locally
 
 A **skill** is a directory containing a `SKILL.md` and any supporting files; a
-**rule** is a single Markdown file. Grimoire detects which one you mean from the
-path — a directory packs as a skill, a `.md` file packs as a rule — and
-`--kind` overrides the guess when you need to.
+**rule** is a single Markdown file; a [**bundle**](./concepts.md#bundles) is a
+`.toml` file listing members. Grimoire detects which one you mean from the path
+— a directory packs as a skill, a `.md` file as a rule, a `.toml` file as a
+bundle — and `--kind` overrides the guess when you need to.
 
 ## Validate before you push
 
@@ -50,6 +51,47 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 An exact-version tag is immutable by default: if `1.2.3` already exists and
 points at different bytes, the release refuses rather than rewrite history.
 Pass `--force` only when you deliberately mean to move it.
+
+## Publishing bundles {#bundles}
+
+A [bundle](./concepts.md#bundles) groups skills and rules so consumers declare
+one reference instead of a dozen. You author it as a small TOML file whose
+`[skills]`/`[rules]` tables list the members — the same shape as a
+`grimoire.toml`:
+
+```toml
+# python-stack.toml
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+
+[rules]
+rust-style = "ghcr.io/acme/rust-style:2"
+```
+
+[`grim build`](./commands.md#build) validates it (a `.toml` path packs as a
+bundle), and [`grim release`](./commands.md#release) pushes it with the same
+cascade tags as any other artifact:
+
+```sh
+grim build ./python-stack.toml
+grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0
+```
+
+### Floating or pinned members {#pin}
+
+By default the bundle stores its members exactly as written — floating tags stay
+floating, and each consumer's [`grim lock`](./commands.md#lock) re-resolves them
+fresh. Add `--pin` to resolve every floating member to a digest at release time
+and freeze it into the published bundle:
+
+```sh
+grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
+```
+
+A pinned bundle is reproducible on its own: it always expands to the exact same
+member digests, even on an air-gapped or tunneled network that cannot re-resolve
+a tag. Re-run the release (a cron job tracking `:stable`, say) to roll the
+pinned members forward.
 
 ## Authenticate
 

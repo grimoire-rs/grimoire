@@ -29,7 +29,7 @@ pub struct BuildArgs {
     pub path: std::path::PathBuf,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule"])]
+    #[arg(long, value_parser = ["skill", "rule", "bundle"])]
     pub kind: Option<String>,
 }
 
@@ -50,11 +50,15 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
     if let Some(k) = forced {
         return Ok(match k {
             "skill" => ArtifactKind::Skill,
+            "bundle" => ArtifactKind::Bundle,
             _ => ArtifactKind::Rule,
         });
     }
     if path.is_dir() && path.join("SKILL.md").is_file() {
         Ok(ArtifactKind::Skill)
+    } else if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
+        // A `.toml` source file lists bundle members ([skills]/[rules]).
+        Ok(ArtifactKind::Bundle)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         Ok(ArtifactKind::Rule)
     } else {
@@ -77,6 +81,9 @@ pub fn validate_and_pack(
     source: Option<&str>,
 ) -> anyhow::Result<PackedArtifact> {
     match kind {
+        // Bundles are packed on a dedicated path (`pack_bundle`); the
+        // skill/rule validator never receives one.
+        ArtifactKind::Bundle => unreachable!("bundles are packed via the bundle path, not validate_and_pack"),
         ArtifactKind::Skill => {
             let fm = super::grim(validate_skill_dir(path))?;
             let tar = super::grim(pack_skill_dir(path))?;
@@ -110,6 +117,44 @@ pub fn validate_and_pack(
     }
 }
 
+/// Parse a bundle source file (a `grimoire.toml`-shaped document whose
+/// `[skills]`/`[rules]` tables are the members) into its name and member
+/// list. The bundle name is the file stem.
+///
+/// # Errors
+///
+/// A config parse/validation failure (78/79/74) or an I/O error.
+pub fn read_bundle_members(path: &Path) -> anyhow::Result<(String, Vec<crate::oci::bundle::BundleMember>)> {
+    use crate::oci::bundle::BundleMember;
+
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
+    })?;
+    let cfg = super::grim(crate::config::project_config::ProjectConfig::from_toml_str(&content))?;
+
+    let mut members = Vec::new();
+    for (name, id) in &cfg.set.skills {
+        members.push(BundleMember {
+            kind: ArtifactKind::Skill,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
+    for (name, id) in &cfg.set.rules {
+        members.push(BundleMember {
+            kind: ArtifactKind::Rule,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
+
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bundle".to_string());
+    Ok((name, members))
+}
+
 /// Run `grim build`.
 ///
 /// # Errors
@@ -118,6 +163,19 @@ pub fn validate_and_pack(
 /// (DataError 65) or an I/O error (74).
 pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildReport, ExitCode)> {
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
+
+    if kind == ArtifactKind::Bundle {
+        let (name, members) = read_bundle_members(&args.path)?;
+        let manifest = crate::oci::bundle::BundleManifest::new(members);
+        let layer = manifest
+            .to_layer_bytes()
+            .map_err(|e| anyhow::anyhow!("failed to serialize bundle layer: {e}"))?;
+        let layer_digest = crate::oci::Algorithm::Sha256.hash(&layer).to_string();
+        // Member count stands in for the annotation count in the report.
+        let report = BuildReport::new(kind, name, args.path.clone(), layer_digest, manifest.members.len());
+        return Ok((report, ExitCode::Success));
+    }
+
     // `build` is a local pre-flight: the version is a placeholder, no
     // source — `release` recomputes annotations with the real version.
     let packed = validate_and_pack(&args.path, kind, "0.0.0-build", None)?;

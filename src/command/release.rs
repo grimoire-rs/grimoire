@@ -22,12 +22,16 @@ use clap::Args;
 use crate::api::release_report::ReleaseReport;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::oci::access::OciAccess;
+use crate::oci::access::{OciAccess, Operation};
+use crate::oci::annotations::annotations_for_bundle;
+use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
 use crate::oci::manifest::{Descriptor, OciManifest};
+use crate::oci::reference::ArtifactRef;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind, cascade_tags};
-use crate::oci::{Algorithm, Identifier};
+use crate::oci::{Algorithm, ArtifactKind, Identifier};
+use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
-use super::build::{detect_kind, validate_and_pack};
+use super::build::{detect_kind, read_bundle_members, validate_and_pack};
 
 /// `grim release` arguments.
 #[derive(Debug, Args)]
@@ -39,7 +43,7 @@ pub struct ReleaseArgs {
     pub reference: String,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule"])]
+    #[arg(long, value_parser = ["skill", "rule", "bundle"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.
@@ -50,6 +54,12 @@ pub struct ReleaseArgs {
     /// digest (default: refuse).
     #[arg(long)]
     pub force: bool,
+
+    /// For a bundle: resolve every floating member tag to a digest and
+    /// freeze it into the published bundle (reproducible, tunnel-safe).
+    /// Ignored for skills and rules.
+    #[arg(long)]
+    pub pin: bool,
 }
 
 /// Run `grim release`.
@@ -70,7 +80,12 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
     let repo = id.without_tag();
-    let source = format!("{}/{}", repo.registry(), repo.repository());
+    let source = repo.registry_repository();
+
+    if kind == ArtifactKind::Bundle {
+        return release_bundle(ctx, args, &id, &repo, &version, &tags, &source).await;
+    }
+
     let packed = validate_and_pack(&args.path, kind, &version, Some(&source))?;
 
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
@@ -114,6 +129,103 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags, true);
     Ok((report, ExitCode::Success))
+}
+
+/// Release a bundle: pack its members document, optionally freezing
+/// floating member tags to digests (`--pin`), then push blob + manifest +
+/// cascade tags exactly like a skill/rule release.
+#[allow(clippy::too_many_arguments)]
+async fn release_bundle(
+    ctx: &Context,
+    args: &ReleaseArgs,
+    id: &Identifier,
+    repo: &Identifier,
+    version: &str,
+    tags: &[String],
+    source: &str,
+) -> anyhow::Result<(ReleaseReport, ExitCode)> {
+    let (name, mut members) = read_bundle_members(&args.path)?;
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+
+    // `--pin`: resolve every floating member to a digest and bake it in, so
+    // the published bundle is fully reproducible regardless of later tag
+    // movement (the strong guarantee air-gapped / tunneled consumers want).
+    if args.pin {
+        super::grim(pin_members(&access, &mut members).await)?;
+    }
+
+    let manifest = BundleManifest::new(members);
+    let layer = manifest
+        .to_layer_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to serialize bundle layer: {e}"))?;
+    let layer_digest = Algorithm::Sha256.hash(&layer);
+    let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source));
+    let oci_manifest = OciManifest {
+        media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        layers: vec![Descriptor {
+            digest: layer_digest.clone(),
+            media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+            size: layer.len() as u64,
+        }],
+        annotations,
+    };
+
+    if args.dry_run {
+        let preview = preview_manifest_digest(&oci_manifest);
+        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false);
+        return Ok((report, ExitCode::Success));
+    }
+
+    super::grim(access.push_blob(repo, &layer).await)?;
+    let manifest_digest = super::grim(access.push_manifest(repo, &oci_manifest).await)?;
+
+    if !args.force {
+        super::grim(guard_existing_version(&access, repo, version, &manifest_digest).await)?;
+    }
+    super::grim(move_tags(&access, repo, tags, version, &manifest_digest).await)?;
+
+    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true);
+    Ok((report, ExitCode::Success))
+}
+
+/// Resolve every floating member to a digest in place. A member already
+/// pinned is left untouched. Failures carry the member as context.
+async fn pin_members(
+    access: &Arc<dyn OciAccess>,
+    members: &mut [crate::oci::bundle::BundleMember],
+) -> Result<(), ResolveError> {
+    for member in members.iter_mut() {
+        let mid = Identifier::parse(&member.id).map_err(|_| {
+            member_error(
+                member,
+                ResolveErrorKind::BundleInvalid(format!("invalid member identifier '{}'", member.id)),
+            )
+        })?;
+        if mid.digest().is_some() {
+            continue;
+        }
+        let digest = access
+            .resolve_digest(&mid, Operation::Resolve)
+            .await
+            .map_err(|e| member_error(member, ResolveErrorKind::RegistryUnreachable(e)))?
+            .ok_or_else(|| member_error(member, ResolveErrorKind::TagNotFound))?;
+        member.id = mid.clone_with_digest(digest).to_string();
+    }
+    Ok(())
+}
+
+/// Build a [`ResolveError`] carrying a bundle member as its reference.
+fn member_error(member: &crate::oci::bundle::BundleMember, kind: ResolveErrorKind) -> ResolveError {
+    let id = Identifier::parse(&member.id)
+        .unwrap_or_else(|_| Identifier::new_registry(member.name.clone(), "invalid.localhost"));
+    ResolveError::new(
+        ArtifactRef {
+            kind: member.kind,
+            name: member.name.clone(),
+            id,
+        },
+        kind,
+    )
 }
 
 /// Parse `<ref>` with the context default registry.

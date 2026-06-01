@@ -152,12 +152,18 @@ struct SerializableView<'a> {
 }
 
 /// On-wire projection of a [`LockedArtifact`]: borrows `name`, emits a
-/// stripped-advisory copy of `pinned`. `kind` is intentionally absent —
-/// the array name carries it.
+/// stripped-advisory copy of `pinned`, and the bundle provenance only for
+/// members that came from a bundle. `kind` is intentionally absent — the
+/// array name carries it. A direct entry omits the bundle fields entirely,
+/// so its on-disk form is byte-identical to a pre-bundles lock.
 #[derive(Serialize)]
 struct LockedArtifactView<'a> {
     name: &'a str,
     pinned: crate::oci::PinnedIdentifier,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_tag: Option<&'a str>,
 }
 
 fn serialize_artifact_views<S>(items: &&[&LockedArtifact], serializer: S) -> Result<S::Ok, S::Error>
@@ -170,6 +176,8 @@ where
         seq.serialize_element(&LockedArtifactView {
             name: &a.name,
             pinned: a.pinned.strip_advisory(),
+            bundle: a.bundle.as_deref(),
+            bundle_tag: a.bundle_tag.as_deref(),
         })?;
     }
     seq.end()
@@ -194,11 +202,7 @@ mod tests {
     }
 
     fn artifact(name: &str, kind: ArtifactKind, p: crate::oci::PinnedIdentifier) -> LockedArtifact {
-        LockedArtifact {
-            name: name.to_string(),
-            kind,
-            pinned: p,
-        }
+        LockedArtifact::direct(name.to_string(), kind, p)
     }
 
     fn metadata() -> LockMetadata {
@@ -344,5 +348,33 @@ generated_at = "2099-01-01T00:00:00Z"
         let reparsed = GrimoireLock::from_toml_str(&first).expect("reparse");
         let second = reparsed.to_toml_string().expect("second");
         assert_eq!(first, second, "second pass must be byte-identical");
+    }
+
+    #[test]
+    fn round_trip_preserves_bundle_provenance() {
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![LockedArtifact {
+                name: "code-review".to_string(),
+                kind: ArtifactKind::Skill,
+                pinned: pinned("acme/code-review", Some("stable"), 'a'),
+                bundle: Some("ghcr.io/acme/stack".to_string()),
+                bundle_tag: Some("1.0.0".to_string()),
+            }],
+            rules: vec![],
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(out.contains("bundle = \"ghcr.io/acme/stack\""));
+        assert!(out.contains("bundle_tag = \"1.0.0\""));
+
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        let member = &reparsed.skills[0];
+        assert_eq!(member.bundle.as_deref(), Some("ghcr.io/acme/stack"));
+        assert_eq!(member.bundle_tag.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            out,
+            reparsed.to_toml_string().expect("second"),
+            "second pass byte-identical"
+        );
     }
 }

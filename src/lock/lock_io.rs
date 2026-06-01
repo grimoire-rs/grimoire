@@ -132,11 +132,7 @@ mod tests {
     }
 
     fn artifact(name: &str, p: PinnedIdentifier) -> LockedArtifact {
-        LockedArtifact {
-            name: name.to_string(),
-            kind: ArtifactKind::Skill,
-            pinned: p,
-        }
+        LockedArtifact::direct(name.to_string(), ArtifactKind::Skill, p)
     }
 
     fn lock_with(generated_at: &str, skills: Vec<LockedArtifact>) -> GrimoireLock {
