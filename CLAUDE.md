@@ -86,12 +86,12 @@ files:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `GRIM_HOME` | Root data directory | `~/.grimoire` |
+| `GRIM_HOME` | Root data directory (content store, catalog, global config, install state). Global-scope client output lands in vendor-native dirs, not here — see subsystem-file-structure.md | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short identifiers | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
-
-(Provisional — env surface grows as the implementation lands.)
+| `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill paths | (unset) |
+| `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills + rules), `COPILOT_HOME` replaces `~/.copilot` (skills), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills (additive — OpenCode scans both). Details → subsystem-file-structure.md | (unset) |
 
 ## Acceptance Test Structure
 

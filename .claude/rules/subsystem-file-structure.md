@@ -29,13 +29,81 @@ local index, and install links live under the data root.
 
 ## Install Layout (client targets)
 
-- A **skill** materializes as a directory tree under the client's `skills/`
-  dir. A **rule** materializes as the index `<name>.md` under `rules/`, and
-  — when the artifact carries an optional sibling support directory — that
-  directory installs **beside** the index as `rules/<name>/…` so the index's
-  relative links resolve. The two on-disk roots (index file + sibling dir)
-  are one footprint: the integrity hash folds both, and uninstall removes
-  both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
+### Skills
+
+A **skill** materializes as a directory tree under the client's `skills/`
+dir. Every file in the tree is copied verbatim, **except** `SKILL.md` when
+it carries tool-namespaced metadata keys (e.g. `claude.user-invocable` in
+the `metadata` map). In that case `SKILL.md` is **rendered per client**:
+known `<client>.<field>` keys are lifted to native typed top-level
+frontmatter, foreign-namespace keys are dropped, and the written file is
+marked `generated: true`. A plain skill with no tool-namespaced keys takes
+the fast path and installs byte-identical. See `arch-principles.md` ADR
+index → `adr_tool_namespaced_metadata_rendering.md`.
+
+### Rules
+
+A **rule** materializes as the index `<name>.md` under `rules/`, and —
+when the artifact carries an optional sibling support directory — that
+directory installs **beside** the index as `rules/<name>/…` so the index's
+relative links resolve. The two on-disk roots (index file + sibling dir)
+are one footprint: the integrity hash folds both, and uninstall removes
+both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
+
+Per-client rule transforms:
+
+- **Claude**: `paths:` is native Claude rule frontmatter. A plain rule
+  carrying no tool-namespaced metadata keys installs verbatim, marked
+  `generated: false` (fast path). A rule that carries any
+  `<vendor>.<field>` entry inside its `metadata` map is re-rendered:
+  own-namespace Claude keys lift per registry (empty today — unknown ones
+  warn + drop), foreign vendor keys drop silently, plain keys survive.
+  Written `generated: true`; if cleaned frontmatter is empty, the block
+  is omitted entirely.
+- **OpenCode**: frontmatter is stripped; the file written is a provenance
+  comment followed by the rule body. Marked `generated: true`. Loading is
+  wired through a managed glob entry in `opencode.json` (or `opencode.jsonc`
+  when present). grim adds the entry when the first OpenCode rule installs
+  and removes it when the last one uninstalls; the target file is
+  `.opencode/rules/<name>.md`.
+- **Copilot**: written to `.github/instructions/<name>.instructions.md`.
+  Frontmatter maps `paths` → `applyTo` (comma-joined into a single string)
+  and the optional `copilot.exclude-agent` key (authored in rule `metadata`)
+  → `excludeAgent` (enum: `code-review` or `cloud-agent`). A rule with
+  neither produces no frontmatter block at all. Marked `generated: true`.
+
+Support directory files are copied verbatim for all three clients. Only
+the index is ever transformed.
+
+### Global-scope paths
+
+For a **global-scope** install (`--global`), grim writes into each
+client's **native** user-level discovery directory rather than under
+`$GRIM_HOME`, so the files are found without extra configuration:
+
+| Client | Skills root | Rules path |
+|--------|-------------|------------|
+| **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` |
+| **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) |
+| **Copilot** | `~/.copilot/skills/<name>/` | `$GRIM_HOME/.github/instructions/<name>.instructions.md` (inert — no documented user-level instructions path; grim warns) |
+
+`$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
+
+**Vendor env overrides** (each client's own variable; the three directory
+variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
+**and** rewrites; empty value = unset):
+
+| Variable | Effect on global paths |
+|----------|------------------------|
+| `CLAUDE_CONFIG_DIR` | Replaces the entire `~/.claude` tree — Claude skills **and** rules root there |
+| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills land in `$COPILOT_HOME/skills/` |
+| `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills when set |
+| `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill paths |
+
+**Fallback**: env override → native default (`$HOME`-derived) → workspace
+layout under `$GRIM_HOME` for the affected client. The recorded install
+path is always absolute, so uninstall and integrity checking are
+unaffected regardless of which path was chosen at install time.
 
 ## Constraints
 
