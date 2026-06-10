@@ -3,17 +3,17 @@
 """`grim add` kind-inference and name-override acceptance tests.
 
 `grim add <reference>` now requires only the reference.  When `--kind` is
-omitted, the kind is inferred from the manifest's `com.grimoire.kind`
-annotation.  When `--name` is omitted, the binding name defaults to the
-reference's last path segment.  Both flags remain overridable.  A
-reference that cannot be resolved yields exit 65 (DataError /
-KindInferenceFailed).
+omitted, the kind is inferred from the manifest's OCI `artifactType`.  When
+`--name` is omitted, the binding name defaults to the reference's last path
+segment.  Both flags remain overridable.  A reference that cannot be
+resolved yields exit 65 (DataError / KindInferenceFailed).
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from src.helpers import make_artifact, write_config
+from src.registry import fetch_manifest
 
 
 def test_add_infers_kind_and_name_from_manifest(
@@ -38,6 +38,36 @@ def test_add_infers_kind_and_name_from_manifest(
     )
     assert out["status"] == "added"
     assert "@sha256:" in out["pinned"]
+
+
+def test_published_manifest_types_kind_via_artifact_type(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The wire contract: kind rides on `artifactType` + config media type,
+    not the retired `com.grimoire.kind` annotation, and `grim add` infers it."""
+    repo = f"{unique_repo}/rust-style"
+    ru = make_artifact(
+        repo,
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+
+    manifest = fetch_manifest(repo, "v1")
+    assert manifest["artifactType"] == "application/vnd.grimoire.rule.v1", (
+        f"manifest must carry the Grimoire artifactType, got {manifest.get('artifactType')!r}"
+    )
+    assert manifest["config"]["mediaType"] == "application/vnd.grimoire.rule.config.v1+json", (
+        f"config media type must be the Grimoire kind config type, got {manifest['config']['mediaType']!r}"
+    )
+    assert "com.grimoire.kind" not in manifest.get("annotations", {}), (
+        "the com.grimoire.kind annotation must no longer be published"
+    )
+
+    # End-to-end: kind inference works off the type alone (no annotation).
+    write_config(project_dir)
+    out = grim_at(project_dir).json("add", ru.fq)
+    assert out["kind"] == "rule"
 
 
 def test_add_name_override_replaces_inferred_name(

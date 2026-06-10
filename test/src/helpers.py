@@ -96,8 +96,8 @@ def make_artifact(
     expects it: a *skill* is a directory tree rooted at ``<name>/`` (e.g.
     ``{"code-review/SKILL.md": "..."}``); a *rule* is a single
     ``<name>.md`` file (e.g. ``{"rust-style.md": "..."}``). The caller
-    constructs the keys; this helper only tars + pushes them with a
-    ``com.grimoire.kind`` annotation.
+    constructs the keys; this helper only tars + pushes them, with the kind
+    carried by the OCI ``artifactType``.
 
     Returns the published reference incl. the manifest digest so tests can
     assert ``@sha256`` pins and retag for rolling-release scenarios.

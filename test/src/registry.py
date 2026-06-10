@@ -2,11 +2,13 @@
 # Copyright 2026 The Grimoire Authors
 """Minimal OCI registry client for the acceptance suite.
 
-The suite pushes single-layer OCI image artifacts to a local
-``registry:2`` on ``localhost:5000`` over plain HTTP using only the
-standard library (no extra test dependency). This mirrors what a real
-publisher does: a config blob, one uncompressed-tar layer blob, and an
-image manifest carrying the ``com.grimoire.kind`` annotation.
+The suite pushes single-layer OCI artifacts to a local ``registry:2`` on
+``localhost:5000`` over plain HTTP using only the standard library (no
+extra test dependency). This mirrors what a real publisher does: a tiny
+``{}`` config blob, one uncompressed-tar layer blob, and a manifest whose
+kind rides on the OCI ``artifactType`` and the config descriptor's media
+type (``application/vnd.grimoire.<kind>.v1`` /
+``application/vnd.grimoire.<kind>.config.v1+json``).
 """
 from __future__ import annotations
 
@@ -20,8 +22,25 @@ REGISTRY_HOST = "localhost:5000"
 REGISTRY_BASE = f"http://{REGISTRY_HOST}"
 
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
-_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 _LAYER_MEDIA_TYPE = "application/vnd.grimoire.artifact.layer.v1.tar"
+
+
+def _artifact_type(kind: str) -> str:
+    """The OCI ``artifactType`` for a Grimoire ``kind``."""
+    return f"application/vnd.grimoire.{kind}.v1"
+
+
+def _config_media_type(kind: str) -> str:
+    """The config-descriptor media type for a Grimoire ``kind``."""
+    return f"application/vnd.grimoire.{kind}.config.v1+json"
+
+
+def _kind_from_artifact_type(artifact_type: str) -> str:
+    """Parse ``application/vnd.grimoire.<kind>.v1`` back to ``<kind>``."""
+    prefix, suffix = "application/vnd.grimoire.", ".v1"
+    if artifact_type.startswith(prefix) and artifact_type.endswith(suffix):
+        return artifact_type[len(prefix) : -len(suffix)]
+    return "skill"
 
 
 def _sha256(data: bytes) -> str:
@@ -93,23 +112,21 @@ def push_artifact(
     """Push a single-layer OCI artifact and tag it.
 
     ``tar_bytes`` is the uncompressed artifact tar the materializer
-    expects. The manifest carries ``com.grimoire.kind`` (plus any extra
-    ``annotations``). Returns the published reference incl. the manifest
+    expects. The kind rides on the OCI ``artifactType`` and the config
+    descriptor's media type (per ``kind``); any extra ``annotations`` are
+    merged in as-is. Returns the published reference incl. the manifest
     digest, so callers can assert ``@sha256`` pins.
     """
-    config_blob = json.dumps({"grimoire": {"kind": kind}}).encode()
+    config_blob = b"{}"
     config_digest = _push_blob(repo, config_blob)
     layer_digest = _push_blob(repo, tar_bytes)
-
-    manifest_annotations = {"com.grimoire.kind": kind}
-    if annotations:
-        manifest_annotations.update(annotations)
 
     manifest = {
         "schemaVersion": 2,
         "mediaType": _MANIFEST_MEDIA_TYPE,
+        "artifactType": _artifact_type(kind),
         "config": {
-            "mediaType": _CONFIG_MEDIA_TYPE,
+            "mediaType": _config_media_type(kind),
             "digest": config_digest,
             "size": len(config_blob),
         },
@@ -120,8 +137,9 @@ def push_artifact(
                 "size": len(tar_bytes),
             }
         ],
-        "annotations": manifest_annotations,
     }
+    if annotations:
+        manifest["annotations"] = dict(annotations)
     manifest_bytes = json.dumps(manifest).encode()
     manifest_digest = _sha256(manifest_bytes)
     _put(
@@ -153,6 +171,20 @@ def tag_digest(repo: str, tag: str) -> str:
         return _sha256(resp.read())
 
 
+def fetch_manifest(repo: str, tag: str) -> dict:
+    """Fetch and JSON-decode the raw manifest a ``tag`` resolves to.
+
+    Lets a test assert the on-the-wire contract directly — `artifactType`,
+    the config descriptor's media type, the absence of legacy annotations.
+    """
+    req = urllib.request.Request(
+        f"{REGISTRY_BASE}/v2/{repo}/manifests/{tag}",
+        headers={"Accept": _MANIFEST_MEDIA_TYPE},
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
+
+
 def retag(repo: str, tag: str, target_digest: str) -> PublishedArtifact:
     """Re-point ``tag`` at an existing manifest ``target_digest``.
 
@@ -172,7 +204,7 @@ def retag(repo: str, tag: str, target_digest: str) -> PublishedArtifact:
         _MANIFEST_MEDIA_TYPE,
     )
     manifest = json.loads(manifest_bytes)
-    kind = manifest.get("annotations", {}).get("com.grimoire.kind", "skill")
+    kind = _kind_from_artifact_type(manifest.get("artifactType", ""))
     return PublishedArtifact(
         repo=repo, tag=tag, digest=_sha256(manifest_bytes), kind=kind
     )
