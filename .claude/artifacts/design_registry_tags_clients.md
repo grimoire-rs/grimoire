@@ -41,6 +41,13 @@ provisional project, so no on-disk migration shims (KISS/YAGNI).
   that the registry may not support `_catalog` (no more silent blank).
 
 ### 4. Persist artifact kind in OCI; make `add` kind optional
+> **Superseded by [adr_oci_artifact_type.md](./adr_oci_artifact_type.md):**
+> the kind discriminator moved from the `com.grimoire.kind` annotation to
+> the OCI `artifactType` + a per-kind config media type; the annotation is
+> retired. The `add`/catalog read seam (`kind_from_manifest`) is unchanged
+> in shape — only its source. The notes below describe the original
+> annotation-based design.
+
 - Kind is already stamped as the `com.grimoire.kind` annotation at push
   and read by the catalog — `add` just never used it.
 - `ArtifactKind::from_annotation(&str) -> Option<Self>` +

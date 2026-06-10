@@ -53,8 +53,11 @@ CLI command (clap parse)
 ## ADR Index
 
 Architecture decisions are recorded as `.claude/artifacts/adr_*.md`. Read
-the relevant ADRs before making decisions in the same domain. (No ADRs
-exist yet — this section grows as decisions are made.)
+the relevant ADRs before making decisions in the same domain.
+
+| ADR | Decision |
+|-----|----------|
+| [adr_oci_artifact_type.md](../artifacts/adr_oci_artifact_type.md) | Type artifacts with OCI `artifactType` + a Grimoire config media type per kind; retire the `com.grimoire.kind` annotation |
 
 ## Code Style Conventions
 
