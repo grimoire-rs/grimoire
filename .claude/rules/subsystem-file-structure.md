@@ -27,6 +27,16 @@ local index, and install links live under the data root.
   atomic rename must validate the data root sits on a single volume;
   cross-device hardlink/rename fails and must be handled explicitly.
 
+## Install Layout (client targets)
+
+- A **skill** materializes as a directory tree under the client's `skills/`
+  dir. A **rule** materializes as the index `<name>.md` under `rules/`, and
+  — when the artifact carries an optional sibling support directory — that
+  directory installs **beside** the index as `rules/<name>/…` so the index's
+  relative links resolve. The two on-disk roots (index file + sibling dir)
+  are one footprint: the integrity hash folds both, and uninstall removes
+  both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
+
 ## Constraints
 
 - Never assume a path operation crosses filesystems silently — check first.
