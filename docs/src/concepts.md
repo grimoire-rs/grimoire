@@ -109,16 +109,17 @@ Most commands operate on the discovered project by default and switch to the
 global scope with `--global`. The [TUI](./commands.md#tui) can flip between the
 two at runtime.
 
-## Editors
+## Clients {#clients}
 
 An installed artifact has to land somewhere the agent reads. Grimoire calls
-that destination an **editor target** and ships three: [Claude Code][claude],
+that destination a **client target** and ships three: [Claude Code][claude],
 [opencode][opencode], and [GitHub Copilot][copilot]. The same skill is
-transformed into each editor's native layout on install.
+transformed into each client's native layout on install.
 
-[`grim install`](./commands.md#install) writes to the target named by the
-`editor` option in your config, defaulting to `claude`; `--target` overrides it
-and accepts a comma-separated list to install into several editors at once.
+[`grim install`](./commands.md#install) writes to the targets listed in the
+`clients` option in your config, defaulting to `["claude"]`; `--client`
+overrides it and accepts a comma-separated list to install into several AI
+clients at once.
 
 ## The catalog
 

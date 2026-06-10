@@ -27,7 +27,7 @@ These apply to every subcommand:
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
 | [`grim add`](#add) | Declare a skill/rule and lock it. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
-| [`grim install`](#install) | Materialize the locked artifacts into the editor. |
+| [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
 | [`grim status`](#status) | Report the state of every declared artifact. |
 | [`grim remove`](#remove) | Undeclare an artifact (config + lock only). |
@@ -51,15 +51,20 @@ grim init --registry ghcr.io/acme
 
 ## grim add {#add}
 
-`grim add <kind> <name> <reference>` declares a skill or rule and immediately
-pins it in the lock. `<kind>` is `skill`, `rule`, or `bundle`, `<name>` is the
-local binding you reuse in later commands, and `<reference>` is
-`registry/repo:tag` or `registry/repo@sha256:…`.
+`grim add [--kind <skill|rule|bundle>] [--name <name>] <reference>` declares a
+skill, rule, or bundle and immediately pins it in the lock. `<reference>` is the
+only required argument — `registry/repo:tag` or `registry/repo@sha256:…`.
+
+When `--kind` is omitted, the kind is inferred from the artifact's
+`com.grimoire.kind` OCI annotation set at release time. When `--name` is
+omitted, the binding name defaults to the reference's last path segment. If the
+kind cannot be inferred (for example, a non-Grimoire image), `add` errors and
+asks you to supply `--kind` explicitly.
 
 ```sh
-grim add skill code-review ghcr.io/acme/code-review:1
-grim add rule rust-style ghcr.io/acme/rust-style:2
-grim add bundle python-stack ghcr.io/acme/python-stack:1
+grim add ghcr.io/acme/code-review:1
+grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2
+grim add --kind bundle ghcr.io/acme/python-stack:1
 ```
 
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
@@ -74,21 +79,22 @@ already locks what it declares.
 
 ## grim install {#install}
 
-Materializes every locked artifact into your editor's configuration directory.
-`--target <list>` selects editors (`claude`, `opencode`, `copilot`, comma
-separated), defaulting to the config `editor` option and then `claude`.
-`--force` overwrites a locally modified artifact instead of refusing it.
+Materializes every locked artifact into your AI clients' configuration
+directories. `--client <list>` selects AI clients (`claude`, `opencode`,
+`copilot`, comma-separated), overriding the config `clients` option (default
+`["claude"]`). `--force` overwrites a locally modified artifact instead of
+refusing it.
 
 ```sh
 grim install
-grim install --target claude,copilot
+grim install --client claude,copilot
 ```
 
 ## grim update {#update}
 
 `grim update [names…]` re-resolves floating tags, rolls the lock forward, and
 re-materializes only what changed. With no names it updates everything; pass
-binding names to scope it. Shares `--target` and `--force` with install.
+binding names to scope it. Shares `--client` and `--force` with install.
 
 ```sh
 grim update
@@ -160,9 +166,11 @@ it from the path.
 
 ## grim release {#release}
 
-`grim release <path> <reference>` validates, packs, and pushes an artifact,
-applying cascade tags (for example, a `1.2.3` release also moves `1`, `1.2`,
-and `latest`). `--dry-run` prints the push plan without pushing; `--force`
+`grim release <path> <reference>` validates, packs, and pushes an artifact.
+A full semver reference (e.g. `1.2.3`) applies cascade tags — `1.2.3`, `1.2`,
+`1`, and `latest` are all moved. A non-version tag (e.g. `canary`, `edge`)
+publishes only that exact tag with no cascade. A reference with no tag at all
+is an error. `--dry-run` prints the push plan without pushing; `--force`
 moves an existing exact-version tag that points at a different digest. A
 `.toml` path publishes a [bundle](./concepts.md#bundles); `--pin` then freezes
 its floating members to digests. See [Publishing](./publishing.md) for the full

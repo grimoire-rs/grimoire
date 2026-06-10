@@ -12,7 +12,7 @@ The declaration file. An `[options]` table holds defaults, and `[skills]` /
 ```toml
 [options]
 default_registry = "ghcr.io/acme"
-editor = "claude"
+clients = ["claude", "opencode"]
 
 [skills]
 code-review = "ghcr.io/acme/code-review:1"
@@ -22,9 +22,11 @@ commit-helper = "ghcr.io/acme/commit-helper:1"
 rust-style = "ghcr.io/acme/rust-style:2"
 ```
 
-`default_registry` lets you write short references; `editor` sets the default
-[install target](./concepts.md#editors). Unknown keys are rejected on parse, so
-a typo surfaces immediately rather than silently doing nothing.
+`default_registry` lets you write short references; `clients` selects which
+[AI clients](./concepts.md#clients) `grim install` and `grim update` materialize
+into. It accepts a TOML array of client names (`claude`, `opencode`, `copilot`);
+when absent it defaults to `["claude"]`. Unknown keys are rejected on parse, so a
+typo surfaces immediately rather than silently doing nothing.
 
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member

@@ -18,27 +18,28 @@ grim init --registry ghcr.io/acme
 ## 2. Declare an artifact
 
 `grim add` records a skill or rule in `grimoire.toml` and immediately pins it
-in `grimoire.lock`. The arguments are the kind (`skill` or `rule`), a local
-binding name you will reuse in later commands, and the reference to fetch:
+in `grimoire.lock`. The only required argument is the reference to fetch; the
+kind is inferred from the artifact's OCI annotation and the binding name
+defaults to the reference's last path segment:
 
 ```sh
-grim add skill code-review ghcr.io/acme/code-review:1
+grim add ghcr.io/acme/code-review:1
 ```
 
 The reference is `registry/repo:tag` (or `registry/repo@sha256:…` to pin an
 exact digest). A floating tag like `:1` tracks the newest `1.x` release, which
 is what makes [`grim update`](#5-upgrade) meaningful later.
 
-## 3. Install into your editor
+## 3. Install into your AI client(s)
 
-`grim install` materializes every locked artifact into your agent's
+`grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets [Claude Code][claude]; pass
-`--target` for [opencode][opencode] or [GitHub Copilot][copilot], comma
-separated:
+`--client` to select [opencode][opencode] or [GitHub Copilot][copilot], or
+supply a comma-separated list to install into several AI clients at once:
 
 ```sh
 grim install
-grim install --target claude,copilot
+grim install --client claude,copilot
 ```
 
 ## 4. Check the state

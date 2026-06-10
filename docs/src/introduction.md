@@ -17,7 +17,7 @@ There is no `npm install` for an agent skill.
 Grimoire treats a skill or rule as a versioned, content-addressed artifact and
 stores it in a registry you already run. You declare what you want in
 `grimoire.toml`, pin exact digests in `grimoire.lock`, and materialize the
-files into your editor of choice. Upgrading is `grim update`; sharing is
+files into your AI client of choice. Upgrading is `grim update`; sharing is
 `grim release`.
 
 Because the transport is plain OCI, you inherit a registry's authentication,
@@ -33,7 +33,7 @@ TLS, and replication for free — there is no bespoke server to operate.
 
 - [Installation][install] — get the `grim` binary.
 - [Quick Start][quickstart] — install your first skill in five commands.
-- [Concepts][concepts] — skills versus rules, scopes, locks, and editors.
+- [Concepts][concepts] — skills versus rules, scopes, locks, and clients.
 - [Command Reference][commands] — every subcommand and flag.
 
 <!-- external -->
