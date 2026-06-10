@@ -19,6 +19,7 @@ use crate::api::artifact_status::UpdateAction;
 use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
+use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::installer::install_all;
 use crate::install::materializer::DefaultMaterializer;
@@ -109,6 +110,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // overwritten — `status` still surfaces it as `modified` beforehand.
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
+        scope.scope,
         &args.client,
         &scope.options.clients,
     ))?;
@@ -128,6 +130,30 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let pruned = prune_orphans(&mut state, &new_lock, args.force).map_err(|e| state_io(&e.path, e.source))?;
 
     state.save().map_err(|e| state_io(&scope.state_path, e))?;
+
+    // Converge vendor-owned config on the new state (covers both fresh
+    // installs and pruned orphans in one pass) for every involved client.
+    // A pruned orphan may have been recorded for clients *outside* this
+    // run's `--client` selection — union them in, or a managed config
+    // entry (e.g. OpenCode's `instructions` glob) outlives its files.
+    let mut sync_clients: Vec<ClientTarget> = target.clients().to_vec();
+    for orphan in pruned.iter().filter(|p| p.outcome == PruneOutcome::Pruned) {
+        for client in &orphan.clients {
+            if let Ok(client) = client.parse::<ClientTarget>()
+                && !sync_clients.contains(&client)
+            {
+                sync_clients.push(client);
+            }
+        }
+    }
+    for client in sync_clients {
+        super::grim(
+            client
+                .vendor()
+                .sync_config(&state, &scope.workspace, scope.scope)
+                .map_err(|e| crate::install::install_error::InstallError::config_sync(client.to_string(), e)),
+        )?;
+    }
 
     // Build the report before surfacing any error so it reflects the new
     // lock; then propagate the first hard install error if there was one.
@@ -266,6 +292,7 @@ mod tests {
                 old: Digest::Sha256("e".repeat(64)),
                 outcome: PruneOutcome::Pruned,
                 removed: vec![],
+                clients: vec![],
             },
             PrunedArtifact {
                 kind: ArtifactKind::Rule,
@@ -273,6 +300,7 @@ mod tests {
                 old: Digest::Sha256("f".repeat(64)),
                 outcome: PruneOutcome::KeptModified,
                 removed: vec![],
+                clients: vec![],
             },
         ];
         let r = build_report(&new, None, &pruned);

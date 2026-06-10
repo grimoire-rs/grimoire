@@ -5,15 +5,20 @@
 //!
 //! A `SKILL.md` is a Markdown file whose leading block, delimited by two
 //! `---` lines, is YAML frontmatter; everything after the closing `---`
-//! is the Markdown body. The frontmatter carries the two required Agent
-//! Skills fields (`name`, `description`), the standard optional fields,
-//! the Claude extension fields, and an arbitrary `metadata` map.
+//! is the Markdown body. The frontmatter carries **only the Agent Skills
+//! standard fields**: the two required ones (`name`, `description`), the
+//! standard optional ones (`license`, `compatibility`, `allowed-tools`),
+//! and an arbitrary string-valued `metadata` map.
+//!
+//! Tool-specific capabilities (Claude's `user-invocable`, `model`, …) are
+//! NOT top-level fields: they are authored as namespaced `metadata` keys
+//! (`claude.<field>: "…"`) and projected into each client's native
+//! frontmatter at install time by [`crate::install::render`].
 //!
 //! Skills must be **forward-compatible**: this model does NOT use
-//! `deny_unknown_fields`. Known Claude extension fields are modelled
-//! explicitly; any other unknown key is preserved via `#[serde(flatten)]`
-//! into [`SkillFrontmatter::extra`] so a newer skill never fails to parse
-//! on an older `grim`.
+//! `deny_unknown_fields`. Any unknown key is preserved via
+//! `#[serde(flatten)]` into [`SkillFrontmatter::extra`] so a newer skill
+//! never fails to parse on an older `grim`.
 
 use std::collections::BTreeMap;
 
@@ -46,38 +51,11 @@ pub struct SkillFrontmatter {
     #[serde(rename = "allowed-tools", default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<String>,
 
-    /// Arbitrary key/value metadata (e.g. `keywords`, `category`).
+    /// Arbitrary key/value metadata (e.g. `keywords`, `category`), plus
+    /// tool-namespaced capability keys (`claude.<field>`) projected into
+    /// native client frontmatter at install time.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
-
-    // ── Claude extension fields (modelled, tolerated) ───────────────────
-    /// Claude: whether a user may invoke the skill directly.
-    #[serde(rename = "user-invocable", default, skip_serializing_if = "Option::is_none")]
-    pub user_invocable: Option<bool>,
-
-    /// Claude: whether the model is forbidden from auto-invoking the skill.
-    #[serde(
-        rename = "disable-model-invocation",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub disable_model_invocation: Option<bool>,
-
-    /// Claude: a short argument hint shown in the slash-command UI.
-    #[serde(rename = "argument-hint", default, skip_serializing_if = "Option::is_none")]
-    pub argument_hint: Option<String>,
-
-    /// Claude: trigger phrases that should surface the skill.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<String>,
-
-    /// Claude: free-text "when to use" guidance.
-    #[serde(rename = "when_to_use", default, skip_serializing_if = "Option::is_none")]
-    pub when_to_use: Option<String>,
-
-    /// Claude: free-text additional context.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
 
     /// Forward-compat: any unknown frontmatter key, preserved verbatim.
     #[serde(flatten)]
@@ -176,40 +154,62 @@ mod tests {
     }
 
     #[test]
-    fn parses_standard_and_claude_fields() {
+    fn parses_standard_fields_and_namespaced_metadata() {
         let doc = r#"---
 name: next
 description: Suggest the next command.
 license: Apache-2.0
 compatibility: claude>=2
 allowed-tools: Bash,Read
-user-invocable: true
-disable-model-invocation: true
-argument-hint: "[--list]"
-triggers:
-  - "what's next"
-  - "next step"
-when_to_use: when the user asks what to do next
-context: extra context here
 metadata:
   keywords: workflow,planning
   category: meta
+  claude.user-invocable: "true"
+  claude.disable-model-invocation: "true"
+  claude.argument-hint: "[--list]"
+  claude.when-to-use: when the user asks what to do next
 ---
 # /next
 "#;
         let fm = SkillFrontmatter::parse_doc(doc, p()).expect("parse");
         assert_eq!(fm.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(fm.compatibility.as_deref(), Some("claude>=2"));
         assert_eq!(fm.allowed_tools.as_deref(), Some("Bash,Read"));
-        assert_eq!(fm.user_invocable, Some(true));
-        assert_eq!(fm.disable_model_invocation, Some(true));
-        assert_eq!(fm.argument_hint.as_deref(), Some("[--list]"));
-        assert_eq!(fm.triggers, vec!["what's next", "next step"]);
-        assert_eq!(fm.when_to_use.as_deref(), Some("when the user asks what to do next"));
         assert_eq!(
             fm.metadata.get("keywords").map(String::as_str),
             Some("workflow,planning")
         );
+        // Tool capabilities ride in `metadata` as namespaced string keys —
+        // they are NOT typed top-level fields (agentskills purity).
+        assert_eq!(
+            fm.metadata.get("claude.user-invocable").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            fm.metadata.get("claude.when-to-use").map(String::as_str),
+            Some("when the user asks what to do next")
+        );
         assert!(fm.extra.is_empty(), "all keys were known");
+    }
+
+    #[test]
+    fn legacy_top_level_claude_fields_land_in_extra() {
+        // Former typed Claude extension fields are no longer modelled;
+        // forward-compat keeps them parseable (preserved in `extra`).
+        let doc = "---\nname: s\ndescription: d\nuser-invocable: true\nwhen_to_use: sometimes\n---\nbody\n";
+        let fm = SkillFrontmatter::parse_doc(doc, p()).expect("parse");
+        assert_eq!(fm.extra.get("user-invocable"), Some(&serde_yaml::Value::Bool(true)));
+        assert!(fm.extra.contains_key("when_to_use"));
+    }
+
+    #[test]
+    fn namespaced_metadata_round_trips() {
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  claude.model: opus\n  keywords: a,b\n---\nbody\n";
+        let fm = SkillFrontmatter::parse_doc(doc, p()).expect("parse");
+        let yaml = serde_yaml::to_string(&fm).unwrap();
+        let again: SkillFrontmatter = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(again.metadata, fm.metadata);
+        assert_eq!(again.metadata.get("claude.model").map(String::as_str), Some("opus"));
     }
 
     #[test]

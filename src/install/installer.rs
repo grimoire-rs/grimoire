@@ -240,6 +240,18 @@ async fn install_one<M: ArtifactMaterializer>(
     let mut client_records = Vec::with_capacity(target.clients().len());
     for client in target.clients() {
         let dest = target.path_for(*client, kind, &artifact.name);
+        // Copilot documents no user-level instructions location: a
+        // global-scope rule lands in the workspace layout, which Copilot
+        // never scans. Install proceeds (consistent footprint) but warn.
+        if kind == ArtifactKind::Rule
+            && *client == crate::install::client_target::ClientTarget::Copilot
+            && target.scope() == crate::config::scope::ConfigScope::Global
+        {
+            tracing::warn!(
+                "Copilot has no user-level instructions path; global rule '{}' will not be discovered by Copilot",
+                artifact.name
+            );
+        }
         // A rule's support dir always lives at `<parent>/<name>/`, whether
         // or not *this* version ships one. `cleanup` is that location (so a
         // version that drops its support dir still reaps the stale one);
@@ -548,7 +560,7 @@ mod tests {
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -568,7 +580,7 @@ mod tests {
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -594,7 +606,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blob_v1 = rule_tar("rust-style", b"v1\n");
         let lock_v1 = lock_of(vec![locked_rule("rust-style", &blob_v1)]);
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -631,7 +643,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blob = rule_tar("rust-style", b"# rust\n");
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -659,7 +671,7 @@ mod tests {
         // The manifest advertises the layer digest of `blob`, but the
         // registry serves `tampered` bytes — a corrupt-registry scenario.
         let wrong = rule_tar("rust-style", b"tampered\n");
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -681,7 +693,7 @@ mod tests {
         let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
         let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -718,7 +730,7 @@ mod tests {
         let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
         let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 
@@ -748,7 +760,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blob_v1 = multi_rule_tar("my-rule", b"# index v1\n", &[("examples.md", b"# ex\n")]);
         let lock_v1 = lock_of(vec![locked_rule("my-rule", &blob_v1)]);
-        let target = InstallTarget::new(dir.path(), vec![]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
 

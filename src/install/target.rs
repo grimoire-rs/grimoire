@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
 
 use super::client_target::ClientTarget;
@@ -20,15 +21,17 @@ use super::install_error::InstallError;
 #[derive(Debug, Clone)]
 pub struct InstallTarget {
     workspace: PathBuf,
+    scope: ConfigScope,
     clients: Vec<ClientTarget>,
 }
 
 impl InstallTarget {
-    /// Build a target for the given clients rooted at `workspace`.
+    /// Build a target for the given clients rooted at `workspace` for
+    /// `scope` (global scope resolves vendor-native user-level paths).
     ///
     /// `clients` defaults to `[Claude]` when empty so call sites with no
     /// `--client` and no config default keep the single-client behavior.
-    pub fn new(workspace: &Path, clients: Vec<ClientTarget>) -> Self {
+    pub fn new(workspace: &Path, scope: ConfigScope, clients: Vec<ClientTarget>) -> Self {
         let clients = if clients.is_empty() {
             vec![ClientTarget::Claude]
         } else {
@@ -36,6 +39,7 @@ impl InstallTarget {
         };
         Self {
             workspace: workspace.to_path_buf(),
+            scope,
             clients,
         }
     }
@@ -49,7 +53,12 @@ impl InstallTarget {
     ///
     /// [`super::install_error::InstallErrorKind::UnsupportedClient`] for
     /// an unknown client name.
-    pub fn parse(workspace: &Path, flag_values: &[String], config_default: &[String]) -> Result<Self, InstallError> {
+    pub fn parse(
+        workspace: &Path,
+        scope: ConfigScope,
+        flag_values: &[String],
+        config_default: &[String],
+    ) -> Result<Self, InstallError> {
         let source: &[String] = if flag_values.is_empty() {
             config_default
         } else {
@@ -74,7 +83,7 @@ impl InstallTarget {
                 clients.push(client);
             }
         }
-        Ok(Self::new(workspace, clients))
+        Ok(Self::new(workspace, scope, clients))
     }
 
     /// The client targets, in declared order (deduplicated).
@@ -87,9 +96,14 @@ impl InstallTarget {
         &self.workspace
     }
 
+    /// The scope this target installs for.
+    pub fn scope(&self) -> ConfigScope {
+        self.scope
+    }
+
     /// The install path for `(kind, name)` under `client`.
     pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
-        client.path_for(&self.workspace, kind, name)
+        client.path_for(&self.workspace, self.scope, kind, name)
     }
 }
 
@@ -99,17 +113,24 @@ mod tests {
 
     #[test]
     fn empty_defaults_to_claude() {
-        let t = InstallTarget::new(Path::new("/w"), vec![]);
+        let t = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![]);
         assert_eq!(t.clients(), &[ClientTarget::Claude]);
     }
 
     #[test]
     fn parse_comma_list_dedups_and_orders() {
-        let t = InstallTarget::parse(Path::new("/w"), &["claude,copilot".to_string()], &[]).unwrap();
+        let t = InstallTarget::parse(
+            Path::new("/w"),
+            ConfigScope::Project,
+            &["claude,copilot".to_string()],
+            &[],
+        )
+        .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Claude, ClientTarget::Copilot]);
         // Repeated flag values merge.
         let t2 = InstallTarget::parse(
             Path::new("/w"),
+            ConfigScope::Project,
             &["copilot".to_string(), "copilot".to_string(), "claude".to_string()],
             &[],
         )
@@ -120,23 +141,35 @@ mod tests {
     #[test]
     fn parse_falls_back_to_config_default() {
         // A config `clients` list (here two entries) is used when no flag.
-        let t = InstallTarget::parse(Path::new("/w"), &[], &["opencode".to_string(), "claude".to_string()]).unwrap();
+        let t = InstallTarget::parse(
+            Path::new("/w"),
+            ConfigScope::Project,
+            &[],
+            &["opencode".to_string(), "claude".to_string()],
+        )
+        .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::OpenCode, ClientTarget::Claude]);
-        let t2 = InstallTarget::parse(Path::new("/w"), &[], &[]).unwrap();
+        let t2 = InstallTarget::parse(Path::new("/w"), ConfigScope::Project, &[], &[]).unwrap();
         assert_eq!(t2.clients(), &[ClientTarget::Claude]);
         // A flag list overrides the config default entirely.
-        let t3 = InstallTarget::parse(Path::new("/w"), &["copilot".to_string()], &["claude".to_string()]).unwrap();
+        let t3 = InstallTarget::parse(
+            Path::new("/w"),
+            ConfigScope::Project,
+            &["copilot".to_string()],
+            &["claude".to_string()],
+        )
+        .unwrap();
         assert_eq!(t3.clients(), &[ClientTarget::Copilot]);
     }
 
     #[test]
     fn parse_rejects_unknown_client() {
-        assert!(InstallTarget::parse(Path::new("/w"), &["vscode".to_string()], &[]).is_err());
+        assert!(InstallTarget::parse(Path::new("/w"), ConfigScope::Project, &["vscode".to_string()], &[]).is_err());
     }
 
     #[test]
     fn path_for_delegates_to_client() {
-        let t = InstallTarget::new(Path::new("/w"), vec![ClientTarget::Copilot]);
+        let t = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![ClientTarget::Copilot]);
         assert_eq!(
             t.path_for(ClientTarget::Copilot, ArtifactKind::Rule, "rust-style"),
             PathBuf::from("/w/.github/instructions/rust-style.instructions.md")

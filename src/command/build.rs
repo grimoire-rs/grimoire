@@ -34,6 +34,7 @@ pub struct BuildArgs {
 }
 
 /// The validated + packed artifact, shared by `build` and `release`.
+#[derive(Debug)]
 pub struct PackedArtifact {
     /// Skill or rule.
     pub kind: ArtifactKind,
@@ -86,6 +87,15 @@ pub fn validate_and_pack(
         ArtifactKind::Bundle => unreachable!("bundles are packed via the bundle path, not validate_and_pack"),
         ArtifactKind::Skill => {
             let fm = super::grim(validate_skill_dir(path))?;
+            // Publish-time gate for the per-client projection: a known
+            // tool-namespaced metadata key with a bad literal fails here,
+            // before the artifact can reach a registry; typo-guard
+            // warnings surface on stderr.
+            let warnings =
+                super::grim(crate::install::render::validate_namespaced_metadata(&fm).map_err(metadata_invalid(path)))?;
+            for warning in warnings {
+                tracing::warn!("{}: {warning}", path.display());
+            }
             let tar = super::grim(pack_skill_dir(path))?;
             let annotations = annotations_for_skill(&fm, version, source);
             Ok(PackedArtifact {
@@ -97,6 +107,12 @@ pub fn validate_and_pack(
         }
         ArtifactKind::Rule => {
             let fm = super::grim(validate_rule_file(path))?;
+            // Same gate for rules (`copilot.exclude-agent` today).
+            let warnings =
+                super::grim(crate::install::render::validate_rule_metadata(&fm).map_err(metadata_invalid(path)))?;
+            for warning in warnings {
+                tracing::warn!("{}: {warning}", path.display());
+            }
             let doc = std::fs::read_to_string(path).map_err(|e| {
                 crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
             })?;
@@ -115,6 +131,12 @@ pub fn validate_and_pack(
             })
         }
     }
+}
+
+/// Wrap a projection failure as a path-attributed `SkillError`
+/// (`MetadataInvalid` ⇒ DataError 65).
+fn metadata_invalid(path: &Path) -> impl Fn(crate::install::render::RenderError) -> crate::skill::SkillError + use<'_> {
+    move |e| crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(Box::new(e)))
 }
 
 /// Parse a bundle source file (a `grimoire.toml`-shaped document whose
@@ -254,5 +276,31 @@ mod tests {
         let dir = tmp.path().join("code-review");
         write(&dir.join("SKILL.md"), "---\nname: wrong-name\ndescription: d\n---\n");
         assert!(validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).is_err());
+    }
+
+    #[test]
+    fn validate_and_pack_rejects_bad_namespaced_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(
+            &dir.join("SKILL.md"),
+            "---\nname: s\ndescription: d\nmetadata:\n  claude.user-invocable: \"maybe\"\n---\n",
+        );
+        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(format!("{err:#}").contains("claude.user-invocable"), "{err:#}");
+    }
+
+    #[test]
+    fn validate_and_pack_rejects_bad_rule_exclude_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("r.md");
+        write(
+            &f,
+            "---\npaths: [\"a\"]\nmetadata:\n  copilot.exclude-agent: everything\n---\nbody\n",
+        );
+        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(format!("{err:#}").contains("copilot.exclude-agent"), "{err:#}");
     }
 }

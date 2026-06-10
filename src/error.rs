@@ -167,7 +167,7 @@ fn classify_install(err: &InstallError) -> ExitCode {
         InstallErrorKind::IntegrityMismatch { .. }
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
-        InstallErrorKind::TargetIo { source, .. } => classify_io(source),
+        InstallErrorKind::TargetIo { source, .. } | InstallErrorKind::ConfigSync { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
     }
 }
@@ -181,7 +181,8 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::NameInvalid(_)
         | SkillErrorKind::DescriptionInvalid(_)
         | SkillErrorKind::FrontmatterParse(_)
-        | SkillErrorKind::MissingFrontmatter => ExitCode::DataError,
+        | SkillErrorKind::MissingFrontmatter
+        | SkillErrorKind::MetadataInvalid(_) => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }
 }

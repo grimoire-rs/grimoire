@@ -18,6 +18,7 @@ use std::io::{self};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
@@ -482,12 +483,30 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 
     let mut install_state =
         InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
+        .get(kind, &name)
+        .map(|r| {
+            r.client_outputs()
+                .iter()
+                .filter_map(|c| c.client.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let result = crate::install::uninstall::uninstall(&mut install_state, kind, &name)
         .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
     if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
         install_state
             .save()
             .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
+    }
+    // Converge vendor-owned config for every client the removed record
+    // carried, mirroring `command::uninstall`. `with_context` keeps the
+    // `io::Error` source chain (kind, config path) intact for the popup.
+    for client in involved_clients {
+        client
+            .vendor()
+            .sync_config(&install_state, &ctx.workspace, ctx.scope)
+            .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
     }
 
     // Drop the lock pin so the badge no longer derives "installed".
@@ -558,7 +577,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         .await
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
 
-    let target = InstallTarget::parse(&ctx.workspace, &[], &ctx.clients_default)
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let mut install_state =
         InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
@@ -578,6 +597,16 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
     install_state
         .save()
         .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
+
+    // Converge vendor-owned config on the new state, mirroring
+    // `command::install`. `with_context` keeps the `io::Error` source
+    // chain (kind, config path) intact for the popup.
+    for client in target.clients() {
+        client
+            .vendor()
+            .sync_config(&install_state, &ctx.workspace, ctx.scope)
+            .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
+    }
 
     // Persist the resolved single-artifact lock alongside the scope so the
     // badge derivation (and a later command run) observes the new pin.

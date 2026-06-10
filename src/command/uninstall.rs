@@ -67,10 +67,31 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
 
     // 1. Delete materialized files + drop the install-state record.
     let mut state = super::grim(InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e)))?;
+    let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
+        .get(kind, &args.name)
+        .map(|r| {
+            r.client_outputs()
+                .iter()
+                .filter_map(|c| c.client.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let result = super::grim(uninstall(&mut state, kind, &args.name).map_err(|e| state_io(&scope.workspace, e)))?;
     let file_removed = result.outcome == UninstallOutcome::Removed;
     if file_removed {
         super::grim(state.save().map_err(|e| state_io(&scope.state_path, e)))?;
+    }
+
+    // Converge vendor-owned config for every client the removed record
+    // carried (e.g. drops OpenCode's managed `instructions` glob when the
+    // last OpenCode rule is gone).
+    for client in involved_clients {
+        super::grim(
+            client
+                .vendor()
+                .sync_config(&state, &scope.workspace, scope.scope)
+                .map_err(|e| crate::install::install_error::InstallError::config_sync(client.to_string(), e)),
+        )?;
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later

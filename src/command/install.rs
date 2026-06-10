@@ -65,6 +65,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
 
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
+        scope.scope,
         &args.client,
         &scope.options.clients,
     ))?;
@@ -77,6 +78,17 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     // Persist whatever progress was made (some artifacts may have
     // installed before another failed) before surfacing the first error.
     super::grim(state.save().map_err(|e| state_io(&scope.state_path, e)))?;
+
+    // Converge vendor-owned config on the new state (e.g. OpenCode's
+    // managed `instructions` glob) for every involved client.
+    for client in target.clients() {
+        super::grim(
+            client
+                .vendor()
+                .sync_config(&state, &scope.workspace, scope.scope)
+                .map_err(|e| crate::install::install_error::InstallError::config_sync(client.to_string(), e)),
+        )?;
+    }
 
     finish(outcomes)
 }

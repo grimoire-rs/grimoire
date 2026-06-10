@@ -72,6 +72,11 @@ pub enum SkillErrorKind {
     #[error("missing YAML frontmatter")]
     MissingFrontmatter,
 
+    /// A tool-namespaced metadata key carries an invalid literal (the
+    /// per-client projection would fail at install time).
+    #[error("invalid tool metadata")]
+    MetadataInvalid(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     /// A filesystem operation failed.
     #[error("I/O error")]
     Io(#[source] io::Error),

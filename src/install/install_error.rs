@@ -41,6 +41,16 @@ impl InstallError {
     pub fn without_reference(kind: InstallErrorKind) -> Self {
         Self { reference: None, kind }
     }
+
+    /// Wrap a vendor config sync failure with the client being synced.
+    /// The triggering install/update/uninstall already completed; only
+    /// the config convergence failed.
+    pub fn config_sync(client: impl Into<String>, source: io::Error) -> Self {
+        Self::without_reference(InstallErrorKind::ConfigSync {
+            client: client.into(),
+            source,
+        })
+    }
 }
 
 impl std::fmt::Display for InstallError {
@@ -78,6 +88,15 @@ pub enum InstallErrorKind {
     #[error("I/O error for {path}")]
     TargetIo {
         path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    /// Converging a vendor-owned config file failed after the triggering
+    /// operation completed. The source carries the config-file path.
+    #[error("vendor config sync failed for client '{client}'")]
+    ConfigSync {
+        client: String,
         #[source]
         source: io::Error,
     },

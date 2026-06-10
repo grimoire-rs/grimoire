@@ -5,9 +5,12 @@
 //!
 //! A rule is a single Markdown file with an optional leading
 //! `---`-delimited YAML block carrying a `paths:` glob list (the editor
-//! path-scope contract) plus any forward-compat keys. Unlike a skill, a
-//! rule's frontmatter is entirely optional — a bare `.md` is a valid rule
-//! with an empty path scope.
+//! path-scope contract), an optional `metadata` map (tool-namespaced
+//! capability keys such as `copilot.exclude-agent`, mirroring the skill
+//! authoring pattern), plus any forward-compat keys. Plain catalog keys
+//! (`keywords`, `summary`) stay top-level — they are not vendor-specific.
+//! Unlike a skill, a rule's frontmatter is entirely optional — a bare
+//! `.md` is a valid rule with an empty path scope.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +28,12 @@ pub struct RuleFrontmatter {
     /// The glob patterns this rule auto-loads on (may be empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+
+    /// String key/value metadata: tool-namespaced capability keys
+    /// (`copilot.exclude-agent`) projected per client at install time,
+    /// mirroring the skill `metadata` map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 
     /// Forward-compat: any unknown frontmatter key, preserved verbatim.
     #[serde(flatten)]

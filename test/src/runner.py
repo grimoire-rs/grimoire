@@ -37,22 +37,44 @@ class GrimRunner:
     """Wraps the ``grim`` binary with per-test environment isolation.
 
     Each instance carries its own minimal environment so tests never leak
-    host state into ``grim``.
+    host state into ``grim``.  In particular, ``HOME`` is an isolated
+    temporary directory (sibling of ``grim_home``, at ``<parent>/home``)
+    so that global-scope installs that target vendor-native user-level
+    discovery paths (``~/.claude/``, ``~/.config/opencode/``, etc.) write
+    into the isolated tree and never touch the developer's real home
+    directory.  The isolated home is exposed via the ``home`` property.
+    ``XDG_CONFIG_HOME`` is set explicitly to ``<home>/.config`` for
+    determinism (overrides any ambient value).
     """
 
     def __init__(self, binary: Path, grim_home: Path, cwd: Path | None = None):
         self.binary = binary
         self.grim_home = grim_home
         self.cwd = cwd
+        # Isolated home: sibling of grim_home so it lives in the same
+        # per-test tmp_path tree and is cleaned up automatically.
+        self._home = grim_home.parent / "home"
+        self._home.mkdir(parents=True, exist_ok=True)
         self.env: dict[str, str] = {
             "GRIM_HOME": str(grim_home),
             "PATH": os.environ.get("PATH", ""),
-            "HOME": os.environ.get("HOME", str(Path.home())),
+            "HOME": str(self._home),
+            "XDG_CONFIG_HOME": str(self._home / ".config"),
         }
         # Windows needs these for subprocess spawning and executable resolution
         for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
+
+    @property
+    def home(self) -> Path:
+        """The isolated home directory for this runner instance.
+
+        Global-scope installs write vendor-native artifacts here (e.g.
+        ``~/.claude/skills/``, ``~/.config/opencode/``).  Tests assert
+        against this path instead of the real ``$HOME``.
+        """
+        return self._home
 
     def run(
         self,

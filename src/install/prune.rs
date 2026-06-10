@@ -63,6 +63,12 @@ pub struct PrunedArtifact {
     /// The on-disk targets actually deleted (empty for [`PruneOutcome::KeptModified`]
     /// or when the files were already gone).
     pub removed: Vec<std::path::PathBuf>,
+    /// The client names the removed record carried. A prune can orphan an
+    /// artifact installed for clients *outside* the current run's
+    /// `--client` selection — the caller must run the vendor config sync
+    /// for these too, or a managed config entry (e.g. OpenCode's
+    /// `instructions` glob) goes stale.
+    pub clients: Vec<String>,
 }
 
 /// Remove every materialized artifact absent from `lock`.
@@ -96,19 +102,41 @@ pub fn prune_orphans(
         .map(|a| (a.kind, a.name.clone()))
         .collect();
 
-    // Snapshot the orphan keys (plus last-known digest and primary target)
-    // before any mutation — `uninstall` borrows `state` mutably, so the
-    // immutable iteration must finish first. `iter_records` is
-    // `(kind, name)`-ordered, so the result is deterministic. The target is
-    // carried so a deletion failure can be attributed to a real path.
-    let orphans: Vec<(ArtifactKind, String, Digest, PathBuf)> = state
+    // Snapshot the orphan keys (plus last-known digest, primary target, and
+    // recorded clients) before any mutation — `uninstall` borrows `state`
+    // mutably, so the immutable iteration must finish first. `iter_records`
+    // is `(kind, name)`-ordered, so the result is deterministic. The target
+    // is carried so a deletion failure can be attributed to a real path;
+    // the clients are carried because the record is gone after `uninstall`
+    // and the caller needs them for the post-prune vendor config sync.
+    struct Orphan {
+        kind: ArtifactKind,
+        name: String,
+        old: Digest,
+        target: PathBuf,
+        clients: Vec<String>,
+    }
+    let orphans: Vec<Orphan> = state
         .iter_records()
         .filter(|r| !declared.contains(&(r.kind, r.name.clone())))
-        .map(|r| (r.kind, r.name.clone(), r.pinned.digest(), r.target.clone()))
+        .map(|r| Orphan {
+            kind: r.kind,
+            name: r.name.clone(),
+            old: r.pinned.digest(),
+            target: r.target.clone(),
+            clients: r.client_outputs().iter().map(|c| c.client.clone()).collect(),
+        })
         .collect();
 
     let mut acted = Vec::with_capacity(orphans.len());
-    for (kind, name, old, target) in orphans {
+    for Orphan {
+        kind,
+        name,
+        old,
+        target,
+        clients,
+    } in orphans
+    {
         // Integrity gate: a locally modified orphan is preserved unless
         // forced. Deleting it would discard the user's edits.
         if !force && is_modified(state, kind, &name)? {
@@ -118,6 +146,7 @@ pub fn prune_orphans(
                 old,
                 outcome: PruneOutcome::KeptModified,
                 removed: Vec::new(),
+                clients,
             });
             continue;
         }
@@ -132,6 +161,7 @@ pub fn prune_orphans(
             old,
             outcome: PruneOutcome::Pruned,
             removed: result.removed,
+            clients,
         });
     }
 
