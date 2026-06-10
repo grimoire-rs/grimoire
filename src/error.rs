@@ -99,6 +99,7 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                     CommandError::LockStale { .. } => ExitCode::DataError,
                     CommandError::NoRegistry | CommandError::NoLoginRegistry => ExitCode::ConfigError,
                     CommandError::LoginInput(_) => ExitCode::UsageError,
+                    CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
                 },
             };
         }
@@ -167,7 +168,7 @@ fn classify_install(err: &InstallError) -> ExitCode {
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
-        InstallErrorKind::UnsupportedEditor(_) => ExitCode::ConfigError,
+        InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
     }
 }
 
@@ -185,11 +186,13 @@ fn classify_skill(err: &SkillError) -> ExitCode {
     }
 }
 
-/// Map a release-tier error to an exit code. A bad version or a refused
-/// tag overwrite is a data error (65).
+/// Map a release-tier error to an exit code. A bad version, a missing tag,
+/// or a refused tag overwrite is a data error (65).
 fn classify_release(err: &ReleaseError) -> ExitCode {
     match &err.kind {
-        ReleaseErrorKind::InvalidVersion { .. } | ReleaseErrorKind::TagExists { .. } => ExitCode::DataError,
+        ReleaseErrorKind::InvalidVersion { .. } | ReleaseErrorKind::MissingTag | ReleaseErrorKind::TagExists { .. } => {
+            ExitCode::DataError
+        }
     }
 }
 
@@ -352,7 +355,7 @@ mod tests {
                 ExitCode::DataError,
             ),
             (
-                InstallErrorKind::UnsupportedEditor("vscode".to_string()),
+                InstallErrorKind::UnsupportedClient("vscode".to_string()),
                 ExitCode::ConfigError,
             ),
             (

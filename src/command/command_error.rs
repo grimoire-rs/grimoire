@@ -40,6 +40,13 @@ pub enum CommandError {
     /// non-interactive shell missing `--username` / `--password-stdin`.
     #[error("{0}")]
     LoginInput(&'static str),
+
+    /// `add` could not infer the artifact kind: the reference did not
+    /// resolve to a manifest carrying a `com.grimoire.kind` annotation (a
+    /// non-Grimoire image, or an offline cache miss). The user must pass
+    /// `--kind`.
+    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|bundle")]
+    KindInferenceFailed { reference: String },
 }
 
 #[cfg(test)]

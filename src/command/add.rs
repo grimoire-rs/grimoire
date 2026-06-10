@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim add <kind> <name> <ref>` — declare a skill/rule and lock it.
+//! `grim add [--kind K] [--name N] <ref>` — declare a skill/rule/bundle and
+//! lock it.
 //!
-//! Edits the discovered config's `[skills]`/`[rules]` table (re-serializing
-//! the parsed config is acceptable — minimal formatting churn for a
-//! provisional milestone), then re-resolves just that entry under the
-//! config flock: a partial relock when a previous lock exists, a full
-//! resolve otherwise. The new lock is saved with `generated_at`
+//! The reference is the only required argument. A short reference is
+//! expanded against the effective default registry (the config
+//! `[options].default_registry` option, then `--registry` /
+//! `GRIM_DEFAULT_REGISTRY`); the persisted config/lock always carry the
+//! fully-qualified name. The artifact **kind** is inferred from the pulled
+//! manifest's `com.grimoire.kind` annotation when `--kind` is omitted, and
+//! the binding **name** defaults to the reference's last path segment when
+//! `--name` is omitted.
+//!
+//! Edits the discovered config's `[skills]`/`[rules]`/`[bundles]` table
+//! (re-serializing the parsed config is acceptable — minimal formatting
+//! churn for a provisional milestone), then re-resolves just that entry
+//! under the config flock: a partial relock when a previous lock exists, a
+//! full resolve otherwise. The new lock is saved with `generated_at`
 //! preservation for the untouched entries.
 
 use std::sync::Arc;
@@ -16,11 +26,12 @@ use clap::Args;
 
 use crate::api::add_report::AddReport;
 use crate::cli::exit_code::ExitCode;
+use crate::command::command_error::CommandError;
 use crate::context::Context;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
-use crate::oci::access::OciAccess;
-use crate::oci::{ArtifactKind, Identifier};
+use crate::oci::access::{OciAccess, Operation};
+use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_options::ResolveOptions;
 use crate::resolve::resolver::{resolve_lock, resolve_lock_partial};
 
@@ -29,15 +40,19 @@ use super::scope_resolution;
 /// `grim add` arguments.
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// `skill`, `rule`, or `bundle`.
-    #[arg(value_parser = ["skill", "rule", "bundle"])]
-    pub kind: String,
-
-    /// The config binding name.
-    pub name: String,
-
-    /// The fully-qualified reference (`registry/repo:tag` or `@digest`).
+    /// The artifact reference (`registry/repo:tag` or `@digest`). A short
+    /// name is expanded against the effective default registry.
     pub reference: String,
+
+    /// The artifact kind (`skill`, `rule`, or `bundle`). Inferred from the
+    /// published manifest's `com.grimoire.kind` annotation when omitted.
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "bundle"])]
+    pub kind: Option<String>,
+
+    /// The config binding name. Defaults to the reference's last path
+    /// segment (e.g. `ghcr.io/acme/code-review` ⇒ `code-review`).
+    #[arg(long, short = 'n')]
+    pub name: Option<String>,
 
     /// Operate on the global scope instead of the discovered project.
     #[arg(long)]
@@ -55,12 +70,6 @@ pub struct AddArgs {
 /// Config (78/79/74), invalid reference (65), or lock/resolve failures
 /// propagate via the typed error chain.
 pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, ExitCode)> {
-    let kind = match args.kind.as_str() {
-        "skill" => ArtifactKind::Skill,
-        "bundle" => ArtifactKind::Bundle,
-        _ => ArtifactKind::Rule,
-    };
-
     let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
 
     // Hold the config flock for the read-modify-write + relock window.
@@ -69,25 +78,41 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         None => None,
     };
 
-    // Validate the reference (with the context default registry) and add
-    // the entry to the in-memory declaration.
-    let id = super::grim(parse_reference(ctx, &args.reference))?;
+    // Expand the reference against the effective default registry (config
+    // option first, then --registry / env). The expanded identifier is
+    // always fully-qualified, so the config and lock persist the registry
+    // host explicitly — the default is a pure CLI-input convenience.
+    let default_registry = super::effective_default_registry(scope.options.default_registry.as_deref(), ctx);
+    let id = super::grim(parse_reference(&args.reference, default_registry))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {
         id
     };
 
+    // The binding name defaults to the reference's last path segment.
+    let name = args.name.clone().unwrap_or_else(|| id.name().to_string());
+
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+
+    // The kind: an explicit --kind wins; otherwise infer it from the
+    // published manifest's `com.grimoire.kind` annotation (the kind is
+    // persisted in the OCI image at release time).
+    let kind = match args.kind.as_deref() {
+        Some(k) => ArtifactKind::from_annotation(k).unwrap_or(ArtifactKind::Rule),
+        None => infer_kind(&access, &id).await?,
+    };
+
     let mut set = scope.set.clone();
     match kind {
         ArtifactKind::Skill => {
-            set.skills.insert(args.name.clone(), id.clone());
+            set.skills.insert(name.clone(), id.clone());
         }
         ArtifactKind::Rule => {
-            set.rules.insert(args.name.clone(), id.clone());
+            set.rules.insert(name.clone(), id.clone());
         }
         ArtifactKind::Bundle => {
-            set.bundles.insert(args.name.clone(), id.clone());
+            set.bundles.insert(name.clone(), id.clone());
         }
     }
     set.invalidate_declaration_hash_cache();
@@ -99,7 +124,6 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // exists and is not stale; a full resolve otherwise (or when the
     // partial stale guard fires — caught and retried as a full resolve so
     // `add` always leaves a consistent lock).
-    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = lock_io::load(&scope.lock_path).ok();
     // A bundle declaration expands into members whose names differ from the
     // bundle's binding name, so a partial relock keyed on the bundle name
@@ -113,7 +137,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
                     &set,
                     prev,
                     &access,
-                    std::slice::from_ref(&args.name),
+                    std::slice::from_ref(&name),
                     scope.scope,
                     &ResolveOptions::default(),
                 )
@@ -148,23 +172,50 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
             .skills
             .iter()
             .chain(new_lock.rules.iter())
-            .find(|a| a.kind == kind && a.name == args.name)
+            .find(|a| a.kind == kind && a.name == name)
             .map(|a| a.pinned.strip_advisory().to_string())
             .unwrap_or_else(|| id.to_string())
     };
 
-    Ok((AddReport::new(kind, args.name.clone(), pinned), ExitCode::Success))
+    Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
 }
 
-/// Parse `<ref>` with the context default registry.
+/// Parse `<ref>`, expanding a short identifier against `default_registry`
+/// when one is configured.
 pub(crate) fn parse_reference(
-    ctx: &Context,
     reference: &str,
+    default_registry: Option<&str>,
 ) -> Result<Identifier, crate::oci::identifier::error::IdentifierError> {
-    match ctx.default_registry() {
+    match default_registry {
         Some(def) => Identifier::parse_with_default_registry(reference, def),
         None => Identifier::parse(reference),
     }
+}
+
+/// Infer the artifact kind from the published manifest's
+/// `com.grimoire.kind` annotation.
+///
+/// Resolves the reference to a digest (a pure `Query` — offline returns a
+/// cache miss as `Ok(None)`), fetches the manifest, and reads the kind. A
+/// reference that does not resolve, has no manifest, or carries no/unknown
+/// kind annotation (a non-Grimoire image) yields
+/// [`CommandError::KindInferenceFailed`] so the user can pass `--kind`.
+///
+/// # Errors
+///
+/// A registry/transport failure propagates with its own taxonomy;
+/// inability to determine the kind is [`CommandError::KindInferenceFailed`].
+async fn infer_kind(access: &Arc<dyn OciAccess>, id: &Identifier) -> anyhow::Result<ArtifactKind> {
+    let not_inferable = || {
+        crate::error::Error::from(CommandError::KindInferenceFailed {
+            reference: id.to_string(),
+        })
+    };
+
+    let digest = super::grim(access.resolve_digest(id, Operation::Query).await)?.ok_or_else(not_inferable)?;
+    let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest)).map_err(|_| not_inferable())?;
+    let manifest = super::grim(access.fetch_manifest(&pinned).await)?.ok_or_else(not_inferable)?;
+    crate::oci::annotations::kind_from_manifest(&manifest).ok_or_else(|| not_inferable().into())
 }
 
 /// Re-serialize the declaration to `path` as the shared
@@ -181,13 +232,19 @@ pub(crate) fn write_config(
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    if options.default_registry.is_some() || options.editor.is_some() {
+    if options.default_registry.is_some() || !options.clients.is_empty() {
         out.push_str("[options]\n");
         if let Some(r) = &options.default_registry {
             let _ = writeln!(out, "default_registry = \"{r}\"");
         }
-        if let Some(e) = &options.editor {
-            let _ = writeln!(out, "editor = \"{e}\"");
+        if !options.clients.is_empty() {
+            let list = options
+                .clients
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "clients = [{list}]");
         }
         out.push('\n');
     }
@@ -236,12 +293,14 @@ mod tests {
         let set = DesiredSet::from_parts(skills, rules);
         let opts = ConfigOptions {
             default_registry: Some("ghcr.io/acme".to_string()),
-            editor: Some("claude".to_string()),
+            clients: vec!["claude".to_string(), "opencode".to_string()],
         };
         write_config(&path, &opts, &set).unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
         let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        // The clients list round-trips as a TOML array.
+        assert_eq!(cfg.options.clients, vec!["claude".to_string(), "opencode".to_string()]);
         assert_eq!(cfg.set.skills.len(), 1);
         assert_eq!(cfg.set.rules.len(), 1);
         assert_eq!(cfg.options.default_registry.as_deref(), Some("ghcr.io/acme"));

@@ -45,6 +45,21 @@ pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&s
         .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
 }
 
+/// The effective default registry for expanding a short identifier: the
+/// resolved scope's config `[options].default_registry` wins, else the
+/// context default (`--registry` / `GRIM_DEFAULT_REGISTRY`).
+///
+/// The default registry is purely a CLI-input convenience — the expanded
+/// [`crate::oci::Identifier`] is always fully-qualified, so the lock and
+/// config persist the registry host explicitly regardless of which default
+/// was applied. Mirrors the precedence `search` / `tui` already use.
+pub fn effective_default_registry<'a>(
+    config_default: Option<&'a str>,
+    ctx: &'a crate::context::Context,
+) -> Option<&'a str> {
+    config_default.or_else(|| ctx.default_registry())
+}
+
 /// Build a classifiable usage error (exit 64) for a missing `login`
 /// credential input, routed through the top-level error so
 /// [`crate::error::classify_error`] sees it.
