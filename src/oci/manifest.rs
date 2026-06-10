@@ -117,6 +117,7 @@ mod tests {
             size,
             urls: None,
             annotations: None,
+            artifact_type: None,
         }
     }
 

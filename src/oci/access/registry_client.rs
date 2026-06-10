@@ -9,11 +9,12 @@
 //! Docker credentials (`~/.docker/config.json` / credential helpers) via
 //! the `docker_credential` crate, the same approach OCX uses.
 //!
-//! `oci-client` 0.16 has no `_catalog` endpoint, so the registry-catalog
-//! listing issues the distribution-spec `GET /v2/_catalog` request
-//! directly through `reqwest`; an unsupported endpoint degrades to an
-//! empty list rather than an error (catalog is a Phase 6 surface — the
-//! method exists here only to satisfy the seam).
+//! The registry-catalog listing delegates to `oci-client`'s `catalog`
+//! endpoint (added in 0.17), which runs the same `WWW-Authenticate` token
+//! handshake as every other call — most registries gate `_catalog` behind
+//! a token, and without one it 401s and the catalog comes back empty. We
+//! only add bounded pagination over the spec `last` cursor; an unsupported
+//! or forbidden endpoint degrades to an empty list rather than an error.
 
 use async_trait::async_trait;
 
@@ -41,23 +42,18 @@ const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+jso
 /// Real OCI registry access backed by `oci-client`.
 pub struct RegistryClient {
     client: Client,
-    http: reqwest::Client,
 }
 
 impl RegistryClient {
     /// Construct a client for production use.
     ///
-    /// Loopback registries (`localhost` / `127.0.0.1`, *any* port) are
-    /// contacted over plain HTTP so a local test registry "just works" on
-    /// whatever port it binds; any host listed in `GRIM_INSECURE_REGISTRIES`
+    /// The conventional loopback forms (`localhost` / `127.0.0.1`, bare and
+    /// on `:5000`) are contacted over plain HTTP so a local test registry
+    /// "just works"; any host listed in `GRIM_INSECURE_REGISTRIES`
     /// (comma-separated) is likewise plain HTTP; everything else uses HTTPS.
-    ///
-    /// `oci-client`'s `HttpsExcept` matches the registry by *exact*
-    /// `host:port` string, so it cannot express "loopback on any port".
-    /// The exception list is therefore materialised from the same
-    /// [`Self::plain_http`] rule for the concrete registries known up front
-    /// (the loopback defaults plus the `GRIM_INSECURE_REGISTRIES` entries);
-    /// the raw catalog client uses the predicate directly.
+    /// `oci-client`'s `HttpsExcept` matches by *exact* `host:port`, so a
+    /// loopback registry on another port (e.g. the manual rig on `:5050`)
+    /// opts in through that env var.
     pub fn new() -> Self {
         // `HttpsExcept` is exact-match per `host:port`, so enumerate the
         // zero-config loopback forms (bare host + the conventional :5000)
@@ -81,7 +77,6 @@ impl RegistryClient {
         };
         Self {
             client: Client::new(config),
-            http: reqwest::Client::new(),
         }
     }
 
@@ -113,25 +108,6 @@ impl RegistryClient {
             ) => Ok(RegistryAuth::Anonymous),
             Err(e) => Err(AccessErrorKind::Authentication(Box::new(e))),
         }
-    }
-
-    /// Whether `registry` is contacted over plain HTTP: any loopback host
-    /// (`localhost` / `127.0.0.1`, *any* port) or a host explicitly listed
-    /// in `GRIM_INSECURE_REGISTRIES`. Single source of truth for the
-    /// HTTP/HTTPS decision — the `oci-client` `HttpsExcept` list in
-    /// [`Self::new`] is materialised from this same rule.
-    fn plain_http(registry: &str) -> bool {
-        let host = registry.split(':').next().unwrap_or(registry);
-        if host == "localhost" || host == "127.0.0.1" {
-            return true;
-        }
-        insecure_registries().iter().any(|r| r == registry)
-    }
-
-    /// HTTP scheme for plain-HTTP registries (see [`Self::plain_http`]);
-    /// HTTPS otherwise.
-    fn scheme_for(registry: &str) -> &'static str {
-        if Self::plain_http(registry) { "http" } else { "https" }
     }
 }
 
@@ -246,6 +222,7 @@ fn oci_descriptor(d: &Descriptor) -> OciDescriptor {
         size: i64::try_from(d.size).unwrap_or(i64::MAX),
         urls: None,
         annotations: None,
+        artifact_type: None,
     }
 }
 
@@ -356,78 +333,61 @@ impl OciAccess for RegistryClient {
     }
 
     async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
-        // `oci-client` 0.16 has no catalog API. Issue the distribution
-        // spec request directly; an unsupported/absent endpoint degrades
-        // to an empty list.
-        //
-        // The `_catalog` response is paginated: registries cap the page
-        // size and advertise the next page via a `Link: <…>; rel="next"`
-        // header (distribution spec §catalog). Follow the cursor, but only
-        // up to a bounded number of pages: a registry can advertise tens
-        // of thousands of repositories and walking every page is neither
-        // fast nor useful for a *bounded* catalog (the catalog layer caps
-        // and prefilters anyway). A truncated listing is an explicit
-        // cut-line — the catalog is a best-effort index, not a mirror.
+        // Bound the walk: a registry can advertise tens of thousands of
+        // repositories, and the catalog layer caps and prefilters anyway —
+        // a truncated listing is an explicit cut-line, the catalog is a
+        // best-effort index, not a mirror.
         const PAGE_SIZE: usize = 1000;
         const MAX_PAGES: usize = 8;
 
-        #[derive(serde::Deserialize)]
-        struct Catalog {
-            #[serde(default)]
-            repositories: Vec<String>,
-        }
-
         // The `_catalog` endpoint lives on the bare registry HOST. A
         // configured default registry may carry a namespace
-        // (`ghcr.io/acme`); using it verbatim would build the malformed URL
-        // `https://ghcr.io/acme/v2/_catalog` and silently return nothing.
-        // Extract the host for both the URL and the HTTP/HTTPS decision.
+        // (`ghcr.io/acme`); the namespace is filtered upstream, so list
+        // against the host. The reference's repository is unused by the
+        // catalog request itself — it only drives oci-client's
+        // `repository:…:pull` token scope, and the token a registry mints
+        // carries the caller's read access, which covers `_catalog`.
         let host = registry_host(registry);
-        let scheme = Self::scheme_for(host);
-        let mut next: Option<String> = Some(format!("{scheme}://{host}/v2/_catalog?n={PAGE_SIZE}"));
-        let mut all: Vec<String> = Vec::new();
-        let mut pages = 0;
+        let auth = Self::auth_for(host).unwrap_or(RegistryAuth::Anonymous);
+        let reference = Reference::with_tag(host.to_string(), "_catalog".to_string(), "latest".to_string());
 
-        while let Some(url) = next.take() {
-            pages += 1;
-            if pages > MAX_PAGES {
-                break;
-            }
-            let resp = match self.http.get(&url).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    // A mid-walk transport failure on a *busy* catalog is
-                    // not worth aborting search/tui for: return what was
-                    // collected so far (degrade, never crash).
-                    if all.is_empty() {
-                        return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
-                    }
-                    break;
-                }
-            };
-            if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
-                // An unsupported endpoint on page 1 ⇒ empty catalog.
-                break;
-            }
-            // Parse the `Link` header before consuming the body.
-            let link_next = resp
-                .headers()
-                .get(reqwest::header::LINK)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_next_link)
-                .map(|rel| absolutize_link(scheme, host, &rel));
-            match resp.json::<Catalog>().await {
-                Ok(catalog) => {
-                    if catalog.repositories.is_empty() {
+        // `oci-client`'s `catalog` runs the WWW-Authenticate token handshake
+        // (so a private registry resolves) but returns one page with no
+        // cursor, so paginate over the distribution-spec `last` marker.
+        let mut all: Vec<String> = Vec::new();
+        let mut last: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let page = match self
+                .client
+                .catalog(&reference, &auth, Some(PAGE_SIZE), last.as_deref())
+                .await
+            {
+                Ok(page) => page.repositories,
+                // Degrade vs. abort, mirroring the rest of this seam: an
+                // unsupported (404) or forbidden/auth-gated catalog yields
+                // whatever was collected (empty on page 1); only a genuine
+                // transport fault aborts an otherwise-empty walk.
+                Err(e) => match classify(e) {
+                    Classified::NotFound | Classified::Auth(_) => break,
+                    Classified::Registry(e) => {
+                        if all.is_empty() {
+                            return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
+                        }
                         break;
                     }
-                    all.extend(catalog.repositories);
-                }
-                // A non-JSON / unexpected body from a registry that does
-                // not implement the catalog is not a hard failure.
-                Err(_) => break,
+                },
+            };
+            // A short page is the last page: the spec returns up to
+            // PAGE_SIZE repositories, so fewer than that means the registry
+            // has none left. When the total is an exact multiple of PAGE_SIZE
+            // the final request comes back empty (0 < PAGE_SIZE) and this same
+            // check terminates on it — no separate empty-page case needed.
+            let is_last_page = page.len() < PAGE_SIZE;
+            last = page.last().cloned();
+            all.extend(page);
+            if is_last_page {
+                break;
             }
-            next = link_next;
         }
         Ok(all)
     }
@@ -471,6 +431,7 @@ impl OciAccess for RegistryClient {
                 size: i64::try_from(config.len()).unwrap_or(i64::MAX),
                 urls: None,
                 annotations: None,
+                artifact_type: None,
             },
             layers: manifest.layers.iter().map(oci_descriptor).collect(),
             subject: None,
@@ -551,45 +512,12 @@ impl OciAccess for RegistryClient {
     }
 }
 
-/// Extract the `rel="next"` target from an RFC 8288 `Link` header.
-///
-/// A catalog `Link` looks like `</v2/_catalog?last=foo&n=100>; rel="next"`
-/// (possibly comma-separated with other relations). Returns the raw URL
-/// reference between the angle brackets of the `next` link, if present.
-fn parse_next_link(header: &str) -> Option<String> {
-    for part in header.split(',') {
-        let part = part.trim();
-        let (target, params) = part.split_once('>')?;
-        let target = target.trim_start_matches('<');
-        if params.split(';').any(|p| {
-            let p = p.trim().replace(['"', ' '], "");
-            p == "rel=next"
-        }) {
-            return Some(target.to_string());
-        }
-    }
-    None
-}
-
 /// The bare registry host (first path segment) of a possibly-namespaced
 /// registry string: `ghcr.io/acme` → `ghcr.io`; `localhost:5000` →
 /// `localhost:5000`. The OCI distribution API (`/v2/_catalog`, auth scope)
 /// is served by the host, not a host+namespace prefix.
 fn registry_host(registry: &str) -> &str {
     registry.split_once('/').map_or(registry, |(host, _)| host)
-}
-
-/// Resolve a possibly-relative `Link` target against the registry origin.
-/// Registries return an absolute-path reference (`/v2/_catalog?…`); a
-/// fully-qualified URL is passed through unchanged.
-fn absolutize_link(scheme: &str, registry: &str, link: &str) -> String {
-    if link.starts_with("http://") || link.starts_with("https://") {
-        link.to_string()
-    } else if let Some(rest) = link.strip_prefix('/') {
-        format!("{scheme}://{registry}/{rest}")
-    } else {
-        format!("{scheme}://{registry}/{link}")
-    }
 }
 
 /// Classify an `oci-client` error from a push/pull path: an auth failure
@@ -611,6 +539,22 @@ fn registry_or_auth(err: OciDistributionError) -> AccessErrorKind {
             AccessErrorKind::Authentication(Box::new(err))
         }
         _ => AccessErrorKind::Registry(Box::new(err)),
+    }
+}
+
+#[cfg(test)]
+impl RegistryClient {
+    /// Test constructor that forces `registry` to plain HTTP. The default
+    /// exception list only knows the conventional loopback `:5000` forms,
+    /// but a mock binds a random port, so add it explicitly.
+    fn with_plain_http(registry: &str) -> Self {
+        let config = ClientConfig {
+            protocol: ClientProtocol::HttpsExcept(vec![registry.to_string()]),
+            ..Default::default()
+        };
+        Self {
+            client: Client::new(config),
+        }
     }
 }
 
@@ -640,25 +584,6 @@ mod tests {
         let id = Identifier::parse_with_default_registry("acme/x", "ghcr.io").unwrap();
         let r = reference_for(&id);
         assert_eq!(r.tag(), Some("latest"));
-    }
-
-    #[test]
-    fn scheme_for_loopback_is_http() {
-        assert_eq!(RegistryClient::scheme_for("localhost"), "http");
-        assert_eq!(RegistryClient::scheme_for("localhost:5000"), "http");
-        assert_eq!(RegistryClient::scheme_for("127.0.0.1:5000"), "http");
-        assert_eq!(RegistryClient::scheme_for("ghcr.io"), "https");
-    }
-
-    /// Regression: a loopback registry on a non-default port (the manual
-    /// rig moved off the shared :5000 to :5050) must still be plain HTTP.
-    /// Before the fix the hardcoded `HttpsExcept` list only knew :5000, so
-    /// :5050 went to HTTPS and failed the TLS handshake against `registry:2`.
-    #[test]
-    fn loopback_any_port_is_http() {
-        assert_eq!(RegistryClient::scheme_for("localhost:5050"), "http");
-        assert_eq!(RegistryClient::scheme_for("127.0.0.1:5050"), "http");
-        assert!(RegistryClient::plain_http("localhost:5050"));
     }
 
     /// `GRIM_INSECURE_REGISTRIES` parsing: comma-separated, trimmed,
@@ -707,43 +632,94 @@ mod tests {
     }
 
     #[test]
-    fn parse_next_link_extracts_next_target() {
-        let h = r#"</v2/_catalog?last=grim-test%2Fzz&n=100>; rel="next""#;
-        assert_eq!(
-            parse_next_link(h),
-            Some("/v2/_catalog?last=grim-test%2Fzz&n=100".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_next_link_ignores_other_relations_and_absent_next() {
-        assert_eq!(parse_next_link(r#"</v2/_catalog?n=1>; rel="prev""#), None);
-        assert_eq!(parse_next_link(""), None);
-        // Multi-relation header: pick only the `next` one.
-        let h = r#"</a>; rel="prev", </v2/_catalog?last=x>; rel="next""#;
-        assert_eq!(parse_next_link(h), Some("/v2/_catalog?last=x".to_string()));
-    }
-
-    #[test]
-    fn absolutize_link_handles_relative_and_absolute() {
-        assert_eq!(
-            absolutize_link("http", "localhost:5000", "/v2/_catalog?last=x"),
-            "http://localhost:5000/v2/_catalog?last=x"
-        );
-        assert_eq!(
-            absolutize_link("https", "ghcr.io", "https://ghcr.io/v2/_catalog?last=y"),
-            "https://ghcr.io/v2/_catalog?last=y"
-        );
-        assert_eq!(
-            absolutize_link("http", "localhost:5000", "v2/_catalog"),
-            "http://localhost:5000/v2/_catalog"
-        );
-    }
-
-    #[test]
     fn auth_for_unknown_registry_is_anonymous() {
         // No Docker config for a bogus host ⇒ anonymous, not an error.
         let auth = RegistryClient::auth_for("nonexistent.invalid").expect("anonymous fallback");
         assert!(matches!(auth, RegistryAuth::Anonymous));
+    }
+
+    // ── token-gated catalog listing ──────────────────────────────────
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A throwaway HTTP/1.1 registry that gates `_catalog` behind the OCI
+    /// token handshake: `GET /v2/` answers `401` + a `Bearer` challenge
+    /// whose realm is `/token`, `/token` mints a token, and `_catalog`
+    /// returns the repository list only once that bearer token is
+    /// presented. This exercises `oci-client`'s real `auth` path. The task
+    /// runs until aborted by the test.
+    async fn spawn_token_gated_registry(repositories_json: &str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let realm = format!("http://{host}/token");
+        let catalog_body = format!(r#"{{"repositories":[{repositories_json}]}}"#);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read the request head (GET has no body) to the blank line.
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                let first = req.lines().next().unwrap_or("").to_string();
+                let has_bearer = req.contains("authorization: bearer ");
+                let ok_json = |body: &str| {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let response = if first.contains("/token") {
+                    ok_json(r#"{"token":"test-token"}"#)
+                } else if first.contains("/v2/_catalog") && has_bearer {
+                    // The caller terminates on a short page, so this single
+                    // sub-PAGE_SIZE page ends the walk after one request. The
+                    // `last=` branch stays faithful to a real registry (an
+                    // exhausted cursor yields no repositories) as a backstop
+                    // in case the walk ever issues a follow-up request.
+                    if first.contains("last=") {
+                        ok_json(r#"{"repositories":[]}"#)
+                    } else {
+                        ok_json(&catalog_body)
+                    }
+                } else {
+                    // Unauthenticated `/v2/` or `/v2/_catalog` ⇒ challenge.
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{realm}\",service=\"reg\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                };
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (host, handle)
+    }
+
+    /// Regression: a registry that gates `_catalog` behind a bearer token
+    /// must be walked by reusing `oci-client`'s token handshake. Before the
+    /// fix `list_catalog` issued a single unauthenticated GET, took the
+    /// `401` as an unsupported endpoint, and returned an empty list — so
+    /// `grim search`/`grim tui` showed nothing against a private registry
+    /// while every other operation (via `oci-client`) authed fine.
+    #[tokio::test]
+    async fn list_catalog_authenticates_via_oci_client_token() {
+        let (host, handle) = spawn_token_gated_registry(r#""glab","acme/code-review""#).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let repos = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(repos, vec!["glab".to_string(), "acme/code-review".to_string()]);
+        handle.abort();
     }
 }
