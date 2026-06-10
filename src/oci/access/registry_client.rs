@@ -227,11 +227,14 @@ fn oci_descriptor(d: &Descriptor) -> OciDescriptor {
 }
 
 impl RegistryClient {
-    /// A tiny, deterministic OCI image config blob. Grimoire artifacts
-    /// carry their real metadata in manifest annotations; the config blob
-    /// only has to exist and be content-addressable.
+    /// A tiny, deterministic config blob (`{}`). The artifact's identity is
+    /// carried by the manifest `artifactType` and the config descriptor's
+    /// media type (`application/vnd.grimoire.<kind>.config.v1+json`), and its
+    /// metadata by the manifest annotations — the config blob itself only has
+    /// to exist and be content-addressable, so it stays empty rather than
+    /// masquerading as a runnable image config.
     fn config_blob() -> Vec<u8> {
-        br#"{"architecture":"","os":""}"#.to_vec()
+        b"{}".to_vec()
     }
 }
 
@@ -417,8 +420,9 @@ impl OciAccess for RegistryClient {
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
             .await;
 
-        // The config blob is pushed inline; Grimoire's real metadata lives
-        // in the manifest annotations, not the config.
+        // The config blob is pushed inline; the kind rides on the manifest
+        // `artifactType` + the config descriptor's media type, and metadata in
+        // the annotations — not in the config blob bytes.
         let config = Self::config_blob();
         let config_digest = self.push_blob(repo, &config).await?;
 
@@ -426,7 +430,10 @@ impl OciAccess for RegistryClient {
             schema_version: 2,
             media_type: Some(OCI_MANIFEST_MEDIA_TYPE.to_string()),
             config: OciDescriptor {
-                media_type: OCI_CONFIG_MEDIA_TYPE.to_string(),
+                media_type: manifest
+                    .config_media_type
+                    .clone()
+                    .unwrap_or_else(|| OCI_CONFIG_MEDIA_TYPE.to_string()),
                 digest: config_digest.to_string(),
                 size: i64::try_from(config.len()).unwrap_or(i64::MAX),
                 urls: None,
@@ -435,7 +442,7 @@ impl OciAccess for RegistryClient {
             },
             layers: manifest.layers.iter().map(oci_descriptor).collect(),
             subject: None,
-            artifact_type: None,
+            artifact_type: manifest.artifact_type.clone(),
             annotations: if manifest.annotations.is_empty() {
                 None
             } else {

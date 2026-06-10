@@ -4,9 +4,10 @@
 //! The bundle artifact format.
 //!
 //! A bundle is a standard single-layer OCI artifact whose layer blob is a
-//! JSON document listing the skill/rule members it groups. It carries the
-//! `com.grimoire.kind = "bundle"` annotation like any other Grimoire
-//! artifact. At resolve time the consumer fetches the bundle manifest,
+//! JSON document listing the skill/rule members it groups. It is typed by
+//! the OCI `artifactType` `application/vnd.grimoire.bundle.v1` like any
+//! other Grimoire artifact. At resolve time the consumer fetches the bundle
+//! manifest,
 //! reads the layer blob, and expands the members into the lock — the
 //! bundle itself never materializes.
 //!

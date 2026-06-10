@@ -3,12 +3,14 @@
 
 //! The subset of an OCI manifest Grimoire reads.
 //!
-//! Grimoire only needs the layer/blob descriptors (to locate the artifact
-//! tarball) and the manifest-level annotations (skill/rule metadata
-//! mirrored at publish time). Image-index selection, platform variants,
-//! and the config blob are out of scope — a single-layer artifact is the
-//! whole model. The from-conversion accepts only an image manifest; an
-//! image index is rejected as an invalid Grimoire artifact.
+//! Grimoire needs the layer/blob descriptors (to locate the artifact
+//! tarball), the type discriminators (`artifactType` and the config
+//! descriptor's media type — how the kind is inferred), and the
+//! manifest-level annotations (skill/rule metadata mirrored at publish
+//! time). Image-index selection, platform variants, and the config blob
+//! *bytes* are out of scope — a single-layer artifact is the whole model.
+//! The from-conversion accepts only an image manifest; an image index is
+//! rejected as an invalid Grimoire artifact.
 
 use std::collections::BTreeMap;
 
@@ -34,6 +36,13 @@ pub struct Descriptor {
 pub struct OciManifest {
     /// The manifest media type, if the registry reported one.
     pub media_type: Option<String>,
+    /// The OCI `artifactType`, if present — the authoritative kind
+    /// discriminator (`application/vnd.grimoire.<kind>.v1`).
+    pub artifact_type: Option<String>,
+    /// The config descriptor's media type — the fallback kind discriminator
+    /// read when `artifactType` is absent
+    /// (`application/vnd.grimoire.<kind>.config.v1+json`).
+    pub config_media_type: Option<String>,
     /// The layer descriptors (the artifact payload lives here).
     pub layers: Vec<Descriptor>,
     /// Manifest-level annotations (skill/rule metadata at publish time).
@@ -87,6 +96,8 @@ impl TryFrom<oci_client::manifest::OciImageManifest> for OciManifest {
 
         Ok(Self {
             media_type: image.media_type,
+            artifact_type: image.artifact_type,
+            config_media_type: Some(image.config.media_type),
             layers,
             annotations: image.annotations.unwrap_or_default(),
         })
@@ -112,7 +123,7 @@ mod tests {
 
     fn oci_descriptor(digest: &str, size: i64) -> oci_client::manifest::OciDescriptor {
         oci_client::manifest::OciDescriptor {
-            media_type: "application/vnd.grimoire.skill.layer.v1.tar".to_string(),
+            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
             digest: digest.to_string(),
             size,
             urls: None,
@@ -123,7 +134,7 @@ mod tests {
 
     fn image_manifest(layers: Vec<oci_client::manifest::OciDescriptor>) -> oci_client::manifest::OciImageManifest {
         let mut annotations = std::collections::BTreeMap::new();
-        annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
+        annotations.insert("org.opencontainers.image.title".to_string(), "code-review".to_string());
         oci_client::manifest::OciImageManifest {
             schema_version: 2,
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
@@ -150,8 +161,31 @@ mod tests {
         assert_eq!(layer.digest, digest);
         assert_eq!(layer.size, payload.len() as u64);
         assert_eq!(
-            manifest.annotations.get("com.grimoire.kind").map(String::as_str),
-            Some("skill")
+            manifest
+                .annotations
+                .get("org.opencontainers.image.title")
+                .map(String::as_str),
+            Some("code-review")
+        );
+    }
+
+    #[test]
+    fn captures_artifact_type_and_config_media_type() {
+        let payload = b"skill tarball";
+        let digest = Algorithm::Sha256.hash(payload);
+        let mut image = image_manifest(vec![oci_descriptor(&digest.to_string(), payload.len() as i64)]);
+        image.artifact_type = Some("application/vnd.grimoire.skill.v1".to_string());
+        image.config.media_type = "application/vnd.grimoire.skill.config.v1+json".to_string();
+
+        let manifest =
+            OciManifest::try_from(oci_client::manifest::OciManifest::Image(image)).expect("valid image converts");
+        assert_eq!(
+            manifest.artifact_type.as_deref(),
+            Some("application/vnd.grimoire.skill.v1")
+        );
+        assert_eq!(
+            manifest.config_media_type.as_deref(),
+            Some("application/vnd.grimoire.skill.config.v1+json")
         );
     }
 

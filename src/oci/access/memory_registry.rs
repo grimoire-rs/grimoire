@@ -119,6 +119,8 @@ impl OciAccess for MemoryRegistry {
 /// a stable manifest digest in the in-memory double.
 #[derive(serde::Serialize)]
 struct ManifestKey {
+    artifact_type: Option<String>,
+    config_media_type: Option<String>,
     layers: Vec<(String, String, u64)>,
     annotations: BTreeMap<String, String>,
 }
@@ -126,6 +128,8 @@ struct ManifestKey {
 impl From<&OciManifest> for ManifestKey {
     fn from(m: &OciManifest) -> Self {
         Self {
+            artifact_type: m.artifact_type.clone(),
+            config_media_type: m.config_media_type.clone(),
             layers: m
                 .layers
                 .iter()

@@ -5,11 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The OCI manifest annotation key the artifact kind is persisted under at
-/// publish time and read back from on pull. Single source of truth for the
-/// key string (writers in `annotations.rs`, readers in the catalog + `add`).
-pub const KIND_ANNOTATION: &str = "com.grimoire.kind";
-
 /// A Grimoire-managed artifact kind.
 ///
 /// Closed internal enum: the binary is the only consumer, so matches stay
@@ -43,16 +38,54 @@ impl ArtifactKind {
         }
     }
 
-    /// Parse the lowercase annotation/string form (`skill`/`rule`/`bundle`)
-    /// into a kind. `None` for any other string. The single source of truth
-    /// for the string→enum mapping (`add`, `build`, catalog read).
-    pub fn from_annotation(s: &str) -> Option<Self> {
+    /// Parse the lowercase kind string (`skill`/`rule`/`bundle`) into a kind.
+    /// `None` for any other string. Used to interpret the `--kind` CLI flag;
+    /// the on-the-wire discriminator is the OCI `artifactType` (see
+    /// [`Self::artifact_type`]), not this string.
+    pub fn from_kind_str(s: &str) -> Option<Self> {
         match s {
             "skill" => Some(Self::Skill),
             "rule" => Some(Self::Rule),
             "bundle" => Some(Self::Bundle),
             _ => None,
         }
+    }
+
+    /// The OCI `artifactType` media type stamped on a published manifest and
+    /// read back to infer the kind. The authoritative wire discriminator and
+    /// the single source of truth for the per-kind type string.
+    pub fn artifact_type(self) -> &'static str {
+        match self {
+            Self::Skill => "application/vnd.grimoire.skill.v1",
+            Self::Rule => "application/vnd.grimoire.rule.v1",
+            Self::Bundle => "application/vnd.grimoire.bundle.v1",
+        }
+    }
+
+    /// The OCI config-descriptor media type stamped on a published manifest;
+    /// the pre-1.1 fallback discriminator read when `artifactType` is absent.
+    pub fn config_media_type(self) -> &'static str {
+        match self {
+            Self::Skill => "application/vnd.grimoire.skill.config.v1+json",
+            Self::Rule => "application/vnd.grimoire.rule.config.v1+json",
+            Self::Bundle => "application/vnd.grimoire.bundle.config.v1+json",
+        }
+    }
+
+    /// Parse an OCI `artifactType` media type back into a kind. `None` for any
+    /// non-Grimoire type.
+    pub fn from_artifact_type(s: &str) -> Option<Self> {
+        [Self::Skill, Self::Rule, Self::Bundle]
+            .into_iter()
+            .find(|k| k.artifact_type() == s)
+    }
+
+    /// Parse an OCI config media type back into a kind (the fallback read
+    /// path). `None` for the generic OCI image config or any non-Grimoire type.
+    pub fn from_config_media_type(s: &str) -> Option<Self> {
+        [Self::Skill, Self::Rule, Self::Bundle]
+            .into_iter()
+            .find(|k| k.config_media_type() == s)
     }
 
     /// Whether the artifact materializes as a directory tree (skill) rather
@@ -90,16 +123,39 @@ mod tests {
     }
 
     #[test]
-    fn from_annotation_round_trips_and_rejects_unknown() {
-        assert_eq!(ArtifactKind::from_annotation("skill"), Some(ArtifactKind::Skill));
-        assert_eq!(ArtifactKind::from_annotation("rule"), Some(ArtifactKind::Rule));
-        assert_eq!(ArtifactKind::from_annotation("bundle"), Some(ArtifactKind::Bundle));
-        assert_eq!(ArtifactKind::from_annotation("Skill"), None);
-        assert_eq!(ArtifactKind::from_annotation("widget"), None);
-        // Display ⇄ from_annotation round-trip for every kind.
+    fn from_kind_str_round_trips_and_rejects_unknown() {
+        assert_eq!(ArtifactKind::from_kind_str("skill"), Some(ArtifactKind::Skill));
+        assert_eq!(ArtifactKind::from_kind_str("rule"), Some(ArtifactKind::Rule));
+        assert_eq!(ArtifactKind::from_kind_str("bundle"), Some(ArtifactKind::Bundle));
+        assert_eq!(ArtifactKind::from_kind_str("Skill"), None);
+        assert_eq!(ArtifactKind::from_kind_str("widget"), None);
+        // Display ⇄ from_kind_str round-trip for every kind.
         for k in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Bundle] {
-            assert_eq!(ArtifactKind::from_annotation(&k.to_string()), Some(k));
+            assert_eq!(ArtifactKind::from_kind_str(&k.to_string()), Some(k));
         }
+    }
+
+    #[test]
+    fn artifact_type_and_config_media_type_round_trip() {
+        for k in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Bundle] {
+            assert_eq!(ArtifactKind::from_artifact_type(k.artifact_type()), Some(k));
+            assert_eq!(ArtifactKind::from_config_media_type(k.config_media_type()), Some(k));
+        }
+        // Exact wire strings (the published contract).
+        assert_eq!(ArtifactKind::Skill.artifact_type(), "application/vnd.grimoire.skill.v1");
+        assert_eq!(
+            ArtifactKind::Skill.config_media_type(),
+            "application/vnd.grimoire.skill.config.v1+json"
+        );
+        // The generic OCI image config and foreign types are not a kind.
+        assert_eq!(
+            ArtifactKind::from_config_media_type("application/vnd.oci.image.config.v1+json"),
+            None
+        );
+        assert_eq!(
+            ArtifactKind::from_artifact_type("application/vnd.cncf.helm.config.v1+json"),
+            None
+        );
     }
 
     #[test]

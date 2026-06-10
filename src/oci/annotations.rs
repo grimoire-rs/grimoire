@@ -6,31 +6,39 @@
 //! On publish the source-of-truth metadata in `SKILL.md` (and a rule's
 //! body) is mirrored into the standard
 //! `org.opencontainers.image.{title,description,version,licenses,source}`
-//! keys plus the Grimoire-specific `com.grimoire.kind` /
-//! `com.grimoire.keywords`. The mapping is **fully deterministic**:
-//! `org.opencontainers.image.created` is intentionally omitted because a
-//! wall-clock timestamp would make a re-release of identical content
-//! produce a different manifest digest, breaking the idempotent-release
-//! contract (reproducible-build practice drops volatile timestamps for
-//! the same reason). Rules have no description frontmatter, so the
-//! title/description are derived from the rule name and body with a sane
-//! default.
+//! keys plus the Grimoire-specific `com.grimoire.keywords`. The artifact
+//! kind is NOT an annotation — it is carried by the OCI `artifactType`
+//! (see [`crate::oci::ArtifactKind::artifact_type`]). The mapping is
+//! **fully deterministic**: `org.opencontainers.image.created` is
+//! intentionally omitted because a wall-clock timestamp would make a
+//! re-release of identical content produce a different manifest digest,
+//! breaking the idempotent-release contract (reproducible-build practice
+//! drops volatile timestamps for the same reason). Rules have no
+//! description frontmatter, so the title/description are derived from the
+//! rule name and body with a sane default.
 
 use std::collections::BTreeMap;
 
 use crate::oci::ArtifactKind;
-use crate::oci::artifact_kind::KIND_ANNOTATION;
 use crate::oci::manifest::OciManifest;
 use crate::skill::{RuleFrontmatter, SkillFrontmatter};
 
-/// Read the artifact kind from a pulled manifest's `com.grimoire.kind`
-/// annotation. `None` when the annotation is absent or not a known kind —
-/// the single read path shared by `add` (kind inference) and the catalog.
+/// Infer the artifact kind from a pulled manifest's OCI type: the
+/// `artifactType` first, then the config descriptor's media type as a
+/// fallback. `None` when neither names a known Grimoire kind (e.g. a foreign
+/// image) — the single read path shared by `add` (kind inference) and the
+/// catalog.
 pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
     manifest
-        .annotations
-        .get(KIND_ANNOTATION)
-        .and_then(|s| ArtifactKind::from_annotation(s))
+        .artifact_type
+        .as_deref()
+        .and_then(ArtifactKind::from_artifact_type)
+        .or_else(|| {
+            manifest
+                .config_media_type
+                .as_deref()
+                .and_then(ArtifactKind::from_config_media_type)
+        })
 }
 
 /// Build the manifest annotation map for a skill.
@@ -60,7 +68,6 @@ pub fn annotations_for_skill(fm: &SkillFrontmatter, version: &str, source: Optio
     // manager). A deterministic content digest is the stronger guarantee;
     // reproducible-build practice drops volatile timestamps for the same
     // reason.
-    a.insert(KIND_ANNOTATION.to_string(), "skill".to_string());
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert("com.grimoire.keywords".to_string(), kw.clone());
     }
@@ -89,7 +96,6 @@ pub fn annotations_for_rule(
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
     // Omitted for idempotent re-release — see `annotations_for_skill`.
-    a.insert(KIND_ANNOTATION.to_string(), "rule".to_string());
     if let Some(kw) = keywords_from_extra(fm) {
         a.insert("com.grimoire.keywords".to_string(), kw);
     }
@@ -118,7 +124,6 @@ pub fn annotations_for_bundle(
     if let Some(src) = source {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
-    a.insert(KIND_ANNOTATION.to_string(), "bundle".to_string());
     a
 }
 
@@ -154,8 +159,9 @@ mod tests {
         assert_eq!(a["org.opencontainers.image.version"], "1.2.3");
         assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
         assert_eq!(a["org.opencontainers.image.source"], "ghcr.io/acme/code-review:1.2.3");
-        assert_eq!(a["com.grimoire.kind"], "skill");
         assert_eq!(a["com.grimoire.keywords"], "review,quality");
+        // The kind is NOT an annotation — it rides on the OCI artifactType.
+        assert!(!a.contains_key("com.grimoire.kind"));
         // `created` is intentionally absent so re-release is idempotent.
         assert!(!a.contains_key("org.opencontainers.image.created"));
 
@@ -179,8 +185,8 @@ mod tests {
         let a = annotations_for_rule("rust-style", &rf, "# Rust Style\nbody\n", "3.0.0", None);
         assert_eq!(a["org.opencontainers.image.title"], "rust-style");
         assert_eq!(a["org.opencontainers.image.description"], "Rust Style");
-        assert_eq!(a["com.grimoire.kind"], "rule");
         assert_eq!(a["org.opencontainers.image.version"], "3.0.0");
+        assert!(!a.contains_key("com.grimoire.kind"));
     }
 
     #[test]
@@ -191,20 +197,41 @@ mod tests {
     }
 
     #[test]
-    fn kind_from_manifest_reads_annotation() {
+    fn kind_from_manifest_prefers_artifact_type() {
         use crate::oci::manifest::OciManifest;
-        let mut annotations = BTreeMap::new();
-        annotations.insert(KIND_ANNOTATION.to_string(), "rule".to_string());
+        // artifactType is authoritative even if the config media type is generic.
         let manifest = OciManifest {
             media_type: None,
+            artifact_type: Some("application/vnd.grimoire.rule.v1".to_string()),
+            config_media_type: Some("application/vnd.oci.image.config.v1+json".to_string()),
             layers: vec![],
-            annotations,
+            annotations: BTreeMap::new(),
         };
         assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Rule));
+    }
 
-        // Absent / unknown annotation ⇒ None (caller must ask for --kind).
+    #[test]
+    fn kind_from_manifest_falls_back_to_config_media_type() {
+        use crate::oci::manifest::OciManifest;
+        // No artifactType (e.g. a registry that dropped it) ⇒ use config media type.
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.grimoire.bundle.config.v1+json".to_string()),
+            layers: vec![],
+            annotations: BTreeMap::new(),
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Bundle));
+    }
+
+    #[test]
+    fn kind_from_manifest_none_for_foreign_image() {
+        use crate::oci::manifest::OciManifest;
+        // Generic image config, no artifactType ⇒ None (caller must ask for --kind).
         let bare = OciManifest {
             media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.oci.image.config.v1+json".to_string()),
             layers: vec![],
             annotations: BTreeMap::new(),
         };

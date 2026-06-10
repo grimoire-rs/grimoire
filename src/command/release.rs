@@ -94,6 +94,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
     let manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        artifact_type: Some(kind.artifact_type().to_string()),
+        config_media_type: Some(kind.config_media_type().to_string()),
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
             media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
@@ -165,6 +167,8 @@ async fn release_bundle(
     let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source));
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
+        config_media_type: Some(ArtifactKind::Bundle.config_media_type().to_string()),
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
             media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
@@ -315,6 +319,12 @@ async fn guard_existing_version(
 /// plan does not flap.
 fn preview_manifest_digest(manifest: &OciManifest) -> String {
     let mut key = String::new();
+    if let Some(at) = &manifest.artifact_type {
+        key.push_str(&format!("artifactType={at}\n"));
+    }
+    if let Some(cmt) = &manifest.config_media_type {
+        key.push_str(&format!("configMediaType={cmt}\n"));
+    }
     for d in &manifest.layers {
         key.push_str(&format!("{}|{}|{}\n", d.digest, d.media_type, d.size));
     }
@@ -337,6 +347,8 @@ mod tests {
     fn preview_digest_is_stable() {
         let m = OciManifest {
             media_type: None,
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(b"x"),
                 media_type: "t".to_string(),
@@ -350,6 +362,8 @@ mod tests {
     fn manifest_of(tar: &[u8]) -> OciManifest {
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(tar),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),

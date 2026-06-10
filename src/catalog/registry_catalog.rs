@@ -66,8 +66,8 @@ pub struct CatalogEntry {
     pub registry: String,
     /// The repository path within the registry.
     pub repository: String,
-    /// The artifact kind from `com.grimoire.kind` (`skill`/`rule`), if the
-    /// manifest declared it.
+    /// The artifact kind from the OCI `artifactType` (`skill`/`rule`/`bundle`),
+    /// if the manifest declared it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// `org.opencontainers.image.description`, if present.
@@ -401,7 +401,7 @@ impl Catalog {
         };
         let (kind, description, keywords) = manifest
             .map(|m| {
-                let kind = m.annotations.get(crate::oci::artifact_kind::KIND_ANNOTATION).cloned();
+                let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
                 let keywords = m
                     .annotations
@@ -672,11 +672,12 @@ mod tests {
 
     fn skill_manifest(kw: &str, desc: &str) -> OciManifest {
         let mut annotations = BTreeMap::new();
-        annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
         annotations.insert("com.grimoire.keywords".to_string(), kw.to_string());
         annotations.insert("org.opencontainers.image.description".to_string(), desc.to_string());
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(crate::oci::ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some(crate::oci::ArtifactKind::Skill.config_media_type().to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(b"payload"),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),

@@ -336,6 +336,8 @@ mod tests {
     fn manifest_for(blob: &[u8]) -> OciManifest {
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some("application/vnd.grimoire.skill.v1".to_string()),
+            config_media_type: Some("application/vnd.grimoire.skill.config.v1+json".to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(blob),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),

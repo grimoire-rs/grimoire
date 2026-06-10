@@ -236,7 +236,9 @@ mod tests {
         assert_eq!(packed.name, "code-review");
         assert!(!packed.tar.is_empty());
         assert_eq!(packed.annotations["org.opencontainers.image.version"], "1.2.3");
-        assert_eq!(packed.annotations["com.grimoire.kind"], "skill");
+        assert_eq!(packed.annotations["org.opencontainers.image.title"], "code-review");
+        // The kind is carried by the OCI artifactType, not an annotation.
+        assert!(!packed.annotations.contains_key("com.grimoire.kind"));
     }
 
     #[test]
