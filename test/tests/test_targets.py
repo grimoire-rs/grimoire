@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""`grim install --target` multi-editor acceptance tests."""
+"""`grim install --client` multi-client acceptance tests."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,7 +40,7 @@ def test_install_claude_and_copilot_layouts(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
-    rows = runner.json("install", "--target", "claude,copilot")
+    rows = runner.json("install", "--client", "claude,copilot")
     assert {r["status"] for r in rows} == {"installed"}
 
     # Claude: canonical skill + rule.
@@ -71,7 +71,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
     _setup(project_dir, unique_repo)
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    runner.run("install", "--target", "copilot", check=False)
+    runner.run("install", "--client", "copilot", check=False)
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
     instr.write_text("hand edited by a user\n")
@@ -86,7 +86,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
     )
 
     # A plain `install` (no --force) refuses the generated-file drift.
-    refused = runner.run("install", "--target", "copilot", check=False)
+    refused = runner.run("install", "--client", "copilot", check=False)
     assert refused.returncode == 65, (
         f"install without --force must refuse generated-file drift (65), "
         f"got {refused.returncode}; {refused.stderr}"
@@ -96,7 +96,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
     )
 
     # `--force` regenerates the deterministic transform output.
-    forced = runner.run("install", "--target", "copilot", "--force", check=False)
+    forced = runner.run("install", "--client", "copilot", "--force", check=False)
     assert forced.returncode == 0, (
         f"forced install must succeed, got {forced.returncode}; "
         f"{forced.stderr}"
@@ -110,11 +110,11 @@ def test_copilot_regeneration_is_idempotent(
     _setup(project_dir, unique_repo)
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    runner.run("install", "--target", "copilot", check=False)
+    runner.run("install", "--client", "copilot", check=False)
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
     first = instr.read_text()
 
     # A second install over intact content is a no-op; the bytes are
     # byte-identical (deterministic transform).
-    runner.run("install", "--target", "copilot", check=False)
+    runner.run("install", "--client", "copilot", check=False)
     assert instr.read_text() == first

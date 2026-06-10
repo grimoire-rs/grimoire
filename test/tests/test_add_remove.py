@@ -21,7 +21,10 @@ def test_add_declares_and_locks_entry(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    out = runner.json("add", "skill", "code-review", sk.fq)
+    # New CLI: reference is the only required arg. Kind is inferred from the
+    # manifest's `com.grimoire.kind` annotation; name defaults to the
+    # reference's last path segment (`code-review`).
+    out = runner.json("add", sk.fq)
     assert out["kind"] == "skill"
     assert out["name"] == "code-review"
     assert out["status"] == "added"
@@ -48,7 +51,7 @@ def test_add_then_remove_round_trip(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    runner.json("add", "rule", "rust-style", ru.fq)
+    runner.json("add", ru.fq)
     assert "rust-style" in (project_dir / "grimoire.toml").read_text()
 
     out = runner.json("remove", "rule", "rust-style")
@@ -90,8 +93,8 @@ def test_add_two_entries_then_lock_install(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    runner.json("add", "skill", "code-review", sk.fq)
-    runner.json("add", "rule", "rust-style", ru.fq)
+    runner.json("add", sk.fq)
+    runner.json("add", ru.fq)
 
     # The lock carries both; install materializes both cleanly.
     rows = runner.json("install")

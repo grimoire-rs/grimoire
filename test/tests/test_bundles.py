@@ -189,7 +189,9 @@ def test_add_bundle_declares_and_locks(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    out = runner.json("add", "bundle", "stack", bundle.fq)
+    # Kind inferred as `bundle` from the manifest annotation; name defaults
+    # to the reference's last segment (`stack`).
+    out = runner.json("add", bundle.fq)
     assert out["kind"] == "bundle"
     assert out["name"] == "stack"
 
