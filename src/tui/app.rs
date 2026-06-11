@@ -40,9 +40,13 @@ use crate::resolve::resolver::resolve_lock;
 
 use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
-use super::state::{ArtifactState, TuiRow, TuiState};
+use super::state::{ArtifactState, Mode, TuiRow, TuiState};
+use super::update_check::{CheckMsg, RowCheck, UpdateChecker, eligible_for_recheck};
 
 use std::collections::BTreeMap;
+use std::time::Instant;
+
+use tokio::sync::mpsc::Receiver;
 
 /// Everything the TUI needs to load the catalog and reuse the install
 /// path, resolved once by `command/tui.rs` before raw mode is entered.
@@ -172,8 +176,24 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     load_into(&ctx, &mut state).await;
     terminal.draw(|f| draw(f, &frame(&state)))?;
 
+    // The background-update-check machinery: a bounded set of tokio tasks
+    // that refresh the catalog and re-resolve installed rows' floating tags
+    // while the user browses, feeding results back over `rx`. Offline
+    // disables it entirely (no network); the checker is still created so the
+    // event loop is shape-stable, it just never gets primed.
+    let (mut checker, mut rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.registry.clone());
+    arm_background_checks(&ctx, &state, &mut checker);
+
     loop {
-        // Poll so a slow terminal does not spin; redraw on any event.
+        // Drain any background results that arrived since the last tick and
+        // redraw if state changed — the 200ms poll below doubles as the
+        // result-drain tick (no event needed to surface a flipped icon).
+        if drain_checks(&ctx, &mut state, &mut checker, &mut rx) {
+            terminal.draw(|f| draw(f, &frame(&state)))?;
+        }
+
+        // Poll so a slow terminal does not spin; on timeout, loop back to
+        // drain again (so results surface within ~200ms even while idle).
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
@@ -195,6 +215,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             continue;
         };
 
+        // A search edit may surface new installed rows — schedule debounced
+        // per-row checks after the transition applies (below).
+        let was_searching = state.mode == Mode::Search;
         match handle(&mut state, input) {
             TuiAction::Quit => break,
             TuiAction::None => {}
@@ -203,6 +226,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 state.set_status("refreshing catalog…");
                 terminal.draw(|f| draw(f, &frame(&state)))?;
                 reload_into(&ctx, &mut state, true).await;
+                // Re-arm the background checks against the freshly-loaded
+                // rows (the `r` key is an explicit "check again" too).
+                arm_background_checks(&ctx, &state, &mut checker);
             }
             TuiAction::Batch { op, rows } => {
                 run_batch(&ctx, &mut state, &rows, op).await;
@@ -215,6 +241,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     state.set_scope_label(&ctx.scope_label);
                     state.set_clients(client_names(&ctx));
                     recompute_states(&ctx, &mut state);
+                    // The new scope has a different lock/state — re-check its
+                    // installed rows against the registry.
+                    arm_background_checks(&ctx, &state, &mut checker);
                     // The colored MODE box already shows the active scope
                     // — no redundant title-bar status.
                     state.set_status("");
@@ -223,9 +252,151 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 }
             }
         }
+
+        // While searching, a query edit can reveal installed rows that were
+        // filtered out — schedule debounced per-row checks for them.
+        if was_searching && state.mode == Mode::Search {
+            schedule_row_checks(&ctx, &state, &mut checker, Instant::now());
+        }
+
         terminal.draw(|f| draw(f, &frame(&state)))?;
     }
     Ok(())
+}
+
+/// Spawn the initial round of background checks against the current rows: a
+/// catalog refresh (new packages) plus a per-row floating-tag re-check for
+/// every eligible (installed/outdated) row. A no-op when offline (zero
+/// network). Called after the first load, after `Refresh`, and after a
+/// scope toggle.
+fn arm_background_checks(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker) {
+    if ctx.offline {
+        return;
+    }
+    checker.spawn_catalog_refresh(ctx.catalog_path.clone());
+    // The initial per-row sweep ignores the debounce window — it is the
+    // launch/refresh check, not a per-keystroke storm.
+    schedule_row_checks(ctx, state, checker, Instant::now());
+}
+
+/// Schedule bounded per-row registry re-checks for the eligible rows,
+/// debounced so per-keystroke search never spawns a storm. Each eligible
+/// row contributes one [`RowCheck`] (its floating identifier + locked
+/// digest); the checker dedups any repo already in flight. A no-op when
+/// offline.
+fn schedule_row_checks(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker, now: Instant) {
+    if ctx.offline {
+        return;
+    }
+    if !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
+        return;
+    }
+    let (lock, _install_state) = load_scope_for_badges(ctx);
+    let Some(lock) = lock else {
+        return; // No lock ⇒ no pins to compare against.
+    };
+    let checks: Vec<RowCheck> = state
+        .rows
+        .iter()
+        .filter(|r| eligible_for_recheck(r))
+        .filter_map(|r| build_row_check(&lock, r))
+        .collect();
+    if checks.is_empty() {
+        return;
+    }
+    checker.spawn_row_checks(checks);
+    checker.mark_scheduled(now);
+}
+
+/// Build the [`RowCheck`] for one eligible row: pair its floating identifier
+/// (registry/repo + the representative/`latest` tag) with the digest the
+/// scope's lock pinned it to. `None` when the row carries no lock entry
+/// (then "newer tag" has no baseline) or its repo is malformed.
+fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
+    let (registry, repository) = split_repo(&row.repo)?;
+    let locked = lock
+        .skills
+        .iter()
+        .chain(lock.rules.iter())
+        .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)?;
+    // Resolve the same floating tag the badge derivation pins against: the
+    // representative tag, else the conventional `latest`.
+    let tag = if row.latest_tag.is_empty() {
+        "latest".to_string()
+    } else {
+        row.latest_tag.clone()
+    };
+    let id = Identifier::new_registry(repository, registry).clone_with_tag(tag);
+    Some(RowCheck {
+        repo: row.repo.clone(),
+        id,
+        locked_digest: locked.pinned.digest(),
+    })
+}
+
+/// Drain every pending [`CheckMsg`] non-blockingly and apply it to `state`.
+/// Returns `true` when anything changed (so the caller redraws). This is the
+/// only place background results touch the screen model — through the pure
+/// setters, keeping `state.rs` the single source of row truth.
+fn drain_checks(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    checker: &mut UpdateChecker,
+    rx: &mut Receiver<CheckMsg>,
+) -> bool {
+    let mut changed = false;
+    // `try_recv` never blocks; loop until the channel is momentarily empty.
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            CheckMsg::CatalogReady(catalog) => {
+                // Re-derive rows from the fresh catalog against the active
+                // scope, then merge preserving live ↑ / pins + the kind-sort
+                // and filter. The scope load is cheap (advisory).
+                drain_catalog_ready(ctx, state, &catalog);
+                changed = true;
+            }
+            CheckMsg::RowOutdated { repo } => {
+                checker.clear_in_flight(&repo);
+                if state.mark_outdated_if_installed(&repo) {
+                    changed = true;
+                }
+            }
+            CheckMsg::RowUpToDate { repo } | CheckMsg::Failed { repo } => {
+                // No state change; just free the repo for a future re-check.
+                checker.clear_in_flight(&repo);
+            }
+        }
+    }
+    if changed {
+        update_idle_breadcrumb(state);
+    }
+    changed
+}
+
+/// Apply a [`CheckMsg::CatalogReady`]: project the fresh catalog into rows
+/// (badges derived from the active scope's lock + install record, reusing
+/// the same path the initial load uses) and merge them, preserving live
+/// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
+fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
+    let (lock, install_state) = load_scope_for_badges(ctx);
+    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state);
+    state.merge_catalog_rows(fresh);
+}
+
+/// Set a quiet tally breadcrumb ("N update(s) available") **only** when the
+/// status line is otherwise idle, so a transient batch-result or refresh
+/// message is never clobbered by the background checker. Cleared to empty
+/// when no updates are outstanding and the line is idle.
+fn update_idle_breadcrumb(state: &mut TuiState) {
+    // Only speak into an idle line: a non-empty status is a transient
+    // message (batch result, error, refresh) that must win.
+    if !state.status_line.is_empty() {
+        return;
+    }
+    let n = state.outdated_count();
+    if n > 0 {
+        state.set_status(format!("{n} update{} available", if n == 1 { "" } else { "s" }));
+    }
 }
 
 /// Map a crossterm key to the abstract [`TuiInput`]. The *only*

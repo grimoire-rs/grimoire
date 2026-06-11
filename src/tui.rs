@@ -11,11 +11,17 @@
 //! function, and [`app`] owns the terminal, the async catalog load, and
 //! the event loop — the one place the render loop and raw mode live, and
 //! the one place excluded from acceptance tests.
+//!
+//! [`update_check`] adds background async update checks: its decisions
+//! (eligibility, outdated derivation, debounce) are pure and headlessly
+//! tested, while its spawn helpers — the only impure surface besides
+//! [`app`] — run the bounded background tasks.
 
 pub mod app;
 pub mod event;
 pub mod render;
 pub mod state;
+pub mod update_check;
 
 #[allow(unused_imports)]
 pub use event::{TuiAction, TuiInput, handle};
@@ -23,3 +29,5 @@ pub use event::{TuiAction, TuiInput, handle};
 pub use render::RenderModel;
 #[allow(unused_imports)]
 pub use state::{Mode, TuiState};
+#[allow(unused_imports)]
+pub use update_check::{CheckMsg, UpdateChecker};

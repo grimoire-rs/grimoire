@@ -194,6 +194,41 @@ impl TuiState {
         self.marked.clear();
     }
 
+    /// Merge a freshly-refreshed catalog row set in, carrying live per-row
+    /// detail forward, then route through [`Self::set_rows`] so the
+    /// kind-sort and the active filter stay consistent.
+    ///
+    /// A background catalog refresh re-derives every row's `state` from the
+    /// on-disk lock + install record, which has **not** seen the live
+    /// registry re-resolve — so a naive replace would erase a just-flipped
+    /// `↑ Outdated` until the next per-row check. To avoid that flicker this
+    /// carries two pieces of live, in-memory-only detail from the current
+    /// rows onto the fresh ones, keyed by `repo`:
+    ///
+    /// - a live `Outdated` flag is re-applied **only** when the fresh row is
+    ///   `Installed` (the same precedence as [`Self::mark_outdated_if_installed`]
+    ///   — a fresh `Modified` / `IntegrityMissing` is stronger on-disk truth
+    ///   and wins);
+    /// - the user's picker `pinned_version` (never part of the catalog).
+    ///
+    /// New repositories appear; vanished ones drop. Marks are cleared by
+    /// `set_rows` (row identities changed wholesale) — acceptable for a
+    /// background refresh.
+    pub fn merge_catalog_rows(&mut self, mut fresh: Vec<TuiRow>) {
+        for row in &mut fresh {
+            let Some(existing) = self.rows.iter().find(|r| r.repo == row.repo) else {
+                continue;
+            };
+            if existing.state == ArtifactState::Outdated && row.state == ArtifactState::Installed {
+                row.state = ArtifactState::Outdated;
+            }
+            if row.pinned_version.is_none() {
+                row.pinned_version = existing.pinned_version.clone();
+            }
+        }
+        self.set_rows(fresh);
+    }
+
     /// Number of selectable rows (the filtered view).
     fn display_len(&self) -> usize {
         self.filtered.len()
@@ -266,6 +301,36 @@ impl TuiState {
     /// Set the active scope's effective selected client names (display only).
     pub fn set_clients(&mut self, clients: Vec<String>) {
         self.clients = clients;
+    }
+
+    /// Flip the row whose `repo` matches to [`ArtifactState::Outdated`], but
+    /// **only** when it is currently [`ArtifactState::Installed`].
+    ///
+    /// This is the single merge primitive the background update-check feeds
+    /// its registry-aware "a newer pin exists" result through. The guard is
+    /// load-bearing: a background `↑` may *upgrade* a clean `Installed` row
+    /// but must never *downgrade* a `Modified` / `IntegrityMissing` /
+    /// `NotInstalled` row (those carry stronger on-disk truth the registry
+    /// cannot override), and re-flipping an already-`Outdated` row is a
+    /// no-op. Unknown `repo` is a silent no-op (the row may have been
+    /// filtered or replaced by a catalog refresh between schedule and
+    /// drain). Returns `true` when a flip actually happened.
+    pub fn mark_outdated_if_installed(&mut self, repo: &str) -> bool {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.repo == repo)
+            && row.state == ArtifactState::Installed
+        {
+            row.state = ArtifactState::Outdated;
+            return true;
+        }
+        false
+    }
+
+    /// How many rows are currently in the [`ArtifactState::Outdated`] state —
+    /// the tally the status-line breadcrumb reports ("N update(s)
+    /// available"). Counts the full row set, not just the filtered view, so
+    /// the number is stable across a search edit.
+    pub fn outdated_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.state == ArtifactState::Outdated).count()
     }
 
     /// Replace the status line.
@@ -676,6 +741,127 @@ mod tests {
         s.apply_query("python");
         assert_eq!(s.filtered.len(), 1);
         assert_eq!(s.selected_row().unwrap().repo, "acme/python");
+    }
+
+    #[test]
+    fn mark_outdated_if_installed_flips_only_installed() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("r/installed", "d", &[], ArtifactState::Installed),
+            row("r/modified", "d", &[], ArtifactState::Modified),
+            row("r/integrity", "d", &[], ArtifactState::IntegrityMissing),
+            row("r/notinstalled", "d", &[], ArtifactState::NotInstalled),
+            row("r/already", "d", &[], ArtifactState::Outdated),
+        ]);
+
+        // Installed flips to Outdated, and the call reports the flip.
+        assert!(s.mark_outdated_if_installed("r/installed"));
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "r/installed").unwrap().state,
+            ArtifactState::Outdated
+        );
+
+        // Stronger on-disk states are never downgraded.
+        for (repo, expected) in [
+            ("r/modified", ArtifactState::Modified),
+            ("r/integrity", ArtifactState::IntegrityMissing),
+            ("r/notinstalled", ArtifactState::NotInstalled),
+        ] {
+            assert!(!s.mark_outdated_if_installed(repo), "{repo} must not flip");
+            assert_eq!(s.rows.iter().find(|r| r.repo == repo).unwrap().state, expected);
+        }
+
+        // Re-flipping an already-Outdated row is a no-op (not Installed).
+        assert!(!s.mark_outdated_if_installed("r/already"));
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "r/already").unwrap().state,
+            ArtifactState::Outdated
+        );
+
+        // An unknown repo is a silent no-op.
+        assert!(!s.mark_outdated_if_installed("r/ghost"));
+    }
+
+    #[test]
+    fn merge_catalog_rows_preserves_live_outdated_and_resorts() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/alpha", "old", &[], ArtifactState::Installed),
+            row("acme/beta", "old", &[], ArtifactState::Modified),
+        ]);
+        // A live per-row check flipped alpha to Outdated.
+        s.mark_outdated_if_installed("acme/alpha");
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "acme/alpha").unwrap().state,
+            ArtifactState::Outdated
+        );
+
+        // A background catalog refresh arrives: alpha re-derives Installed
+        // (the on-disk lock has not advanced), beta re-derives Modified, and
+        // a new gamma appears. Input order is shuffled to prove re-sorting.
+        let fresh = vec![
+            row("acme/gamma", "new", &[], ArtifactState::NotInstalled),
+            row("acme/beta", "new", &[], ArtifactState::Modified),
+            row("acme/alpha", "new", &[], ArtifactState::Installed),
+        ];
+        s.merge_catalog_rows(fresh);
+
+        // Sort + filter stay consistent: three rows, sorted by leaf name.
+        assert_eq!(s.filtered.len(), 3);
+        let order: Vec<&str> = s.rows.iter().map(|r| r.repo.as_str()).collect();
+        assert_eq!(order, vec!["acme/alpha", "acme/beta", "acme/gamma"]);
+
+        // The live ↑ survived the refresh (alpha was Installed in the fresh
+        // set, so the carried-over Outdated re-applies).
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "acme/alpha").unwrap().state,
+            ArtifactState::Outdated
+        );
+        // The fresh description replaced the old one.
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "acme/alpha").unwrap().description,
+            "new"
+        );
+        // A fresh Modified is stronger on-disk truth — never downgraded by a
+        // stale live flag (beta had no live ↑ anyway, stays Modified).
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "acme/beta").unwrap().state,
+            ArtifactState::Modified
+        );
+    }
+
+    #[test]
+    fn merge_catalog_rows_does_not_relift_outdated_onto_modified() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("acme/alpha", "d", &[], ArtifactState::Installed)]);
+        s.mark_outdated_if_installed("acme/alpha"); // now Outdated (live ↑)
+
+        // The refresh re-derives alpha as Modified (the file drifted on
+        // disk). The stale live ↑ must NOT override the stronger Modified.
+        s.merge_catalog_rows(vec![row("acme/alpha", "d", &[], ArtifactState::Modified)]);
+        assert_eq!(
+            s.rows[0].state,
+            ArtifactState::Modified,
+            "Modified wins over a stale live ↑"
+        );
+    }
+
+    #[test]
+    fn outdated_count_tallies_full_row_set() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("r/a", "d", &[], ArtifactState::Installed),
+            row("r/b", "d", &[], ArtifactState::Installed),
+            row("r/c", "d", &[], ArtifactState::Outdated),
+        ]);
+        assert_eq!(s.outdated_count(), 1, "one row starts Outdated");
+        s.mark_outdated_if_installed("r/a");
+        s.mark_outdated_if_installed("r/b");
+        assert_eq!(s.outdated_count(), 3, "both Installed rows flipped");
+        // The tally counts the full row set even when a search hides some.
+        s.apply_query("r/a");
+        assert_eq!(s.filtered.len(), 1, "filter hides two rows");
+        assert_eq!(s.outdated_count(), 3, "tally is over all rows, not the filter");
     }
 
     #[test]
