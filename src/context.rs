@@ -135,6 +135,22 @@ impl Context {
 }
 
 #[cfg(test)]
+impl Context {
+    /// Hermetic test constructor: no ambient env reads. Tests asserting
+    /// registry precedence or "no registry resolvable" must not inherit the
+    /// developer's `$GRIM_DEFAULT_REGISTRY` / `$GRIM_HOME` (mutating the
+    /// process env in tests is `unsafe` and forbidden — inject instead).
+    pub fn hermetic(grim_home: std::path::PathBuf) -> Self {
+        Self {
+            grim_home,
+            registry_flag: None,
+            registry_env: None,
+            offline: false,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::options::OutputFormat;

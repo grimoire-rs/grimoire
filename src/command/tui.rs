@@ -185,12 +185,18 @@ mod tests {
 
     #[test]
     fn no_registry_is_config_error() {
-        let ctx = Context::new(&opts());
+        // Hermetic: the developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME /
+        // a CWD-discovered project config must not leak in — pin all
+        // three tiers explicitly.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[options]\n").unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         let a = TuiArgs {
             registry: None,
             refresh: false,
             global: false,
-            config: None,
+            config: Some(cfg),
         };
         let err = resolve_registry(&ctx, &a).expect_err("no registry");
         assert_eq!(crate::error::classify_error(&err), ExitCode::ConfigError);

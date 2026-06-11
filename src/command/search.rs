@@ -207,10 +207,16 @@ mod tests {
 
     #[test]
     fn no_registry_anywhere_is_config_error() {
-        // No --registry, no GRIM_DEFAULT_REGISTRY in the test env, no
-        // project config ⇒ NoRegistry, classified as a config error.
-        let ctx = Context::new(&opts());
-        let a = args();
+        // No --registry, no env, no config default anywhere ⇒ NoRegistry,
+        // classified as a config error. Hermetic: the developer's
+        // $GRIM_DEFAULT_REGISTRY / $GRIM_HOME / a CWD-discovered project
+        // config must not leak in — pin all three tiers explicitly.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[options]\n").unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(cfg);
         let err = resolve_registry(&ctx, &a).expect_err("no registry resolvable");
         assert_eq!(crate::error::classify_error(&err), ExitCode::ConfigError);
     }

@@ -171,7 +171,9 @@ mod tests {
     #[test]
     fn precedence_project_config_beats_global_config() {
         // No flag, no env ⇒ project config wins over the global fallback.
-        let ctx = Context::new(&opts(None));
+        // Hermetic: a developer's $GRIM_DEFAULT_REGISTRY must not interpose.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             resolve_default_registry(&ctx, Some("proj.example"), Some("glob.example")),
             Some("proj.example".to_string())
@@ -180,7 +182,9 @@ mod tests {
 
     #[test]
     fn precedence_global_config_is_lowest_fallback() {
-        let ctx = Context::new(&opts(None));
+        // Hermetic: a developer's $GRIM_DEFAULT_REGISTRY must not interpose.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             resolve_default_registry(&ctx, None, Some("glob.example")),
             Some("glob.example".to_string())
@@ -189,7 +193,9 @@ mod tests {
 
     #[test]
     fn no_registry_anywhere_is_none() {
-        let ctx = Context::new(&opts(None));
+        // Hermetic: a developer's $GRIM_DEFAULT_REGISTRY must not leak in.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(resolve_default_registry(&ctx, None, None), None);
     }
 
@@ -206,9 +212,12 @@ mod tests {
 
     #[test]
     fn global_config_default_degrades_to_none_when_absent() {
-        // No global config on disk in the test environment ⇒ the
-        // best-effort load degrades to `None` rather than failing.
-        let ctx = Context::new(&opts(None));
+        // No global config on disk under the hermetic $GRIM_HOME ⇒ the
+        // best-effort load degrades to `None` rather than failing. (An
+        // empty tempdir pins "absent" — the developer's real global
+        // config must not leak in.)
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             global_config_default(&ctx, crate::config::scope::ConfigScope::Project),
             None

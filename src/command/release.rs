@@ -381,7 +381,14 @@ mod tests {
         // chain — not a literal `None` argument — produced it. The flag tier
         // above proves the chain still orders correctly; the global-tier disk
         // read is exercised end-to-end by `test_default_registry.py`.
-        let ctx = Context::new(&opts(None));
+        //
+        // Hermetic context: the developer's $GRIM_DEFAULT_REGISTRY /
+        // $GRIM_HOME must not leak in. The project tier still walks the
+        // CWD (`ProjectConfig::discover(None)` is not injectable here);
+        // it stays `None` because the repo's own `grimoire.toml` carries
+        // no `default_registry` — keep it that way.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(release_default_registry(&ctx), None);
     }
 
