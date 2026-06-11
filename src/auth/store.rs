@@ -352,8 +352,9 @@ fn write_config(path: &Path, config: &DockerConfig) -> Result<(), AuthError> {
     restrict_permissions(path)
 }
 
-/// Ensure the config file (and its parent directory) exist so the advisory
-/// lock has something to open. A freshly created file is owner-only.
+/// Ensure the config file (and its parent directory) exist so the lock
+/// sidecar can be created beside it and a fresh credentials file starts
+/// life owner-only (`0600`) before the first secret is written.
 fn ensure_config_file(path: &Path) -> Result<(), AuthError> {
     let io = |source| AuthError::StoreIo {
         path: path.to_path_buf(),
