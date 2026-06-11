@@ -91,21 +91,21 @@ catalog against the global scope's state. Tamper a file
 then refresh — it shows `✱ modified`; delete the dir and it shows
 `✘ integrity-missing`.
 
-### 2. Lock & install into an editor
+### 2. Lock & install into a client
 
 ```sh
 cd test/manual/project
 grim lock                         # floating :1 -> pinned @sha256
 cat grimoire.lock                 # byte-stable, digest-pinned
-grim install                      # default editor: claude
+grim install                      # default client: claude
 ls -R .claude/skills .claude/rules
 grim status                       # every artifact 'installed'
 ```
 
-### 3. Multi-editor transform (Copilot rule transform)
+### 3. Multi-client transform (Copilot rule transform)
 
 ```sh
-grim install --target claude,copilot
+grim install --client claude,copilot
 cat .github/instructions/rust-style.instructions.md
 # note: `paths:` frontmatter stripped + provenance header prepended
 ```
@@ -143,11 +143,12 @@ upgrading `:1 -> :2` adds AND removes members:
 
 ```sh
 # v1: code-reviewer + rust-style + security-baseline
-grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:1
+# `add` infers kind=bundle from the published manifest's artifactType
+grim add localhost:5050/grimoire/bundles/starter-pack:1
 cat grimoire.toml grimoire.lock           # inspect the resolved members
 
 # v2 ADDS commit-helper, DROPS security-baseline
-grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:2
+grim add localhost:5050/grimoire/bundles/starter-pack:2
 grim update                               # commit-helper added, security-baseline pruned
 cat grimoire.toml grimoire.lock
 ```
@@ -155,7 +156,7 @@ cat grimoire.toml grimoire.lock
 ### 6. add / remove
 
 ```sh
-grim add skill hello-world localhost:5050/grimoire/skills/hello-world:1
+grim add localhost:5050/grimoire/skills/hello-world:1
 grim remove skill commit-helper
 cat grimoire.toml grimoire.lock
 ```
@@ -164,7 +165,7 @@ cat grimoire.toml grimoire.lock
 
 ```sh
 grim --global init
-grim --global add rule security-baseline localhost:5050/grimoire/rules/security-baseline:1
+grim --global add localhost:5050/grimoire/rules/security-baseline:1
 grim --global install
 ```
 

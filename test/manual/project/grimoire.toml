@@ -9,7 +9,7 @@
 # `grim update` rolls the pin forward 1.2.0 → 1.3.0 (rolling release).
 [options]
 default_registry = "localhost:5050"
-editor = "claude"
+clients = ["claude"]
 
 [skills]
 hello-world   = "localhost:5050/grimoire/skills/hello-world:1"
