@@ -16,6 +16,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use super::detail::{
+    CATALOG_WIDTH, DETAIL_MIN_WIDTH, DetailLine, W_KIND, W_REPO, W_STATUS, W_TAG, detail_lines, scroll_max, viewport,
+};
 use super::state::{ArtifactState, Mode, TuiState};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
@@ -48,25 +51,6 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
         ArtifactState::IntegrityMissing => ("✘", "integrity-missing", ColorKey::IntegrityMissing),
     }
 }
-
-/// Column widths (chars) — the projection pads/truncates to these so the
-/// table aligns regardless of how long an identifier is.
-const W_KIND: usize = 8;
-const W_REPO: usize = 46;
-const W_TAG: usize = 12;
-/// Status column width — wide enough for the longest label
-/// (`✘ integrity-missing`, 19 chars) so the header underline spans the
-/// full column instead of stopping at `Status`.
-const W_STATUS: usize = 19;
-/// Total terminal columns the Catalog needs to show every fixed-width
-/// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + status,
-/// plus 2 block borders. Selection is shown by row highlight (no leading
-/// symbol). Sized to exactly this side-by-side so Detail gets all slack.
-const CATALOG_WIDTH: u16 = (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS) as u16 + 2 /* borders */;
-
-/// Narrowest usable Detail column (side-by-side layout threshold in
-/// [`draw`], and the conservative wrap width [`detail_scroll_max`] uses).
-const DETAIL_MIN_WIDTH: u16 = 30;
 
 /// Truncate `s` to `width` *display chars* (ellipsis on overflow) then
 /// left-pad to exactly `width`, so every cell is the same width and the
@@ -109,31 +93,6 @@ pub struct PickerView {
     pub pinned: Option<String>,
 }
 
-/// One semantic line of the Detail pane. Pure data — [`draw`] maps each
-/// kind to concrete styling with zero logic of its own.
-///
-/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DetailLine {
-    /// Blank spacer.
-    Blank,
-    /// The artifact reference — centered, bold, accent color.
-    Identifier(String),
-    /// An underlined section label; the colon is part of the label
-    /// (e.g. `Summary:`).
-    SectionLabel(&'static str),
-    /// `label value` on one line; the label includes the colon
-    /// (e.g. `Keywords:`).
-    MetaEntry {
-        /// The highlighted key, colon included.
-        label: &'static str,
-        /// The plain value rendered on the same line.
-        value: String,
-    },
-    /// Plain wrapped body text.
-    Text(String),
-}
-
 /// A plain, ratatui-free description of the whole screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderModel {
@@ -159,7 +118,8 @@ pub struct RenderModel {
     /// ([`draw`] maps each kind to its styling).
     pub detail: Vec<DetailLine>,
     /// The detail pane's vertical scroll offset, already clamped to the
-    /// pane's estimated rendered height (see [`detail_scroll_max`]).
+    /// content's post-wrap height in the live viewport
+    /// (see [`super::detail::scroll_max`]).
     pub detail_scroll: u16,
     /// The bottom status line — transient only (loading, counts, batch
     /// results, marked-set actions). Empty when idle.
@@ -184,91 +144,6 @@ pub struct RenderModel {
     pub show_help: bool,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
-}
-
-/// Build the Detail pane's semantic lines for the current selection.
-///
-/// Layout: the centered identifier framed by blank lines, an underlined
-/// `Summary:` section (the short blurb, `-` when absent), an optional
-/// `Description:` section (only when a description exists), then a
-/// `Metadata:` section of `Label: value` rows. Version and status are
-/// deliberately NOT repeated here — the catalog row already shows both
-/// (Tag column, status glyph). `Pinned:` appears only when the picker
-/// pinned a version.
-fn detail_lines(state: &TuiState) -> Vec<DetailLine> {
-    let Some(r) = state.selected_row() else {
-        return vec![DetailLine::Text("no selection".to_string())];
-    };
-    let keywords = if r.keywords.is_empty() {
-        "-".to_string()
-    } else {
-        r.keywords.join(", ")
-    };
-    let summary = if r.summary.is_empty() { "-" } else { r.summary.as_str() };
-
-    let mut lines = vec![
-        DetailLine::Blank,
-        DetailLine::Identifier(r.repo.clone()),
-        DetailLine::Blank,
-        DetailLine::SectionLabel("Summary:"),
-        DetailLine::Blank,
-        DetailLine::Text(summary.to_string()),
-    ];
-    if !r.description.is_empty() {
-        lines.extend([
-            DetailLine::Blank,
-            DetailLine::SectionLabel("Description:"),
-            DetailLine::Blank,
-            DetailLine::Text(r.description.clone()),
-        ]);
-    }
-    lines.extend([
-        DetailLine::Blank,
-        DetailLine::SectionLabel("Metadata:"),
-        DetailLine::Blank,
-        DetailLine::MetaEntry {
-            label: "Keywords:",
-            value: keywords,
-        },
-        DetailLine::MetaEntry {
-            label: "Repository:",
-            value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
-        },
-    ]);
-    if let Some(p) = &r.pinned_version {
-        lines.push(DetailLine::MetaEntry {
-            label: "Pinned:",
-            value: p.clone(),
-        });
-    }
-    lines
-}
-
-/// The visible text of one semantic detail line (the wrap-estimate input;
-/// tests reuse it to assert content without caring about styling).
-fn detail_line_text(line: &DetailLine) -> String {
-    match line {
-        DetailLine::Blank => String::new(),
-        DetailLine::Identifier(s) | DetailLine::Text(s) => s.clone(),
-        DetailLine::SectionLabel(l) => (*l).to_string(),
-        DetailLine::MetaEntry { label, value } => format!("{label} {value}"),
-    }
-}
-
-/// Conservative upper bound for the detail scroll offset.
-///
-/// `Paragraph::scroll` counts *post-wrap* rows, which depend on the live
-/// pane width the pure layer cannot know. Estimate each line's row count
-/// at the narrowest possible pane ([`DETAIL_MIN_WIDTH`] minus the two
-/// border cells); a wider pane wraps less, so the bound only ever
-/// over-allows (a short blank tail when fully scrolled), never under.
-fn detail_scroll_max(lines: &[DetailLine]) -> u16 {
-    let width = usize::from(DETAIL_MIN_WIDTH - 2);
-    let rows: usize = lines
-        .iter()
-        .map(|l| detail_line_text(l).chars().count().div_ceil(width).max(1))
-        .sum();
-    u16::try_from(rows.saturating_sub(1)).unwrap_or(u16::MAX)
 }
 
 /// Pick the widest hint tier whose text (plus a one-cell right margin)
@@ -350,8 +225,11 @@ pub fn frame(state: &TuiState) -> RenderModel {
         })
         .collect();
 
-    let detail = detail_lines(state);
-    let detail_scroll = state.detail_scroll.min(detail_scroll_max(&detail));
+    // The offset is already clamped at mutation time
+    // (`TuiState::scroll_detail`); the re-clamp here covers direct field
+    // writes (the field is public for tests).
+    let detail = detail_lines(state.selected_row());
+    let detail_scroll = state.detail_scroll.min(scroll_max(&detail, viewport(state.term_size)));
 
     // Status is transient only — loading / counts / batch results, or the
     // marked-set action keys (contextual). The always-on key summary lives
@@ -845,6 +723,7 @@ fn color_for(key: ColorKey) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::detail::detail_line_text;
     use crate::tui::state::{ArtifactState, TuiRow};
 
     /// Flatten the semantic detail lines to one plain string for
@@ -1089,21 +968,27 @@ mod tests {
     }
 
     #[test]
-    fn frame_clamps_detail_scroll_to_estimated_height() {
+    fn frame_clamps_detail_scroll_to_content_height() {
         let mut s = TuiState::new();
         s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
+        // A small terminal so the content overflows its pane.
+        s.set_term_size((40, 13));
         s.enter_detail();
-        // Way past the end: the projection clamps to the wrap estimate.
+        // Way past the end: the state clamp stops at the content bottom.
         for _ in 0..500 {
             s.scroll_detail(1);
         }
         let m = frame(&s);
-        let max = detail_scroll_max(&m.detail);
+        let max = scroll_max(&m.detail, viewport(s.term_size));
         assert_eq!(m.detail_scroll, max);
-        assert!(max > 0, "a populated pane has a non-zero scroll range");
+        assert!(max > 0, "an overflowing pane has a non-zero scroll range");
         // Within range: passed through untouched.
         s.detail_scroll = 1;
         assert_eq!(frame(&s).detail_scroll, 1);
+        // A direct field write past the end (no clamp in between) is
+        // still caught by the projection's defensive re-clamp.
+        s.detail_scroll = u16::MAX;
+        assert_eq!(frame(&s).detail_scroll, max);
     }
 
     #[test]

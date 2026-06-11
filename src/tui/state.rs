@@ -120,10 +120,15 @@ pub struct TuiState {
     pub filtered: Vec<usize>,
     /// Selection index *into `filtered`* (not into `rows`).
     pub selected: usize,
-    /// Detail-pane vertical scroll offset (post-wrap rows). Saturates at 0
-    /// here; the upper bound is clamped at projection time
-    /// ([`crate::tui::render::frame`]) where the line count is known.
+    /// Detail-pane vertical scroll offset (post-wrap rows). Clamped at
+    /// both ends by [`Self::scroll_detail`]: 0 at the top, the content's
+    /// post-wrap height minus the viewport at the bottom
+    /// ([`super::detail::scroll_max`]).
     pub detail_scroll: u16,
+    /// The terminal size `(width, height)` the app last observed — the
+    /// input for the detail pane's scroll geometry. Kept current by the
+    /// event loop (initial size + every resize event).
+    pub term_size: (u16, u16),
     /// The live search query.
     pub query: String,
     /// Current interaction mode.
@@ -162,6 +167,9 @@ impl Default for TuiState {
             filtered: Vec::new(),
             selected: 0,
             detail_scroll: 0,
+            // A sane universal default until the app reports the real
+            // size (before the first key event is ever processed).
+            term_size: (80, 24),
             query: String::new(),
             mode: Mode::List,
             loading: true,
@@ -435,13 +443,25 @@ impl TuiState {
         self.selected = next as usize;
     }
 
-    /// Scroll the detail pane by `delta` rows, saturating at the top. The
-    /// upper bound is clamped at projection time
-    /// ([`crate::tui::render::frame`]) where the rendered line count is
-    /// known — state only guarantees the offset never goes negative.
+    /// Scroll the detail pane by `delta` rows, clamped at both ends: 0 at
+    /// the top, and the content's post-wrap height minus the viewport at
+    /// the bottom — scrolling stops when the last content row reaches the
+    /// pane's bottom edge, mirroring the top saturation.
     pub fn scroll_detail(&mut self, delta: i64) {
-        let next = (i64::from(self.detail_scroll) + delta).max(0);
-        self.detail_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+        let lines = super::detail::detail_lines(self.selected_row());
+        let max = super::detail::scroll_max(&lines, super::detail::viewport(self.term_size));
+        let next = (i64::from(self.detail_scroll) + delta).clamp(0, i64::from(max));
+        // `next` is in `[0, max]`, both u16-representable.
+        self.detail_scroll = u16::try_from(next).unwrap_or(0);
+    }
+
+    /// Record the live terminal size (initial + every resize), re-clamping
+    /// the detail scroll — a grown pane may shrink the scroll range.
+    pub fn set_term_size(&mut self, size: (u16, u16)) {
+        self.term_size = size;
+        let lines = super::detail::detail_lines(self.selected_row());
+        let max = super::detail::scroll_max(&lines, super::detail::viewport(size));
+        self.detail_scroll = self.detail_scroll.min(max);
     }
 
     /// Set the effective default registry (elided from displayed names).
@@ -1136,5 +1156,21 @@ mod tests {
         s.scroll_detail(2);
         s.set_rows(vec![row("r/zeta", "d", &[], ArtifactState::NotInstalled)]);
         assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn detail_scroll_clamps_at_content_end_and_reclamps_on_resize() {
+        let mut s = seeded();
+        let max = super::super::detail::scroll_max(
+            super::super::detail::detail_lines(s.selected_row()).as_slice(),
+            super::super::detail::viewport(s.term_size),
+        );
+        assert!(max > 0, "fixture content must overflow the default viewport");
+        // Scrolling far past the end stops exactly at the content bottom.
+        s.scroll_detail(500);
+        assert_eq!(s.detail_scroll, max);
+        // Growing the terminal shrinks the range — the offset re-clamps.
+        s.set_term_size((400, 200));
+        assert_eq!(s.detail_scroll, 0, "content fits a huge pane: no scroll range left");
     }
 }

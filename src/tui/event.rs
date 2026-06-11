@@ -617,9 +617,17 @@ mod tests {
     #[test]
     fn page_keys_scroll_detail_without_focus() {
         let mut s = seeded();
+        // The content's exact scroll range in the current viewport — the
+        // bottom clamp the page keys must respect.
+        let max = crate::tui::detail::scroll_max(
+            &crate::tui::detail::detail_lines(s.selected_row()),
+            crate::tui::detail::viewport(s.term_size),
+        );
+        let page = u16::try_from(DETAIL_PAGE).unwrap();
+        assert!(max > page, "fixture content must overflow by more than one page");
         // List mode: PageDown scrolls the pane, selection stays put.
         assert_eq!(handle(&mut s, TuiInput::PageDown), TuiAction::None);
-        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
+        assert_eq!(s.detail_scroll, page);
         assert_eq!(s.selected, 0, "selection unchanged by page keys");
         // PageUp scrolls back and saturates at the top.
         handle(&mut s, TuiInput::PageUp);
@@ -628,14 +636,17 @@ mod tests {
         // Detail mode: same behavior.
         handle(&mut s, TuiInput::Enter);
         handle(&mut s, TuiInput::PageDown);
-        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
+        assert_eq!(s.detail_scroll, page);
         // Leaving detail keeps the offset — the pane content is unchanged.
         handle(&mut s, TuiInput::Esc);
-        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
-        // Search mode: page keys still scroll the visible pane.
+        assert_eq!(s.detail_scroll, page);
+        // Search mode: page keys still scroll, and the bottom clamp wins —
+        // paging past the end stops at the content's last row.
         handle(&mut s, TuiInput::Char('/'));
         handle(&mut s, TuiInput::PageDown);
-        assert_eq!(s.detail_scroll, u16::try_from(2 * DETAIL_PAGE).unwrap());
+        handle(&mut s, TuiInput::PageDown);
+        handle(&mut s, TuiInput::PageDown);
+        assert_eq!(s.detail_scroll, max, "scrolling stops at the content end");
         assert_eq!(s.query, "", "page keys are not query characters");
     }
 

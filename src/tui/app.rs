@@ -174,6 +174,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::new();
+    // The live terminal size feeds the detail pane's scroll clamp; the
+    // state default (80×24) covers the (unlikely) size query failure.
+    if let Ok(size) = crossterm::terminal::size() {
+        state.set_term_size(size);
+    }
     state.set_offline(ctx.offline);
     state.set_scope_label(&ctx.scope_label);
     state.set_clients(client_names(&ctx));
@@ -214,7 +219,10 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
         let ev = event::read()?;
         // A terminal resize must redraw immediately — the layout is
         // recomputed every `draw`, but only key events reached it before.
-        if let Event::Resize(..) = ev {
+        // The new size also re-clamps the detail scroll (the pane's
+        // geometry just changed).
+        if let Event::Resize(w, h) = ev {
+            state.set_term_size((w, h));
             terminal.draw(|f| draw(f, &frame(&state)))?;
             continue;
         }
