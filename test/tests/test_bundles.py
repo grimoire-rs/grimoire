@@ -390,6 +390,125 @@ def test_release_bundle_pin_freezes_members(
     assert member_v1_digest in lock, "pinned member stays frozen despite the tag move"
 
 
+def test_remove_direct_keeps_artifact_held_by_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The artifact is declared DIRECTLY and a declared bundle names it at
+    # the SAME identifier. Removing the direct declaration must keep the
+    # lock entry — the bundle still provides it (provenance flips from
+    # direct to the bundle), with no network round-trip.
+    sk = _member_skill(unique_repo, "code-review")
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", sk.fq)],
+        tag="1.0.0",
+    )
+    write_config(
+        project_dir,
+        skills={"code-review": sk.fq},
+        bundles={"stack": bundle.fq},
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    rows = runner.json("status")
+    before = next(r for r in rows if r["name"] == "code-review")
+    assert before["source"] == "direct", "direct declaration wins while declared"
+
+    runner.json("remove", "skill", "code-review")
+
+    rows = runner.json("status")
+    after = next((r for r in rows if r["name"] == "code-review"), None)
+    assert after is not None, "the artifact survives — the bundle still holds it"
+    assert after["source"].startswith("bundle:"), "provenance flips to the bundle"
+    assert f"{unique_repo}/stack" in after["source"]
+    assert after["state"] != "stale", "same-identifier flip needs no re-resolution"
+
+
+def test_remove_direct_with_bundle_id_mismatch_goes_stale(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The bundle names the artifact at a DIFFERENT identifier than the
+    # direct declaration. While the direct pin wins, the bundle's variant
+    # is never resolved — removing the direct declaration cannot produce
+    # the correct pin offline. grim must NOT launder the lock: the entry is
+    # dropped and the lock left stale so the next operation demands a
+    # re-resolve instead of silently omitting the artifact.
+    direct = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# direct\n"},
+        tag="direct",
+    )
+    bundled = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# bundled\n"},
+        tag="bundled",
+    )
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", bundled.fq)],
+        tag="1.0.0",
+    )
+    write_config(
+        project_dir,
+        skills={"code-review": direct.fq},
+        bundles={"stack": bundle.fq},
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    result = runner.run("remove", "skill", "code-review")
+    assert "lock" in (result.stderr or "").lower(), "the user is told to re-resolve"
+
+    # The lock is honestly stale: status surfaces it instead of reporting a
+    # fresh lock that silently lost the bundle's variant.
+    rows = runner.json("status")
+    states = {r["name"]: r["state"] for r in rows}
+    assert states.get("stack") == "stale", f"bundle row must surface staleness: {states}"
+
+    # `grim lock` heals: the bundle's variant resolves in.
+    runner.run("lock")
+    rows = runner.json("status")
+    healed = next(r for r in rows if r["name"] == "code-review")
+    assert healed["source"].startswith("bundle:")
+    assert bundled.digest in healed["pinned"]
+
+
+def test_uninstall_direct_keeps_lock_entry_held_by_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # `grim uninstall` deletes the files (explicit user intent), but the
+    # lock entry survives when a declared bundle still names the artifact
+    # at the same identifier — the next install rematerializes it.
+    sk = _member_skill(unique_repo, "code-review")
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", sk.fq)],
+        tag="1.0.0",
+    )
+    write_config(
+        project_dir,
+        skills={"code-review": sk.fq},
+        bundles={"stack": bundle.fq},
+    )
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
+
+    runner.json("uninstall", "skill", "code-review")
+
+    assert_not_exists(project_dir / ".claude" / "skills" / "code-review")
+    rows = runner.json("status")
+    after = next((r for r in rows if r["name"] == "code-review"), None)
+    assert after is not None, "the lock entry survives via the bundle"
+    assert after["source"].startswith("bundle:")
+    assert after["state"] == "missing", "files deleted, still desired"
+
+
 def test_release_bundle_with_agent_member(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

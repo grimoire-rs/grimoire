@@ -831,19 +831,12 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
     // The install-state records this row owns: itself for a skill/rule;
-    // for a bundle, every lock member whose provenance names ONLY this
-    // repo (computed BEFORE the undeclare below evicts them from the
-    // lock). A member another bundle also contributed keeps its files —
-    // the undeclare seam strips just this bundle's provenance entry.
+    // for a bundle, exactly the lock entries the undeclare would drop
+    // (computed BEFORE the undeclare below applies it) — the effective-set
+    // diff via the shared `drop_from_lock` seam, so a member another
+    // declaration still holds keeps its files.
     let targets: Vec<(ArtifactKind, String)> = match kind {
-        ArtifactKind::Bundle => lock_io::load(&ctx.lock_path)
-            .map(|lock| {
-                lock.iter_artifacts()
-                    .filter(|a| !a.bundles.is_empty() && a.bundles.iter().all(|b| b.repo == row.repo))
-                    .map(|a| (a.kind, a.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        ArtifactKind::Bundle => bundle_uninstall_targets(ctx, &name, &row.repo),
         _ => vec![(kind, name.clone())],
     };
 
@@ -1007,6 +1000,42 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
 /// install/uninstall re-reads rather than caching a parse from startup.
 /// A missing global config is an empty declaration (mirroring
 /// `scope_resolution::resolve`); a missing project config is an error.
+/// The lock entries deleting the bundle row would drop — the file-deletion
+/// targets for the TUI delete action. Computed through the shared
+/// [`crate::command::remove::drop_from_lock`] effective-set seam by
+/// simulating the undeclare, so a member another declaration still holds
+/// keeps its files. A binding the config does not declare (a legacy or
+/// foreign row) falls back to provenance-exclusive matching by repo.
+fn bundle_uninstall_targets(ctx: &TuiContext, binding: &str, repo: &str) -> Vec<(ArtifactKind, String)> {
+    let Ok(previous) = lock_io::load(&ctx.lock_path) else {
+        return Vec::new();
+    };
+    let Ok((_options, set_before)) = load_scope_declaration(ctx) else {
+        return Vec::new();
+    };
+    let mut set_after = set_before.clone();
+    if set_after.bundles.remove(binding).is_none() {
+        return previous
+            .iter_artifacts()
+            .filter(|a| !a.bundles.is_empty() && a.bundles.iter().all(|b| b.repo == repo))
+            .map(|a| (a.kind, a.name.clone()))
+            .collect();
+    }
+    set_after.invalidate_declaration_hash_cache();
+    let outcome =
+        crate::command::remove::drop_from_lock(&previous, ArtifactKind::Bundle, binding, &set_before, &set_after);
+    let kept: std::collections::HashSet<(ArtifactKind, String)> = outcome
+        .lock
+        .iter_artifacts()
+        .map(|a| (a.kind, a.name.clone()))
+        .collect();
+    previous
+        .iter_artifacts()
+        .filter(|a| !kept.contains(&(a.kind, a.name.clone())))
+        .map(|a| (a.kind, a.name.clone()))
+        .collect()
+}
+
 fn load_scope_declaration(ctx: &TuiContext) -> anyhow::Result<(ConfigOptions, DesiredSet)> {
     match ctx.scope {
         ConfigScope::Global => {
@@ -1041,6 +1070,9 @@ fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str)
         skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
         rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
         agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
+        // A projection feeds the installer only — the bundle cache is not
+        // consulted there, so it is not carried over.
+        bundles: Vec::new(),
     }
 }
 
@@ -1065,6 +1097,7 @@ fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Opt
         skills,
         rules,
         agents,
+        bundles: Vec::new(),
     })
 }
 
@@ -1190,6 +1223,7 @@ mod tests {
             skills,
             rules,
             agents: vec![],
+            bundles: vec![],
         }
     }
 

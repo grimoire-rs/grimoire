@@ -115,18 +115,19 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     Ok((UninstallReport::new(kind, args.name.clone(), status), ExitCode::Success))
 }
 
-/// Undeclare `name` from the scope's config (when declared) and drop its
-/// lock entry, restamping the lock's `declaration_hash` to the
-/// post-removal declaration so the partial-relock staleness gate stays
-/// consistent. The lock entry is dropped even when the config never
-/// declared it (a legacy TUI install predating declared installs), so the
-/// operation is the full inverse either way. Returns whether the config
-/// had declared it. Shared by `grim uninstall` and the TUI delete action.
+/// Undeclare `name` from the scope's config (when declared) and bring the
+/// lock to the post-edit **effective state** via
+/// [`super::remove::drop_from_lock`]: entries another declaration still
+/// holds survive (a bundle-held artifact keeps its lock entry when the
+/// direct declaration goes, and vice versa); the declaration hash is
+/// restamped unless an id-mismatch left the lock honestly stale. A
+/// lock-only ghost entry the config never declared (a legacy TUI install)
+/// is still dropped when named. Returns whether the config had declared
+/// it. Shared by `grim uninstall` and the TUI delete action.
 ///
-/// A bundle undeclares from `[bundles]` and evicts exactly the lock
-/// members it contributed (matched by provenance repo + tag, via
-/// [`super::remove::drop_from_lock`]); the CLI `uninstall` never passes
-/// one (`--kind` excludes `"bundle"`), but the TUI delete action does.
+/// A bundle undeclares from `[bundles]` and evicts exactly the members no
+/// other declaration holds; the CLI `uninstall` never passes one
+/// (`--kind` excludes `"bundle"`), but the TUI delete action does.
 ///
 /// # Errors
 ///
@@ -140,15 +141,7 @@ pub(crate) fn undeclare_and_unlock(
     kind: ArtifactKind,
     name: &str,
 ) -> anyhow::Result<bool> {
-    // For a bundle, capture its declared (repo, tag) BEFORE removal so the
-    // lock eviction can match exactly the members this bundle contributed.
-    let bundle = match kind {
-        ArtifactKind::Bundle => set
-            .bundles
-            .get(name)
-            .map(|id| (id.registry_repository(), id.tag_or_latest().to_string())),
-        _ => None,
-    };
+    let set_before = set.clone();
     let declared = match kind {
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
@@ -160,8 +153,11 @@ pub(crate) fn undeclare_and_unlock(
         super::grim(write_config(config_path, options, set))?;
     }
     if let Ok(previous) = lock_io::load(lock_path) {
-        let new_lock = super::remove::drop_from_lock(&previous, kind, name, bundle.as_ref(), set);
-        super::grim(lock_io::save(lock_path, &new_lock, Some(&previous)))?;
+        let outcome = super::remove::drop_from_lock(&previous, kind, name, &set_before, set);
+        for note in &outcome.notes {
+            tracing::warn!("{note}");
+        }
+        super::grim(lock_io::save(lock_path, &outcome.lock, Some(&previous)))?;
     }
     Ok(declared)
 }
@@ -217,6 +213,7 @@ mod tests {
                 .collect(),
             rules: Vec::new(),
             agents: Vec::new(),
+            bundles: Vec::new(),
         }
     }
 
