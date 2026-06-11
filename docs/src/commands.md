@@ -158,6 +158,14 @@ in colour, and supports multi-select with batch install, update, and delete.
 Press `?` in the TUI for the full key map; highlights are `t` to toggle the
 tree, `v` to pick a version, `g` to switch scope, and `space` to mark rows.
 
+A TUI install or update goes through the same seams as the commands: it
+declares the entry in the active scope's `grimoire.toml` and relocks it (like
+[`grim add`](#add)), then materializes just that artifact (like
+[`grim install`](#install)). Delete is the full inverse via the
+[`grim uninstall`](#uninstall) seam. Installing a version older than the
+registry's latest flips the row to `outdated` right after the install
+completes.
+
 ```sh
 grim tui --registry ghcr.io/acme
 ```
