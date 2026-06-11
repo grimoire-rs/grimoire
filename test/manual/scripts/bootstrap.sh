@@ -61,25 +61,30 @@ export GRIM_DEFAULT_REGISTRY="$REGISTRY"
 export GRIM_INSECURE_REGISTRIES="$REGISTRY"
 mkdir -p "$GRIM_HOME"
 
-release() { # <path> <repo-subpath> <name> <version>
+release() { # <path> <repo-subpath> <name> <version> [forced-kind]
     log "release $3:$4"
     # --force so re-seeding after editing the catalog moves the exact-version
     # tag to the new content. The rig owns this throwaway :5050 registry, so
     # overwriting an immutable version tag here is intended, not a footgun;
     # identical content still resolves to the same digest (an effective no-op).
-    "$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4" --force
+    local args=("$1" "$REGISTRY/$NS/$2/$3:$4" --force)
+    # A bare `.md` builds as a rule by shape; agents need the explicit kind.
+    if [ -n "${5:-}" ]; then
+        args+=(--kind "$5")
+    fi
+    "$GRIM" release "${args[@]}"
 }
 
 # Publish one artifact at each of its versions, in ASCENDING order so the
 # floating :MAJOR/:MINOR/:latest tags end up on the highest version.
-#   <path> <repo-subpath> <name> <space-separated versions, ascending>
+#   <path> <repo-subpath> <name> <space-separated versions, ascending> [forced-kind]
 release_versions() {
-    local path="$1" kind="$2" name="$3" versions_field="$4"
+    local path="$1" kind="$2" name="$3" versions_field="$4" forced_kind="${5:-}"
     local versions ver
     # Split the version field on whitespace regardless of the script's IFS.
     IFS=' ' read -r -a versions <<<"$versions_field"
     for ver in "${versions[@]}"; do
-        release "$path" "$kind" "$name" "$ver"
+        release "$path" "$kind" "$name" "$ver" "$forced_kind"
     done
 }
 
@@ -100,6 +105,14 @@ RULE_MATRIX=(
     "rules|rust-style|$CATALOG/rules/rust-style.md|1.0.0 1.1.0"
     "rules|security-baseline|$CATALOG/rules/security-baseline.md|1.0.0"
 )
+# Agents are single `.md` files like rules, so `grim release` needs the
+# explicit `--kind agent` (a bare `.md` builds as a rule by shape).
+# reviewer carries two versions for the upgrade demos; release-bot demos
+# vendor-namespaced metadata overrides (claude.model, opencode.temperature).
+AGENT_MATRIX=(
+    "agents|reviewer|$CATALOG/agents/reviewer.md|1.0.0 1.1.0"
+    "agents|release-bot|$CATALOG/agents/release-bot.md|1.0.0"
+)
 
 # 4a. Publish skills.
 for record in "${SKILL_MATRIX[@]}"; do
@@ -111,6 +124,12 @@ done
 for record in "${RULE_MATRIX[@]}"; do
     IFS='|' read -r kind name path versions <<<"$record"
     release_versions "$path" "$kind" "$name" "$versions"
+done
+
+# 4c. Publish agents (forced kind, see AGENT_MATRIX comment).
+for record in "${AGENT_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions" agent
 done
 
 # 5. Publish bundles LAST — their members must already exist. The
@@ -129,6 +148,10 @@ release "$CATALOG/bundles/starter-pack.toml" bundles starter-pack 1.0.0
 
 cp "$CATALOG/bundles/starter-pack-v2.toml" "$bundle_tmp/starter-pack.toml"
 release "$bundle_tmp/starter-pack.toml" bundles starter-pack 2.0.0
+
+# `review-pack` shares its code-reviewer member with starter-pack (same
+# identifier) and adds the reviewer agent — the shared-member demo bundle.
+release "$CATALOG/bundles/review-pack.toml" bundles review-pack 1.0.0
 
 log "done. Catalog published to $REGISTRY/$NS/{skills,rules,bundles}/*"
 cat >&2 <<EOF
@@ -154,4 +177,17 @@ Bundle add/remove-on-upgrade demo:
   # resolves code-reviewer + rust-style + security-baseline
   grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:2
   # :2 ADDS commit-helper and DROPS security-baseline
+
+Agent demo (per-client rendering + vendor overrides):
+  grim install --client claude,opencode,copilot
+  cat .claude/agents/release-bot.md      # claude.model override -> model: opus
+  cat .opencode/agents/release-bot.md    # common model: sonnet + temperature
+  cat .github/agents/release-bot.md      # tools as a YAML list, no model
+
+Shared bundle members demo (removing one bundle spares shared members):
+  grim add localhost:5050/grimoire/bundles/starter-pack:1
+  grim add localhost:5050/grimoire/bundles/review-pack:1
+  grim status                            # code-reviewer: bundle provenance x2
+  grim remove bundle review-pack
+  grim status                            # code-reviewer survives via starter-pack
 EOF

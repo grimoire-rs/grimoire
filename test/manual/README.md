@@ -1,7 +1,7 @@
 # Grimoire Manual Test Rig
 
 A hands-on harness for exercising `grim` against a real local OCI registry
-with a committed sample catalog of skills and rules. This is **fully
+with a committed sample catalog of skills, rules, and agents. This is **fully
 separate** from the pytest acceptance suite (`test/tests/`): it runs its
 own `registry:2` on **`localhost:5050`** (own container + volume), while
 the suite uses `localhost:5000`. They are isolated on purpose — sharing
@@ -19,8 +19,10 @@ project, and a `teardown.sh`.
 |------|---------|
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
+| `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
+| `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
 | `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
 | `scripts/bootstrap.sh` | Build `grim`, start registry, publish the version matrix |
@@ -48,7 +50,10 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0, 1.1.0 |
 | rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
 | rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
+| agent | `localhost:5050/grimoire/agents/reviewer` | 1.0.0, 1.1.0 |
+| agent | `localhost:5050/grimoire/agents/release-bot` | 1.0.0 (vendor-override demo) |
 | bundle | `localhost:5050/grimoire/bundles/starter-pack` | 1.0.0, 2.0.0 (v2 adds commit-helper, drops security-baseline) |
+| bundle | `localhost:5050/grimoire/bundles/review-pack` | 1.0.0 (shares code-reviewer with starter-pack, adds the reviewer agent) |
 
 Each full-semver release cascades the floating tags forward, e.g. `1.0.0`
 also sets `1.0`, `1`, `latest`; publishing `code-reviewer` `1.2.0` then
@@ -98,7 +103,7 @@ cd test/manual/project
 grim lock                         # floating :1 -> pinned @sha256
 cat grimoire.lock                 # byte-stable, digest-pinned
 grim install                      # default client: claude
-ls -R .claude/skills .claude/rules
+ls -R .claude/skills .claude/rules .claude/agents
 grim status                       # every artifact 'installed'
 ```
 
@@ -151,6 +156,53 @@ cat grimoire.toml grimoire.lock           # inspect the resolved members
 grim add localhost:5050/grimoire/bundles/starter-pack:2
 grim update                               # commit-helper added, security-baseline pruned
 cat grimoire.toml grimoire.lock
+```
+
+### 5b. Shared bundle members
+
+`starter-pack` and `review-pack` both declare `code-reviewer` at the same
+identifier, so declaring both coalesces it to ONE lock entry that records
+BOTH bundles as provenance. Removing one bundle strips only that bundle's
+provenance entry — the member survives until the last holder goes.
+
+Run this in a **scratch project**: the rig's ready-made project declares
+every bundle member directly, and a direct declaration always wins over
+bundle provenance (you would see `direct`, not `bundle: …`).
+
+```sh
+mkdir -p /tmp/grim-shared-demo && cd /tmp/grim-shared-demo
+grim init
+grim add localhost:5050/grimoire/bundles/starter-pack:1
+grim add localhost:5050/grimoire/bundles/review-pack:1
+grim status                       # code-reviewer source: "bundle: ...starter-pack, ...review-pack"
+grep -B3 -A3 'skill.bundles' grimoire.lock    # multi-provenance [[skill.bundles]] rows
+
+grim remove bundle review-pack
+grim status                       # code-reviewer still locked (held by starter-pack)
+grim remove bundle starter-pack
+grim status                       # now gone — the last holder was removed
+```
+
+The same holds in the TUI: deleting one of the two bundle rows keeps the
+shared member's files on disk; only members the deleted bundle exclusively
+owns are uninstalled.
+
+### 5c. Agents (per-client rendering + vendor overrides)
+
+The project declares the `reviewer` agent; `release-bot` carries
+vendor-namespaced metadata (`claude.model: opus`,
+`claude.permission-mode: plan`, `opencode.temperature: "0.2"`) that
+overrides or extends the projected common fields per client:
+
+```sh
+cd test/manual/project
+grim add localhost:5050/grimoire/agents/release-bot:1
+grim install --client claude,opencode,copilot
+
+cat .claude/agents/release-bot.md     # claude.model override: model: opus (+ permissionMode)
+cat .opencode/agents/release-bot.md   # common model: sonnet kept; temperature lifted; no name:
+cat .github/agents/release-bot.md     # tools: as a YAML list; no model
+cat .claude/agents/reviewer.md        # common fields only -> installed verbatim
 ```
 
 ### 6. add / remove

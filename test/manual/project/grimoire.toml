@@ -23,3 +23,9 @@ security-baseline  = "localhost:5050/grimoire/rules/security-baseline:1"
 # .claude/rules/architecture-guide.md AND .claude/rules/architecture-guide/.
 # Edit a file under that dir to see `grim status` report it as `modified`.
 architecture-guide = "localhost:5050/grimoire/rules/architecture-guide:1"
+
+[agents]
+# bootstrap.sh publishes reviewer ascending to 1.1.0, so `grim lock`
+# records 1.1.0. release-bot (the vendor-override demo) is added on demand:
+#   grim add localhost:5050/grimoire/agents/release-bot:1
+reviewer = "localhost:5050/grimoire/agents/reviewer:1"

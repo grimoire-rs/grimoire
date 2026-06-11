@@ -1,0 +1,18 @@
+# The `review-pack` bundle: the code-review skill plus the reviewer agent.
+#
+# Its `code-reviewer` member is declared at the IDENTICAL identifier as the
+# one in starter-pack.toml — on purpose. Declaring BOTH bundles in one
+# project makes the two agree and coalesce to a single lock entry carrying
+# multi-bundle provenance, so the rig can demo that removing one bundle
+# keeps a member the other still holds (see README "Shared bundle members").
+#
+# The `[agents]` table demos a bundle with an agent member.
+summary = "Review pack"
+keywords = "review,agent,quality"
+description = "The code-review skill (shared with starter-pack) plus the reviewer agent"
+
+[skills]
+code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
+
+[agents]
+reviewer = "localhost:5050/grimoire/agents/reviewer:1"
