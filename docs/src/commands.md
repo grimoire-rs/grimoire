@@ -184,7 +184,8 @@ block with the keywords and the
 [repository URL](./publishing.md#metadata-repository) (version and install
 status stay on the catalog row). While the pane is open, `↑`/`↓` (or
 `j`/`k`) scroll it instead of moving the selection; `esc` returns to the
-list.
+list. `pgup`/`pgdn` scroll the pane from any mode — no need to open it
+first.
 
 A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like

@@ -372,6 +372,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // Widest → narrowest. `draw` picks the widest that fits; the last
     // (`? help`) is the irreducible minimum so help is always discoverable.
     let hint_tiers = vec![
+        "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · / search · ? help · q quit"
+            .to_string(),
         "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · / search · ? help · q quit".to_string(),
         "↑↓ move · i/u/d act · v ver · g scope · / search · ? help · q quit".to_string(),
         "↑↓ · i/u/d · v · g · / · ? help · q".to_string(),
@@ -762,6 +764,7 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 fn draw_help(f: &mut Frame) {
     let rows = [
         ("↑ / ↓", "move selection (scroll the detail pane when open)"),
+        ("pgup/pgdn", "scroll the detail pane (no focus needed)"),
         ("space", "mark / unmark the row"),
         ("a / c", "mark all visible / clear marks"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
@@ -999,6 +1002,10 @@ mod tests {
         let t = &m.hint_tiers;
         assert!(t.len() >= 2);
         assert_eq!(t.last().unwrap(), "? help");
+        // The scroll hint lives only in the widest tier, so it is the
+        // first thing dropped when the terminal narrows.
+        assert!(t[0].contains("pgup/pgdn scroll"));
+        assert!(!t[1].contains("pgup"));
         // Wide terminal ⇒ the full (widest) tier.
         assert_eq!(fit_hint(t, 200), t[0]);
         // Zero width ⇒ still the minimum, never empty.

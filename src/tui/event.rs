@@ -12,6 +12,11 @@
 
 use super::state::{Mode, TuiState};
 
+/// Rows one `PageUp`/`PageDown` press scrolls the detail pane. A fixed
+/// step (not the live pane height, which the pure layer cannot know);
+/// the projection clamps the offset, so overshoot is harmless.
+const DETAIL_PAGE: i64 = 5;
+
 /// The terminal-independent input alphabet.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
@@ -23,6 +28,10 @@ pub enum TuiInput {
     Down,
     /// A printable character (search-mode text entry / list hotkeys).
     Char(char),
+    /// Scroll the detail pane up one page (works without focusing it).
+    PageUp,
+    /// Scroll the detail pane down one page (works without focusing it).
+    PageDown,
     /// Delete the last query character (search mode).
     Backspace,
     /// Confirm: open the detail pane (list) or commit the query (search).
@@ -163,6 +172,15 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.move_selection(1);
             TuiAction::None
         }
+        // Page keys keep scrolling the visible detail pane mid-typing.
+        TuiInput::PageUp | TuiInput::PageDown => {
+            state.scroll_detail(if input == TuiInput::PageDown {
+                DETAIL_PAGE
+            } else {
+                -DETAIL_PAGE
+            });
+            TuiAction::None
+        }
         // Commit the query and return to the list.
         TuiInput::Enter | TuiInput::Esc => {
             state.back();
@@ -199,6 +217,8 @@ fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
 /// `↑`/`↓` are mode-sensitive: they move the selection in the list but
 /// scroll the pane while the detail view is open (`j`/`k` alias the
 /// scroll there; both stay literal query chars in search).
+/// `PageUp`/`PageDown` scroll the detail pane in *every* mode — the pane
+/// is always visible, so paging it never requires entering detail first.
 fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Up => {
@@ -219,6 +239,16 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('j') | TuiInput::Char('k') if state.mode == Mode::Detail => {
             state.scroll_detail(if input == TuiInput::Char('j') { 1 } else { -1 });
+            TuiAction::None
+        }
+        // Page keys scroll the detail pane from anywhere — no need to
+        // focus it first (the pane is always visible beside the list).
+        TuiInput::PageUp | TuiInput::PageDown => {
+            state.scroll_detail(if input == TuiInput::PageDown {
+                DETAIL_PAGE
+            } else {
+                -DETAIL_PAGE
+            });
             TuiAction::None
         }
         TuiInput::Enter => {
@@ -582,6 +612,31 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Char('j')), TuiAction::None);
         assert_eq!(s.selected, 1);
         assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn page_keys_scroll_detail_without_focus() {
+        let mut s = seeded();
+        // List mode: PageDown scrolls the pane, selection stays put.
+        assert_eq!(handle(&mut s, TuiInput::PageDown), TuiAction::None);
+        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
+        assert_eq!(s.selected, 0, "selection unchanged by page keys");
+        // PageUp scrolls back and saturates at the top.
+        handle(&mut s, TuiInput::PageUp);
+        handle(&mut s, TuiInput::PageUp);
+        assert_eq!(s.detail_scroll, 0);
+        // Detail mode: same behavior.
+        handle(&mut s, TuiInput::Enter);
+        handle(&mut s, TuiInput::PageDown);
+        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
+        // Leaving detail keeps the offset — the pane content is unchanged.
+        handle(&mut s, TuiInput::Esc);
+        assert_eq!(s.detail_scroll, u16::try_from(DETAIL_PAGE).unwrap());
+        // Search mode: page keys still scroll the visible pane.
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::PageDown);
+        assert_eq!(s.detail_scroll, u16::try_from(2 * DETAIL_PAGE).unwrap());
+        assert_eq!(s.query, "", "page keys are not query characters");
     }
 
     #[test]

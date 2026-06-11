@@ -527,6 +527,8 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
     Some(match key.code {
         KeyCode::Up => TuiInput::Up,
         KeyCode::Down => TuiInput::Down,
+        KeyCode::PageUp => TuiInput::PageUp,
+        KeyCode::PageDown => TuiInput::PageDown,
         KeyCode::Enter => TuiInput::Enter,
         KeyCode::Esc => TuiInput::Esc,
         KeyCode::Backspace => TuiInput::Backspace,
@@ -1172,6 +1174,8 @@ mod tests {
         let mk = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
         assert_eq!(map_key(mk(KeyCode::Up)), Some(TuiInput::Up));
         assert_eq!(map_key(mk(KeyCode::Down)), Some(TuiInput::Down));
+        assert_eq!(map_key(mk(KeyCode::PageUp)), Some(TuiInput::PageUp));
+        assert_eq!(map_key(mk(KeyCode::PageDown)), Some(TuiInput::PageDown));
         assert_eq!(map_key(mk(KeyCode::Enter)), Some(TuiInput::Enter));
         assert_eq!(map_key(mk(KeyCode::Esc)), Some(TuiInput::Esc));
         assert_eq!(map_key(mk(KeyCode::Backspace)), Some(TuiInput::Backspace));

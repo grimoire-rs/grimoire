@@ -83,6 +83,7 @@ grim tui                          # interactive (requires a TTY)
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` | move selection (scroll the detail pane while it is open) |
+| `pgup`/`pgdn` | scroll the detail pane from any mode (no focus needed) |
 | `space` | mark/unmark the selected row |
 | `a` / `c` | mark all visible / clear marks |
 | `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked) |
@@ -106,7 +107,8 @@ the catalog row). Most rig artifacts carry an authored `repository` URL
 demo the `Repository: -` fallback and the "no repository URL for this
 entry" status line. The `architecture-guide` **skill** ships a
 deliberately long description so its pane overflows a small terminal —
-open it and scroll (`↑`/`↓` or `j`/`k`).
+open it and scroll (`↑`/`↓` or `j`/`k`), or page it from the list with
+`pgup`/`pgdn` without opening it at all.
 
 ### 2. Lock & install into a client
 
