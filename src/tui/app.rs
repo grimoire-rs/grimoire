@@ -635,7 +635,7 @@ fn derive_bundle_state(bundle_repo: &str, lock: Option<&GrimoireLock>, state: &I
         }
     }
     lock.iter_artifacts()
-        .filter(|a| a.bundle.as_deref() == Some(bundle_repo))
+        .filter(|a| a.bundles.iter().any(|b| b.repo == bundle_repo))
         .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state))
         .max_by_key(|s| rank(*s))
         .unwrap_or(ArtifactState::NotInstalled)
@@ -831,13 +831,15 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
     // The install-state records this row owns: itself for a skill/rule;
-    // for a bundle, every lock member stamped with this repo's provenance
-    // (computed BEFORE the undeclare below evicts them from the lock).
+    // for a bundle, every lock member whose provenance names ONLY this
+    // repo (computed BEFORE the undeclare below evicts them from the
+    // lock). A member another bundle also contributed keeps its files —
+    // the undeclare seam strips just this bundle's provenance entry.
     let targets: Vec<(ArtifactKind, String)> = match kind {
         ArtifactKind::Bundle => lock_io::load(&ctx.lock_path)
             .map(|lock| {
                 lock.iter_artifacts()
-                    .filter(|a| a.bundle.as_deref() == Some(row.repo.as_str()))
+                    .filter(|a| !a.bundles.is_empty() && a.bundles.iter().all(|b| b.repo == row.repo))
                     .map(|a| (a.kind, a.name.clone()))
                     .collect()
             })
@@ -1029,12 +1031,11 @@ fn row_kind(kind: &str) -> ArtifactKind {
 /// of `lock` as a members-only lock (same metadata), so the shared
 /// `install_all` path materializes exactly the acted-on bundle's members.
 /// Members are matched by the provenance the resolver stamps
-/// ([`LockedArtifact::bundle`] / [`LockedArtifact::bundle_tag`]); an empty
-/// projection means the bundle resolved to zero members (or every member
-/// was overridden by a direct declaration).
+/// ([`LockedArtifact::bundles`] — a shared member lists every
+/// contributor); an empty projection means the bundle resolved to zero
+/// members (or every member was overridden by a direct declaration).
 fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str) -> GrimoireLock {
-    let is_member =
-        |a: &LockedArtifact| a.bundle.as_deref() == Some(bundle_repo) && a.bundle_tag.as_deref() == Some(bundle_tag);
+    let is_member = |a: &LockedArtifact| a.bundles.iter().any(|b| b.repo == bundle_repo && b.tag == bundle_tag);
     GrimoireLock {
         metadata: lock.metadata.clone(),
         skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
@@ -1365,10 +1366,12 @@ mod tests {
         assert_eq!(lock.skills.len(), 1);
         assert_eq!(lock.skills[0].name, "demo");
         assert_eq!(
-            lock.skills[0].bundle.as_deref(),
-            Some("localhost:5050/grimoire/bundles/starter-pack")
+            lock.skills[0].bundles,
+            vec![crate::lock::locked_artifact::BundleProvenance::new(
+                "localhost:5050/grimoire/bundles/starter-pack",
+                "latest"
+            )]
         );
-        assert_eq!(lock.skills[0].bundle_tag.as_deref(), Some("latest"));
 
         // The member skill materialized into the claude target.
         assert!(
@@ -1442,21 +1445,19 @@ mod tests {
         assert_eq!(row_kind("-"), ArtifactKind::Skill);
     }
 
+    fn stamp(mut a: LockedArtifact, repo: &str, tag: &str) -> LockedArtifact {
+        a.bundles
+            .push(crate::lock::locked_artifact::BundleProvenance::new(repo, tag));
+        a
+    }
+
     #[test]
     fn bundle_members_lock_projects_by_provenance_repo_and_tag() {
-        let mut member = locked("member", ArtifactKind::Skill, '4');
-        member.bundle = Some("r/bundles/pack".to_string());
-        member.bundle_tag = Some("latest".to_string());
-        let mut other_tag = locked("other", ArtifactKind::Skill, '5');
-        other_tag.bundle = Some("r/bundles/pack".to_string());
-        other_tag.bundle_tag = Some("v2".to_string());
-        let mut rule_member = locked("rmember", ArtifactKind::Rule, '6');
-        rule_member.bundle = Some("r/bundles/pack".to_string());
-        rule_member.bundle_tag = Some("latest".to_string());
+        let member = stamp(locked("member", ArtifactKind::Skill, '4'), "r/bundles/pack", "latest");
+        let other_tag = stamp(locked("other", ArtifactKind::Skill, '5'), "r/bundles/pack", "v2");
+        let rule_member = stamp(locked("rmember", ArtifactKind::Rule, '6'), "r/bundles/pack", "latest");
         let direct = locked("direct", ArtifactKind::Skill, '7');
-        let mut agent_member = locked("amember", ArtifactKind::Agent, '8');
-        agent_member.bundle = Some("r/bundles/pack".to_string());
-        agent_member.bundle_tag = Some("latest".to_string());
+        let agent_member = stamp(locked("amember", ArtifactKind::Agent, '8'), "r/bundles/pack", "latest");
 
         let mut lock = lock_fixture(vec![member, other_tag, direct], vec![rule_member]);
         lock.agents = vec![agent_member];
@@ -1480,9 +1481,11 @@ mod tests {
     fn bundle_with_agent_member_state_and_expand() {
         use crate::install::install_state::InstallState;
 
-        let mut agent_member = locked("my-agent", ArtifactKind::Agent, 'a');
-        agent_member.bundle = Some("r/bundles/ai-pack".to_string());
-        agent_member.bundle_tag = Some("latest".to_string());
+        let agent_member = stamp(
+            locked("my-agent", ArtifactKind::Agent, 'a'),
+            "r/bundles/ai-pack",
+            "latest",
+        );
         let mut lock = lock_fixture(vec![], vec![]);
         lock.agents = vec![agent_member];
 
@@ -1511,14 +1514,34 @@ mod tests {
         assert_eq!(projected.agents[0].name, "my-agent");
 
         // perform_uninstall's bundle-target collection path (tested via
-        // iter_artifacts on a lock containing only agents):
+        // iter_artifacts on a lock containing only agents): only members
+        // whose EVERY provenance names this repo are file-deletion targets.
         let targets: Vec<(ArtifactKind, String)> = lock
             .iter_artifacts()
-            .filter(|a| a.bundle.as_deref() == Some("r/bundles/ai-pack"))
+            .filter(|a| !a.bundles.is_empty() && a.bundles.iter().all(|b| b.repo == "r/bundles/ai-pack"))
             .map(|a| (a.kind, a.name.clone()))
             .collect();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0], (ArtifactKind::Agent, "my-agent".to_string()));
+    }
+
+    #[test]
+    fn bundle_target_collection_spares_shared_members() {
+        // A member two bundles share must NOT be a file-deletion target
+        // when only one of them is removed.
+        let shared = {
+            let a = stamp(locked("shared", ArtifactKind::Skill, 'b'), "r/bundles/pack-a", "latest");
+            stamp(a, "r/bundles/pack-b", "latest")
+        };
+        let exclusive = stamp(locked("only-a", ArtifactKind::Skill, 'c'), "r/bundles/pack-a", "latest");
+        let lock = lock_fixture(vec![shared, exclusive], vec![]);
+
+        let targets: Vec<String> = lock
+            .iter_artifacts()
+            .filter(|a| !a.bundles.is_empty() && a.bundles.iter().all(|b| b.repo == "r/bundles/pack-a"))
+            .map(|a| a.name.clone())
+            .collect();
+        assert_eq!(targets, vec!["only-a"], "the shared member keeps its files");
     }
 
     #[test]

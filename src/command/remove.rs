@@ -108,8 +108,10 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
 /// Return `previous` with `(kind, name)` dropped and the declaration hash
 /// re-stamped from the edited set so the lock stays consistent. For a
 /// bundle, `bundle` carries the declared `(registry/repo, tag)` so exactly
-/// the members *this* bundle contributed are evicted. Shared with the
-/// `uninstall` seam ([`super::uninstall::undeclare_and_unlock`]).
+/// the members *this* bundle contributed are evicted — a member another
+/// still-declared bundle also contributed only loses this bundle's
+/// provenance entry and stays locked. Shared with the `uninstall` seam
+/// ([`super::uninstall::undeclare_and_unlock`]).
 pub(crate) fn drop_from_lock(
     previous: &GrimoireLock,
     kind: ArtifactKind,
@@ -123,22 +125,41 @@ pub(crate) fn drop_from_lock(
         ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
         ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
         ArtifactKind::Bundle => {
-            // Removing a bundle drops every locked member it contributed,
-            // identified by BOTH the provenance repo and tag so a sibling
-            // bundle at the same repository (different tag) is untouched.
-            let keep = |a: &LockedArtifact| match bundle {
-                Some((repo, tag)) => {
-                    !(a.bundle.as_deref() == Some(repo.as_str()) && a.bundle_tag.as_deref() == Some(tag.as_str()))
-                }
-                None => true,
-            };
-            lock.skills.retain(&keep);
-            lock.rules.retain(&keep);
-            lock.agents.retain(&keep);
+            if let Some((repo, tag)) = bundle {
+                evict_bundle_members(&mut lock, repo, tag, set);
+            }
         }
     }
     lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
     lock
+}
+
+/// Evict the lock members the bundle `(repo, tag)` contributed.
+///
+/// Each member loses the matching provenance entry; the member itself is
+/// dropped only when no other bundle's provenance remains (a member two
+/// bundles share survives the removal of one). When another still-declared
+/// binding in `set` resolves to the same `(repo, tag)` — the same bundle
+/// declared under two names — nothing is evicted at all.
+fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &crate::config::declaration::DesiredSet) {
+    let still_declared = set
+        .bundles
+        .values()
+        .any(|id| id.registry_repository() == repo && id.tag_or_latest() == tag);
+    if still_declared {
+        return;
+    }
+    let evict = |a: &mut LockedArtifact| {
+        let matched = a.bundles.iter().any(|b| b.repo == repo && b.tag == tag);
+        if !matched {
+            return true; // direct entry or another bundle's member: keep as-is
+        }
+        a.bundles.retain(|b| !(b.repo == repo && b.tag == tag));
+        !a.bundles.is_empty()
+    };
+    lock.skills.retain_mut(evict);
+    lock.rules.retain_mut(evict);
+    lock.agents.retain_mut(evict);
 }
 
 #[cfg(test)]
@@ -161,9 +182,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn drop_from_lock_removes_only_named_entry() {
-        let prev = GrimoireLock {
+    fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
+        GrimoireLock {
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -171,14 +191,98 @@ mod tests {
                 generated_by: "grim 0.1.0".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
             },
-            skills: vec![locked("a"), locked("b")],
+            skills,
             rules: vec![],
             agents: vec![],
-        };
+        }
+    }
+
+    fn member_of(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
+        let mut a = locked(name);
+        a.bundles = bundles
+            .iter()
+            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
+            .collect();
+        a
+    }
+
+    #[test]
+    fn drop_from_lock_removes_only_named_entry() {
+        let prev = lock_of(vec![locked("a"), locked("b")]);
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let after = drop_from_lock(&prev, ArtifactKind::Skill, "a", None, &set);
         assert_eq!(after.skills.len(), 1);
         assert_eq!(after.skills[0].name, "b");
         assert_eq!(after.metadata.declaration_hash, set.declaration_hash_cached());
+    }
+
+    #[test]
+    fn bundle_eviction_keeps_member_shared_with_other_bundle() {
+        let prev = lock_of(vec![
+            member_of(
+                "shared",
+                &[("ghcr.io/acme/stack-a", "1"), ("ghcr.io/acme/stack-b", "1")],
+            ),
+            member_of("only-a", &[("ghcr.io/acme/stack-a", "1")]),
+            locked("direct"),
+        ]);
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let bundle = ("ghcr.io/acme/stack-a".to_string(), "1".to_string());
+
+        let after = drop_from_lock(&prev, ArtifactKind::Bundle, "a", Some(&bundle), &set);
+
+        let names: Vec<&str> = after.skills.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["shared", "direct"],
+            "exclusive member evicted, shared + direct stay"
+        );
+        assert_eq!(
+            after.skills[0].bundles,
+            vec![crate::lock::locked_artifact::BundleProvenance::new(
+                "ghcr.io/acme/stack-b",
+                "1"
+            )],
+            "the evicted bundle's provenance entry is stripped"
+        );
+    }
+
+    #[test]
+    fn bundle_eviction_drops_member_when_last_provenance_goes() {
+        let prev = lock_of(vec![member_of("m", &[("ghcr.io/acme/stack-a", "1")])]);
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let bundle = ("ghcr.io/acme/stack-a".to_string(), "1".to_string());
+
+        let after = drop_from_lock(&prev, ArtifactKind::Bundle, "a", Some(&bundle), &set);
+        assert!(
+            after.skills.is_empty(),
+            "the sole contributor's removal evicts the member"
+        );
+    }
+
+    #[test]
+    fn bundle_eviction_skipped_while_duplicate_binding_remains() {
+        // The same bundle (repo AND tag) declared under a second binding
+        // name: removing one binding must not evict anything.
+        let prev = lock_of(vec![member_of("m", &[("localhost:5000/acme/stack", "1")])]);
+        let mut set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        set.bundles.insert(
+            "second".to_string(),
+            crate::oci::Identifier::parse("localhost:5000/acme/stack:1").unwrap(),
+        );
+        set.invalidate_declaration_hash_cache();
+        let bundle = ("localhost:5000/acme/stack".to_string(), "1".to_string());
+
+        let after = drop_from_lock(&prev, ArtifactKind::Bundle, "first", Some(&bundle), &set);
+        assert_eq!(
+            after.skills.len(),
+            1,
+            "members survive while a duplicate binding remains"
+        );
+        assert_eq!(
+            after.skills[0].bundles.len(),
+            1,
+            "the provenance entry is kept for the remaining binding"
+        );
     }
 }

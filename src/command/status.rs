@@ -113,11 +113,13 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     if let Some(l) = lock.as_ref() {
         for member in l.iter_artifacts().filter(|a| a.is_from_bundle()) {
             let st = derive_state(member.kind, &member.name, Some(member), &state, lock_matches_config);
-            let repo = member.bundle.clone().unwrap_or_default();
+            // Every contributing bundle is listed (a shared member carries
+            // multi-provenance), comma-joined in lock order.
+            let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
-                source: format!("bundle: {repo}"),
+                source: format!("bundle: {}", repos.join(", ")),
                 pinned: Some(member.pinned.clone()),
                 state: st,
             });

@@ -291,8 +291,10 @@ mod tests {
 
         let mut lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a')]);
         let mut member = LockedArtifact::direct("member".to_string(), ArtifactKind::Skill, pinned("acme/member", 'b'));
-        member.bundle = Some("localhost:5000/acme/bundles/starter-pack".to_string());
-        member.bundle_tag = Some("latest".to_string());
+        member.bundles = vec![crate::lock::locked_artifact::BundleProvenance::new(
+            "localhost:5000/acme/bundles/starter-pack",
+            "latest",
+        )];
         lock.skills.push(member);
         lock_io::save(&lock_path, &lock, None).unwrap();
 
@@ -319,6 +321,56 @@ mod tests {
             saved.metadata.declaration_hash,
             set.declaration_hash_cached(),
             "lock hash must match the post-removal declaration"
+        );
+    }
+
+    #[test]
+    fn undeclare_bundle_keeps_member_shared_with_other_bundle() {
+        // Two declared bundles share one member: undeclaring one bundle
+        // (the TUI delete path) strips its provenance but keeps the member
+        // locked for the other bundle.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("grimoire.toml");
+        let lock_path = tmp.path().join("grimoire.lock");
+
+        let mut set = declared_set(&[]);
+        for binding in ["pack-a", "pack-b"] {
+            set.bundles.insert(
+                binding.to_string(),
+                Identifier::parse(&format!("localhost:5000/acme/bundles/{binding}:latest")).unwrap(),
+            );
+        }
+        set.invalidate_declaration_hash_cache();
+        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+
+        let mut lock = lock_with_skills(set.declaration_hash_cached(), &[]);
+        let mut member = LockedArtifact::direct("member".to_string(), ArtifactKind::Skill, pinned("acme/member", 'b'));
+        member.bundles = vec![
+            crate::lock::locked_artifact::BundleProvenance::new("localhost:5000/acme/bundles/pack-a", "latest"),
+            crate::lock::locked_artifact::BundleProvenance::new("localhost:5000/acme/bundles/pack-b", "latest"),
+        ];
+        lock.skills.push(member);
+        lock_io::save(&lock_path, &lock, None).unwrap();
+
+        undeclare_and_unlock(
+            &config_path,
+            &lock_path,
+            &ConfigOptions::default(),
+            &mut set,
+            ArtifactKind::Bundle,
+            "pack-a",
+        )
+        .expect("bundle undeclare succeeds");
+
+        let saved = lock_io::load(&lock_path).unwrap();
+        assert_eq!(saved.skills.len(), 1, "the shared member survives");
+        assert_eq!(
+            saved.skills[0].bundles,
+            vec![crate::lock::locked_artifact::BundleProvenance::new(
+                "localhost:5000/acme/bundles/pack-b",
+                "latest"
+            )],
+            "only the removed bundle's provenance is stripped"
         );
     }
 

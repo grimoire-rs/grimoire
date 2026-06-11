@@ -28,7 +28,7 @@ use crate::config::scope::ConfigScope;
 use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
 use crate::lock::lock_io::now_rfc3339;
 use crate::lock::lock_version::LockVersion;
-use crate::lock::locked_artifact::LockedArtifact;
+use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
 use crate::oci::access::error::AccessErrorKind;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::reference::ArtifactRef;
@@ -171,9 +171,10 @@ fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
 #[derive(Debug)]
 struct WorkItem {
     reference: ArtifactRef,
-    /// `(bundle registry/repo, bundle tag)` when this item came from a
-    /// bundle expansion; `None` for a direct `[skills]`/`[rules]` entry.
-    bundle: Option<(String, String)>,
+    /// Every declared bundle this item came from (agreeing bundles
+    /// coalesce to one item but ALL contributors are recorded); empty for
+    /// a direct `[skills]`/`[rules]` entry.
+    bundles: Vec<BundleProvenance>,
 }
 
 /// One member produced by expanding a declared bundle.
@@ -203,7 +204,7 @@ async fn build_work(
         .into_iter()
         .map(|reference| WorkItem {
             reference,
-            bundle: None,
+            bundles: Vec::new(),
         })
         .collect();
 
@@ -277,13 +278,22 @@ fn merge_bundle_members(
                 },
             ));
         }
+        // Record EVERY contributing bundle (sorted + deduped, so the lock
+        // stays deterministic) — evicting one bundle later must keep a
+        // member the others still hold.
+        let mut bundles: Vec<BundleProvenance> = group
+            .iter()
+            .map(|m| BundleProvenance::new(m.bundle_repo.clone(), m.bundle_tag.clone()))
+            .collect();
+        bundles.sort_by(|a, b| (&a.repo, &a.tag).cmp(&(&b.repo, &b.tag)));
+        bundles.dedup();
         work.push(WorkItem {
             reference: ArtifactRef {
                 kind,
                 name,
                 id: first.id.clone(),
             },
-            bundle: Some((first.bundle_repo.clone(), first.bundle_tag.clone())),
+            bundles,
         });
     }
 
@@ -498,7 +508,7 @@ async fn resolve_one(
     access: Arc<dyn OciAccess>,
     options: ResolveOptions,
 ) -> Result<LockedArtifact, ResolveError> {
-    let WorkItem { reference, bundle } = item;
+    let WorkItem { reference, bundles } = item;
     let timeout = options.per_artifact_timeout;
     let digest = match tokio::time::timeout(timeout, retry_chain(&reference, &access, &options)).await {
         Ok(Ok(digest)) => digest,
@@ -516,17 +526,11 @@ async fn resolve_one(
     let pinned = PinnedIdentifier::try_from(pinned_id)
         .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
 
-    let (bundle, bundle_tag) = match bundle {
-        Some((repo, tag)) => (Some(repo), Some(tag)),
-        None => (None, None),
-    };
-
     Ok(LockedArtifact {
         name: reference.name,
         kind: reference.kind,
         pinned,
-        bundle,
-        bundle_tag,
+        bundles,
     })
 }
 
@@ -1066,8 +1070,8 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].reference.name, "code-review");
         assert_eq!(
-            work[0].bundle,
-            Some(("ghcr.io/acme/python-stack".to_string(), "1.0.0".to_string()))
+            work[0].bundles,
+            vec![BundleProvenance::new("ghcr.io/acme/python-stack", "1.0.0")]
         );
     }
 
@@ -1106,6 +1110,39 @@ mod tests {
         ];
         let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
         assert_eq!(work.len(), 1, "identical members coalesce to one entry");
+        assert_eq!(
+            work[0].bundles,
+            vec![
+                BundleProvenance::new("ghcr.io/acme/stack-a", "1"),
+                BundleProvenance::new("ghcr.io/acme/stack-b", "2"),
+            ],
+            "every contributing bundle is recorded, sorted"
+        );
+    }
+
+    #[test]
+    fn merge_duplicate_provenance_dedupes() {
+        // The same bundle listed twice (e.g. two bindings at one repo+tag
+        // both expanded) must not double-record its provenance.
+        let members = vec![
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:stable",
+                "ghcr.io/acme/stack",
+                "1",
+            ),
+            member(
+                ArtifactKind::Skill,
+                "code-review",
+                "ghcr.io/acme/code-review:stable",
+                "ghcr.io/acme/stack",
+                "1",
+            ),
+        ];
+        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].bundles, vec![BundleProvenance::new("ghcr.io/acme/stack", "1")]);
     }
 
     #[test]
@@ -1146,8 +1183,8 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].reference.kind, ArtifactKind::Agent);
         assert_eq!(
-            work[0].bundle,
-            Some(("ghcr.io/acme/stack".to_string(), "1.0.0".to_string()))
+            work[0].bundles,
+            vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")]
         );
     }
 

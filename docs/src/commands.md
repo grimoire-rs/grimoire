@@ -70,7 +70,8 @@ grim add --kind bundle ghcr.io/acme/python-stack:1
 
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
 its members into the lock. `grim remove bundle <name>` undeclares the bundle and
-drops the members it contributed.
+drops the members it contributed — a member another still-declared bundle also
+contributes only loses this bundle's provenance entry and stays locked.
 
 ## grim lock {#lock}
 
@@ -171,7 +172,9 @@ A bundle row works the same way at the bundle level. Install declares it
 under `[bundles]`, expands it into its members (like
 `grim add --kind bundle`), and materializes exactly those members; the row's
 state aggregates the member states. Delete removes the member files and
-records, evicts the members from the lock, and undeclares the bundle.
+records, evicts the members from the lock, and undeclares the bundle. A
+member shared with another still-declared bundle is spared: its files stay
+on disk and its lock entry only loses the deleted bundle's provenance.
 
 ```sh
 grim tui --registry ghcr.io/acme

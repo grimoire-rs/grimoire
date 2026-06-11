@@ -252,6 +252,110 @@ def test_remove_bundle_keeps_sibling_at_same_repo(
     assert "skill-b" in lock, "the sibling bundle's member at the same repo is preserved"
 
 
+def _shared_member_setup(project_dir: Path, unique_repo: str):
+    """Two bundles at DIFFERENT repos agreeing on one shared member, plus a
+    member exclusive to each, declared as ``a`` and ``b``."""
+    shared = _member_skill(unique_repo, "shared-skill")
+    only_a = _member_skill(unique_repo, "only-a")
+    only_b = _member_skill(unique_repo, "only-b")
+    bundle_a = make_bundle(
+        f"{unique_repo}/stack-a",
+        [("skill", "shared-skill", shared.fq), ("skill", "only-a", only_a.fq)],
+        tag="1.0.0",
+    )
+    bundle_b = make_bundle(
+        f"{unique_repo}/stack-b",
+        [("skill", "shared-skill", shared.fq), ("skill", "only-b", only_b.fq)],
+        tag="1.0.0",
+    )
+    write_config(project_dir, bundles={"a": bundle_a.fq, "b": bundle_b.fq})
+
+
+def test_remove_bundle_keeps_member_shared_with_other_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Bundle `a` expands first (BTreeMap order), so the shared member's
+    # provenance historically recorded only `a`. Removing `a` must NOT evict
+    # the shared member — bundle `b` still declares it.
+    _shared_member_setup(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    runner.json("remove", "bundle", "a")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "only-a" not in lock, "the removed bundle's exclusive member is dropped"
+    assert "shared-skill" in lock, "a member still held by another bundle survives"
+    assert "only-b" in lock, "the sibling bundle's members are untouched"
+
+    # Removing the LAST holder finally drops the shared member.
+    runner.json("remove", "bundle", "b")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "shared-skill" not in lock, "the last holder's removal evicts the member"
+    assert "only-b" not in lock
+
+
+def test_remove_bundle_shared_member_reverse_order(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Same setup, but remove `b` (the NON-provenance-holder) first. The
+    # outcome must be symmetric — eviction must not depend on which bundle
+    # happened to stamp the coalesced lock entry.
+    _shared_member_setup(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    runner.json("remove", "bundle", "b")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "only-b" not in lock, "the removed bundle's exclusive member is dropped"
+    assert "shared-skill" in lock, "a member still held by another bundle survives"
+    assert "only-a" in lock
+
+    runner.json("remove", "bundle", "a")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "shared-skill" not in lock, "the last holder's removal evicts the member"
+
+
+def test_remove_duplicate_binding_keeps_members(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The SAME bundle (repo AND tag) declared under two binding names.
+    # Removing one binding must not evict the members — the other binding
+    # still declares the identical bundle.
+    sk = _member_skill(unique_repo, "code-review")
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", sk.fq)],
+        tag="1.0.0",
+    )
+    write_config(project_dir, bundles={"first": bundle.fq, "second": bundle.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    runner.json("remove", "bundle", "first")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "code-review" in lock, "members survive while a duplicate binding remains"
+
+    runner.json("remove", "bundle", "second")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "code-review" not in lock, "removing the last binding evicts the members"
+
+
+def test_status_shows_all_bundle_provenances_for_shared_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    _shared_member_setup(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    rows = runner.json("status")
+    member = next(r for r in rows if r["name"] == "shared-skill")
+    assert member["source"].startswith("bundle:")
+    assert f"{unique_repo}/stack-a" in member["source"], "first contributor listed"
+    assert f"{unique_repo}/stack-b" in member["source"], "second contributor listed"
+    # A shared member coalesces to ONE row even with two contributors.
+    assert sum(1 for r in rows if r["name"] == "shared-skill") == 1
+
+
 def test_release_bundle_pin_freezes_members(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

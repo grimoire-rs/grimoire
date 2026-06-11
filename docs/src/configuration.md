@@ -78,9 +78,13 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:…"
 A member that came from a [bundle](./concepts.md#bundles) additionally carries
 `bundle` and `bundle_tag` fields recording its origin; a directly-declared entry
 omits them, so a bundle-free lock is byte-identical to one written before
-bundles existed. The same compatibility holds for agents: an agent-free lock
-carries no `[[agent]]` array at all and is byte-identical to one written
-before agents existed.
+bundles existed. A member that **several** declared bundles contributed (an
+agreeing overlap) records every contributor in a `bundles` sub-table array
+(`[[skill.bundles]]` rows with `repo` and `tag`) instead of the single pair —
+removing one bundle then only strips its provenance entry, and the member
+stays locked until the last contributing bundle is removed. The same
+compatibility holds for agents: an agent-free lock carries no `[[agent]]`
+array at all and is byte-identical to one written before agents existed.
 
 ## Scopes on disk
 

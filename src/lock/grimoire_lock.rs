@@ -183,7 +183,9 @@ struct SerializableView<'a> {
 /// stripped-advisory copy of `pinned`, and the bundle provenance only for
 /// members that came from a bundle. `kind` is intentionally absent — the
 /// array name carries it. A direct entry omits the bundle fields entirely,
-/// so its on-disk form is byte-identical to a pre-bundles lock.
+/// so its on-disk form is byte-identical to a pre-bundles lock; exactly one
+/// provenance keeps the legacy `bundle` + `bundle_tag` pair (byte-identical
+/// to a single-provenance lock); two or more emit the `bundles` array.
 #[derive(Serialize)]
 struct LockedArtifactView<'a> {
     name: &'a str,
@@ -192,6 +194,8 @@ struct LockedArtifactView<'a> {
     bundle: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle_tag: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    bundles: &'a [crate::lock::locked_artifact::BundleProvenance],
 }
 
 fn serialize_artifact_views<S>(items: &&[&LockedArtifact], serializer: S) -> Result<S::Ok, S::Error>
@@ -201,11 +205,13 @@ where
     use serde::ser::SerializeSeq;
     let mut seq = serializer.serialize_seq(Some(items.len()))?;
     for a in *items {
+        let single = (a.bundles.len() == 1).then(|| &a.bundles[0]);
         seq.serialize_element(&LockedArtifactView {
             name: &a.name,
             pinned: a.pinned.strip_advisory(),
-            bundle: a.bundle.as_deref(),
-            bundle_tag: a.bundle_tag.as_deref(),
+            bundle: single.map(|b| b.repo.as_str()),
+            bundle_tag: single.map(|b| b.tag.as_str()),
+            bundles: if a.bundles.len() > 1 { &a.bundles } else { &[] },
         })?;
     }
     seq.end()
@@ -438,26 +444,74 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
 
     #[test]
     fn round_trip_preserves_bundle_provenance() {
+        use crate::lock::locked_artifact::BundleProvenance;
         let lock = GrimoireLock {
             metadata: metadata(),
             skills: vec![LockedArtifact {
                 name: "code-review".to_string(),
                 kind: ArtifactKind::Skill,
                 pinned: pinned("acme/code-review", Some("stable"), 'a'),
-                bundle: Some("ghcr.io/acme/stack".to_string()),
-                bundle_tag: Some("1.0.0".to_string()),
+                bundles: vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")],
             }],
             rules: vec![],
             agents: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
+        // A single provenance keeps the legacy pair shape on the wire.
         assert!(out.contains("bundle = \"ghcr.io/acme/stack\""));
         assert!(out.contains("bundle_tag = \"1.0.0\""));
+        assert!(!out.contains("bundles ="), "single provenance never emits the array");
 
         let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
         let member = &reparsed.skills[0];
-        assert_eq!(member.bundle.as_deref(), Some("ghcr.io/acme/stack"));
-        assert_eq!(member.bundle_tag.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            member.bundles,
+            vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")]
+        );
+        assert_eq!(
+            out,
+            reparsed.to_toml_string().expect("second"),
+            "second pass byte-identical"
+        );
+    }
+
+    #[test]
+    fn round_trip_preserves_multi_bundle_provenance() {
+        use crate::lock::locked_artifact::BundleProvenance;
+        let provenance = vec![
+            BundleProvenance::new("ghcr.io/acme/stack-a", "1.0.0"),
+            BundleProvenance::new("ghcr.io/acme/stack-b", "2.0.0"),
+        ];
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![LockedArtifact {
+                name: "code-review".to_string(),
+                kind: ArtifactKind::Skill,
+                pinned: pinned("acme/code-review", Some("stable"), 'a'),
+                bundles: provenance.clone(),
+            }],
+            rules: vec![],
+            agents: vec![],
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        // Two or more contributors emit the `bundles` sub-table array
+        // ([[skill.bundles]] with repo/tag rows), never the legacy pair.
+        assert!(
+            out.contains("[[skill.bundles]]"),
+            "multi provenance emits the array: {out}"
+        );
+        assert!(out.contains("repo = \"ghcr.io/acme/stack-a\""), "{out}");
+        assert!(
+            !out.contains("bundle = "),
+            "multi provenance never emits the legacy pair"
+        );
+        assert!(
+            !out.contains("bundle_tag"),
+            "multi provenance never emits the legacy pair"
+        );
+
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed.skills[0].bundles, provenance);
         assert_eq!(
             out,
             reparsed.to_toml_string().expect("second"),
