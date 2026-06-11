@@ -19,8 +19,9 @@ use crate::context::Context;
 /// `grim logout` arguments.
 #[derive(Debug, Args)]
 pub struct LogoutArgs {
-    /// Registry hostname (e.g. `ghcr.io`). Falls back to `--registry`,
-    /// the `default_registry` option, or `GRIM_DEFAULT_REGISTRY`.
+    /// Registry hostname (e.g. `ghcr.io`). Falls back to the `--registry`
+    /// flag, then `GRIM_DEFAULT_REGISTRY`. The `default_registry` config
+    /// option is not consulted on the logout path.
     pub registry: Option<String>,
 }
 

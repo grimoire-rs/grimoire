@@ -42,8 +42,9 @@ pub struct LoginArgs {
     #[arg(long)]
     pub allow_insecure_store: bool,
 
-    /// Registry hostname (e.g. `ghcr.io`). Falls back to `--registry`,
-    /// the `default_registry` option, or `GRIM_DEFAULT_REGISTRY`.
+    /// Registry hostname (e.g. `ghcr.io`). Falls back to the `--registry`
+    /// flag, then `GRIM_DEFAULT_REGISTRY`. The `default_registry` config
+    /// option is not consulted on the login path.
     pub registry: Option<String>,
 }
 

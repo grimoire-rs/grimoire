@@ -72,7 +72,7 @@ grim tui                          # interactive (requires a TTY)
 
 `grim tui` (needs a TTY). Each row shows a colored state glyph:
 `✓ installed` (green), `↑ outdated` (yellow), `✱ modified` (red),
-`⚠ integrity-missing` (magenta — recorded but files gone/edited away),
+`✘ integrity-missing` (magenta — recorded but files gone/edited away),
 `· not-installed` (grey).
 
 | Key | Action |
@@ -89,7 +89,7 @@ state glyphs flip to green; `d` to batch-uninstall; `g` to see the same
 catalog against the global scope's state. Tamper a file
 (`echo x >> test/manual/project/.claude/skills/hello-world/SKILL.md`)
 then refresh — it shows `✱ modified`; delete the dir and it shows
-`⚠ integrity-missing`.
+`✘ integrity-missing`.
 
 ### 2. Lock & install into an editor
 

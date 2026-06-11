@@ -116,7 +116,7 @@ for the active scope:
 |--------|----------------|---------------|
 | **Claude** | `<workspace>/.claude` | native root (`$CLAUDE_CONFIG_DIR` or `~/.claude`) exists |
 | **OpenCode** | `<workspace>/.opencode` | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
-| **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` | native skills root (`$COPILOT_HOME` or `~/.copilot`) exists |
+| **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` | native skills root (`$COPILOT_HOME/skills` or `~/.copilot/skills`) exists — the `skills/` subdir, not the bare `~/.copilot` parent |
 
 Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
 scope)`), driven by `install::target::detect_clients`, which iterates
