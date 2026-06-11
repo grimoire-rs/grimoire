@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Rolling-release demo step: publish a NEW version (1.1.0) of
-# `code-reviewer` so a project that locked the floating `:1` tag at 1.0.0
-# can roll forward with `grim update`.
+# Outdated / rolling-release demo step: publish a NEW version (1.3.0) of
+# `code-reviewer` — ABOVE the bootstrap matrix top (1.2.0) — so a project
+# that already locked the floating `:1` tag (at 1.2.0) shows `↑ outdated`
+# and can roll forward with `grim update`.
+#
+# This post-lock publish is the only way to produce a genuinely outdated
+# lock without hand-editing grimoire.lock: bootstrap publishes ascending to
+# 1.2.0, you `grim lock` (records 1.2.0), THEN run this to move :1 → 1.3.0.
 #
 # Run this AFTER `grim lock` in test/manual/project, then `grim update`.
 set -euo pipefail
+IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANUAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -19,19 +25,19 @@ export GRIM_INSECURE_REGISTRIES="$REGISTRY"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp -r "$MANUAL_DIR/catalog/skills/code-reviewer" "$tmp/code-reviewer"
-printf '\n## Changelog\n\n- 1.1.0: clarified the severity grouping.\n' \
+printf '\n## Changelog\n\n- 1.3.0: clarified the severity grouping.\n' \
     >>"$tmp/code-reviewer/SKILL.md"
 
-printf '\033[1;34m==>\033[0m releasing code-reviewer:1.1.0 (moves :1, :latest)\n'
+printf '\033[1;34m==>\033[0m releasing code-reviewer:1.3.0 (moves :1, :latest)\n'
 # --force so the demo is re-runnable after the catalog skill is edited (the
 # rig's :5050 registry is throwaway — moving its tags is intended).
-"$GRIM" release "$tmp/code-reviewer" "$REGISTRY/grimoire/skills/code-reviewer:1.1.0" --force
+"$GRIM" release "$tmp/code-reviewer" "$REGISTRY/grimoire/skills/code-reviewer:1.3.0" --force
 
 cat >&2 <<EOF
 
 Now roll the project forward:
   cd test/manual/project
-  grim status                 # code-reviewer still pinned at 1.0.0
-  grim update                 # re-resolves :1 -> 1.1.0, re-materializes
+  grim status                 # code-reviewer -> 'outdated' (locked 1.2.0, :1 now 1.3.0)
+  grim update                 # re-resolves :1 -> 1.3.0, re-materializes
   grep code-reviewer grimoire.lock
 EOF

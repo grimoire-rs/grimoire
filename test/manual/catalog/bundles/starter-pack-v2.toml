@@ -1,0 +1,29 @@
+# The `starter-pack` bundle, version 2.0.0 — the SAME `starter-pack` repo as
+# starter-pack.toml, with a CHANGED member set so an upgrade exercises a
+# bundle whose newer version ADDS and REMOVES entries:
+#
+#   * ADDED:   commit-helper (skill)
+#   * REMOVED: security-baseline (rule)
+#
+# bootstrap.sh copies this file to a mktemp `starter-pack.toml` before
+# `grim release ...:2.0.0`, because the published bundle name is the file
+# stem (src/command/build.rs::read_bundle_members). Releasing this file
+# directly would publish under repo `starter-pack-v2`, breaking the
+# `:1` vs `:2` same-repo upgrade demo.
+#
+# Top-level summary/keywords/description are the bundle's catalog metadata
+# (parsed as BundleMetadata); only those keys plus the `[skills]`/`[rules]`/
+# `[bundles]` member tables are allowed.
+#
+# Members reference the rig's fixed registry (localhost:5050) on the floating
+# major tag, exactly as v1 does.
+summary = "Curated starter pack"
+keywords = "starter,review,style,commit"
+description = "A starter set: the code-review and commit-helper skills plus the Rust rule"
+
+[skills]
+code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
+commit-helper = "localhost:5050/grimoire/skills/commit-helper:1"
+
+[rules]
+rust-style = "localhost:5050/grimoire/rules/rust-style:1"

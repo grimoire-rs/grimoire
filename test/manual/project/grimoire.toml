@@ -3,9 +3,10 @@
 #   cd test/manual/project
 #   grim lock && grim install && grim status
 #
-# The skill/rule entries use the FLOATING major tag `:1`, so after the
-# bootstrap script publishes a 1.1.0 of `code-reviewer`, `grim update`
-# rolls the pin forward from 1.0.0 → 1.1.0 (rolling release).
+# The skill/rule entries use the FLOATING major tag `:1`. bootstrap.sh
+# publishes code-reviewer ascending to 1.2.0, so `grim lock` here records
+# 1.2.0; running scripts/release-update.sh AFTER locking publishes 1.3.0 and
+# `grim update` rolls the pin forward 1.2.0 → 1.3.0 (rolling release).
 [options]
 default_registry = "localhost:5050"
 editor = "claude"

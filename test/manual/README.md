@@ -19,10 +19,12 @@ project, and a `teardown.sh`.
 |------|---------|
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
+| `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
+| `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
-| `scripts/bootstrap.sh` | Build `grim`, start registry, publish the catalog at 1.0.0 |
-| `scripts/release-update.sh` | Publish `code-reviewer` 1.1.0 (rolling-release demo) |
+| `scripts/bootstrap.sh` | Build `grim`, start registry, publish the version matrix |
+| `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops the registry) |
 | `docker-compose.yml` | `registry:2` on `localhost:5050` |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
@@ -34,18 +36,26 @@ test/manual/scripts/bootstrap.sh        # one command: build + registry + publis
 source test/manual/scripts/env.sh       # point `grim` at the rig
 ```
 
-Published catalog:
+Published catalog (a small **version matrix** — most artifacts ship one
+1.0.0, a few carry extra versions for the upgrade / `↑ outdated` demos):
 
 | Kind | Repo | Versions |
 |------|------|----------|
 | skill | `localhost:5050/grimoire/skills/hello-world` | 1.0.0 |
-| skill | `localhost:5050/grimoire/skills/code-reviewer` | 1.0.0 (1.1.0 via `release-update.sh`) |
-| skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0 |
-| rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0 |
+| skill | `localhost:5050/grimoire/skills/code-reviewer` | 1.0.0, 1.1.0, 1.2.0 (1.3.0 via `release-update.sh`) |
+| skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0, 2.0.0 |
+| skill | `localhost:5050/grimoire/skills/architecture-guide` | 1.0.0 |
+| rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0, 1.1.0 |
 | rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
+| rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
+| bundle | `localhost:5050/grimoire/bundles/starter-pack` | 1.0.0, 2.0.0 (v2 adds commit-helper, drops security-baseline) |
 
-Each release cascades floating tags, e.g. `1.0.0` also sets `1.0`, `1`,
-`latest`; `code-reviewer` `1.1.0` then moves `1.1`, `1`, `latest`.
+Each full-semver release cascades the floating tags forward, e.g. `1.0.0`
+also sets `1.0`, `1`, `latest`; publishing `code-reviewer` `1.2.0` then
+moves `1.2`, `1`, `latest` onto it. Because of this, `bootstrap.sh`
+publishes versions in **ascending** order per artifact, so the floating
+`:1`/`:latest` the consumer project pins always land on the highest
+version (code-reviewer `1.2.0`, commit-helper `2.0.0`, rust-style `1.1.0`).
 
 ## Scenarios
 
@@ -109,15 +119,37 @@ grim install                      # refused (exit 65) — local edit protected
 grim install --force              # overwrite the local edit
 ```
 
-### 5. Rolling release / update
+### 5. Rolling release / outdated / update
+
+`bootstrap.sh` publishes `code-reviewer` ascending to 1.2.0, so locking the
+floating `:1` records 1.2.0 (state `installed`, NOT `outdated`). To produce
+a genuine `↑ outdated` lock, publish a version ABOVE the matrix top AFTER
+locking — that is exactly what `release-update.sh` does (1.3.0):
 
 ```sh
-# in test/manual/project, with code-reviewer locked at 1.0.0 (via :1):
-grep code-reviewer grimoire.lock          # 1.0.0 digest
-../scripts/release-update.sh              # publishes code-reviewer 1.1.0
-grim update                               # re-resolves :1 -> 1.1.0
+# in test/manual/project, after `grim lock` (code-reviewer pinned at 1.2.0):
+grep code-reviewer grimoire.lock          # 1.2.0 digest
+../scripts/release-update.sh              # publishes code-reviewer 1.3.0, moves :1
+grim status                               # code-reviewer -> 'outdated'
+grim update                               # re-resolves :1 -> 1.3.0
 grep code-reviewer grimoire.lock          # digest advanced
-grim status
+grim status                               # back to 'installed'
+```
+
+### 5a. Bundle add/remove on upgrade
+
+The `starter-pack` bundle ships two versions with different member sets, so
+upgrading `:1 -> :2` adds AND removes members:
+
+```sh
+# v1: code-reviewer + rust-style + security-baseline
+grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:1
+cat grimoire.toml grimoire.lock           # inspect the resolved members
+
+# v2 ADDS commit-helper, DROPS security-baseline
+grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:2
+grim update                               # commit-helper added, security-baseline pruned
+cat grimoire.toml grimoire.lock
 ```
 
 ### 6. add / remove

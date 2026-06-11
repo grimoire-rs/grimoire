@@ -1,5 +1,11 @@
 # A bundle for the manual rig: groups a few catalog members so `grim search`
-# / `grim tui` show a bundle entry carrying its own catalog metadata.
+# / `grim tui` show a bundle entry carrying its own catalog metadata. This is
+# the bundle's v1 (1.0.0) member set; the published bundle name is the .toml
+# file stem (src/command/build.rs::read_bundle_members).
+#
+# v2 (starter-pack-v2.toml) intentionally ADDS commit-helper and DROPS
+# security-baseline so `grim add bundle starter-pack ...:1` vs `...:2`
+# exercises a bundle whose newer version adds AND removes members.
 #
 # Members reference the rig's fixed registry (localhost:5050) on the floating
 # major tag, exactly as the consumer project declares them.

@@ -5,10 +5,19 @@
 #
 # Re-runnable: re-publishes the *current* catalog content with `--force`, so
 # an edited artifact moves its exact-version tag to the new digest (identical
-# content resolves to the same digest, an effective no-op). Publishes every
-# skill/rule/bundle at 1.0.0; the rolling-release / `grim update` flow gets a
-# 1.1.0 of `code-reviewer` from scripts/release-update.sh.
+# content resolves to the same digest, an effective no-op).
+#
+# Publishes a small VERSION MATRIX (see step 4) so upgrade / `↑ outdated`
+# states are exercisable: most artifacts ship a single 1.0.0, but a few carry
+# extra versions (code-reviewer 1.0.0/1.1.0/1.2.0, commit-helper 1.0.0/2.0.0,
+# rust-style 1.0.0/1.1.0) and the `starter-pack` bundle ships 1.0.0 plus a
+# 2.0.0 whose member set adds AND removes entries. Each full-semver release
+# cascades the floating :MAJOR/:MINOR/:latest tags forward, so versions MUST
+# be published in ASCENDING order per artifact — the floating :1 the consumer
+# project pins then lands on the highest version. A post-lock bump above the
+# matrix top (scripts/release-update.sh) produces a genuine `↑ outdated` lock.
 set -euo pipefail
+IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANUAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -61,44 +70,88 @@ release() { # <path> <repo-subpath> <name> <version>
     "$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4" --force
 }
 
-# 4. Publish every skill at 1.0.0.
-for dir in "$CATALOG"/skills/*/; do
-    name="$(basename "$dir")"
-    release "$dir" skills "$name" 1.0.0
+# Publish one artifact at each of its versions, in ASCENDING order so the
+# floating :MAJOR/:MINOR/:latest tags end up on the highest version.
+#   <path> <repo-subpath> <name> <space-separated versions, ascending>
+release_versions() {
+    local path="$1" kind="$2" name="$3" versions_field="$4"
+    local versions ver
+    # Split the version field on whitespace regardless of the script's IFS.
+    IFS=' ' read -r -a versions <<<"$versions_field"
+    for ver in "${versions[@]}"; do
+        release "$path" "$kind" "$name" "$ver"
+    done
+}
+
+# 4. VERSION MATRIX. Keep it SMALL but covering: most artifacts ship one
+#    1.0.0, a few carry extra versions for the upgrade / outdated demos.
+#    Each record is `kind|name|path|space-separated versions (ascending)`.
+#    A rule path is the index `<name>.md`; `grim release` packs the sibling
+#    `<name>/` support dir automatically (the `rules/*.md` glob is
+#    non-recursive, so a support file is never released as its own rule).
+SKILL_MATRIX=(
+    "skills|architecture-guide|$CATALOG/skills/architecture-guide|1.0.0"
+    "skills|code-reviewer|$CATALOG/skills/code-reviewer|1.0.0 1.1.0 1.2.0"
+    "skills|commit-helper|$CATALOG/skills/commit-helper|1.0.0 2.0.0"
+    "skills|hello-world|$CATALOG/skills/hello-world|1.0.0"
+)
+RULE_MATRIX=(
+    "rules|architecture-guide|$CATALOG/rules/architecture-guide.md|1.0.0"
+    "rules|rust-style|$CATALOG/rules/rust-style.md|1.0.0 1.1.0"
+    "rules|security-baseline|$CATALOG/rules/security-baseline.md|1.0.0"
+)
+
+# 4a. Publish skills.
+for record in "${SKILL_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions"
 done
 
-# 5. Publish every rule at 1.0.0. An index `<name>.md` with a sibling
-#    `<name>/` directory is a multi-file rule — `grim release` packs the
-#    support dir automatically (the `rules/*.md` glob is non-recursive, so a
-#    support file is never released as its own rule).
-for file in "$CATALOG"/rules/*.md; do
-    name="$(basename "$file" .md)"
-    release "$file" rules "$name" 1.0.0
+# 4b. Publish rules.
+for record in "${RULE_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions"
 done
 
-# 6. Publish every bundle at 1.0.0 (its members were published above).
-for file in "$CATALOG"/bundles/*.toml; do
-    [ -e "$file" ] || continue
-    name="$(basename "$file" .toml)"
-    release "$file" bundles "$name" 1.0.0
-done
+# 5. Publish bundles LAST — their members must already exist. The
+#    `starter-pack` bundle ships two versions with differing member sets:
+#      * 1.0.0 (starter-pack.toml):    code-reviewer + rust-style + security-baseline
+#      * 2.0.0 (starter-pack-v2.toml): ADDS commit-helper, DROPS security-baseline
+#    The published bundle name is the .toml file stem
+#    (src/command/build.rs::read_bundle_members), so v2 is copied to a
+#    mktemp `starter-pack.toml` first to publish under the SAME repo (else
+#    :1 and :2 would be different repos and the upgrade demo would break).
+bundle_tmp="$(mktemp -d)"
+cleanup() { rm -rf "$bundle_tmp"; }
+trap cleanup EXIT
 
-# Note: every skill/rule/bundle is published ONCE at 1.0.0. The rolling-release
-# demo (publishing code-reviewer 1.1.0) is deliberately a separate step —
-# run scripts/release-update.sh AFTER you have locked at 1.0.0 so `grim
-# update` actually shows the pin rolling forward.
+release "$CATALOG/bundles/starter-pack.toml" bundles starter-pack 1.0.0
 
-log "done. Catalog published to $REGISTRY/$NS/{skills,rules,bundles}/* at 1.0.0"
+cp "$CATALOG/bundles/starter-pack-v2.toml" "$bundle_tmp/starter-pack.toml"
+release "$bundle_tmp/starter-pack.toml" bundles starter-pack 2.0.0
+
+log "done. Catalog published to $REGISTRY/$NS/{skills,rules,bundles}/*"
 cat >&2 <<EOF
 
 Next:
   source test/manual/scripts/env.sh
-  grim search                       # browse the published catalog
+  grim search                       # browse the catalog (Version column = highest semver)
   grim tui                          # interactive browser (needs a TTY)
   cd test/manual/project
   grim lock && grim install         # materialize into .claude/
   grim status                       # all 'installed'
-  # then, for the rolling-release demo:
-  test/manual/scripts/release-update.sh   # publishes code-reviewer 1.1.0
-  grim update                       # rolls code-reviewer :1 -> 1.1.0
+
+Outdated / update demo (lock at an OLD pin, then roll forward):
+  # the project pins code-reviewer at the floating :1, so 'grim lock' here
+  # records the newest published version (1.2.0). To force a real '↑ outdated'
+  # lock, publish a version ABOVE the matrix top AFTER locking:
+  test/manual/scripts/release-update.sh   # publishes code-reviewer 1.3.0
+  grim status                             # code-reviewer -> 'outdated'
+  grim update                             # rolls :1 -> 1.3.0; back to 'installed'
+
+Bundle add/remove-on-upgrade demo:
+  grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:1
+  # resolves code-reviewer + rust-style + security-baseline
+  grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:2
+  # :2 ADDS commit-helper and DROPS security-baseline
 EOF
