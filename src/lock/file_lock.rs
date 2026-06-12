@@ -38,23 +38,38 @@ use crate::lock::lock_error::{LockError, LockErrorKind};
 
 /// An held exclusive advisory lock keyed by a config-file path.
 ///
-/// The lock is released when this guard is dropped (the underlying file
-/// descriptor of the sidecar is closed, which releases the lock). The
-/// file handle is retained for exactly that reason.
+/// Dropping the guard removes the sidecar (best-effort, while the lock is
+/// still held) and then releases the lock by closing the handle — see
+/// [`Drop`] below for the platform-specific ordering rationale.
 #[derive(Debug)]
 pub struct ConfigFileLock {
-    // Held so the fd stays open for the lock's lifetime; dropping it
-    // releases the lock. Never read directly.
-    _file: File,
+    // Held so the fd stays open for the lock's lifetime; closing it (on
+    // drop) releases the lock. Never read directly.
+    file: File,
+    // The sidecar path, retained so Drop can unlink it.
+    sidecar: PathBuf,
 }
 
 impl ConfigFileLock {
+    /// Bounded retries for the unlink-vs-acquire window: an acquired lock
+    /// whose sidecar was concurrently unlinked (a holder dropping) or a
+    /// Windows delete-pending open failure triggers a fresh open+lock
+    /// attempt. Contention itself never retries — it returns `Locked`.
+    const MAX_ATTEMPTS: u32 = 8;
+
     /// Try to acquire the exclusive advisory lock for `config_path` (held
-    /// on the `<file>.lock` sidecar, created when missing and left in
-    /// place — removing a lock file is inherently racy).
+    /// on the `<file>.lock` sidecar, created when missing and removed
+    /// again when the guard drops).
     ///
     /// Non-blocking: if another process holds the lock this returns
     /// [`LockErrorKind::Locked`] immediately rather than waiting.
+    ///
+    /// Because a dropping holder unlinks the sidecar while still holding
+    /// the lock, an acquire that won the lock must prove the inode it
+    /// locked is still what the sidecar path names; otherwise it locked a
+    /// ghost (an unlinked or replaced file) and another process could
+    /// re-create the path and lock it concurrently. On a mismatch the
+    /// attempt is discarded and the open+lock retried (bounded).
     ///
     /// The config file itself does not have to exist; its parent
     /// directory does (the sidecar is created beside it).
@@ -80,15 +95,92 @@ impl ConfigFileLock {
             ));
         }
 
-        let file = open_sidecar(config_path)?;
+        let sidecar = sidecar_path(config_path);
+        let mut last_io: Option<std::io::Error> = None;
+        for _ in 0..Self::MAX_ATTEMPTS {
+            let file = match open_sidecar(config_path) {
+                Ok(f) => f,
+                // Windows: a sidecar marked delete-pending by a dropping
+                // holder refuses new opens until the holder's handle
+                // closes (moments later). Treat it as the transient window
+                // it is and retry.
+                Err(e)
+                    if cfg!(windows)
+                        && matches!(&e.kind, LockErrorKind::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                Err(LockError::new(config_path, LockErrorKind::Locked))
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    if sidecar_still_current(&file, &sidecar) {
+                        return Ok(Self { file, sidecar });
+                    }
+                    // Locked a ghost inode (holder unlinked it between our
+                    // open and lock) — discard and retry on the live path.
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(LockError::new(config_path, LockErrorKind::Locked));
+                }
+                Err(e) => last_io = Some(e),
             }
-            Err(e) => Err(LockError::new(config_path, LockErrorKind::Io(e))),
         }
+        Err(LockError::new(
+            config_path,
+            LockErrorKind::Io(
+                last_io.unwrap_or_else(|| {
+                    std::io::Error::other("lock sidecar kept changing underneath the acquire retries")
+                }),
+            ),
+        ))
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        // Unlink the sidecar BEFORE the handle closes, i.e. while the lock
+        // is still held — a waiter can then never lock the doomed inode
+        // without `try_acquire`'s identity re-check catching it.
+        //
+        // - Unix: unlinking an open, locked file is plain; the fd (and the
+        //   lock) lives until the close below.
+        // - Windows: Rust's std opens with FILE_SHARE_DELETE, so the
+        //   remove marks the name delete-pending; the name disappears when
+        //   our handle (the last one) closes right after. Concurrent opens
+        //   during the pending window fail with a permission error, which
+        //   `try_acquire` maps to a bounded retry.
+        //
+        // Best-effort: a failure leaves the sidecar behind, which is the
+        // pre-cleanup status quo and never breaks correctness.
+        let _ = std::fs::remove_file(&self.sidecar);
+        // `self.file` closes after this body returns, releasing the lock.
+    }
+}
+
+/// Whether the locked handle still corresponds to the file the sidecar
+/// path names. On Unix this compares `(dev, ino)`; a missing path or a
+/// different inode means a dropping holder unlinked/replaced the sidecar
+/// after we opened it. On non-Unix platforms `std` exposes no stable file
+/// identity, so the check degrades to "the path still exists" — the
+/// delete-pending semantics of the Drop impl cover the rest of the window.
+fn sidecar_still_current(file: &File, sidecar: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(held) = file.metadata() else { return false };
+        let Ok(on_disk) = std::fs::metadata(sidecar) else {
+            return false;
+        };
+        held.dev() == on_disk.dev() && held.ino() == on_disk.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        sidecar.exists()
     }
 }
 
@@ -191,6 +283,48 @@ mod tests {
         let _guard = ConfigFileLock::try_acquire(&cfg).expect("acquire");
         assert!(dir.path().join("grimoire.toml.lock").exists());
         assert!(!dir.path().join("grimoire.lock").exists());
+    }
+
+    #[test]
+    fn sidecar_removed_on_drop_and_reacquirable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[skills]\n").unwrap();
+        let sidecar = dir.path().join("grimoire.toml.lock");
+
+        let guard = ConfigFileLock::try_acquire(&cfg).expect("acquire");
+        assert!(sidecar.exists(), "sidecar exists while the lock is held");
+        drop(guard);
+        assert!(!sidecar.exists(), "drop must remove the sidecar");
+
+        // The cleaned-up path stays fully lockable.
+        let again = ConfigFileLock::try_acquire(&cfg).expect("re-acquire after cleanup");
+        assert!(sidecar.exists());
+        drop(again);
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn acquire_retries_past_a_ghost_inode() {
+        // Simulate the drop race: a holder unlinks the sidecar while a
+        // waiter has already opened it. The waiter's lock on the unlinked
+        // inode must be discarded and re-acquired on the live path.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[skills]\n").unwrap();
+        let sidecar = dir.path().join("grimoire.toml.lock");
+
+        // Plant a sidecar and unlink it right away — any pre-opened handle
+        // (the race victim) would now point at a ghost inode. try_acquire
+        // itself must end up holding a lock on the CURRENT on-disk file.
+        std::fs::write(&sidecar, b"").unwrap();
+        std::fs::remove_file(&sidecar).unwrap();
+
+        let guard = ConfigFileLock::try_acquire(&cfg).expect("acquire on the live sidecar");
+        assert!(
+            sidecar_still_current(&guard.file, &sidecar),
+            "the held lock must be on the file the path names"
+        );
     }
 
     #[test]
