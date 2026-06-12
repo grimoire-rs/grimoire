@@ -7,8 +7,7 @@ authored here, validated by `grim build` in CI, published to `grim.ocx.sh`.
 
 ```
 catalog/
-├── publish.toml        # publish manifest: registry + per-package versions
-├── scripts/publish.py  # release driver (repo tooling, not a package)
+├── publish.toml        # grim publish manifest: registry + per-package version tables
 ├── taskfile.yml        # catalog: subsystem tasks (verify, release)
 ├── skills/<name>/      # one dir per skill package (SKILL.md + references/)
 ├── bundles/<name>.toml # one file per bundle package

@@ -1,6 +1,6 @@
 # Publish manifest for first-party catalog packages.
 #
-# NOT a grim bundle — this file drives catalog/scripts/publish.py.
+# NOT a grim bundle — this file drives `grim publish`.
 # Versions are independent per package and bumped via PR (no git tags;
 # cliff.toml's unanchored tag_pattern would pick catalog tags up).
 #
@@ -9,10 +9,14 @@
 
 registry = "grim.ocx.sh"
 
-[skills]
-grim-usage = "0.1.1"
-ai-config-authoring = "0.1.0"
-grim-authoring = "0.1.0"
+[skills.grim-usage]
+version = "0.2.0"
 
-[bundles]
-grim-essentials = "0.1.0"
+[skills.ai-config-authoring]
+version = "0.1.0"
+
+[skills.grim-authoring]
+version = "0.1.0"
+
+[bundles.grim-essentials]
+version = "0.1.0"

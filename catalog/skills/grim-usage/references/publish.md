@@ -54,6 +54,13 @@ that is their job.
 
 ## Scripted Publishing
 
+For multi-package repositories, `grim publish` supersedes the manual
+release loop below. It reads a `publish.toml` manifest, validates every
+entry before touching the registry, and releases each package in a fixed
+kind order — see [Manifest-Driven Batch Publishing](#manifest-driven-batch-publishing).
+The manual loop remains useful for edge cases: per-package divergent flags,
+or environments where `grim publish` is not available.
+
 Publishing several packages from one repository? Keep their versions in
 a reviewed manifest file (versions change only via commits, so the repo
 records exactly what was published), then blanket-rerun the release for
@@ -69,6 +76,52 @@ maintenance loop becomes: change content, bump that package's version,
 rerun the whole publish. Two rules keep it sound: bump on every content
 change (an unbumped change is silently never published), and release
 bundle members before the bundle that references them.
+
+## Manifest-Driven Batch Publishing
+
+`grim publish` is the built-in command for multi-package repositories. It
+reads a `publish.toml` manifest that declares every package with a `registry`
+and per-entry `version`, validates the whole set before any push, then
+releases each entry in a fixed kind order: skills first, then rules, then
+agents, then bundles — alphabetical within each kind. Bundle members always
+land before the bundles that reference them.
+
+The manifest format uses per-entry sub-tables keyed by name. A minimal
+example:
+
+```toml
+registry = "grim.ocx.sh"
+
+[skills.code-review]
+version = "1.2.0"
+
+[bundles.dev-stack]
+version = "0.3.0"
+pin = true          # bundle-only: freeze floating member tags to digests
+```
+
+Key behaviors — confirmed invariants, not subject to minor-release drift:
+
+- **Skip-existing by default.** An already-published exact version is a
+  success no-op. Only bumped versions push. Use `--force` to move an
+  existing exact-version tag instead (the two modes are mutually exclusive).
+- **Fail-fast.** The first failing entry stops the batch. The report shows
+  all completed entries plus the failed one. Re-run with `--only <name>` to
+  resume from a specific entry.
+- **`pin = true` is bundle-only.** Setting it on a skill, rule, or agent
+  entry is a validation error (exit 65).
+
+Common flags — confirm current spelling with `grim publish --help`:
+
+```sh
+grim publish --dry-run           # plan without pushing
+grim publish --only code-review  # publish one entry
+grim publish --tag canary        # movable tag, semver rejected
+grim publish --manifest staging/publish.toml  # alternate manifest
+```
+
+See [Batch publishing with a manifest][batch-publish] for the full schema,
+source layout conventions, and disambiguation from bundle TOML files.
 
 ## Bundles
 
@@ -150,5 +203,6 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 
 [publishing]: https://michael-herwig.github.io/grimoire/publishing.html
 [metadata]: https://michael-herwig.github.io/grimoire/publishing.html#metadata
+[batch-publish]: https://michael-herwig.github.io/grimoire/publishing.html#batch-publish
 [auth]: https://michael-herwig.github.io/grimoire/authentication.html
 [commands]: https://michael-herwig.github.io/grimoire/commands.html#build

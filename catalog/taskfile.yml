@@ -58,9 +58,7 @@ tasks:
         [ "$found" -eq 1 ] || { echo "no catalog packages found" >&2; exit 1; }
 
   release:
-    desc: Publish catalog packages per publish.toml (pass flags after -- e.g. -- --dry-run)
+    desc: Publish catalog packages per publish.toml via grim publish (pass flags after -- e.g. -- --dry-run)
     deps: [.ensure-grim]
-    env:
-      GRIM_COMMAND: '{{.GRIM_BINARY}}'
     cmds:
-      - python3 scripts/publish.py {{.CLI_ARGS}}
+      - '"{{.GRIM_BINARY}}" publish --manifest {{.TASKFILE_DIR}}/publish.toml {{.CLI_ARGS}}'

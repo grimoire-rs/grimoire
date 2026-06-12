@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, build, release, login, or logout commands; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, build, release, publish, login, or logout commands; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.4
 metadata:
@@ -45,6 +45,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim search` / `tui` | Browse a registry's catalog | [registries](references/registries.md) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
+| `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
 
 ## Reference Syntax
