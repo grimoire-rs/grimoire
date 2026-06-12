@@ -1121,31 +1121,80 @@ fn split_repo(repo: &str) -> Option<(String, String)> {
     repo.split_once('/').map(|(r, p)| (r.to_string(), p.to_string()))
 }
 
-/// Open `url` with the platform opener, detached: stdio is nulled so the
-/// child can never write into the alternate screen / raw-mode terminal,
-/// and the handle is reaped in a background task (openers exit fast).
+/// Candidate opener command lines for the current platform, tried in
+/// order until one spawns. A tiny polyfill instead of an extra crate:
+///
+/// - Windows: `cmd /C start "" <url>` (builtin; the empty quoted arg fills
+///   the window-title slot), then `rundll32 url.dll,FileProtocolHandler`
+///   as the no-shell fallback.
+/// - macOS: `open` (always present).
+/// - other unixes: `xdg-open` (xdg-utils), then `gio open` (GLib systems
+///   without xdg-utils), then `wslview` (WSL without a Linux browser).
+fn opener_candidates(url: &str) -> Vec<(&'static str, Vec<String>)> {
+    if cfg!(windows) {
+        // `start` goes through cmd's parser: escape `&` so a query string
+        // is not split into a second command. The catalog guard already
+        // pins `https://`, so no further shell metacharacters survive.
+        let escaped = url.replace('&', "^&");
+        vec![
+            ("cmd", vec!["/C".into(), "start".into(), String::new(), escaped]),
+            ("rundll32", vec![format!("url.dll,FileProtocolHandler {url}")]),
+        ]
+    } else if cfg!(target_os = "macos") {
+        vec![("open", vec![url.to_string()])]
+    } else {
+        vec![
+            ("xdg-open", vec![url.to_string()]),
+            ("gio", vec!["open".into(), url.to_string()]),
+            ("wslview", vec![url.to_string()]),
+        ]
+    }
+}
+
+/// Open `url` with the first available platform opener, detached: stdio is
+/// nulled so the child can never write into the alternate screen /
+/// raw-mode terminal, and the handle is reaped in a background task
+/// (openers exit fast). Spawn failures (typically a missing opener binary)
+/// fall through to the next candidate from [`opener_candidates`].
 ///
 /// # Errors
 ///
 /// A non-HTTPS URL (defense in depth — only the catalog guard's vetted
-/// `https://` values reach here) or a spawn failure.
+/// `https://` values reach here), or no candidate opener could be spawned.
 fn open_url(url: &str) -> io::Result<()> {
     if !url.starts_with("https://") {
         return Err(io::Error::other("not an https URL"));
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let mut child = tokio::process::Command::new(opener)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    tokio::spawn(async move {
-        // Reap so the opener never zombifies; its exit code is irrelevant
-        // (the status line already reported the attempt).
-        let _ = child.wait().await;
-    });
-    Ok(())
+    let candidates = opener_candidates(url);
+    let tried: Vec<&str> = candidates.iter().map(|(p, _)| *p).collect();
+    let mut last_err: Option<io::Error> = None;
+    for (program, args) in &candidates {
+        match tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                tokio::spawn(async move {
+                    // Reap so the opener never zombifies; its exit code is
+                    // irrelevant (the status line already reported the
+                    // attempt).
+                    let _ = child.wait().await;
+                });
+                return Ok(());
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let detail = last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "no candidates".to_string());
+    Err(io::Error::other(format!(
+        "no URL opener found (tried {}): {detail}",
+        tried.join(", ")
+    )))
 }
 
 /// The display names of the active scope's effective selected clients
@@ -1676,6 +1725,26 @@ mod tests {
             .map(|a| a.name.clone())
             .collect();
         assert_eq!(targets, vec!["only-a"], "the shared member keeps its files");
+    }
+
+    #[test]
+    fn opener_candidates_cover_current_platform() {
+        let url = "https://github.com/acme/x?a=1&b=2";
+        let candidates = opener_candidates(url);
+        assert!(!candidates.is_empty(), "every platform has at least one opener");
+        if cfg!(windows) {
+            // The cmd candidate must escape `&` (cmd's command separator).
+            assert_eq!(candidates[0].0, "cmd");
+            assert!(candidates[0].1.last().unwrap().contains("^&"));
+            assert_eq!(candidates[1].0, "rundll32");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(candidates[0].0, "open");
+        } else {
+            // Unix fallback chain: xdg-open first, then the polyfills.
+            let programs: Vec<&str> = candidates.iter().map(|(p, _)| *p).collect();
+            assert_eq!(programs, vec!["xdg-open", "gio", "wslview"]);
+            assert_eq!(candidates[0].1, vec![url.to_string()]);
+        }
     }
 
     #[test]
