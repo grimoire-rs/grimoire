@@ -83,9 +83,14 @@ impl RegistryClient {
     /// Resolve credentials for `registry`: anonymous unless Docker
     /// credentials are configured for the host.
     ///
-    /// A genuine credential-helper failure is surfaced; "no credentials
-    /// configured" is a normal anonymous-access case, not an error.
-    fn auth_for(registry: &str) -> Result<RegistryAuth, AccessErrorKind> {
+    /// Infallible by design: a credential is an opportunistic enhancement,
+    /// never a precondition. A broken credential store (helper binary not
+    /// on PATH, locked keyring, malformed helper output, …) must not block
+    /// access to a registry that allows anonymous pulls — those failures
+    /// degrade to anonymous with a warning. A registry that actually
+    /// requires auth then fails the request itself with a classified
+    /// authentication error pointing at `grim login`.
+    fn auth_for(registry: &str) -> RegistryAuth {
         use docker_credential::{CredentialRetrievalError, DockerCredential};
 
         // Canonicalize the lookup key so a credential written by
@@ -93,20 +98,24 @@ impl RegistryClient {
         // found here. Single source of truth: `auth::canonicalize_registry`.
         let registry = crate::auth::canonicalize_registry(registry);
         match docker_credential::get_credential(&registry) {
-            Ok(DockerCredential::IdentityToken(token)) => Ok(RegistryAuth::Bearer(token)),
-            Ok(DockerCredential::UsernamePassword(user, pass)) => Ok(RegistryAuth::Basic(user, pass)),
+            Ok(DockerCredential::IdentityToken(token)) => RegistryAuth::Bearer(token),
+            Ok(DockerCredential::UsernamePassword(user, pass)) => RegistryAuth::Basic(user, pass),
             // "No credential for this registry" is a benign anonymous-access
-            // case, not an error. The patched `docker_credential` fork
+            // case — stay silent. The patched `docker_credential` fork
             // surfaces a credential-helper miss as `NotFound` (upstream rolled
-            // it into `HelperFailure`), so it joins the anonymous group too.
+            // it into `HelperFailure`), so it joins the silent group too.
             Err(
                 CredentialRetrievalError::NoCredentialConfigured
                 | CredentialRetrievalError::ConfigNotFound
                 | CredentialRetrievalError::ConfigReadError
                 | CredentialRetrievalError::NotFound
                 | CredentialRetrievalError::HelperFailure { .. },
-            ) => Ok(RegistryAuth::Anonymous),
-            Err(e) => Err(AccessErrorKind::Authentication(Box::new(e))),
+            ) => RegistryAuth::Anonymous,
+            // Anything else is a broken credential store — degrade loudly.
+            Err(e) => {
+                tracing::warn!("credential lookup for {registry} failed ({e}); continuing anonymously");
+                RegistryAuth::Anonymous
+            }
         }
     }
 }
@@ -246,7 +255,7 @@ impl OciAccess for RegistryClient {
             return Ok(Some(digest));
         }
         let reference = reference_for(id);
-        let auth = Self::auth_for(id.registry()).map_err(|kind| AccessError::with_identifier(id.clone(), kind))?;
+        let auth = Self::auth_for(id.registry());
 
         match self.client.fetch_manifest_digest(&reference, &auth).await {
             Ok(digest_str) => {
@@ -268,8 +277,7 @@ impl OciAccess for RegistryClient {
     async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
         let identifier = id.as_identifier().clone();
         let reference = reference_for(&identifier);
-        let auth = Self::auth_for(identifier.registry())
-            .map_err(|kind| AccessError::with_identifier(identifier.clone(), kind))?;
+        let auth = Self::auth_for(identifier.registry());
 
         let (manifest, _digest) = match self.client.pull_manifest(&reference, &auth).await {
             Ok(pair) => pair,
@@ -288,7 +296,7 @@ impl OciAccess for RegistryClient {
 
     async fn fetch_blob(&self, repo: &Identifier, digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
         let reference = reference_for(repo);
-        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let auth = Self::auth_for(repo.registry());
         // Ensure auth is primed before the (internally-authenticated)
         // blob pull, matching OCX's NativeTransport ordering.
         self.client
@@ -324,7 +332,7 @@ impl OciAccess for RegistryClient {
 
     async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
         let reference = reference_for(id);
-        let auth = Self::auth_for(id.registry()).map_err(|kind| AccessError::with_identifier(id.clone(), kind))?;
+        let auth = Self::auth_for(id.registry());
 
         match self.client.list_tags(&reference, &auth, None, None).await {
             Ok(response) => Ok(Some(response.tags)),
@@ -351,7 +359,7 @@ impl OciAccess for RegistryClient {
         // `repository:…:pull` token scope, and the token a registry mints
         // carries the caller's read access, which covers `_catalog`.
         let host = registry_host(registry);
-        let auth = Self::auth_for(host).unwrap_or(RegistryAuth::Anonymous);
+        let auth = Self::auth_for(host);
         let reference = Reference::with_tag(host.to_string(), "_catalog".to_string(), "latest".to_string());
 
         // `oci-client`'s `catalog` runs the WWW-Authenticate token handshake
@@ -397,7 +405,7 @@ impl OciAccess for RegistryClient {
 
     async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
         let reference = reference_for(repo);
-        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let auth = Self::auth_for(repo.registry());
         self.client
             .store_auth_if_needed(reference.resolve_registry(), &auth)
             .await;
@@ -414,7 +422,7 @@ impl OciAccess for RegistryClient {
     }
 
     async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
-        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let auth = Self::auth_for(repo.registry());
         let registry_ref = reference_for(repo);
         self.client
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
@@ -481,7 +489,7 @@ impl OciAccess for RegistryClient {
     }
 
     async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError> {
-        let auth = Self::auth_for(repo.registry()).map_err(|kind| AccessError::with_identifier(repo.clone(), kind))?;
+        let auth = Self::auth_for(repo.registry());
         let registry_ref = reference_for(repo);
         self.client
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
@@ -641,7 +649,7 @@ mod tests {
     #[test]
     fn auth_for_unknown_registry_is_anonymous() {
         // No Docker config for a bogus host ⇒ anonymous, not an error.
-        let auth = RegistryClient::auth_for("nonexistent.invalid").expect("anonymous fallback");
+        let auth = RegistryClient::auth_for("nonexistent.invalid");
         assert!(matches!(auth, RegistryAuth::Anonymous));
     }
 
