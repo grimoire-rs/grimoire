@@ -346,8 +346,10 @@ a glob pointing at the directory where it writes rules — and keeps it in
 sync with the install state.
 
 The entry is added when the first OpenCode rule installs, and removed
-when the last one uninstalls. Install, update, uninstall, and the TUI all
-converge through the same sync call.
+when the last one uninstalls — together with the then-empty
+`.opencode/rules/` directory itself (a directory still holding files is
+left alone). Install, update, uninstall, and the TUI all converge through
+the same sync call.
 
 For a **project-scope** install, grim edits `opencode.jsonc` when it
 exists in the workspace root, otherwise `opencode.json`, and writes the

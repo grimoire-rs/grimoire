@@ -116,7 +116,10 @@ fn global_config_path(
 
 /// Converge the vendor config on the state's needs: ensure the managed
 /// glob is present while any OpenCode rule is recorded for this scope,
-/// absent otherwise. Call after install/update/uninstall mutated `state`.
+/// absent otherwise. With no OpenCode rule left, the now-empty managed
+/// `.opencode/rules/` directory is reaped too (best-effort — a non-empty
+/// dir is never touched). Call after install/update/uninstall mutated
+/// `state`.
 ///
 /// # Errors
 ///
@@ -127,6 +130,15 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
     let want = state
         .iter_records()
         .any(|r| r.kind == ArtifactKind::Rule && r.client_outputs().iter().any(|c| c.client == opencode));
+    // The managed rules dir mirrors the managed glob: when the last
+    // OpenCode rule for this scope is gone, reap the now-empty
+    // `.opencode/rules/` directory (it exists only because a rule install
+    // created it). `remove_dir` refuses a non-empty dir, so user files
+    // are never touched; that refusal — and an already-absent dir — are
+    // deliberately ignored (best-effort hygiene, never a sync failure).
+    if !want {
+        let _ = std::fs::remove_dir(workspace.join(".opencode").join("rules"));
+    }
     // No resolvable config location (global scope without $OPENCODE_CONFIG,
     // $XDG_CONFIG_HOME, or $HOME): skip the sync rather than invent a
     // CWD-relative path — the same degradation as the install paths.
@@ -510,5 +522,59 @@ mod tests {
             sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
             InstructionsSync::Removed
         );
+    }
+
+    #[test]
+    fn sync_for_state_reaps_empty_rules_dir_but_never_user_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let rules_dir = ws.join(".opencode").join("rules");
+
+        // Empty managed dir + no opencode rule recorded ⇒ reaped.
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = InstallState::empty(&ws.join("state.json"));
+        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        assert!(!rules_dir.exists(), "empty rules dir is reaped");
+        assert!(ws.join(".opencode").exists(), "only the rules dir itself goes");
+
+        // A dir holding user files is never touched.
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(rules_dir.join("mine.md"), "user content\n").unwrap();
+        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        assert!(rules_dir.join("mine.md").is_file(), "non-empty dir is preserved");
+
+        // An absent dir stays a silent no-op (idempotent).
+        std::fs::remove_file(rules_dir.join("mine.md")).unwrap();
+        std::fs::remove_dir(&rules_dir).unwrap();
+        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        assert!(!rules_dir.exists());
+    }
+
+    #[test]
+    fn written_config_is_always_pretty_printed_valid_json() {
+        // Contract pin: every write goes through serde's pretty printer and
+        // ends with a newline — never a hand-assembled (and breakable)
+        // JSON string.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.json");
+        std::fs::write(&cfg, "{\"$schema\": \"https://opencode.ai/config.json\"}").unwrap();
+
+        sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap();
+        let added = std::fs::read_to_string(&cfg).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(doc["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(
+            added,
+            serde_json::to_string_pretty(&doc).unwrap() + "\n",
+            "output is pretty-printed and newline-terminated"
+        );
+
+        // The remove round-trip stays valid pretty JSON too (the shape the
+        // user-reported breakage would have violated).
+        sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
+        let removed = std::fs::read_to_string(&cfg).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&removed).unwrap();
+        assert!(doc.get("instructions").is_none());
+        assert_eq!(removed, serde_json::to_string_pretty(&doc).unwrap() + "\n");
     }
 }
