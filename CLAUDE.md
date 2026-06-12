@@ -70,15 +70,13 @@ commit. Conventions →
 crate/package `grimoire`. No workspace, no lib/CLI split. Acceptance tests
 under `test/`. Rust edition 2024.
 
-**Subsystem context**: each major subsystem has a detailed context rule in
-`.claude/rules/subsystem-*.md` that auto-loads when working on matching
-files:
+**Subsystem context** rules auto-load on matching files:
 
 | Subsystem | Rule | Scope |
 |-----------|------|-------|
 | Storage / file structure | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md) | `src/**` |
 | CLI shell | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `src/**` |
-| Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
+| Acceptance tests (pytest, fixtures) | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 
 **Read the relevant subsystem rule before working on code in that area.**
 
@@ -93,10 +91,13 @@ files:
 | `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill paths | (unset) |
 | `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills + rules), `COPILOT_HOME` replaces `~/.copilot` (skills), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |
 
-## Acceptance Test Structure
+## First-Party Catalog
 
-Tests live in `test/` using pytest. Full fixture reference + patterns →
-[subsystem-tests.md](./.claude/rules/subsystem-tests.md).
+`catalog/` holds grim-publishable packages (skills `grim-usage`,
+`ai-config-authoring`, `grim-authoring` + the `grim-essentials` bundle).
+**CLI (`src/command/**`) or docs-page changes require a drift review of
+these skills** — duty + procedure: [catalog/README.md](./catalog/README.md).
+Hooks remind on matching edits; `task catalog:verify` gates CI.
 
 ## Deep Context
 
