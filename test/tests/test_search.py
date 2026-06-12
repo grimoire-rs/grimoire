@@ -2,9 +2,12 @@
 # Copyright 2026 The Grimoire Authors
 """`grim search` acceptance tests — catalog query over the real registry.
 
-The catalog is *bounded*: the query is a case-insensitive repository-name
-prefilter (a registry-wide manifest walk is an explicit cut-line), so a
-search uses a term present in the unique repo path. State is data:
+The catalog build is *bounded* (a registry-wide manifest walk is an
+explicit cut-line) and `grim search` builds the same unscoped browse
+window the TUI loads, filtering the query in memory. On the shared test
+registry that window can miss this suite's UUID repos, so tests scope the
+build deterministically via a namespaced ``--registry``
+(``host/<unique_repo>``). State is data:
 `search` always exits 0 (no results ⇒ empty array). The interactive TUI
 render loop is not acceptance-tested (its decision logic is covered by
 headless Rust unit tests); only the non-TTY guard of `grim tui` is
@@ -44,10 +47,10 @@ def test_search_finds_matching_entries_with_kind_and_status(
     )
     runner = grim_at(project_dir)
 
-    # The unique-repo segment is in the repo *name*, so the bounded
-    # name-prefilter scopes the build to just this test's repos.
+    # The namespaced registry scopes the bounded build to just this
+    # test's repos (deterministic on the shared registry).
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     by_repo = {r["repo"]: r for r in rows}
     sk = next(
@@ -93,7 +96,7 @@ def test_search_exposes_summary_and_full_description(
     runner = grim_at(project_dir)
 
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     by_repo = {r["repo"]: r for r in rows}
     with_summary = next(
@@ -137,7 +140,7 @@ def test_search_exposes_repository_url_with_https_guard(
     runner = grim_at(project_dir)
 
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     by_repo = {r["repo"]: r for r in rows}
     with_repo = next(
@@ -181,9 +184,9 @@ def test_search_refresh_repopulates(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     runner = grim_at(project_dir)
-    # Cold catalog before the artifact exists (scoped to this repo).
+    # Cold catalog before the artifact exists (namespace-scoped).
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     assert rows == []
 
@@ -194,7 +197,7 @@ def test_search_refresh_repopulates(
         tag="latest",
     )
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     assert [r for r in rows if r["repo"].endswith(f"{unique_repo}/late")], (
         f"--refresh must repopulate the catalog, got {rows}"
@@ -217,7 +220,7 @@ def test_search_status_flips_to_installed_after_install(
     runner.run("install", check=False)
 
     rows = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     match = [
         r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")
@@ -236,9 +239,9 @@ def test_search_offline_serves_cached_exit_0(
         tag="latest",
     )
     runner = grim_at(project_dir)
-    # Warm the catalog cache online (scoped to this repo).
+    # Warm the catalog cache online (namespace-scoped).
     warm = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     assert [r for r in warm if r["repo"].endswith(f"{unique_repo}/cached")]
 
@@ -249,7 +252,7 @@ def test_search_offline_serves_cached_exit_0(
         "search",
         unique_repo,
         "--registry",
-        REGISTRY_HOST,
+        f"{REGISTRY_HOST}/{unique_repo}",
         check=False,
     )
     assert result.returncode == 0, (
@@ -268,11 +271,10 @@ def test_search_multi_term_is_and(
     """A whitespace-split query ANDs its terms: every term must match an
     entry (across repo / summary / description / keywords) for it to surface.
 
-    A 2+ term query carries no single-term name prefilter (no substring can
-    AND across terms), so an online ``--refresh`` would build the capped
-    browse window and miss this test's UUID repos. We warm a catalog scoped
-    to ``unique_repo`` with a single-term ``--refresh``, then run the
-    two-term query ``--offline`` so the in-memory AND narrows the warm cache.
+    The catalog build is the capped browse window, so on the shared test
+    registry the build is scoped via the namespaced registry. We warm that
+    scoped catalog with ``--refresh``, then run the two-term query
+    ``--offline`` so the in-memory AND narrows the warm cache.
     """
     # Two repos under the same unique segment; only one carries `lint`.
     make_artifact(
@@ -297,9 +299,9 @@ def test_search_multi_term_is_and(
     )
     runner = grim_at(project_dir)
 
-    # Warm a catalog scoped to this test's repos (single-term prefilter).
+    # Warm a catalog scoped to this test's repos (namespaced registry).
     warm = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"rust-lint", "rust-fmt"} <= warm_repos, (
@@ -309,7 +311,7 @@ def test_search_multi_term_is_and(
     # `<unique_repo> lint` over the warm cache: `lint` ANDs in memory and
     # matches only rust-lint (rust-fmt's keywords/description lack `lint`).
     rows = runner.json(
-        "--offline", "search", f"{unique_repo} lint", "--registry", REGISTRY_HOST
+        "--offline", "search", f"{unique_repo} lint", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
     )
     repos = [r["repo"] for r in rows]
     assert any(r.endswith(f"{unique_repo}/rust-lint") for r in repos), (
@@ -326,13 +328,12 @@ def test_search_kind_keyword_filters(
     """A bare kind keyword (`skill`/`rule`) filters by kind, not as a text
     term, ANDed with the rest of the query.
 
-    A kind-keyword query carries no single-term name prefilter (no substring
-    can express it), so an online ``--refresh`` would build the capped browse
-    window over the whole shared registry and miss this test's UUID repos.
-    We therefore warm a catalog scoped to ``unique_repo`` with a single-term
-    ``--refresh`` first, then run the kind-filter query ``--offline`` so the
-    in-memory matcher narrows the warm cache deterministically — exactly the
-    offline-serves-cache path the matcher is designed to support.
+    The catalog build is the capped browse window, so on the shared test
+    registry the build is scoped via the namespaced registry. We warm that
+    scoped catalog with ``--refresh`` first, then run the kind-filter query
+    ``--offline`` so the in-memory matcher narrows the warm cache
+    deterministically — exactly the offline-serves-cache path the matcher
+    is designed to support.
     """
     make_artifact(
         f"{unique_repo}/a-skill",
@@ -348,9 +349,9 @@ def test_search_kind_keyword_filters(
     )
     runner = grim_at(project_dir)
 
-    # Warm a catalog scoped to this test's repos (single-term prefilter).
+    # Warm a catalog scoped to this test's repos (namespaced registry).
     warm = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"a-skill", "a-rule"} <= warm_repos, (
@@ -359,7 +360,7 @@ def test_search_kind_keyword_filters(
 
     # `<unique_repo> rule` over the warm cache ⇒ only the rule survives.
     rule_rows = runner.json(
-        "--offline", "search", f"{unique_repo} rule", "--registry", REGISTRY_HOST
+        "--offline", "search", f"{unique_repo} rule", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
     )
     rule_repos = [r["repo"] for r in rule_rows]
     assert all(r["kind"] == "rule" for r in rule_rows), rule_rows
@@ -370,7 +371,7 @@ def test_search_kind_keyword_filters(
 
     # `<unique_repo> skill` over the warm cache ⇒ only the skill survives.
     skill_rows = runner.json(
-        "--offline", "search", f"{unique_repo} skill", "--registry", REGISTRY_HOST
+        "--offline", "search", f"{unique_repo} skill", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
     )
     skill_repos = [r["repo"] for r in skill_rows]
     assert all(r["kind"] == "skill" for r in skill_rows), skill_rows
@@ -406,7 +407,7 @@ def test_search_kind_agent_keyword_filters_to_agents_only(
 
     # Warm the catalog scoped to this test's repos.
     warm = runner.json(
-        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
     )
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"my-agent", "my-rule"} <= warm_repos, (
@@ -415,7 +416,7 @@ def test_search_kind_agent_keyword_filters_to_agents_only(
 
     # `<unique_repo> agent` over the warm cache ⇒ only the agent survives.
     agent_rows = runner.json(
-        "--offline", "search", f"{unique_repo} agent", "--registry", REGISTRY_HOST
+        "--offline", "search", f"{unique_repo} agent", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
     )
     agent_repos = [r["repo"] for r in agent_rows]
     assert all(r["kind"] == "agent" for r in agent_rows), agent_rows
@@ -448,7 +449,7 @@ def test_tui_refresh_flag_non_tty_exits_0(
     """
     runner = grim_at(project_dir)
     result = runner.run(
-        "tui", "--registry", REGISTRY_HOST, "--refresh", check=False
+        "tui", "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh", check=False
     )
     assert result.returncode == 0, (
         f"non-TTY tui --refresh must exit 0, got {result.returncode}; "

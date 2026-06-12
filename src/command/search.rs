@@ -75,30 +75,22 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     let catalog_path = ctx.paths().catalog_file();
     // Parse the raw query once: the in-memory matcher reuses it per row.
     let parsed = SearchQuery::parse(args.query.as_deref().unwrap_or(""));
-    // The build's repository-name prefilter is derived from the parsed query,
-    // not the raw string: the longest text term scopes the build by name
-    // (sound, since matching ANDs every term), so even a multi-term query
-    // narrows the walk. A kind-only / empty query has no term to scope by and
-    // builds the capped browse window. Either way the in-memory matcher below
-    // re-applies the full AND.
+    // Build the same unscoped browse window the TUI loads (empty name
+    // prefilter) and apply the full query in memory. A repository-name
+    // prefilter at build time would drop entries whose match lives only in
+    // the summary / description / keywords (those annotations are never
+    // fetched for filtered-out repos), making `grim search` miss results
+    // the TUI finds. Equivalence with the TUI beats the narrower walk.
     let catalog = super::grim(
-        Catalog::load_or_refresh(
-            &catalog_path,
-            &registry,
-            parsed.prefilter_term(),
-            &access,
-            ctx.offline(),
-            args.refresh,
-        )
-        .await,
+        Catalog::load_or_refresh(&catalog_path, &registry, "", &access, ctx.offline(), args.refresh).await,
     )?;
 
     // A non-empty query against a build that hit the repository cap may be
     // missing matches past the window: the catalog walked only the first
-    // `MAX_CATALOG_REPOS` candidates and a multi-term / kind-only query
-    // narrows in memory over that prefix. Surface it so a short or empty
-    // result set is not read as exhaustive. (An empty query is an explicit
-    // browse and the cap is the documented cut-line — no warning.)
+    // `MAX_CATALOG_REPOS` candidates and the query narrows in memory over
+    // that prefix. Surface it so a short or empty result set is not read as
+    // exhaustive. (An empty query is an explicit browse and the cap is the
+    // documented cut-line — no warning.)
     if catalog.truncated() && !parsed.is_empty() {
         tracing::warn!(
             "catalog listing capped at {} repositories; results may be incomplete — narrow the query or use a more specific term",
