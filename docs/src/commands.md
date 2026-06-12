@@ -42,8 +42,11 @@ These apply to every subcommand:
 ## grim init {#init}
 
 Writes a fresh `grimoire.toml` in the current directory. `--registry <ref>`
-seeds the `default_registry` option; `--global` creates the global config at
-`$GRIM_HOME/grimoire.toml` instead of a project-local one.
+seeds the `default_registry` option; without the flag, a set
+`GRIM_DEFAULT_REGISTRY` is snapshotted into the option instead (the built-in
+default registry is never written — it keeps floating with the binary).
+`--global` creates the global config at `$GRIM_HOME/grimoire.toml` instead
+of a project-local one.
 
 ```sh
 grim init --registry ghcr.io/acme

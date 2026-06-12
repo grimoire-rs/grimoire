@@ -6,8 +6,10 @@
 //! Project scope writes `./grimoire.toml`; `--global` writes
 //! `$GRIM_HOME/grimoire.toml`. An existing file is never overwritten
 //! (exit 64). The body is an `[options]` table (carrying
-//! `default_registry` only when `--registry` is given) plus empty
-//! `[skills]` / `[rules]` tables.
+//! `default_registry` when `--registry` is given, else snapshotting the
+//! `--registry` global flag or `$GRIM_DEFAULT_REGISTRY` when set) plus
+//! empty `[skills]` / `[rules]` tables. The built-in fallback registry is
+//! never snapshotted — it applies implicitly and must stay floating.
 
 use anyhow::Context as _;
 use clap::Args;
@@ -54,12 +56,20 @@ pub async fn run(ctx: &Context, args: &InitArgs) -> anyhow::Result<(InitReport, 
             .map_err(|e| crate::error::Error::from(ConfigError::new(&path, ConfigErrorKind::Io(e))))?;
     }
 
-    let body = render_config(args.registry.as_deref());
+    let body = render_config(snapshot_registry(ctx, args.registry.as_deref()));
     std::fs::write(&path, body)
         .map_err(|e| crate::error::Error::from(ConfigError::new(&path, ConfigErrorKind::Io(e))))?;
 
     let report = InitReport::new(path, scope, InitStatus::Created);
     Ok((report, ExitCode::Success))
+}
+
+/// The registry to snapshot into the seed config: `--registry` on `init`
+/// wins, then the global `--registry` flag, then `$GRIM_DEFAULT_REGISTRY`.
+/// The built-in fallback registry is deliberately NOT snapshotted — pinning
+/// it would freeze a default that should keep following the binary.
+fn snapshot_registry<'a>(ctx: &'a Context, explicit: Option<&'a str>) -> Option<&'a str> {
+    explicit.or_else(|| ctx.registry_flag()).or_else(|| ctx.registry_env())
 }
 
 /// Render the seed config. `[options]` is emitted only when there is
@@ -86,6 +96,30 @@ mod tests {
         assert!(body.contains("default_registry = \"ghcr.io/acme\""));
         assert!(body.contains("[skills]"));
         assert!(body.contains("[rules]"));
+    }
+
+    #[test]
+    fn snapshot_registry_prefers_explicit_then_flag_then_env() {
+        // Explicit `init --registry` wins over the context tiers.
+        let tmp = tempfile::tempdir().unwrap();
+        let hermetic = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(snapshot_registry(&hermetic, Some("init.example")), Some("init.example"));
+        // Nothing anywhere ⇒ no snapshot (the built-in fallback stays
+        // implicit, never written to disk).
+        assert_eq!(snapshot_registry(&hermetic, None), None);
+
+        // The global `--registry` flag is snapshotted when `init` has none.
+        let opts = crate::cli::options::GlobalOptions {
+            format: crate::cli::options::OutputFormat::Plain,
+            offline: false,
+            log_level: None,
+            config: None,
+            global: false,
+            registry: Some("flag.example".to_string()),
+        };
+        let ctx = Context::new(&opts);
+        assert_eq!(snapshot_registry(&ctx, None), Some("flag.example"));
+        assert_eq!(snapshot_registry(&ctx, Some("init.example")), Some("init.example"));
     }
 
     #[test]

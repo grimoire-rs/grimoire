@@ -27,6 +27,38 @@ def test_init_with_registry_seeds_options(grim_at, project_dir: Path) -> None:
     assert 'default_registry = "ghcr.io/acme"' in body
 
 
+def test_init_snapshots_env_default_registry(grim_at, project_dir: Path) -> None:
+    """Without ``--registry``, init snapshots ``GRIM_DEFAULT_REGISTRY``."""
+    runner = grim_at(project_dir)
+    runner.env["GRIM_DEFAULT_REGISTRY"] = "snap.example"
+    result = runner.plain("init", check=False)
+    assert result.returncode == 0, result.stderr
+    body = (project_dir / "grimoire.toml").read_text()
+    assert 'default_registry = "snap.example"' in body
+
+
+def test_init_explicit_registry_beats_env(grim_at, project_dir: Path) -> None:
+    """``--registry`` wins over ``GRIM_DEFAULT_REGISTRY`` at init time."""
+    runner = grim_at(project_dir)
+    runner.env["GRIM_DEFAULT_REGISTRY"] = "env.example"
+    runner.run("init", "--registry", "flag.example", check=False)
+    body = (project_dir / "grimoire.toml").read_text()
+    assert 'default_registry = "flag.example"' in body
+    assert "env.example" not in body
+
+
+def test_init_without_any_registry_omits_options(grim_at, project_dir: Path) -> None:
+    """No --registry, no env: the built-in fallback registry is never
+    snapshotted — ``[options]`` stays absent so the default keeps floating
+    with the binary."""
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+    runner.plain("init", check=False)
+    body = (project_dir / "grimoire.toml").read_text()
+    assert "[options]" not in body
+    assert "default_registry" not in body
+
+
 def test_init_refuses_existing_config_exit_64(
     grim_at, project_dir: Path
 ) -> None:
