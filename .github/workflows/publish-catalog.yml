@@ -53,10 +53,14 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: grim.ocx.sh
-    env:
-      # Per-job credential store; never the runner's shared docker config.
-      DOCKER_CONFIG: ${{ runner.temp }}/docker
     steps:
+      # Per-job credential store; never the runner's shared docker config.
+      # Set via GITHUB_ENV: the `runner` context is not available in
+      # job-level `env`, only at step level — a job-level `${{ runner.temp }}`
+      # fails workflow parsing and startup-fails every push.
+      - name: Isolate Docker config
+        run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
