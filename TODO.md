@@ -5,20 +5,30 @@ All items from the 2026-06-11 sweep are addressed (see
 
 ## Open
 
-### Artifacts Reference
+### Nested Errors
 
-The documentation should have a bit more expamples of valid artifacts.
-Further, there should be a reference of all supported artifact types and their attributes, including vendor-specific extensions.
+In a project without gimoire.toml the same error is nested three times.
+Reads very akward, maybe just the case if no grimoire.toml is found.
+Maybe subject to the error reporting as is, and other failures produce same kind.
 
-### Bundles inconistency
+### TUI Init
 
-In TUI bundle operations the status of included members is not re-checked.
-Ie. deleting a bundle, deletes a contained member, but the TUI says its still installed, until refresh (r) is pressed.
+Running the TUI without a grimoire.toml in local or global mode should prompt
+before starting if the ./grimoire.toml or ~/.grimoire.toml is missing respectively.
+Should ask for initialization for a specfic repository.
+The default value of the prompt should be the configured GRIM_DEFAULT_REGSITRY, if none set, let it empty.
+On cancel close the TUI.
 
-### Manual tests and documentation regression
+### Search inquivelance
 
-Examples in the documentation and the manual test environemnt break very often.
-All standard workflows should be covered by automated tests, to ensure they are always up to date and working.
+Search results via TUI and grim search are different.
+grim search should yield the same results as TUI search.
+TUI search works fine, but grim search is missing results.
+
+### Snapshot default registry
+
+On init, snapshot the default registry GRIM_DEFAULT_REGISTRY into the toml config default_registry.
+ATM this is only set if --registry is explicilty set.
 
 ## Follow-ups (deferred from review, warn/suggest tier)
 
