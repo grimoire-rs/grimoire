@@ -10,6 +10,12 @@
 //! it prints a clear message and exits 0 *without* attempting raw mode —
 //! a non-interactive caller (pipe, CI, `</dev/null`) must never have its
 //! terminal mangled.
+//!
+//! When the requested scope has no `grimoire.toml` yet (project discovery
+//! misses, or the global config file is absent), the command offers to
+//! initialize one before the session starts: a confirm prompt plus a
+//! registry prompt pre-filled from `$GRIM_DEFAULT_REGISTRY` (empty when
+//! unset). Cancelling closes the TUI cleanly with exit 0.
 
 use std::io::IsTerminal;
 
@@ -69,6 +75,13 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // No config for the requested scope yet: offer to initialize one before
+    // the session starts. The prompt runs before raw mode, so plain stdin
+    // reads are safe; declining closes the TUI cleanly.
+    if config_missing(ctx, args) && matches!(prompt_init(ctx, args).await?, InitPrompt::Cancelled) {
+        return Ok(ExitCode::Success);
+    }
+
     let registry = resolve_registry(ctx, args);
 
     let scope = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
@@ -112,6 +125,103 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
 
     app::run(tui_ctx).await?;
     Ok(ExitCode::Success)
+}
+
+/// Outcome of the missing-config init prompt.
+enum InitPrompt {
+    /// A config exists now — continue into the TUI session.
+    Ready,
+    /// The user declined (or stdin cannot prompt) — close the TUI.
+    Cancelled,
+}
+
+/// Whether the requested scope has no config yet. Global scope checks
+/// `$GRIM_HOME/grimoire.toml` directly; project scope asks discovery. An
+/// explicit `--config` path is never treated as missing here — `grim init`
+/// writes only the canonical locations, so a bad explicit path keeps
+/// surfacing as the usual hard error instead of initializing elsewhere.
+fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
+    if args.global {
+        return !ctx.paths().global_config().exists();
+    }
+    if args.config.is_some() {
+        return false;
+    }
+    match crate::config::project_config::ProjectConfig::discover(None) {
+        Ok(_) => false,
+        // Only a genuine "nothing found" offers init; a parse failure on an
+        // existing file must surface through the normal resolve path.
+        Err(e) => scope_resolution::config_not_found(&e),
+    }
+}
+
+/// Interactive missing-config prompt: confirm initialization, ask for the
+/// default registry (pre-filled from `$GRIM_DEFAULT_REGISTRY`, empty when
+/// unset), and create the scope's `grimoire.toml` via `grim init`.
+/// Prompts go to stderr (mirroring `auth::prompt`) so stdout stays clean.
+///
+/// # Errors
+///
+/// Propagates prompt I/O failures and any `grim init` error (e.g. a config
+/// racing into existence maps to the usual exit-64 error).
+async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt> {
+    use std::io::Write as _;
+
+    if !std::io::stdin().is_terminal() {
+        eprintln!("no grimoire.toml found and stdin is not a terminal; run `grim init` first");
+        return Ok(InitPrompt::Cancelled);
+    }
+
+    let label = if args.global {
+        ctx.paths().global_config().display().to_string()
+    } else {
+        "./grimoire.toml".to_string()
+    };
+    let scope = if args.global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    eprintln!("no grimoire.toml found for the {} scope", scope_label(scope));
+
+    let mut stderr = std::io::stderr();
+    write!(stderr, "Initialize {label}? [Y/n] ")?;
+    stderr.flush()?;
+    let Some(answer) = read_prompt_line()? else {
+        return Ok(InitPrompt::Cancelled);
+    };
+    if !matches!(answer.to_lowercase().as_str(), "" | "y" | "yes") {
+        return Ok(InitPrompt::Cancelled);
+    }
+
+    // Registry to seed `[options].default_registry`; Enter accepts the
+    // env-derived default, a blank final value seeds nothing.
+    let env_default = ctx.registry_env().unwrap_or("");
+    write!(stderr, "Default registry [{env_default}]: ")?;
+    stderr.flush()?;
+    let Some(typed) = read_prompt_line()? else {
+        return Ok(InitPrompt::Cancelled);
+    };
+    let value = if typed.is_empty() { env_default } else { typed.as_str() };
+    let registry = (!value.is_empty()).then(|| value.to_string());
+
+    let init_args = crate::command::init::InitArgs {
+        global: args.global,
+        registry,
+    };
+    let (report, _) = crate::command::init::run(ctx, &init_args).await?;
+    eprintln!("initialized {}", report.path.display());
+    Ok(InitPrompt::Ready)
+}
+
+/// Read one trimmed line from stdin; `None` on EOF (= cancel).
+fn read_prompt_line() -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim().to_string()))
 }
 
 /// Resolve the registry to browse via the centralized precedence (mirrors
@@ -200,6 +310,37 @@ mod tests {
             config: Some(cfg),
         };
         assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
+    }
+
+    #[test]
+    fn config_missing_global_checks_grim_home_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let a = TuiArgs {
+            registry: None,
+            refresh: false,
+            global: true,
+            config: None,
+        };
+        assert!(config_missing(&ctx, &a), "absent global config offers init");
+
+        std::fs::write(ctx.paths().global_config(), "[skills]\n\n[rules]\n").unwrap();
+        assert!(!config_missing(&ctx, &a), "existing global config skips the prompt");
+    }
+
+    #[test]
+    fn config_missing_never_fires_for_explicit_config_path() {
+        // An explicit --config path (even a missing one) keeps the normal
+        // hard-error path — init writes only canonical locations.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let a = TuiArgs {
+            registry: None,
+            refresh: false,
+            global: false,
+            config: Some(tmp.path().join("nope/grimoire.toml")),
+        };
+        assert!(!config_missing(&ctx, &a));
     }
 
     #[test]

@@ -181,6 +181,11 @@ for the full key map; highlights are `v` to pick a version, `o` to open
 the selected entry's repository URL in the browser, `g` to switch scope,
 and `space` to mark rows.
 
+When the active scope has no `grimoire.toml` yet, the TUI offers to create
+one before starting: confirm the init, then enter the registry to seed
+`default_registry` with (pre-filled from `GRIM_DEFAULT_REGISTRY`, empty when
+unset — leaving it empty seeds nothing). Cancelling closes the TUI.
+
 `enter` opens the detail pane for the selected row: the centered artifact
 reference, its `Summary:` and `Description:` sections, and a `Metadata:`
 block with the keywords and the
