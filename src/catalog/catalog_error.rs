@@ -43,7 +43,9 @@ impl std::fmt::Display for CatalogError {
 
 impl std::error::Error for CatalogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.kind)
+        // `Display` already embeds the kind's message; expose the kind's own
+        // cause so `{:#}` chains do not print the kind twice.
+        self.kind.source()
     }
 }
 
@@ -104,9 +106,11 @@ mod tests {
     }
 
     #[test]
-    fn source_chain_reaches_kind() {
+    fn source_chain_skips_kind_layer() {
         use std::error::Error;
+        // Display embeds the kind, so the chain must not re-expose it: the
+        // kind's own cause (the I/O error) is surfaced directly instead.
         let err = CatalogError::io(Path::new("/x"), io::Error::other("boom"));
-        assert!(err.source().is_some());
+        assert!(err.source().expect("chain reaches the I/O cause").is::<io::Error>());
     }
 }

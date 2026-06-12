@@ -59,7 +59,9 @@ impl std::fmt::Display for ReleaseError {
 
 impl std::error::Error for ReleaseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.kind)
+        // `Display` already embeds the kind's message; expose the kind's own
+        // cause so `{:#}` chains do not print the kind twice.
+        self.kind.source()
     }
 }
 

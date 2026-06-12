@@ -39,7 +39,9 @@ impl std::fmt::Display for SkillError {
 
 impl std::error::Error for SkillError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.kind)
+        // `Display` already embeds the kind's message; expose the kind's own
+        // cause so `{:#}` chains do not print the kind twice.
+        self.kind.source()
     }
 }
 
@@ -95,10 +97,12 @@ mod tests {
     }
 
     #[test]
-    fn source_chain_reaches_kind() {
+    fn source_chain_skips_kind_layer() {
         use std::error::Error;
+        // Display embeds the kind, so the chain must not re-expose it: a
+        // kind without an underlying cause terminates the chain.
         let err = SkillError::new("/w/skill", SkillErrorKind::MissingSkillMd);
-        assert!(err.source().is_some());
+        assert!(err.source().is_none());
     }
 
     #[test]

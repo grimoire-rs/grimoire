@@ -44,7 +44,10 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.kind)
+        // `Display` already embeds the kind's message ("{path}: {kind}"), so
+        // the chain skips the kind layer and exposes its underlying cause
+        // directly — otherwise `{:#}` rendering would print the kind twice.
+        self.kind.source()
     }
 }
 
@@ -122,6 +125,20 @@ mod tests {
         let rendered = err.to_string();
         assert!(!rendered.starts_with(':'));
         assert!(!rendered.starts_with(' '));
+    }
+
+    #[test]
+    fn anyhow_alternate_format_prints_kind_message_once() {
+        // Regression: `Display` embeds the kind AND `source()` exposed it,
+        // so `{:#}` printed "no grimoire.toml found …" twice on one line.
+        let err = ConfigError::new(PathBuf::from("/w"), ConfigErrorKind::NotDiscovered);
+        let any: anyhow::Error = crate::error::Error::from(err).into();
+        let rendered = format!("{any:#}");
+        assert_eq!(
+            rendered.matches("no grimoire.toml found").count(),
+            1,
+            "kind message must render exactly once, got: {rendered}"
+        );
     }
 
     #[test]

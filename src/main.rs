@@ -132,9 +132,9 @@ fn main() -> std::process::ExitCode {
     match runtime.block_on(app::run(cli)) {
         Ok(code) => code.into(),
         Err(err) => {
-            // Full chain via the alternate format; `tracing` already
-            // categorizes the line, so no "Error:" prefix.
-            tracing::error!("{err:#}");
+            // Full chain via the alternate format, printed exactly once on
+            // stderr (a `tracing::error!` here would duplicate the line —
+            // the default filter also writes to stderr).
             eprintln!("{err:#}");
             classify_error(&err).into()
         }
