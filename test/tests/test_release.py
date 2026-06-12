@@ -216,3 +216,48 @@ def test_release_prerelease_is_exact_tag_only(
     assert out["tags"] == ["1.2.3-rc.1"], (
         "a prerelease must NOT cascade and must NOT move latest"
     )
+
+
+def test_release_skip_existing_skips_published_version(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """--skip-existing: an existing exact-version tag is a success no-op.
+
+    The manifest-driven publisher pattern (catalog/scripts/publish.py):
+    blanket re-runs must skip unbumped versions — even when local content
+    changed — and push bumped ones.
+    """
+    skill = _local_skill(project_dir)
+    repo = f"{registry}/{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    first = runner.json("release", str(skill), f"{repo}:1.0.0")
+    assert first["pushed"] is True
+    published = tag_digest(f"{unique_repo}/code-review", "1.0.0")
+
+    # Change content, same version, --skip-existing → skipped, not error,
+    # and the registry digest must NOT move.
+    (skill / "scripts/run.sh").write_text("echo CHANGED\n")
+    skipped = runner.json("release", str(skill), f"{repo}:1.0.0", "--skip-existing")
+    assert skipped["pushed"] is False
+    assert skipped["tags"] == [], "a skipped release moves no tags"
+    assert tag_digest(f"{unique_repo}/code-review", "1.0.0") == published
+
+    # A bumped version with the same flag publishes normally.
+    bumped = runner.json("release", str(skill), f"{repo}:1.0.1", "--skip-existing")
+    assert bumped["pushed"] is True
+    assert bumped["tags"] == ["1.0.1", "1.0", "1", "latest"]
+
+
+def test_release_skip_existing_conflicts_with_force(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    skill = _local_skill(project_dir)
+    repo = f"{registry}/{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "release", str(skill), f"{repo}:1.0.0", "--skip-existing", "--force",
+        check=False,
+    )
+    assert result.returncode != 0, "--skip-existing and --force must conflict"

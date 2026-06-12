@@ -223,10 +223,13 @@ A full semver reference (e.g. `1.2.3`) applies cascade tags — `1.2.3`, `1.2`,
 `1`, and `latest` are all moved. A non-version tag (e.g. `canary`, `edge`)
 publishes only that exact tag with no cascade. A reference with no tag at all
 is an error. `--dry-run` prints the push plan without pushing; `--force`
-moves an existing exact-version tag that points at a different digest. A
-`.toml` path publishes a [bundle](./concepts.md#bundles); `--pin` then freezes
-its floating members to digests. See [Publishing](./publishing.md) for the full
-workflow.
+moves an existing exact-version tag that points at a different digest;
+`--skip-existing` (conflicts with `--force`) turns a release whose
+exact-version tag already exists into a success no-op that pushes nothing —
+for manifest-driven publishers that re-run blanket releases and only want
+bumped versions pushed. A `.toml` path publishes a
+[bundle](./concepts.md#bundles); `--pin` then freezes its floating members to
+digests. See [Publishing](./publishing.md) for the full workflow.
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run

@@ -55,6 +55,12 @@ pub struct ReleaseArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Skip the release entirely (success, nothing pushed) when the
+    /// exact-version tag already exists — for manifest-driven publishers
+    /// that re-run blanket releases and only want bumped versions pushed.
+    #[arg(long, conflicts_with = "force")]
+    pub skip_existing: bool,
+
     /// For a bundle: resolve every floating member tag to a digest and
     /// freeze it into the published bundle (reproducible, tunnel-safe).
     /// Ignored for skills and rules.
@@ -106,6 +112,17 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
+    // --skip-existing: an exact-version tag that already exists (any
+    // digest) turns the release into a success no-op before anything is
+    // pushed. A lookup failure counts as "absent" — the push path surfaces
+    // real transport errors.
+    if args.skip_existing
+        && let Some(existing) = resolve_existing_version(&access, &repo, &version).await
+    {
+        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        return Ok((report, ExitCode::Success));
+    }
+
     if args.dry_run {
         // No push: report the plan with a deterministic preview digest.
         let preview = preview_manifest_digest(&manifest);
@@ -151,6 +168,14 @@ async fn release_bundle(
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
     let (name, mut members, metadata) = read_bundle_members(&args.path)?;
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+
+    // Same --skip-existing semantics as the skill/rule/agent path.
+    if args.skip_existing
+        && let Some(existing) = resolve_existing_version(&access, repo, version).await
+    {
+        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        return Ok((report, ExitCode::Success));
+    }
 
     // `--pin`: resolve every floating member to a digest and bake it in, so
     // the published bundle is fully reproducible regardless of later tag
@@ -285,6 +310,22 @@ async fn move_tags(
     Ok(())
 }
 
+/// Resolve the digest an exact-version tag currently points at, if any.
+/// A lookup failure is treated as "no existing tag" — the push path
+/// surfaces any real transport failure.
+async fn resolve_existing_version(
+    access: &Arc<dyn OciAccess>,
+    repo: &Identifier,
+    version: &str,
+) -> Option<crate::oci::Digest> {
+    let tagged = repo.clone_with_tag(version);
+    access
+        .resolve_digest(&tagged, crate::oci::access::Operation::Query)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Refuse to move an existing exact-version tag onto a different digest.
 /// An absent tag, or a tag already pointing at `new_digest` (idempotent
 /// re-release), is allowed.
@@ -294,16 +335,7 @@ async fn guard_existing_version(
     version: &str,
     new_digest: &crate::oci::Digest,
 ) -> Result<(), ReleaseError> {
-    let tagged = repo.clone_with_tag(version);
-    // A lookup failure is treated as "no existing tag" — `move_tags` will
-    // surface any real transport failure.
-    let existing = access
-        .resolve_digest(&tagged, crate::oci::access::Operation::Query)
-        .await
-        .ok()
-        .flatten();
-
-    let Some(existing_digest) = existing else {
+    let Some(existing_digest) = resolve_existing_version(access, repo, version).await else {
         return Ok(());
     };
     if &existing_digest == new_digest {
