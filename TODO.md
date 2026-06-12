@@ -5,12 +5,10 @@ All items from the 2026-06-11 sweep are addressed (see
 
 ## Open
 
-### Republish grim-essentials bundle
-
-The registry copy of `grim.ocx.sh/bundles/grim-essentials:latest` still
-references members at the floating `:1` tag (`skill … :1: tag not found`
-on install); the repo's bundle TOML already references `:0`. Needs a
-`task catalog:release` by a maintainer with registry credentials.
+(empty — TUI init-dialog and OpenCode UX items resolved 2026-06-12; the
+reported "broken opencode.json with `$schema`" could not be reproduced
+from any grim write path — the writer is serde-based and now contract-
+pinned by unit tests for valid, pretty-printed, newline-terminated JSON.)
 
 ## Follow-ups (deferred from review, warn/suggest tier)
 
