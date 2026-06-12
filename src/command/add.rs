@@ -80,8 +80,8 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 
     // Expand the reference against the effective default registry —
     // precedence: --registry flag > GRIM_DEFAULT_REGISTRY > project config >
-    // global config (the global config is consulted as the lowest-priority
-    // fallback only when this is a project-scope run). The expanded
+    // global config (consulted only when this is a project-scope run) >
+    // the built-in fallback registry. The expanded
     // identifier is always fully-qualified, so the config and lock persist
     // the registry host explicitly — the default is a pure CLI-input
     // convenience.
@@ -91,7 +91,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         scope.options.default_registry.as_deref(),
         global_default.as_deref(),
     );
-    let id = super::grim(parse_reference(&args.reference, default_registry.as_deref()))?;
+    let id = super::grim(parse_reference(&args.reference, Some(&default_registry)))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {

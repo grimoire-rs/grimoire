@@ -59,9 +59,9 @@ pub struct TuiArgs {
 ///
 /// # Errors
 ///
-/// A missing registry (none resolvable) is a config error (78); a
-/// terminal-setup failure propagates. A clean quit (or a non-TTY stdout)
-/// exits 0.
+/// A terminal-setup failure propagates. A clean quit (or a non-TTY
+/// stdout) exits 0. A registry always resolves (the built-in fallback is
+/// the last tier).
 pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     if !std::io::stdout().is_terminal() {
         // Non-interactive: do not touch raw mode. Clear, zero-exit.
@@ -69,7 +69,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    let registry = resolve_registry(ctx, args)?;
+    let registry = resolve_registry(ctx, args);
 
     let scope = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -117,10 +117,11 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
 /// Resolve the registry to browse via the centralized precedence (mirrors
 /// `grim search`): `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project
 /// config `default_registry` > global config (the global config is the
-/// lowest-priority fallback only for a non-global run).
-fn resolve_registry(ctx: &Context, args: &TuiArgs) -> anyhow::Result<String> {
+/// lowest-priority fallback only for a non-global run) > the built-in
+/// [`crate::command::FALLBACK_REGISTRY`].
+fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
     if let Some(r) = &args.registry {
-        return Ok(r.clone());
+        return r.clone();
     }
     let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .ok()
@@ -134,7 +135,6 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> anyhow::Result<String> {
     };
     let global_default = crate::command::global_config_default(ctx, scope);
     crate::command::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
-        .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
 }
 
 /// The effective selected clients for a scope's TUI display, derived from
@@ -180,14 +180,15 @@ mod tests {
             global: false,
             config: None,
         };
-        assert_eq!(resolve_registry(&ctx, &a).unwrap(), "ghcr.io");
+        assert_eq!(resolve_registry(&ctx, &a), "ghcr.io");
     }
 
     #[test]
-    fn no_registry_is_config_error() {
+    fn no_registry_anywhere_uses_builtin_fallback() {
         // Hermetic: the developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME /
         // a CWD-discovered project config must not leak in — pin all
-        // three tiers explicitly.
+        // three tiers explicitly. Nothing configured ⇒ the built-in
+        // fallback registry, never an error.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
@@ -198,8 +199,7 @@ mod tests {
             global: false,
             config: Some(cfg),
         };
-        let err = resolve_registry(&ctx, &a).expect_err("no registry");
-        assert_eq!(crate::error::classify_error(&err), ExitCode::ConfigError);
+        assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
     }
 
     #[test]

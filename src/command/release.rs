@@ -80,7 +80,7 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // effective default registry (config `[options].default_registry` first,
     // then `--registry` / `GRIM_DEFAULT_REGISTRY`).
     let default_registry = release_default_registry(ctx);
-    let id = super::grim(parse_reference(&args.reference, default_registry.as_deref()))?;
+    let id = super::grim(parse_reference(&args.reference, Some(&default_registry)))?;
     // The published tag is the reference tag; a reference with no tag is
     // rejected (a release must carry a tag). A non-version tag publishes
     // exactly itself (no cascade); full semver cascades.
@@ -279,11 +279,11 @@ fn parse_reference(
 /// `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the discovered
 /// project config `[options].default_registry` (best-effort — a publish run
 /// from outside a project tree simply has none), then the global config
-/// `[options].default_registry` as the lowest-priority fallback. A release
-/// is never a global-scope operation, so the global config is always
-/// consulted as a fallback (project scope). Owned so the transient
-/// discovered config can drop.
-fn release_default_registry(ctx: &Context) -> Option<String> {
+/// `[options].default_registry`, then the built-in
+/// [`crate::command::FALLBACK_REGISTRY`]. A release is never a global-scope
+/// operation, so the global config is always consulted as a fallback
+/// (project scope). Owned so the transient discovered config can drop.
+fn release_default_registry(ctx: &Context) -> String {
     let project_default = crate::config::project_config::ProjectConfig::discover(None)
         .ok()
         .and_then(|d| d.config.options.default_registry);
@@ -400,19 +400,19 @@ mod tests {
         // composed `release_default_registry` chain — the refactor that
         // wired the global-config fallback in must not disturb it.
         let ctx = Context::new(&opts(Some("flag.example")));
-        assert_eq!(release_default_registry(&ctx), Some("flag.example".to_string()));
+        assert_eq!(release_default_registry(&ctx), "flag.example");
     }
 
     #[test]
-    fn release_default_registry_consults_global_tier_not_none() {
+    fn release_default_registry_consults_global_tier_then_builtin() {
         // Regression for the skipped global-config tier: the publish path now
         // routes through the centralized `global_config_default` (project
         // scope, so the global config is a live fallback) instead of passing
         // a hard-coded `None`. With no flag / env / project-or-global config
-        // present in the test environment the result is `None`, but the call
-        // chain — not a literal `None` argument — produced it. The flag tier
-        // above proves the chain still orders correctly; the global-tier disk
-        // read is exercised end-to-end by `test_default_registry.py`.
+        // present in the test environment the built-in fallback applies, but
+        // the call chain — not a literal — produced it. The flag tier above
+        // proves the chain still orders correctly; the global-tier disk read
+        // is exercised end-to-end by `test_default_registry.py`.
         //
         // Hermetic context: the developer's $GRIM_DEFAULT_REGISTRY /
         // $GRIM_HOME must not leak in. The project tier still walks the
@@ -421,7 +421,7 @@ mod tests {
         // no `default_registry` — keep it that way.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
-        assert_eq!(release_default_registry(&ctx), None);
+        assert_eq!(release_default_registry(&ctx), crate::command::FALLBACK_REGISTRY);
     }
 
     #[test]

@@ -25,12 +25,6 @@ pub enum CommandError {
     )]
     LockStale { locked: String, current: String },
 
-    /// `search` / `tui` need a registry but none could be resolved from
-    /// `--registry`, the config `default_registry` option, or
-    /// `GRIM_DEFAULT_REGISTRY`.
-    #[error("no registry to search; pass --registry or set GRIM_DEFAULT_REGISTRY")]
-    NoRegistry,
-
     /// `login` / `logout` need a registry but none was given and no
     /// default is configured.
     #[error("no registry given; pass a registry argument or set GRIM_DEFAULT_REGISTRY")]

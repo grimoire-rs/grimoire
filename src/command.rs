@@ -47,10 +47,17 @@ pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&s
         .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
 }
 
+/// The built-in default registry, used only when no other tier configures
+/// one (no `--registry` flag, no `$GRIM_DEFAULT_REGISTRY`, no config
+/// `default_registry`).
+pub const FALLBACK_REGISTRY: &str = "grim.ocx.sh";
+
 /// The single registry-precedence helper: `--registry` flag, then
 /// `$GRIM_DEFAULT_REGISTRY`, then the project config
 /// `[options].default_registry`, then the global config
-/// `[options].default_registry`. The first present value wins.
+/// `[options].default_registry`, then the built-in
+/// [`FALLBACK_REGISTRY`]. The first present value wins, so the fallback
+/// applies only when nothing is configured anywhere.
 ///
 /// The default registry is purely a CLI-input convenience — the expanded
 /// [`crate::oci::Identifier`] is always fully-qualified, so the lock and
@@ -61,12 +68,13 @@ pub fn resolve_default_registry(
     ctx: &crate::context::Context,
     project_default: Option<&str>,
     global_default: Option<&str>,
-) -> Option<String> {
+) -> String {
     ctx.registry_flag()
         .or_else(|| ctx.registry_env())
         .or(project_default)
         .or(global_default)
-        .map(str::to_string)
+        .unwrap_or(FALLBACK_REGISTRY)
+        .to_string()
 }
 
 /// The global config's `[options].default_registry`, loaded best-effort as
@@ -164,7 +172,7 @@ mod tests {
         let ctx = Context::new(&opts(Some("flag.example")));
         assert_eq!(
             resolve_default_registry(&ctx, Some("proj.example"), Some("glob.example")),
-            Some("flag.example".to_string())
+            "flag.example"
         );
     }
 
@@ -176,27 +184,28 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             resolve_default_registry(&ctx, Some("proj.example"), Some("glob.example")),
-            Some("proj.example".to_string())
+            "proj.example"
         );
     }
 
     #[test]
-    fn precedence_global_config_is_lowest_fallback() {
+    fn precedence_global_config_beats_builtin_fallback() {
         // Hermetic: a developer's $GRIM_DEFAULT_REGISTRY must not interpose.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             resolve_default_registry(&ctx, None, Some("glob.example")),
-            Some("glob.example".to_string())
+            "glob.example"
         );
     }
 
     #[test]
-    fn no_registry_anywhere_is_none() {
+    fn no_registry_anywhere_falls_back_to_builtin() {
         // Hermetic: a developer's $GRIM_DEFAULT_REGISTRY must not leak in.
+        // Nothing configured anywhere ⇒ the built-in default applies.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
-        assert_eq!(resolve_default_registry(&ctx, None, None), None);
+        assert_eq!(resolve_default_registry(&ctx, None, None), FALLBACK_REGISTRY);
     }
 
     #[test]

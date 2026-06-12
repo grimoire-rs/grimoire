@@ -134,8 +134,9 @@ network.
 A command-line flag always wins. For the registry, the environment variable
 wins over the config options: the registry resolves as `--registry`, then
 `GRIM_DEFAULT_REGISTRY`, then the project config's `default_registry` option,
-then the global config's. The `--offline` toggle has no config-file
-counterpart — the flag or its `GRIM_OFFLINE` variable applies.
+then the global config's, and finally the built-in default `grim.ocx.sh`
+when nothing is configured anywhere. The `--offline` toggle has no
+config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
 ## Data layout
 

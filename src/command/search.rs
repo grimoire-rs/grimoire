@@ -66,10 +66,10 @@ pub struct SearchArgs {
 /// # Errors
 ///
 /// A catalog cache parse / version failure, or a genuine registry
-/// transport/auth failure during an online rebuild. A missing registry
-/// (none resolvable) is a config error (78). Offline never errors.
+/// transport/auth failure during an online rebuild. Offline never errors.
+/// A registry always resolves (the built-in fallback is the last tier).
 pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchReport, ExitCode)> {
-    let registry = resolve_registry(ctx, args)?;
+    let registry = resolve_registry(ctx, args);
 
     let access = super::access_seam(ctx)?;
     let catalog_path = ctx.paths().catalog_file();
@@ -136,13 +136,13 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
 /// Resolve the registry to search via the centralized precedence:
 /// `--registry` flag > `GRIM_DEFAULT_REGISTRY` > the resolved scope's
 /// project config `[options].default_registry` > the global config
-/// (consulted as the lowest-priority fallback only for a non-global run).
-/// A miss is a classifiable config error.
-fn resolve_registry(ctx: &Context, args: &SearchArgs) -> anyhow::Result<String> {
+/// (consulted as the lowest-priority fallback only for a non-global run)
+/// > the built-in [`super::FALLBACK_REGISTRY`].
+fn resolve_registry(ctx: &Context, args: &SearchArgs) -> String {
     // `--registry` on the command is the top precedence; fold it into the
     // helper as the flag-equivalent so the single helper owns the order.
     if let Some(r) = &args.registry {
-        return Ok(r.clone());
+        return r.clone();
     }
     let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .ok()
@@ -156,7 +156,6 @@ fn resolve_registry(ctx: &Context, args: &SearchArgs) -> anyhow::Result<String> 
     };
     let global_default = super::global_config_default(ctx, scope);
     super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
-        .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
 }
 
 /// Load the scope's lock + install-state for badge derivation, degrading
@@ -202,23 +201,22 @@ mod tests {
         let ctx = Context::new(&opts());
         let mut a = args();
         a.registry = Some("ghcr.io".to_string());
-        assert_eq!(resolve_registry(&ctx, &a).unwrap(), "ghcr.io");
+        assert_eq!(resolve_registry(&ctx, &a), "ghcr.io");
     }
 
     #[test]
-    fn no_registry_anywhere_is_config_error() {
-        // No --registry, no env, no config default anywhere ⇒ NoRegistry,
-        // classified as a config error. Hermetic: the developer's
-        // $GRIM_DEFAULT_REGISTRY / $GRIM_HOME / a CWD-discovered project
-        // config must not leak in — pin all three tiers explicitly.
+    fn no_registry_anywhere_uses_builtin_fallback() {
+        // No --registry, no env, no config default anywhere ⇒ the built-in
+        // fallback registry applies (never an error). Hermetic: the
+        // developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME / a CWD-discovered
+        // project config must not leak in — pin all three tiers explicitly.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(cfg);
-        let err = resolve_registry(&ctx, &a).expect_err("no registry resolvable");
-        assert_eq!(crate::error::classify_error(&err), ExitCode::ConfigError);
+        assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
     }
 
     #[test]
@@ -227,7 +225,7 @@ mod tests {
         o.registry = Some("localhost:5000".to_string());
         let ctx = Context::new(&o);
         let a = args();
-        assert_eq!(resolve_registry(&ctx, &a).unwrap(), "localhost:5000");
+        assert_eq!(resolve_registry(&ctx, &a), "localhost:5000");
     }
 
     #[test]
@@ -246,7 +244,7 @@ mod tests {
         let mut a = args();
         a.config = Some(cfg);
         assert_eq!(
-            resolve_registry(&ctx, &a).unwrap(),
+            resolve_registry(&ctx, &a),
             "flag.example",
             "the registry flag/env tier wins over the project config default"
         );

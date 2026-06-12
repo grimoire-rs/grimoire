@@ -97,7 +97,7 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Command(ce) => match ce {
                     CommandError::LockMissing { .. } => ExitCode::NotFound,
                     CommandError::LockStale { .. } => ExitCode::DataError,
-                    CommandError::NoRegistry | CommandError::NoLoginRegistry => ExitCode::ConfigError,
+                    CommandError::NoLoginRegistry => ExitCode::ConfigError,
                     CommandError::LoginInput(_) => ExitCode::UsageError,
                     CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
                 },
