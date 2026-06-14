@@ -73,7 +73,7 @@ impl SchemaKind {
 ///
 /// Pure and unit-testable: builds the schema from the real parse struct,
 /// injects `$schema`/`$id`/`title`, and pretty-prints. No trailing newline
-/// — the caller (and the committed file) add one.
+/// — the caller adds one.
 ///
 /// # Errors
 ///
@@ -166,34 +166,5 @@ mod tests {
     #[test]
     fn each_kind_emits_a_distinct_id() {
         assert_ne!(SchemaKind::Config.id(), SchemaKind::Publish.id());
-    }
-
-    #[test]
-    fn committed_config_schema_is_current() {
-        assert_committed_matches(SchemaKind::Config, CONFIG_SCHEMA_FILE);
-    }
-
-    #[test]
-    fn committed_publish_schema_is_current() {
-        assert_committed_matches(SchemaKind::Publish, PUBLISH_SCHEMA_FILE);
-    }
-
-    /// Staleness gate: the file committed under `docs/src/schemas/` must
-    /// equal the freshly generated schema (plus the trailing newline the
-    /// `schema:generate` task writes). It only changes when the parse
-    /// structs change, so a drift means the task was not re-run.
-    fn assert_committed_matches(kind: SchemaKind, file: &str) {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/src/schemas")
-            .join(file);
-        let committed =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read committed schema {}: {e}", path.display()));
-        let expected = format!("{}\n", generate(kind).expect("schema generates"));
-        assert_eq!(
-            committed,
-            expected,
-            "{} is stale; regenerate it with `task schema:generate`",
-            path.display()
-        );
     }
 }

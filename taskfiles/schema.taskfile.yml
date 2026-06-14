@@ -4,15 +4,20 @@ version: '3'
 
 tasks:
   generate:
-    desc: Regenerate the committed JSON Schemas for grimoire.toml and publish.toml
+    desc: Generate the JSON Schemas for grimoire.toml and publish.toml into docs/src/schemas/
     summary: |
       Runs the compiled `grim schema` for each kind and writes the pretty
       JSON into docs/src/schemas/. mdBook copies those files verbatim into
-      the published site; the Rust drift test fails if they go stale.
+      the published site.
+
+      The schemas are generated artifacts, NOT committed: they are
+      gitignored and the docs build (`task docs:build`) regenerates them on
+      every run, so the published site can never drift from the parser.
+      Caching is deliberately omitted here — the two `grim schema` calls are
+      sub-millisecond once the binary is built, and always running them is
+      what guarantees freshness.
     deps:
       - :rust:build
-    sources:
-      - '{{.ROOT_DIR}}/target/release/grim'
     generates:
       - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
       - '{{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'

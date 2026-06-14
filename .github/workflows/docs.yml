@@ -1,11 +1,22 @@
 name: Docs
 
 # Build the mdBook documentation site and publish it to GitHub Pages.
+#
+# The JSON Schemas served at /schemas/ are generated from grim's parse
+# structs at build time (never committed), so this workflow must rebuild
+# whenever those structs — or anything they pull in — change. That is why
+# `src/**` and the Cargo manifests are in the path filter alongside `docs/`.
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'taskfiles/docs.taskfile.yml'
+      - 'taskfiles/schema.taskfile.yml'
+      - 'taskfiles/rust.taskfile.yml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -19,20 +30,39 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # `external/docker_credential` is the [patch.crates-io] source; the
+          # grim build (needed to generate the schemas) fails without it.
+          submodules: recursive
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        with:
+          matcher: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup Task
+        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
       - name: Install mdBook
         uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
         with:
           tool: mdbook
+      # Builds grim, regenerates docs/src/schemas/*.json from the parser,
+      # then builds the book — so the published schemas always match grim.
       - name: Build the book
-        run: mdbook build docs
+        run: task docs:build
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:

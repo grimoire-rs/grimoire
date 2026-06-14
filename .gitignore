@@ -109,3 +109,10 @@ venv/
 # mdBook build output (docs site is built in CI and deployed to Pages)
 # =============================================================================
 docs/book/
+
+# =============================================================================
+# Generated JSON Schemas — produced from grim's parse structs by
+# `task schema:generate` and rebuilt on every `task docs:build`. Deliberately
+# not committed so the published site can never drift from the parser.
+# =============================================================================
+docs/src/schemas/

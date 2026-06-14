@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  build:
+    desc: Generate schemas and build the mdBook site to docs/book
+    summary: |
+      Regenerates the JSON Schemas (via :schema:generate) and then builds
+      the mdBook site. The schema step runs first so the published site
+      always carries schemas that match the current parser. This is the
+      task CI runs to produce the GitHub Pages artifact.
+    deps:
+      - :schema:generate
+    cmds:
+      - mdbook build {{.ROOT_DIR}}/docs
+
+  serve:
+    desc: Generate schemas and serve the mdBook site locally (pass flags after --)
+    deps:
+      - :schema:generate
+    cmds:
+      - mdbook serve {{.ROOT_DIR}}/docs {{.CLI_ARGS}}
