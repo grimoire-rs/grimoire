@@ -4,3 +4,7 @@ project/.claude/
 project/.opencode/
 project/.github/
 project/grimoire.lock
+project-multi/.claude/
+project-multi/.opencode/
+project-multi/.github/
+project-multi/grimoire.lock

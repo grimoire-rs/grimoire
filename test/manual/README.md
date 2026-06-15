@@ -1,13 +1,15 @@
 # Grimoire Manual Test Rig
 
-A hands-on harness for exercising `grim` against a real local OCI registry
+A hands-on harness for exercising `grim` against real local OCI registries
 with a committed sample catalog of skills, rules, and agents. This is **fully
 separate** from the pytest acceptance suite (`test/tests/`): it runs its
-own `registry:2` on **`localhost:5050`** (own container + volume), while
-the suite uses `localhost:5000`. They are isolated on purpose — sharing
-one registry let the suite's hundreds of throwaway `grim-test/<uuid>`
-repos bleed into `grim search` / `grim tui` here as junk. It exists so
-you can drive the tool by hand and see how it behaves.
+own `registry:2` containers on **`localhost:5050`** (the primary `grimoire`
+catalog) and **`localhost:5051`** (a small `tools` subset for the
+multi-registry demo), each with its own container + volume, while the suite
+uses `localhost:5000`. They are isolated on purpose — sharing one registry
+let the suite's hundreds of throwaway `grim-test/<uuid>` repos bleed into
+`grim search` / `grim tui` here as junk. It exists so you can drive the tool
+by hand and see how it behaves.
 
 Pattern mirrors the OCX manual rig: committed source-of-truth catalog,
 idempotent `bootstrap.sh`, an isolated `GRIM_HOME`, a ready-made consumer
@@ -23,12 +25,13 @@ project, and a `teardown.sh`.
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
-| `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) |
+| `project/grimoire.toml` | Ready-made single-registry consumer project (floating `:1` tags) |
+| `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
-| `scripts/bootstrap.sh` | Build `grim`, start registry, publish the version matrix |
+| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
-| `scripts/teardown.sh` | Wipe rig state (`--registry` also stops the registry) |
-| `docker-compose.yml` | `registry:2` on `localhost:5050` |
+| `scripts/teardown.sh` | Wipe rig state (`--registry` also stops both registries) |
+| `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset) |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
 
 ## Quick start
@@ -61,6 +64,14 @@ moves `1.2`, `1`, `latest` onto it. Because of this, `bootstrap.sh`
 publishes versions in **ascending** order per artifact, so the floating
 `:1`/`:latest` the consumer project pins always land on the highest
 version (code-reviewer `1.2.0`, commit-helper `2.0.0`, rust-style `1.1.0`).
+
+It also publishes a small **second-registry subset** at `1.0.0` for the
+multi-registry demo (see scenario 2a):
+
+| Kind | Repo | Versions |
+|------|------|----------|
+| skill | `localhost:5051/tools/skills/commit-helper` | 1.0.0 |
+| rule | `localhost:5051/tools/rules/security-baseline` | 1.0.0 |
 
 ## Scenarios
 
@@ -119,6 +130,42 @@ cat grimoire.lock                 # byte-stable, digest-pinned
 grim install                      # targets the detected clients (all when none detected)
 ls -R .claude/skills .claude/rules .claude/agents
 grim status                       # every artifact 'installed'
+```
+
+### 2a. Multi-registry: browse-all + `[[registries]]` alias resolution
+
+`bootstrap.sh` publishes the primary catalog to `localhost:5050/grimoire`
+and a small `tools` subset (`commit-helper`, `security-baseline`) to a
+SECOND registry `localhost:5051/tools`. The `project-multi/` consumer
+declares both with `[[registries]]`, so one search browses both and
+fully-qualified refs across the two hosts lock and install together.
+
+> **Gotcha:** `$GRIM_DEFAULT_REGISTRY` (exported by `env.sh`) and the
+> `--registry` flag each **force a single-registry browse by design**,
+> overriding `[[registries]]`. `unset` it first so the declared registries
+> drive the browse set.
+
+```sh
+cd test/manual/project-multi
+unset GRIM_DEFAULT_REGISTRY       # else it collapses the browse to just 5050
+cat grimoire.toml                 # two [[registries]]: primary (5050), tools (5051)
+
+grim search                       # browses BOTH 5050/grimoire AND 5051/tools
+grim search commit-helper         # the 5051/tools copy surfaces here too
+
+grim lock                         # pins each FQ ref to its own registry
+grep -E 'pinned' grimoire.lock    # hello-world @5050; commit-helper,
+                                  #   security-baseline @5051
+grim install && grim status       # all 'installed' from across both registries
+```
+
+Alias resolution is a `grim add` CLI convenience (the leading segment is the
+alias, the rest is appended to its `url`), not a persisted config form:
+
+```sh
+# 'tools' -> localhost:5051/tools, so this resolves to
+#   localhost:5051/tools/skills/commit-helper:1
+grim add tools/skills/commit-helper:1
 ```
 
 ### 3. Multi-client transform (Copilot rule transform)

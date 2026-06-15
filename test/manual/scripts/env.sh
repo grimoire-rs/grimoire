@@ -21,7 +21,12 @@ _grim_repo_root="$(cd "$_grim_manual_dir/../.." && pwd)"
 
 export GRIM_HOME="$_grim_manual_dir/.grim-home"
 export GRIM_DEFAULT_REGISTRY="localhost:5050"
-export GRIM_INSECURE_REGISTRIES="localhost:5050"
+# Both rig registries over plain HTTP: 5050 (primary `grimoire` catalog) and
+# 5051 (the `tools` multi-registry subset). COMMA-separated (the var is split
+# on ','); non-default loopback ports are not built-in HTTP, so opt them in
+# here. The default stays 5050; project-multi reaches 5051 via a [[registries]]
+# alias.
+export GRIM_INSECURE_REGISTRIES="localhost:5050,localhost:5051"
 
 case ":$PATH:" in
     *":$_grim_repo_root/test/bin:"*) ;;
@@ -32,7 +37,7 @@ esac
     echo "grimoire manual env:"
     echo "  GRIM_HOME=$GRIM_HOME"
     echo "  GRIM_DEFAULT_REGISTRY=$GRIM_DEFAULT_REGISTRY"
-    echo "  GRIM_INSECURE_REGISTRIES=$GRIM_INSECURE_REGISTRIES"
+    echo "  GRIM_INSECURE_REGISTRIES=$GRIM_INSECURE_REGISTRIES (5050 primary, 5051 multi-registry subset)"
     echo "  grim -> $(command -v grim 2>/dev/null || echo '(not built yet — run bootstrap.sh)')"
 } >&2
 

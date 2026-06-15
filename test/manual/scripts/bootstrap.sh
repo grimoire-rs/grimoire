@@ -23,11 +23,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANUAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$MANUAL_DIR/../.." && pwd)"
 CATALOG="$MANUAL_DIR/catalog"
-# Own port — deliberately NOT 5000 (the pytest acceptance registry). See
+# Own ports — deliberately NOT 5000 (the pytest acceptance registry). See
 # docker-compose.yml: sharing one registry polluted `grim search` here
 # with the suite's throwaway `grim-test/*` repos.
 REGISTRY="localhost:5050"
 NS="grimoire"
+# Second registry for the multi-registry demo (`[[registries]]` aliases,
+# browse-all-declared). Hosts a small `tools` subset; see step 6 and
+# project-multi/grimoire.toml.
+REGISTRY2="localhost:5051"
+NS2="tools"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -40,25 +45,32 @@ if [ ! -x "$REPO_ROOT/test/bin/grim" ] ||
 fi
 GRIM="$REPO_ROOT/test/bin/grim"
 
-# 2. Ensure the registry is reachable (reuse a running one, else compose).
-if ! curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1; then
-    log "starting registry via docker compose"
+# 2. Ensure both registries are reachable (reuse running ones, else compose).
+#    A single `compose up -d` starts both services; bring it up if EITHER
+#    registry is down, then wait for BOTH to answer /v2/.
+if ! curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 ||
+    ! curl -fsS "http://$REGISTRY2/v2/" >/dev/null 2>&1; then
+    log "starting registries via docker compose"
     docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d
+fi
+for reg in "$REGISTRY" "$REGISTRY2"; do
     for _ in $(seq 1 60); do
-        curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 && break
+        curl -fsS "http://$reg/v2/" >/dev/null 2>&1 && break
         sleep 0.5
     done
-fi
-curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 ||
-    {
-        echo "registry not reachable at $REGISTRY" >&2
-        exit 69
-    }
+    curl -fsS "http://$reg/v2/" >/dev/null 2>&1 ||
+        {
+            echo "registry not reachable at $reg" >&2
+            exit 69
+        }
+done
 
 # 3. Isolated GRIM_HOME for the rig.
 export GRIM_HOME="$MANUAL_DIR/.grim-home"
 export GRIM_DEFAULT_REGISTRY="$REGISTRY"
-export GRIM_INSECURE_REGISTRIES="$REGISTRY"
+# GRIM_INSECURE_REGISTRIES is COMMA-separated (split on ','); :5050/:5051 are
+# non-default loopback ports so they are NOT built-in HTTP and must opt in here.
+export GRIM_INSECURE_REGISTRIES="$REGISTRY,$REGISTRY2"
 mkdir -p "$GRIM_HOME"
 
 release() { # <path> <repo-subpath> <name> <version> [forced-kind]
@@ -153,7 +165,26 @@ release "$bundle_tmp/starter-pack.toml" bundles starter-pack 2.0.0
 # identifier) and adds the reviewer agent — the shared-member demo bundle.
 release "$CATALOG/bundles/review-pack.toml" bundles review-pack 1.0.0
 
-log "done. Catalog published to $REGISTRY/$NS/{skills,rules,bundles}/*"
+# 6. SECOND REGISTRY (localhost:5051, namespace `tools`) — the multi-registry
+#    demo. Publishes a SMALL distinct subset (one skill, one rule) from the
+#    same committed catalog so:
+#      * `grim search` from a project declaring both registries browses BOTH
+#        (browse-all-declared), and
+#      * a `[[registries]]` alias `tools` resolves `tools/skills/commit-helper`
+#        to `localhost:5051/tools/skills/commit-helper` (see project-multi/).
+#    Same `--force` re-seed semantics as the primary registry.
+release2() { # <path> <repo-subpath> <name> <version> [forced-kind]
+    log "release2 $3:$4 -> $REGISTRY2/$NS2"
+    local args=("$1" "$REGISTRY2/$NS2/$2/$3:$4" --force)
+    if [ -n "${5:-}" ]; then
+        args+=(--kind "$5")
+    fi
+    "$GRIM" release "${args[@]}"
+}
+release2 "$CATALOG/skills/commit-helper" skills commit-helper 1.0.0
+release2 "$CATALOG/rules/security-baseline.md" rules security-baseline 1.0.0
+
+log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*"
 cat >&2 <<EOF
 
 Next:
@@ -163,6 +194,15 @@ Next:
   cd test/manual/project
   grim lock && grim install         # materialize into .claude/
   grim status                       # all 'installed'
+
+Multi-registry demo (browse-all-declared across two registries):
+  cd test/manual/project-multi
+  unset GRIM_DEFAULT_REGISTRY       # else it forces a single-registry browse
+  grim search                       # browses BOTH 5050/grimoire and 5051/tools
+  grim lock                         # pins each FQ ref to its own registry
+  grim install && grim status       # all 'installed' from across both registries
+  # alias form is a 'grim add' convenience:
+  grim add tools/skills/commit-helper:1   # 'tools' -> localhost:5051/tools/...
 
 Outdated / update demo (lock at an OLD pin, then roll forward):
   # the project pins code-reviewer at the floating :1, so 'grim lock' here
