@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Accepted
+**Status:** Superseded by adr_oci_empty_config_compat.md
 **Date:** 2026-06-10
 **Deciders:** Michael Herwig (maintainer)
 **Tech Strategy Alignment:**
@@ -10,6 +10,7 @@
       (OCI is the distribution substrate; this uses standard OCI 1.1 fields)
 **Domain Tags:** integration, api
 **Supersedes:** N/A
+**Superseded by:** adr_oci_empty_config_compat.md
 
 ## Context
 
@@ -153,3 +154,4 @@ layer). Config blob: deterministic `{}` (the type lives in the descriptor's
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-10 | Michael Herwig | Initial draft, accepted |
+| 2026-06-19 | Michael Herwig | Superseded by adr_oci_empty_config_compat.md (GitLab allowlist rejects the custom config media type) |
