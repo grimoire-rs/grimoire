@@ -128,7 +128,32 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         })
         .collect();
 
+    // An online browse that comes back empty is most often a registry that
+    // gates the `_catalog` endpoint (GitLab SaaS, GHCR, Docker Hub), not a
+    // fault — point at the registry-compatibility docs so an empty list is not
+    // read as "nothing published". Offline (serves the cache) and any hit stay
+    // quiet.
+    if warn_unsupported_browse(ctx.offline(), entries.is_empty()) {
+        tracing::warn!(
+            "no catalog entries; some registries (GitLab SaaS, GHCR, Docker Hub) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS}"
+        );
+    }
+
     Ok((SearchReport::new(entries), ExitCode::Success))
+}
+
+/// Docs anchor for the registry-compatibility table (which registries support
+/// `_catalog` browse vs. explicit-reference operations).
+const REGISTRY_COMPAT_DOCS: &str =
+    "https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility";
+
+/// Whether to warn that a registry's `_catalog` browse may be unsupported.
+///
+/// Gate: online (an offline browse legitimately serves the local cache) AND
+/// the result is empty (any hit proves browse works). Extracted so the gate is
+/// unit-testable without a live registry.
+fn warn_unsupported_browse(offline: bool, result_empty: bool) -> bool {
+    !offline && result_empty
 }
 
 /// Resolve the registry browse set and best-effort badge inputs for the
@@ -228,6 +253,17 @@ mod tests {
             global: false,
             config: None,
         }
+    }
+
+    #[test]
+    fn warn_unsupported_browse_only_when_online_and_empty() {
+        // Online + empty → warn (likely a `_catalog`-gated registry).
+        assert!(warn_unsupported_browse(false, true));
+        // Online + hits → quiet (browse works).
+        assert!(!warn_unsupported_browse(false, false));
+        // Offline → quiet regardless (the cache is the source of truth).
+        assert!(!warn_unsupported_browse(true, true));
+        assert!(!warn_unsupported_browse(true, false));
     }
 
     #[test]

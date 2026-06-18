@@ -570,10 +570,12 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 format!("offline — {n} cached entr{} ", if n == 1 { "y" } else { "ies" })
             } else if n == 0 {
                 // An online build that yields nothing is most often a
-                // registry whose `_catalog` listing is unsupported or
-                // access-restricted (GHCR, Docker Hub) — say so rather than
-                // showing a silent blank list, and point at targeted search.
-                "0 entries — registry catalog listing may be unsupported or restricted; try `grim search <name>`"
+                // registry that gates the `_catalog` browse endpoint
+                // (GitLab SaaS, GHCR, Docker Hub) — say so, name the
+                // registries, and point at the registry-compatibility docs so
+                // an empty list reads as expected, not an error. Explicit-ref
+                // ops (install/add/release) work on those registries regardless.
+                "0 entries — GitLab SaaS, GHCR and Docker Hub gate `_catalog` browse (expected, not an error); explicit-ref ops still work. See docs: configuration#registry-compatibility"
                     .to_string()
             } else {
                 format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
@@ -1503,7 +1505,9 @@ mod tests {
         let skill_manifest = OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
-            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
+            // OCI empty config — the actual wire shape since
+            // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
             layers: vec![Descriptor {
                 digest: skill_layer,
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
@@ -1527,7 +1531,9 @@ mod tests {
         let bundle_manifest = OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
-            config_media_type: Some(ArtifactKind::Bundle.config_media_type().to_string()),
+            // OCI empty config — the actual wire shape since
+            // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
             layers: vec![Descriptor {
                 digest: members_layer,
                 media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),

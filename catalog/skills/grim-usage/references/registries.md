@@ -206,6 +206,13 @@ in a project `.mcp.json`:
 
 Confirm current flags with `grim mcp --help`.
 
+> **Registry note**: catalog browse (`grim search` / TUI) depends on
+> the registry exposing the `_catalog` endpoint. Registries such as GHCR,
+> Docker Hub, and the GitLab Container Registry (SaaS) gate this endpoint
+> — an empty browse result there is expected, not an error. Explicit-ref
+> operations (install, add, release, publish) work on all registries. See
+> [Registry compatibility][registry-compat] for the full table.
+
 ## Further Reading
 
 - [Concepts: scopes][scopes], [clients][clients], and
@@ -218,6 +225,7 @@ Confirm current flags with `grim mcp --help`.
 [clients]: https://michael-herwig.github.io/grimoire/concepts.html#clients
 [online]: https://michael-herwig.github.io/grimoire/concepts.html#online-by-default-offline-on-demand
 [envvars]: https://michael-herwig.github.io/grimoire/configuration.html#environment-variables
+[registry-compat]: https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility
 [search]: https://michael-herwig.github.io/grimoire/commands.html#search
 [tui]: https://michael-herwig.github.io/grimoire/commands.html#tui
 [mcp]: https://michael-herwig.github.io/grimoire/commands.html#mcp

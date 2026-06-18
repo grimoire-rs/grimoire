@@ -118,6 +118,33 @@ Short references with no alias and no explicit registry still expand
 against the primary (or only) registry, unchanged from the single-registry
 behavior.
 
+### Registry compatibility {#registry-compatibility}
+
+`grim search` and the TUI browse a registry's catalog through the
+host-level OCI `_catalog` endpoint. Not all registries expose it —
+multi-tenant SaaS registries such as [GitHub Container Registry][ghcr]
+and the [GitLab Container Registry][gitlab-registry] gate the endpoint
+for namespace-privacy reasons. When a registry does not support
+`_catalog`, a browse comes back empty.
+
+An empty browse result on these registries is **expected behavior, not
+an error**. Install, add, release, and publish work through explicit
+references and are unaffected — every registry in the table below
+supports explicit-reference operations.
+
+| Registry | `_catalog` browse (`grim search`, TUI) | Explicit-ref ops (install / add / release / publish) |
+|---|---|---|
+| `registry:2` (local) | yes | yes |
+| [Zot][zot] | yes | yes |
+| [Harbor][harbor] | yes | yes |
+| `grim.ocx.sh` | yes | yes |
+| [GitHub Container Registry (GHCR)][ghcr] | no | yes |
+| [Docker Hub][dockerhub] | no | yes |
+| [GitLab Container Registry (SaaS)][gitlab-registry] | no | yes |
+
+When an online browse comes back empty, grim prints a hint pointing to
+this section so you can confirm whether the registry supports `_catalog`.
+
 ## `grimoire.lock`
 
 The lockfile pins every declared tag to an exact digest and records the
@@ -246,3 +273,10 @@ volume cannot collide. Grim writes a self-managed `.grimoire/.gitignore`
 (contents: `*`) the first time it creates the `.grimoire/` directory, so the
 state file is kept out of version control without touching your root
 `.gitignore`.
+
+<!-- external -->
+[ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+[gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
+[zot]: https://zotregistry.dev/
+[harbor]: https://goharbor.io/
+[dockerhub]: https://hub.docker.com/
