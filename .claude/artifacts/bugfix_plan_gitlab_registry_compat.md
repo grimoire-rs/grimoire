@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** bugfix_gitlab_registry_compat
-- **Active phase:** 7 — Commit & Document
-- **Step:** awaiting /finalize (reporter must confirm against real GitLab before #11 is closed)
-- **Last update:** 2026-06-19 (after 79f3057: all 5 axis commits landed, `task verify` green, reviewer APPROVE)
+- **Active phase:** 7 — Commit & Document (complete)
+- **Step:** awaiting /finalize (GitLab confirmed; human merges + closes #11)
+- **Last update:** 2026-06-19 (after cc11b6b: confirmed end-to-end against real GitLab SaaS — release/add/publish succeed; GitLab also rejected the custom artifactType, now dropped)
 
 ---
 
