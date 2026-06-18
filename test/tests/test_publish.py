@@ -892,3 +892,120 @@ def test_publish_pin_true_bundle_member_references_digest(
         assert "@sha256:" in member_id, (
             f"pin=true must freeze member ref to digest pin; got id={member_id!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: repository_prefix / per-entry repository (issue #11 axis B)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_nested_repository_prefix(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Headline regression for issue #11 axis B: a manifest `repository_prefix`
+    nests the push under the registry's group/project path instead of the
+    hardcoded `{kind-subdir}/{name}` — the reporter's GitLab case."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    repo_prefix = f"{prefix}-ns/sub"
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n'
+        f'repository_prefix = "{repo_prefix}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path))
+    assert len(rows) == 1, f"expected 1 row, got {rows}"
+    assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
+
+    nested_repo = f"{repo_prefix}/{skill_name}"
+    expected_ref = f"{registry}/{nested_repo}:0.1.0"
+    assert rows[0]["ref"] == expected_ref, (
+        f"entry must publish to the nested repo, got {rows[0]['ref']!r}"
+    )
+    # The artifact actually landed at the nested repo.
+    assert tag_digest(nested_repo, "0.1.0") == rows[0]["digest"], (
+        "nested repo must resolve to the published manifest digest"
+    )
+    # The conventional default path (`skills/<name>`) must NOT exist.
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(f"skills/{skill_name}", "0.1.0")
+
+
+def test_publish_per_entry_repository(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #11 axis B: a per-entry `repository` is used verbatim (the entry
+    name is NOT appended) and wins over the manifest `repository_prefix`."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    full_repo = f"{prefix}-grp/proj/skill/{skill_name}"
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n'
+        f'repository_prefix = "{prefix}-ignored/prefix"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+        f'repository = "{full_repo}"\n'
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path))
+    assert len(rows) == 1, f"expected 1 row, got {rows}"
+    assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
+
+    expected_ref = f"{registry}/{full_repo}:0.1.0"
+    assert rows[0]["ref"] == expected_ref, (
+        f"per-entry repository must be used verbatim, got {rows[0]['ref']!r}"
+    )
+    assert tag_digest(full_repo, "0.1.0") == rows[0]["digest"], (
+        "per-entry repo must resolve to the published manifest digest"
+    )
+    # The prefix path must NOT have been used (per-entry repository wins).
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(f"{prefix}-ignored/prefix/{skill_name}", "0.1.0")
+
+
+def test_publish_wire_shape_empty_config(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #11 axis A via the publish path: a batch-published manifest carries
+    the OCI empty config type (GitLab-allowlist-safe) and the `com.grimoire.kind`
+    annotation. Guards the publish path independently of `grim release` so a
+    future change to how publish composes the manifest cannot silently
+    reintroduce the custom config type."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path))
+    assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
+
+    manifest = fetch_manifest(f"skills/{skill_name}", "0.1.0")
+    assert manifest["config"]["mediaType"] == "application/vnd.oci.empty.v1+json", (
+        f"published config descriptor must be the OCI empty type, "
+        f"got {manifest['config']['mediaType']!r}"
+    )
+    assert manifest["artifactType"] == "application/vnd.grimoire.skill.v1", (
+        f"published manifest must carry the skill artifactType, "
+        f"got {manifest.get('artifactType')!r}"
+    )
+    assert manifest.get("annotations", {}).get("com.grimoire.kind") == "skill", (
+        f"published manifest must carry com.grimoire.kind=skill, "
+        f"got {manifest.get('annotations', {})!r}"
+    )

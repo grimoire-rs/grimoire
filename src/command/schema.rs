@@ -164,6 +164,37 @@ mod tests {
     }
 
     #[test]
+    fn publish_schema_repository_fields_are_optional() {
+        // Axis B (issue #11): `repository_prefix` (manifest) and `repository`
+        // (per-entry) are additive optional fields — `registry` stays the only
+        // required top-level field, and both new fields appear in the schema.
+        let v = parsed(SchemaKind::Publish);
+        let required = v["required"].as_array().expect("required is an array");
+        assert_eq!(
+            required.len(),
+            1,
+            "`registry` must remain the only required top-level field, got: {required:?}"
+        );
+        assert_eq!(required[0], "registry");
+        assert!(
+            v["properties"]["repository_prefix"].is_object(),
+            "repository_prefix must be a documented manifest property"
+        );
+        let entry = v["$defs"]["PublishEntrySpec"]
+            .as_object()
+            .expect("PublishEntrySpec definition present");
+        assert!(
+            entry["properties"]["repository"].is_object(),
+            "per-entry repository must be a documented property"
+        );
+        let entry_required = entry["required"].as_array().expect("entry required is an array");
+        assert!(
+            !entry_required.iter().any(|r| r == "repository"),
+            "per-entry repository must be optional, got: {entry_required:?}"
+        );
+    }
+
+    #[test]
     fn each_kind_emits_a_distinct_id() {
         assert_ne!(SchemaKind::Config.id(), SchemaKind::Publish.id());
     }

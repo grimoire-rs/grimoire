@@ -71,6 +71,14 @@ pub struct PublishEntrySpec {
     /// `bundles/{name}.toml`.
     pub path: Option<PathBuf>,
 
+    /// Full OCI repository path override (registry-relative, no tag), e.g.
+    /// `durzn-technology/hearth/skill/hearth`. When present the entry name is
+    /// NOT appended — the path is used verbatim (mirrors `grim release`). Wins
+    /// over the manifest `repository_prefix` and the conventional
+    /// `{kind-subdir}/{name}` default, letting an entry target a registry's
+    /// group/project nesting (e.g. GitLab).
+    pub repository: Option<String>,
+
     /// For bundle entries only: freeze every floating member tag to a
     /// digest in the published bundle (reproducible, tunnel-safe).
     /// A `pin = true` on a non-bundle entry is a data error (exit 65).
@@ -88,6 +96,14 @@ pub struct PublishManifest {
     /// The OCI registry host to publish to (e.g. `grim.ocx.sh`). May be
     /// overridden by the `--registry` flag.
     pub registry: String,
+
+    /// Optional repository path prefix applied to every entry that does not
+    /// set its own `repository`: the published repository becomes
+    /// `{repository_prefix}/{name}` (the prefix replaces the conventional
+    /// `{kind-subdir}` segment). Registry-relative, no tag. Lets a whole
+    /// manifest publish under a registry's group/project nesting (e.g.
+    /// `durzn-technology/hearth/skill` on GitLab).
+    pub repository_prefix: Option<String>,
 
     /// Skill entries, keyed by name.
     #[serde(default)]
@@ -182,6 +198,51 @@ fn validate_registry_value(registry: &str, manifest_path: &std::path::Path) -> a
             manifest_path,
             format!("registry '{registry}': must be a plain registry host (e.g. 'grim.ocx.sh' or 'localhost:5000')"),
         ));
+    }
+    Ok(())
+}
+
+/// Charset/structural gate for an authored OCI repository path
+/// (`repository_prefix` or a per-entry `repository`). The value becomes part
+/// of the pushed `registry/repo:tag` reference, so reject anything that would
+/// compose a malformed reference up front, where the error is cleanly
+/// attributed to the manifest (mirrors [`validate_entry_name`] /
+/// [`validate_registry_value`]).
+///
+/// Each `/`-separated segment must start with `[a-z0-9]` and contain only
+/// `[a-z0-9._-]` (the OCI repository-path alphabet). Rejects an empty value,
+/// a leading/trailing `/`, an empty `//` segment, `.`/`..` segments (caught by
+/// the head-char rule), uppercase, and an embedded `:` (which would smuggle a
+/// tag into the reference). `field` is the human label for the message
+/// (`"repository_prefix"` or `"entry '<name>': repository"`).
+fn validate_repository_path(value: &str, field: &str, manifest_path: &std::path::Path) -> anyhow::Result<()> {
+    if value.is_empty() {
+        return Err(data_error_at(manifest_path, format!("{field}: must not be empty")));
+    }
+    if value.contains(':') {
+        return Err(data_error_at(
+            manifest_path,
+            format!("{field} '{value}': must not contain ':' (the tag comes from the entry version)"),
+        ));
+    }
+    if value.starts_with('/') || value.ends_with('/') {
+        return Err(data_error_at(
+            manifest_path,
+            format!("{field} '{value}': must not start or end with '/'"),
+        ));
+    }
+    for segment in value.split('/') {
+        let mut chars = segment.chars();
+        let head_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        let tail_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
+        if !(head_ok && tail_ok) {
+            return Err(data_error_at(
+                manifest_path,
+                format!("{field} '{value}': each path segment must start with [a-z0-9] and contain only [a-z0-9._-]"),
+            ));
+        }
     }
     Ok(())
 }
@@ -512,6 +573,13 @@ fn validate_manifest(
         }
     }
 
+    // -- Validate the manifest-level repository_prefix (axis B) --
+    // Charset/shape gate before it composes any reference; per-entry
+    // `repository` overrides are validated inside `validate_entry`.
+    if let Some(prefix) = &manifest.repository_prefix {
+        validate_repository_path(prefix, "repository_prefix", manifest_path)?;
+    }
+
     // -- Validate per-kind entries --
     for (name, spec) in &manifest.skills {
         validate_entry(name, spec, ArtifactKind::Skill, manifest_dir, manifest_path)?;
@@ -551,6 +619,12 @@ fn validate_entry(
     // Name charset gate (CWE-20) before the name reaches a path join or
     // a reference string.
     validate_entry_name(name, manifest_path)?;
+
+    // Per-entry repository override charset/shape gate (axis B): a full
+    // repository path used verbatim in the pushed reference.
+    if let Some(repo) = &spec.repository {
+        validate_repository_path(repo, &format!("entry '{name}': repository"), manifest_path)?;
+    }
 
     // Strict semver version (ADR D2). The bundle variant previously used a
     // shorter message; unify to the full message for all kinds.
@@ -606,6 +680,28 @@ fn resolve_source_path(
     }
 }
 
+/// Resolve the OCI repository path (registry-relative, no tag) for an entry.
+///
+/// Precedence (highest first):
+/// 1. `spec.repository` — a full repository path; the entry name is NOT
+///    appended (mirrors `grim release`, which takes the repository verbatim).
+/// 2. manifest `repository_prefix` → `{prefix}/{name}` (the prefix replaces
+///    the conventional `{kind-subdir}` segment).
+/// 3. default → `{kind.subdir()}/{name}` (today's behavior, unchanged when
+///    neither override is set).
+///
+/// Both override values are charset-validated up front by
+/// [`validate_repository_path`]; `name` is gated by [`validate_entry_name`].
+fn entry_repository(name: &str, kind: ArtifactKind, spec: &PublishEntrySpec, prefix: Option<&str>) -> String {
+    if let Some(repo) = spec.repository.as_deref() {
+        repo.to_string()
+    } else if let Some(prefix) = prefix {
+        format!("{prefix}/{name}")
+    } else {
+        format!("{}/{name}", kind.subdir())
+    }
+}
+
 /// Compute the conventional source path relative to the manifest directory.
 fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::path::Path) -> PathBuf {
     match kind {
@@ -644,7 +740,8 @@ fn plan_entries(
                 }
                 let src = resolve_source_path(name, $kind, spec, manifest_dir);
                 let publish_tag = tag.unwrap_or(&spec.version);
-                let reference = format!("{}/{}/{name}:{publish_tag}", registry, $kind.subdir());
+                let repo = entry_repository(name, $kind, spec, manifest.repository_prefix.as_deref());
+                let reference = format!("{registry}/{repo}:{publish_tag}");
                 entries.push(PlannedEntry {
                     kind: $kind,
                     name: name.clone(),
@@ -1068,6 +1165,183 @@ mod tests {
     fn registry_value_accepts_host_and_host_with_port() {
         validate_registry_value("grim.ocx.sh", Path::new("t.toml")).expect("plain host valid");
         validate_registry_value("localhost:5000", Path::new("t.toml")).expect("host:port valid");
+    }
+
+    // ── axis B: repository_prefix / per-entry repository (issue #11) ───────
+
+    /// Build a bare entry spec for `entry_repository` unit tests.
+    fn entry_spec(version: &str, repository: Option<&str>) -> PublishEntrySpec {
+        PublishEntrySpec {
+            version: version.to_string(),
+            path: None,
+            repository: repository.map(str::to_string),
+            pin: false,
+        }
+    }
+
+    #[test]
+    fn entry_repository_default_uses_kind_subdir() {
+        // No override → today's behavior: `{kind-subdir}/{name}` (backward compat).
+        let s = entry_spec("1.0.0", None);
+        assert_eq!(
+            entry_repository("hearth", ArtifactKind::Skill, &s, None),
+            "skills/hearth"
+        );
+        assert_eq!(entry_repository("r", ArtifactKind::Rule, &s, None), "rules/r");
+        assert_eq!(entry_repository("a", ArtifactKind::Agent, &s, None), "agents/a");
+        assert_eq!(entry_repository("b", ArtifactKind::Bundle, &s, None), "bundles/b");
+    }
+
+    #[test]
+    fn entry_repository_prefix_replaces_kind_subdir() {
+        // The manifest prefix replaces `{kind-subdir}`, appending the name.
+        let s = entry_spec("1.0.0", None);
+        assert_eq!(
+            entry_repository("hearth", ArtifactKind::Skill, &s, Some("durzn-technology/hearth/skill")),
+            "durzn-technology/hearth/skill/hearth"
+        );
+    }
+
+    #[test]
+    fn entry_repository_per_entry_override_wins_and_omits_name() {
+        // A per-entry `repository` wins over the prefix and is used verbatim
+        // (the name is NOT appended — mirrors `grim release`).
+        let s = entry_spec("1.0.0", Some("durzn-technology/hearth/skill/hearth"));
+        assert_eq!(
+            entry_repository("hearth", ArtifactKind::Skill, &s, Some("ignored/prefix")),
+            "durzn-technology/hearth/skill/hearth"
+        );
+    }
+
+    #[test]
+    fn validate_repository_path_accepts_nested_lowercase() {
+        validate_repository_path(
+            "durzn-technology/hearth/skill",
+            "repository_prefix",
+            Path::new("t.toml"),
+        )
+        .expect("nested lowercase path valid");
+        validate_repository_path("a/b_c/d.e/f-g", "repository_prefix", Path::new("t.toml"))
+            .expect("OCI path alphabet valid");
+    }
+
+    #[test]
+    fn validate_repository_path_rejects_bad_values() {
+        for bad in [
+            "",           // empty
+            "/leading",   // leading slash
+            "trailing/",  // trailing slash
+            "a//b",       // empty segment
+            "../evil",    // parent-dir traversal
+            "a/./b",      // cur-dir segment
+            "UPPER/case", // uppercase
+            "has:tag",    // embedded tag separator
+        ] {
+            let err = validate_repository_path(bad, "repository_prefix", Path::new("t.toml")).unwrap_err();
+            assert_eq!(
+                crate::error::classify_error(&err),
+                ExitCode::DataError,
+                "{bad:?} must be rejected as DataError (65)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_bad_repository_prefix() {
+        let (mut manifest, dir, _tmp) = make_manifest_dir();
+        manifest.repository_prefix = Some("Bad/Prefix".to_string());
+        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn validate_manifest_rejects_bad_entry_repository() {
+        let (mut manifest, dir, _tmp) = make_manifest_dir();
+        manifest.skills.get_mut("my-skill").unwrap().repository = Some("has:colon".to_string());
+        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn validate_manifest_accepts_valid_repository_overrides() {
+        let (mut manifest, dir, _tmp) = make_manifest_dir();
+        manifest.repository_prefix = Some("durzn-technology/hearth/skill".to_string());
+        manifest.rules.get_mut("my-rule").unwrap().repository =
+            Some("durzn-technology/hearth/rule/my-rule".to_string());
+        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None)
+            .expect("valid repository overrides must pass");
+    }
+
+    #[test]
+    fn manifest_deserializes_repository_fields() {
+        let toml = r#"
+            registry = "registry.gitlab.com"
+            repository_prefix = "group/project/skill"
+
+            [skills.hearth]
+            version = "0.1.0"
+            repository = "group/project/skill/hearth"
+        "#;
+        let m: PublishManifest = toml::from_str(toml).unwrap();
+        assert_eq!(m.repository_prefix.as_deref(), Some("group/project/skill"));
+        assert_eq!(
+            m.skills["hearth"].repository.as_deref(),
+            Some("group/project/skill/hearth")
+        );
+    }
+
+    #[test]
+    fn manifest_repository_fields_default_to_none() {
+        // Backward compat: a manifest with neither field parses, and
+        // `entry_repository` falls back to the kind-subdir default.
+        let m: PublishManifest =
+            toml::from_str("registry = \"grim.ocx.sh\"\n\n[skills.s]\nversion = \"1.0.0\"\n").unwrap();
+        assert!(m.repository_prefix.is_none());
+        assert!(m.skills["s"].repository.is_none());
+    }
+
+    #[test]
+    fn plan_entries_nested_repository_prefix_builds_reporter_path() {
+        // Headline regression for issue #11 axis B: the reporter's exact path.
+        // A `repository_prefix` nests the push under the registry's
+        // group/project path instead of the hardcoded `{kind-subdir}/{name}`.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(
+            &dir.join("skills/hearth/SKILL.md"),
+            "---\nname: hearth\ndescription: d.\n---\n",
+        );
+        let mut manifest: PublishManifest =
+            toml::from_str("registry = \"registry.gitlab.com\"\n\n[skills.hearth]\nversion = \"0.1.0\"\n").unwrap();
+        manifest.repository_prefix = Some("durzn-technology/hearth/skill".to_string());
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].reference,
+            "registry.gitlab.com/durzn-technology/hearth/skill/hearth:0.1.0"
+        );
+    }
+
+    #[test]
+    fn plan_entries_per_entry_repository_overrides_prefix() {
+        // A per-entry `repository` wins over the manifest prefix and is used
+        // verbatim (no name appended).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(
+            &dir.join("skills/hearth/SKILL.md"),
+            "---\nname: hearth\ndescription: d.\n---\n",
+        );
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"registry.gitlab.com\"\nrepository_prefix = \"group/ignored\"\n\n\
+             [skills.hearth]\nversion = \"0.1.0\"\nrepository = \"durzn-technology/hearth/skill/hearth\"\n",
+        )
+        .unwrap();
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        assert_eq!(
+            entries[0].reference,
+            "registry.gitlab.com/durzn-technology/hearth/skill/hearth:0.1.0"
+        );
     }
 
     // ── validate_manifest: unknown --only name rejected ───────────────────

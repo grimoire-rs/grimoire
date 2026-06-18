@@ -303,6 +303,66 @@ so a supporting editor autocompletes keys and flags a typo before you ever run
 [Editor schema support](./configuration.md#editor-schema) for both schema URLs
 and [`grim schema`](./commands.md#schema) to print one locally.
 
+### Repository namespace {#batch-publish-namespace}
+
+By default, each entry pushes to `{kind-subdir}/{name}` under the
+manifest's registry — a skill named `hearth` publishes to
+`registry/skills/hearth`. Most self-hosted or single-user registries
+work fine with this convention. Multi-tenant SaaS registries — such as
+the [GitLab Container Registry][gitlab-registry] — require every image
+to live under a group-and-project path, making the default layout
+inaccessible.
+
+Two optional fields let you replace the `{kind-subdir}` segment with an
+arbitrary namespace path, so a publish manifest can target any registry
+layout.
+
+**Manifest-level `repository_prefix`** — a string applied to every entry
+that does not set its own `repository`. The published repository becomes
+`{repository_prefix}/{name}`; the prefix replaces the conventional
+`{kind.subdir()}` segment. Registry-relative, no tag.
+
+**Per-entry `repository`** — a string inside a `[skills.<name>]`,
+`[rules.<name>]`, `[agents.<name>]`, or `[bundles.<name>]` sub-table.
+The value is used verbatim as the full repository path; the entry name is
+**not** appended (same behavior as the `--registry` path in
+`grim release`). Wins over `repository_prefix` when both are set.
+
+Resolution precedence per entry (highest first):
+
+1. per-entry `repository` (full path, name not appended)
+2. manifest `repository_prefix` → `{prefix}/{name}`
+3. default → `{kind.subdir()}/{name}` (unchanged backward-compatible behavior)
+
+```toml
+#:schema https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json
+registry = "registry.gitlab.com"
+repository_prefix = "durzn-technology/hearth/skill"
+
+[skills.hearth]
+version = "0.2.0"
+# publishes to: registry.gitlab.com/durzn-technology/hearth/skill/hearth
+
+[skills.other-skill]
+version = "0.1.0"
+repository = "durzn-technology/hearth/skill/other-skill"
+# per-entry form — identical effect for this entry, wins over repository_prefix
+```
+
+The reporter's working example: registry `registry.gitlab.com`, prefix
+`durzn-technology/hearth/skill`, skill `hearth` → resolves to
+`registry.gitlab.com/durzn-technology/hearth/skill/hearth`.
+
+**Charset rules** — each `/`-separated segment of both fields must start
+with a character in `[a-z0-9]` and contain only `[a-z0-9._-]`. Leading
+or trailing `/`, empty `//` segments, `.` or `..` segments, and embedded
+`:` are all rejected at manifest validation time with exit 65 (data
+error). An invalid prefix or repository aborts the whole manifest before
+any push.
+
+A manifest with neither field is unchanged: `grim.ocx.sh/skills/grim-usage`
+style paths are the default and remain fully backward compatible.
+
 ### Conventional source layout {#batch-publish-layout}
 
 When `path` is omitted, grim derives the source path from the entry name and
@@ -410,6 +470,7 @@ Registry][ghcr]) and `grim release` inherits it.
 
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+[gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
 
 <!-- internal -->
 [global-options]: ./commands.md#global-options
