@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** bugfix_gitlab_registry_compat
-- **Active phase:** 4 — Fix
-- **Step:** /swarm-execute → implementation
-- **Last update:** 2026-06-19 (initialized on branch fix/gitlab-registry-compat)
+- **Active phase:** 7 — Commit & Document
+- **Step:** awaiting /finalize (reporter must confirm against real GitLab before #11 is closed)
+- **Last update:** 2026-06-19 (after 79f3057: all 5 axis commits landed, `task verify` green, reviewer APPROVE)
 
 ---
 
