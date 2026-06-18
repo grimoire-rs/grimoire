@@ -27,6 +27,7 @@ use std::sync::Arc;
 use crate::catalog::registry_catalog::Catalog;
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
+use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::{StatusBadge, derive_badge};
@@ -43,6 +44,11 @@ pub struct BadgeContext<'a> {
     pub state: &'a InstallState,
     /// The scope's resolved anchor roots.
     pub roots: &'a AnchorRoots,
+    /// The currently-active client set for the scope (vendor dir present — see
+    /// [`crate::install::target::detect_clients`]). A record's per-client
+    /// outputs are reconciled against this so a client removed since install
+    /// does not badge the repository as broken.
+    pub active: &'a [ClientTarget],
 }
 
 /// One repository row: catalog metadata plus the derived install badge.
@@ -205,7 +211,14 @@ pub async fn load_catalog(
                         repository_url: e.repository_url.clone(),
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),
-                        badge: derive_badge(&e.registry, &e.repository, badges.lock, badges.state, badges.roots),
+                        badge: derive_badge(
+                            &e.registry,
+                            &e.repository,
+                            badges.lock,
+                            badges.state,
+                            badges.roots,
+                            badges.active,
+                        ),
                     })
                     .collect();
                 CatalogGroup {
@@ -294,6 +307,7 @@ mod tests {
             lock: None,
             state: &state,
             roots: &roots,
+            active: &ClientTarget::ALL,
         };
 
         let registries = vec![

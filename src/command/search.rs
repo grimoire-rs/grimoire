@@ -24,8 +24,10 @@ use crate::api::search_report::{SearchEntry, SearchReport};
 use crate::catalog::{BadgeContext, SearchQuery};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
+use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
+use crate::install::target::detect_clients;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 
@@ -78,11 +80,12 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // then browse every configured registry through the shared catalog
     // service (the single seam `search`/`tui`/`mcp` share). A registry given
     // via `--registry` collapses the set to exactly that registry.
-    let (registries, lock, state, roots) = resolve_scope(ctx, args);
+    let (registries, lock, state, roots, active) = resolve_scope(ctx, args);
     let badges = BadgeContext {
         lock: lock.as_ref(),
         state: &state,
         roots: &roots,
+        active: &active,
     };
     let results = super::grim(
         crate::catalog::load_catalog(
@@ -142,6 +145,7 @@ fn resolve_scope(
     Option<GrimoireLock>,
     InstallState,
     AnchorRoots,
+    Vec<ClientTarget>,
 ) {
     // An explicit `--registry` on the command collapses the browse set to
     // exactly that registry (historical single-registry `--registry`
@@ -152,35 +156,52 @@ fn resolve_scope(
             alias: None,
             is_default: true,
         }];
-        let (lock, state, roots) = load_badges_best_effort(ctx, args);
-        return (registries, lock, state, roots);
+        let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
+        return (registries, lock, state, roots, active);
     }
 
     let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
         // No scope resolves: browse the env/flag/fallback registry (no
-        // config tiers) with empty badge inputs.
+        // config tiers) with empty badge inputs. With no scope to detect
+        // against, treat every client as active (no output is filtered).
         let registries =
             crate::config::resolve_registries(ctx.default_registry(), &[], None, &[], None, super::FALLBACK_REGISTRY);
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
-        return (registries, None, InstallState::empty(std::path::Path::new("")), roots);
+        return (
+            registries,
+            None,
+            InstallState::empty(std::path::Path::new("")),
+            roots,
+            ClientTarget::ALL.to_vec(),
+        );
     };
     let registries = super::registries_for_scope(ctx, &scope);
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    (registries, lock, state, scope.roots)
+    let active = detect_clients(&scope.workspace, scope.scope);
+    (registries, lock, state, scope.roots, active)
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge
 /// derivation, degrading to an empty state when no scope resolves or the
 /// files are absent/corrupt (badges are advisory, never fail the search).
-fn load_badges_best_effort(ctx: &Context, args: &SearchArgs) -> (Option<GrimoireLock>, InstallState, AnchorRoots) {
+fn load_badges_best_effort(
+    ctx: &Context,
+    args: &SearchArgs,
+) -> (Option<GrimoireLock>, InstallState, AnchorRoots, Vec<ClientTarget>) {
     let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
-        return (None, InstallState::empty(std::path::Path::new("")), roots);
+        return (
+            None,
+            InstallState::empty(std::path::Path::new("")),
+            roots,
+            ClientTarget::ALL.to_vec(),
+        );
     };
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    (lock, state, scope.roots)
+    let active = detect_clients(&scope.workspace, scope.scope);
+    (lock, state, scope.roots, active)
 }
 
 #[cfg(test)]

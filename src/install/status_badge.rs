@@ -11,7 +11,8 @@
 //! (no config binding name), so this matches a lock/install record by its
 //! pinned repository rather than by the config key.
 
-use crate::install::install_state::InstallState;
+use crate::install::client_target::ClientTarget;
+use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::path_anchor::AnchorRoots;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -56,6 +57,7 @@ pub fn derive_badge(
     lock: Option<&GrimoireLock>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
 ) -> StatusBadge {
     let Some(locked) = lock.and_then(|l| find_by_repo(l, registry, repository)) else {
         return StatusBadge::NotInstalled;
@@ -67,17 +69,25 @@ pub fn derive_badge(
         return StatusBadge::NotInstalled;
     };
 
+    // Reconcile against the active client set: an output for a client removed
+    // since install is ignored. With no output for any active client the
+    // repository is not installed here.
+    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    if outputs.is_empty() {
+        return StatusBadge::NotInstalled;
+    }
+
     // An unresolvable anchored target (corrupt `relative`, anchor root
     // absent on this machine) absorbs to NotInstalled — a read-only badge
     // never `?`-propagates an `AnchorError`.
-    for out in &record.outputs {
+    for out in &outputs {
         match out.resolved_target(roots) {
             Ok(resolved) if !resolved.exists() => return StatusBadge::NotInstalled,
             Ok(_) => {}
             Err(_) => return StatusBadge::NotInstalled,
         }
     }
-    for out in &record.outputs {
+    for out in &outputs {
         match out.current_hash(roots) {
             Ok(actual) if actual != out.content_hash => return StatusBadge::Modified,
             Ok(_) => {}
@@ -181,12 +191,19 @@ mod tests {
         let roots = roots(dir.path());
         let st = InstallState::empty(std::path::Path::new("/tmp/s.json"));
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", None, &st, &roots),
+            derive_badge("localhost:5000", "acme/x", None, &st, &roots, &[ClientTarget::Claude]),
             StatusBadge::NotInstalled
         );
         let lk = lock_with("acme/x", 'a');
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", Some(&lk), &st, &roots),
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lk),
+                &st,
+                &roots,
+                &[ClientTarget::Claude]
+            ),
             StatusBadge::NotInstalled
         );
     }
@@ -203,18 +220,39 @@ mod tests {
 
         // Same pin, intact content ⇒ installed.
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", Some(&lock_with("acme/x", 'a')), &st, &roots),
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lock_with("acme/x", 'a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude]
+            ),
             StatusBadge::Installed
         );
         // Lock advanced to a different digest ⇒ outdated.
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", Some(&lock_with("acme/x", 'b')), &st, &roots),
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lock_with("acme/x", 'b')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude]
+            ),
             StatusBadge::Outdated
         );
         // Tamper ⇒ modified.
         std::fs::write(&target, b"hand edited\n").unwrap();
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", Some(&lock_with("acme/x", 'a')), &st, &roots),
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lock_with("acme/x", 'a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude]
+            ),
             StatusBadge::Modified
         );
         let _ = Algorithm::Sha256;
@@ -283,7 +321,14 @@ mod tests {
         // Before the SC-04 fix, find_by_repo only searched skills+rules and
         // returned NotInstalled. After the fix it must return Installed.
         assert_eq!(
-            derive_badge("localhost:5000", "acme/my-agent", Some(&lk), &st, &roots),
+            derive_badge(
+                "localhost:5000",
+                "acme/my-agent",
+                Some(&lk),
+                &st,
+                &roots,
+                &[ClientTarget::Claude]
+            ),
             StatusBadge::Installed,
             "an installed agent must badge as Installed, not NotInstalled"
         );
@@ -328,7 +373,14 @@ mod tests {
 
         let lk = lock_with("acme/x", 'a');
         // Contract: AnchorError must be absorbed, returning NotInstalled (never `?`-propagated).
-        let badge = derive_badge("localhost:5000", "acme/x", Some(&lk), &st, &no_claude_roots);
+        let badge = derive_badge(
+            "localhost:5000",
+            "acme/x",
+            Some(&lk),
+            &st,
+            &no_claude_roots,
+            &[ClientTarget::Claude],
+        );
         assert_eq!(
             badge,
             StatusBadge::NotInstalled,

@@ -17,8 +17,10 @@ use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::{StatusEntry, StatusReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::install::install_state::InstallState;
+use crate::install::client_target::ClientTarget;
+use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::path_anchor::AnchorRoots;
+use crate::install::target::detect_clients;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -73,6 +75,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let lock_matches_config =
         lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
 
+    // The currently-active client set: a record's per-client outputs are
+    // reconciled against this so a client the user removed since install does
+    // not flag its now-absent files as `missing`.
+    let active = detect_clients(&scope.workspace, scope.scope);
+
     let mut entries = Vec::new();
 
     // Declared bundles: one row each so the user sees what they declared.
@@ -99,7 +106,15 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
-        let state = derive_state(decl.kind, &decl.name, locked, &state, &scope.roots, lock_matches_config);
+        let state = derive_state(
+            decl.kind,
+            &decl.name,
+            locked,
+            &state,
+            &scope.roots,
+            &active,
+            lock_matches_config,
+        );
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
@@ -121,6 +136,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 Some(member),
                 &state,
                 &scope.roots,
+                &active,
                 lock_matches_config,
             );
             // Every contributing bundle is listed (a shared member carries
@@ -183,6 +199,7 @@ fn derive_state(
     locked: Option<&LockedArtifact>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
     lock_matches_config: bool,
 ) -> ArtifactStatus {
     if !lock_matches_config {
@@ -194,10 +211,19 @@ fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
+    // Reconcile the record's per-client outputs against the currently-active
+    // client set: an output for a client the user removed since install must
+    // be ignored, not flagged `missing`. With no output for any active client
+    // the artifact is genuinely not present here ⇒ `missing`.
+    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    if outputs.is_empty() {
+        return ArtifactStatus::Missing;
+    }
     // An unresolvable anchored target (corrupt/tampered `relative`, or an
     // anchor root absent on this machine) is degraded to `Missing` for a
     // read-only report — never `?`-propagated (state is data; status exits 0).
-    for out in &record.outputs {
+    // A present (active) client whose file is missing still flags `missing`.
+    for out in &outputs {
         match out.resolved_target(roots) {
             Ok(resolved) if !resolved.exists() => return ArtifactStatus::Missing,
             Ok(_) => {}
@@ -206,7 +232,7 @@ fn derive_state(
     }
     // Any drifted client output (canonical OR generated — the recorded
     // hash for a generated target is over its expected bytes) ⇒ modified.
-    for out in &record.outputs {
+    for out in &outputs {
         match out.current_hash(roots) {
             Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
             Ok(_) => {}
@@ -257,7 +283,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let roots = roots(dir.path());
         let st = InstallState::load(&dir.path().join("s.json")).unwrap();
-        let s = derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, false);
+        let s = derive_state(
+            ArtifactKind::Rule,
+            "x",
+            Some(&locked('a')),
+            &st,
+            &roots,
+            &[ClientTarget::Claude],
+            false,
+        );
         assert_eq!(s, ArtifactStatus::Stale);
     }
 
@@ -267,11 +301,27 @@ mod tests {
         let roots = roots(dir.path());
         let st = InstallState::load(&dir.path().join("s.json")).unwrap();
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", None, &st, &roots, true),
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                None,
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true
+            ),
             ArtifactStatus::Missing
         );
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true
+            ),
             ArtifactStatus::Missing
         );
     }
@@ -303,20 +353,44 @@ mod tests {
 
         // Same pin, intact content ⇒ installed.
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true
+            ),
             ArtifactStatus::Installed
         );
 
         // Lock advanced to a different digest ⇒ outdated.
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('b')), &st, &roots, true),
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('b')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true
+            ),
             ArtifactStatus::Outdated
         );
 
         // Tamper with the file ⇒ modified.
         std::fs::write(&target, b"hand edited\n").unwrap();
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true
+            ),
             ArtifactStatus::Modified
         );
         let _ = Algorithm::Sha256;
@@ -351,11 +425,120 @@ mod tests {
         // Roots with claude_root = None → resolved_target returns AnchorRootAbsent.
         // Contract: must return Missing via match, NOT propagate the error.
         // Until T8 this panics with unimplemented!; after T8 it must return Missing.
-        let state = derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true);
+        let state = derive_state(
+            ArtifactKind::Rule,
+            "x",
+            Some(&locked('a')),
+            &st,
+            &roots,
+            &[ClientTarget::Claude],
+            true,
+        );
         assert_eq!(
             state,
             ArtifactStatus::Missing,
             "unresolvable AnchoredPath must degrade to Missing, not error"
+        );
+    }
+
+    /// C4: an output for a client the user removed since install (not in the
+    /// active set, file gone) must not flag the artifact `missing` — the
+    /// active client's intact files make it `installed`.
+    #[test]
+    fn derive_state_skips_absent_client_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+
+        // claude file present + intact; the opencode file is absent.
+        let claude_target = ws.join(".claude/rules/x.md");
+        std::fs::create_dir_all(claude_target.parent().unwrap()).unwrap();
+        std::fs::write(&claude_target, b"canonical\n").unwrap();
+        let claude_hash = content_hash(&claude_target).unwrap();
+
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            pinned: pinned('a'),
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/x.md".to_string(),
+                    },
+                    content_hash: claude_hash,
+                    support_dir: None,
+                },
+                ClientOutput {
+                    client: "opencode".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".opencode/rules/x.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("d".repeat(64)),
+                    support_dir: None,
+                },
+            ],
+        });
+
+        // opencode is NOT active (the user removed it) ⇒ its absent file is
+        // ignored; claude is intact ⇒ installed.
+        let state = derive_state(
+            ArtifactKind::Rule,
+            "x",
+            Some(&locked('a')),
+            &st,
+            &roots,
+            &[ClientTarget::Claude],
+            true,
+        );
+        assert_eq!(
+            state,
+            ArtifactStatus::Installed,
+            "a removed-client output must not flag the artifact missing"
+        );
+    }
+
+    /// C4 guard: a present (active) client whose file is missing still flags
+    /// `missing` — tolerance must never mask a genuinely broken install.
+    #[test]
+    fn present_client_missing_file_still_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            pinned: pinned('a'),
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".claude/rules/x.md".to_string(),
+                },
+                content_hash: Digest::Sha256("d".repeat(64)),
+                support_dir: None,
+            }],
+        });
+
+        // claude IS active but its file was never written ⇒ missing.
+        let state = derive_state(
+            ArtifactKind::Rule,
+            "x",
+            Some(&locked('a')),
+            &st,
+            &roots,
+            &[ClientTarget::Claude],
+            true,
+        );
+        assert_eq!(
+            state,
+            ArtifactStatus::Missing,
+            "an active client with a missing file must still flag missing"
         );
     }
 }

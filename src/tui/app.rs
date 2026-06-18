@@ -31,11 +31,12 @@ use crate::config::declaration::{ConfigOptions, DesiredSet};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
-use crate::install::install_state::InstallState;
+use crate::install::client_target::ClientTarget;
+use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::AnchorRoots;
-use crate::install::target::InstallTarget;
+use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -492,7 +493,8 @@ fn drain_checks(
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state) = load_scope_for_badges(ctx);
-    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state, &ctx.roots);
+    let active = detect_clients(&ctx.workspace, ctx.scope);
+    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state, &ctx.roots, &active);
     state.merge_catalog_rows(fresh);
     // The background refresh re-walks the same browse window, so its
     // truncation verdict supersedes the initial load's (the cap may now be
@@ -557,7 +559,8 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     {
         Ok(catalog) => {
             let (lock, install_state) = load_scope_for_badges(ctx);
-            let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state, &ctx.roots);
+            let active = detect_clients(&ctx.workspace, ctx.scope);
+            let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state, &ctx.roots, &active);
             let n = rows.len();
             state.set_rows(rows);
             // Surface whether the browse window hit the cap so the row list
@@ -591,12 +594,13 @@ fn rows_from_catalog(
     lock: Option<&GrimoireLock>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
 ) -> Vec<TuiRow> {
     catalog
         .entries()
         .map(|e| {
             let kind = e.kind.clone().unwrap_or_else(|| "-".to_string());
-            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state, roots);
+            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state, roots, active);
             TuiRow {
                 kind,
                 repo: e.repo(),
@@ -625,11 +629,12 @@ fn derive_row_state(
     lock: Option<&GrimoireLock>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
 ) -> ArtifactState {
     if row_kind(kind) == ArtifactKind::Bundle {
-        derive_bundle_state(&format!("{registry}/{repository}"), lock, state, roots)
+        derive_bundle_state(&format!("{registry}/{repository}"), lock, state, roots, active)
     } else {
-        derive_artifact_state(registry, repository, lock, state, roots)
+        derive_artifact_state(registry, repository, lock, state, roots, active)
     }
 }
 
@@ -642,6 +647,7 @@ fn derive_bundle_state(
     lock: Option<&GrimoireLock>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
 ) -> ArtifactState {
     let Some(lock) = lock else {
         return ArtifactState::NotInstalled;
@@ -659,7 +665,16 @@ fn derive_bundle_state(
     }
     lock.iter_artifacts()
         .filter(|a| a.bundles.iter().any(|b| b.repo == bundle_repo))
-        .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state, roots))
+        .map(|m| {
+            derive_artifact_state(
+                m.pinned.registry(),
+                m.pinned.repository(),
+                Some(lock),
+                state,
+                roots,
+                active,
+            )
+        })
         .max_by_key(|s| rank(*s))
         .unwrap_or(ArtifactState::NotInstalled)
 }
@@ -679,6 +694,7 @@ fn derive_artifact_state(
     lock: Option<&GrimoireLock>,
     state: &InstallState,
     roots: &AnchorRoots,
+    active: &[ClientTarget],
 ) -> ArtifactState {
     let Some(locked) = lock.and_then(|l| {
         l.iter_artifacts()
@@ -693,17 +709,26 @@ fn derive_artifact_state(
         return ArtifactState::NotInstalled;
     };
 
+    // Reconcile against the active client set: an output for a client removed
+    // since install is ignored (it must not poison the row — nor, via the
+    // bundle worst-of aggregation, the bundle row). With no output for any
+    // active client the artifact is not installed here.
+    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    if outputs.is_empty() {
+        return ArtifactState::NotInstalled;
+    }
+
     // A read-only derivation never `?`-propagates an `AnchorError`: an
     // unresolvable anchored output (corrupt `relative`, anchor root absent
     // here) surfaces as IntegrityMissing, distinct from never-installed.
-    for out in &record.outputs {
+    for out in &outputs {
         match out.resolved_target(roots) {
             Ok(resolved) if !resolved.exists() => return ArtifactState::IntegrityMissing,
             Ok(_) => {}
             Err(_) => return ArtifactState::IntegrityMissing,
         }
     }
-    for out in &record.outputs {
+    for out in &outputs {
         match out.current_hash(roots) {
             Ok(actual) if actual != out.content_hash => return ArtifactState::Modified,
             Ok(_) => {}
@@ -722,6 +747,7 @@ fn derive_artifact_state(
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     let (lock, install_state) = load_scope_for_badges(ctx);
+    let active = detect_clients(&ctx.workspace, ctx.scope);
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
             r.state = derive_row_state(
@@ -731,6 +757,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
                 lock.as_ref(),
                 &install_state,
                 &ctx.roots,
+                &active,
             );
         }
     }
@@ -940,7 +967,14 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
     };
-    let (options, registries, mut set) = load_scope_declaration(ctx)?;
+    // Post-action cleanup: the files are already deleted and the install state
+    // persisted. If the declaration can no longer be read (a project config the
+    // user removed, say), there is nothing left to undeclare — the goal is
+    // already met, so converge rather than fail the delete (the `let Ok(..)
+    // else` precedent from `bundle_uninstall_targets`).
+    let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
+        return Ok(());
+    };
     undeclare_and_unlock(
         &ctx.config_path,
         &ctx.lock_path,
@@ -1598,6 +1632,7 @@ mod tests {
                 lock.as_ref(),
                 &install_state,
                 &ctx.roots,
+                &ClientTarget::ALL,
             ),
             ArtifactState::Installed
         );
@@ -1640,6 +1675,7 @@ mod tests {
                 lock.as_ref(),
                 &install_state,
                 &ctx.roots,
+                &ClientTarget::ALL,
             ),
             ArtifactState::NotInstalled
         );
@@ -1758,14 +1794,20 @@ mod tests {
             opencode_skills: None,
         };
         assert_eq!(
-            derive_bundle_state("r/bundles/ai-pack", Some(&lock), &state, &stub_roots),
+            derive_bundle_state(
+                "r/bundles/ai-pack",
+                Some(&lock),
+                &state,
+                &stub_roots,
+                &ClientTarget::ALL
+            ),
             ArtifactState::NotInstalled,
             "bundle with only an agent member derives NotInstalled when not installed"
         );
 
         // A bundle with no matching provenance in the lock is NotInstalled.
         assert_eq!(
-            derive_bundle_state("r/bundles/other", Some(&lock), &state, &stub_roots),
+            derive_bundle_state("r/bundles/other", Some(&lock), &state, &stub_roots, &ClientTarget::ALL),
             ArtifactState::NotInstalled,
             "bundle with no matching provenance is NotInstalled"
         );
@@ -1787,6 +1829,73 @@ mod tests {
             .collect();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0], (ArtifactKind::Agent, "my-agent".to_string()));
+    }
+
+    /// C4: a bundle whose member was installed to claude + opencode must read
+    /// `Installed` after the opencode client is removed — the stale opencode
+    /// output must not poison the member (and, via worst-of aggregation, the
+    /// bundle row) to `IntegrityMissing`.
+    #[test]
+    fn derive_bundle_state_installed_when_active_clients_intact() {
+        use crate::install::content_hash::content_hash;
+        use crate::install::install_state::{ClientOutput, InstallRecord};
+        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+
+        // The member rule installed to claude (present + intact). The opencode
+        // file is absent (the user removed that client).
+        let claude_file = ws.join(".claude/rules/demo.md");
+        std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
+        std::fs::write(&claude_file, b"# demo\n").unwrap();
+        let claude_hash = content_hash(&claude_file).unwrap();
+
+        let member = stamp(locked("demo", ArtifactKind::Rule, 'a'), "r/bundles/pack", "latest");
+        let lock = lock_fixture(vec![], vec![member.clone()]);
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "demo".to_string(),
+            pinned: member.pinned.clone(),
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/demo.md".to_string(),
+                    },
+                    content_hash: claude_hash,
+                    support_dir: None,
+                },
+                ClientOutput {
+                    client: "opencode".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".opencode/rules/demo.md".to_string(),
+                    },
+                    content_hash: crate::oci::Digest::Sha256(sha('e')),
+                    support_dir: None,
+                },
+            ],
+        });
+
+        let roots = AnchorRoots {
+            workspace: ws.to_path_buf(),
+            grim_home: ws.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        };
+
+        // opencode is NOT active (removed) ⇒ its absent output is ignored; the
+        // claude member is intact ⇒ the bundle is Installed, not IntegrityMissing.
+        assert_eq!(
+            derive_bundle_state("r/bundles/pack", Some(&lock), &state, &roots, &[ClientTarget::Claude]),
+            ArtifactState::Installed,
+            "a removed client's absent output must not poison the bundle row"
+        );
     }
 
     #[test]

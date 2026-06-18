@@ -27,7 +27,7 @@ use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{InstallRecord, InstallState};
 use super::materializer::ArtifactMaterializer;
-use super::path_anchor::AnchorRoots;
+use super::path_anchor::{AnchorError, AnchorRoots};
 use super::target::InstallTarget;
 
 /// What happened to one artifact during an install pass.
@@ -126,12 +126,22 @@ async fn install_one<M: ArtifactMaterializer>(
 
     // Integrity gate: for every client output a prior record described,
     // an on-disk content hash that drifted from what was recorded is a
-    // local modification. Refuse unless forced; if every output is intact
-    // and the pin is unchanged the install is a no-op.
+    // local modification. Refuse unless forced; if every output is intact,
+    // the pin is unchanged, AND the record already covers every client this
+    // install targets, the install is a no-op.
     if let Some(rec) = &recorded {
         let mut all_intact = true;
         for out in &rec.outputs {
-            let resolved = out.resolved_target(roots)?;
+            // Tolerant resolve: a recorded output whose anchor root is absent
+            // on this machine names a client out of scope here (e.g. a global
+            // client whose vendor root is unset). Skip it — it can neither be
+            // verified nor block the install. A genuine containment failure
+            // (traversal / escaped anchor) or an I/O error still surfaces.
+            let resolved = match out.resolved_target(roots) {
+                Ok(resolved) => resolved,
+                Err(AnchorError::AnchorRootAbsent { .. }) => continue,
+                Err(e) => return Err(e.into()),
+            };
             if resolved.exists() {
                 let actual = out.current_hash(roots)?;
                 if actual != out.content_hash {
@@ -147,7 +157,16 @@ async fn install_one<M: ArtifactMaterializer>(
                 all_intact = false;
             }
         }
-        if all_intact && rec.pinned.eq_content(&artifact.pinned) {
+        // Only short-circuit when the record already materialized every client
+        // this install targets. A target client absent from the record (an
+        // additive `--client` install, or a client re-enabled since the last
+        // install) must fall through to materialize instead of being silently
+        // skipped.
+        let covers_targets = target
+            .clients()
+            .iter()
+            .all(|c| rec.outputs.iter().any(|out| out.client == c.to_string()));
+        if all_intact && covers_targets && rec.pinned.eq_content(&artifact.pinned) {
             return Ok(InstallOutcome::AlreadyInstalled);
         }
     }
@@ -320,13 +339,32 @@ async fn install_one<M: ArtifactMaterializer>(
         });
     }
 
+    // Merge with the prior record so an additive `--client` install (or a
+    // client re-enabled since the last install) accumulates instead of
+    // clobbering the other clients' outputs. Re-attach every recorded output
+    // for a client NOT in this target; a freshly materialized target client
+    // is already in `client_records`. A recorded non-target output whose
+    // anchor root is absent on this machine names an out-of-scope client —
+    // drop it (it cannot be resolved or verified, and re-attaching it would
+    // re-introduce the desync the read paths must tolerate).
+    let mut outputs = client_records;
+    if let Some(rec) = &recorded {
+        for out in &rec.outputs {
+            let in_target = target.clients().iter().any(|c| out.client == c.to_string());
+            if in_target || out.target.anchor.root(roots).is_none() {
+                continue;
+            }
+            outputs.push(out.clone());
+        }
+    }
+
     // `outputs` is the single source of truth — no denormalized top-level
     // mirror of the primary client.
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
         pinned: artifact.pinned.clone(),
-        outputs: client_records,
+        outputs,
     });
 
     Ok(if recorded.is_some() {
@@ -380,6 +418,9 @@ mod tests {
     use async_trait::async_trait;
     use std::path::Path;
 
+    use crate::config::scope::ConfigScope;
+    use crate::install::client_target::ClientTarget;
+    use crate::install::install_state::ClientOutput;
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
@@ -857,6 +898,197 @@ mod tests {
         // The record no longer carries a support dir.
         let rec = state.get(ArtifactKind::Rule, "my-rule").unwrap();
         assert!(rec.outputs.iter().all(|c| c.support_dir.is_none()));
+    }
+
+    // ── Client-set desync regression tests (C1–C3) ──────────────────────────
+
+    /// C1: a recorded client output whose anchor root is absent on this
+    /// machine (an out-of-scope client) must not hard-fail the integrity gate;
+    /// the install proceeds and the record reconciles to the resolvable client.
+    #[tokio::test]
+    async fn integrity_gate_tolerates_unresolvable_client_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path()); // copilot_root = None
+
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        // Seed a prior desync record: a claude workspace output whose file is
+        // absent on disk (so the install proceeds past the gate) + a copilot
+        // output anchored to CopilotRoot, which is unresolvable here because
+        // roots.copilot_root is None.
+        let prior_pin = PinnedIdentifier::try_from(
+            Identifier::new_registry("rust-style", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            pinned: prior_pin,
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/rust-style.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("b".repeat(64)),
+                    support_dir: None,
+                },
+                ClientOutput {
+                    client: "copilot".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::CopilotRoot,
+                        relative: "rules/rust-style.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("c".repeat(64)),
+                    support_dir: None,
+                },
+            ],
+        });
+
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        // Without the fix, the gate's `?` on the unresolvable copilot output
+        // makes this an Err; with the fix it tolerates and the install runs.
+        assert!(
+            r[0].result.is_ok(),
+            "unresolvable recorded client must not hard-fail: {:?}",
+            r[0].result
+        );
+        assert!(dir.path().join(".claude/rules/rust-style.md").is_file());
+
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        let clients: Vec<&str> = rec.outputs.iter().map(|o| o.client.as_str()).collect();
+        assert_eq!(
+            clients,
+            vec!["claude"],
+            "record reconciles to the resolvable client only (unresolvable copilot dropped)"
+        );
+    }
+
+    /// C2: `AlreadyInstalled` must require the record to cover every target
+    /// client. A client added to the target since the last install must be
+    /// materialized instead of being skipped by the short-circuit.
+    #[tokio::test]
+    async fn already_installed_requires_all_target_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install copilot-only ⇒ the record covers only copilot.
+        let t_copilot = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
+        install_all(&lock, &access, &m, &t_copilot, &mut state, &roots, false).await;
+        assert!(
+            dir.path()
+                .join(".github/instructions/rust-style.instructions.md")
+                .is_file()
+        );
+        assert!(!dir.path().join(".claude/rules/rust-style.md").exists());
+
+        // 2. Re-install claude+copilot at the SAME pin. The record covers
+        //    copilot but not claude, so this must NOT short-circuit — it must
+        //    materialize the claude output.
+        let t_both = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        let r = install_all(&lock, &access, &m, &t_both, &mut state, &roots, false).await;
+        assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+        assert!(
+            dir.path().join(".claude/rules/rust-style.md").is_file(),
+            "the newly-targeted claude client must be materialized"
+        );
+
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        let mut clients: Vec<&str> = rec.outputs.iter().map(|o| o.client.as_str()).collect();
+        clients.sort_unstable();
+        assert_eq!(clients, vec!["claude", "copilot"], "record covers both clients");
+    }
+
+    /// C3: installing a subset of clients must preserve the other clients'
+    /// recorded outputs (merge-on-write), not clobber them.
+    #[tokio::test]
+    async fn partial_client_update_preserves_other_client_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install claude+copilot at version A.
+        let blob_a = rule_tar("rust-style", b"vA\n");
+        let lock_a = lock_of(vec![locked_rule("rust-style", &blob_a)]);
+        let t_both = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_both,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+        let copilot_hash_a = state
+            .get(ArtifactKind::Rule, "rust-style")
+            .unwrap()
+            .outputs
+            .iter()
+            .find(|o| o.client == "copilot")
+            .unwrap()
+            .content_hash
+            .clone();
+
+        // 2. Install claude-only at version B (different digest ⇒ Updated).
+        let blob_b = rule_tar("rust-style", b"vB\n");
+        let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
+        let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r = install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+        assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        let claude = rec
+            .outputs
+            .iter()
+            .find(|o| o.client == "claude")
+            .expect("claude output present");
+        let copilot = rec
+            .outputs
+            .iter()
+            .find(|o| o.client == "copilot")
+            .expect("copilot output preserved (merge-on-write)");
+        assert_eq!(
+            copilot.content_hash, copilot_hash_a,
+            "copilot output preserved at version A"
+        );
+        assert_ne!(
+            claude.content_hash, copilot.content_hash,
+            "claude advanced to version B"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(".claude/rules/rust-style.md")).unwrap(),
+            b"vB\n"
+        );
     }
 
     #[test]

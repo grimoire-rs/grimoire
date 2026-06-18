@@ -117,6 +117,27 @@ impl ClientOutput {
     }
 }
 
+/// Filter `outputs` to those whose client is in the currently-active set.
+///
+/// `InstallRecord.outputs` records one entry per client targeted *at install
+/// time*. A read-side derivation (`status`, the TUI, the catalog badge) must
+/// reconcile that against the *currently-active* client set (a vendor dir
+/// present for the scope — see [`crate::install::target::detect_clients`]) so a
+/// client the user removed since install does not flag its now-absent files as
+/// a broken install. This is the single source of truth for that reconciliation
+/// so the read-side derivations cannot drift.
+///
+/// An output whose client string does not name a supported target is treated
+/// as inactive (filtered out) — it can never belong to the active set.
+pub fn active_outputs<'a>(
+    outputs: &'a [ClientOutput],
+    active: &'a [ClientTarget],
+) -> impl Iterator<Item = &'a ClientOutput> + 'a {
+    outputs
+        .iter()
+        .filter(move |o| o.client.parse::<ClientTarget>().is_ok_and(|c| active.contains(&c)))
+}
+
 /// One installed artifact's recorded state.
 ///
 /// `outputs` is the single source of truth for every materialized client
