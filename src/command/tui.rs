@@ -109,6 +109,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
             clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
             label: scope_label(other.scope).to_string(),
             roots: other.roots,
+            tui_options: other.options.tui.clone(),
         });
 
     let tui_ctx = TuiContext {
@@ -128,6 +129,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         scope_label: scope_label(scope.scope).to_string(),
         alt,
         roots: scope.roots,
+        tui_options: scope.options.tui.clone(),
     };
 
     app::run(tui_ctx).await?;

@@ -287,7 +287,9 @@ pub(crate) fn write_config(
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    if options.default_registry.is_some() || !options.clients.is_empty() {
+    let has_base_options = options.default_registry.is_some() || !options.clients.is_empty();
+    let has_tui_options = !options.tui.is_empty();
+    if has_base_options || has_tui_options {
         out.push_str("[options]\n");
         if let Some(r) = &options.default_registry {
             let _ = writeln!(out, "default_registry = \"{r}\"");
@@ -300,6 +302,30 @@ pub(crate) fn write_config(
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "clients = [{list}]");
+        }
+        out.push('\n');
+    }
+    if has_tui_options {
+        out.push_str("[options.tui]\n");
+        if let Some(dv) = options.tui.default_view {
+            let label = match dv {
+                crate::config::declaration::DefaultView::Flat => "flat",
+                crate::config::declaration::DefaultView::Tree => "tree",
+            };
+            let _ = writeln!(out, "default_view = \"{label}\"");
+        }
+        if options.tui.group_by_type {
+            let _ = writeln!(out, "group_by_type = true");
+        }
+        if !options.tui.tree_separators.is_empty() {
+            let list = options
+                .tui
+                .tree_separators
+                .iter()
+                .map(|s| toml::Value::String(s.clone()).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "tree_separators = [{list}]");
         }
         out.push('\n');
     }
@@ -368,6 +394,7 @@ mod tests {
         let opts = ConfigOptions {
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
+            tui: Default::default(),
         };
         write_config(&path, &opts, &[], &set).unwrap();
 
@@ -417,5 +444,160 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(!body.contains("[options]"));
         assert!(ProjectConfig::from_toml_str(&body).is_ok());
+    }
+
+    // ── [options.tui] round-trip tests ──────────────────────────────────────
+
+    #[test]
+    fn write_config_tui_options_round_trips() {
+        // A fully-populated [options.tui] block must survive write → parse with
+        // all three fields intact.
+        use crate::config::declaration::{DefaultView, TuiOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            default_registry: None,
+            clients: vec![],
+            tui: TuiOptions {
+                default_view: Some(DefaultView::Tree),
+                group_by_type: true,
+                tree_separators: vec!["/".to_string(), "-".to_string()],
+            },
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("[options.tui] round-trip must parse");
+
+        assert_eq!(
+            cfg.options.tui.default_view,
+            Some(DefaultView::Tree),
+            "default_view must round-trip as DefaultView::Tree"
+        );
+        assert!(cfg.options.tui.group_by_type, "group_by_type must round-trip as true");
+        assert_eq!(
+            cfg.options.tui.tree_separators,
+            vec!["/".to_string(), "-".to_string()],
+            "tree_separators must round-trip verbatim"
+        );
+    }
+
+    #[test]
+    fn write_config_omits_tui_table_when_tui_options_empty() {
+        // When TuiOptions is default (all fields absent/false/empty), the
+        // [options.tui] subtable must not appear in the serialized output.
+        use crate::config::declaration::TuiOptions;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        // Provide a non-empty base options so [options] itself appears, but
+        // leave tui at its Default.
+        let opts = ConfigOptions {
+            default_registry: Some("ghcr.io/acme".to_string()),
+            clients: vec![],
+            tui: TuiOptions::default(),
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("[options.tui]"),
+            "empty TuiOptions must not emit [options.tui]: {body}"
+        );
+        // The file must still parse cleanly.
+        assert!(ProjectConfig::from_toml_str(&body).is_ok());
+    }
+
+    #[test]
+    fn write_config_preserves_registries_and_tui_options_together() {
+        // A config carrying both [[registries]] and [options.tui] must
+        // round-trip with both sections intact — neither may clobber the
+        // other.
+        use crate::config::declaration::{DefaultView, RegistryConfig, TuiOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let registries = vec![RegistryConfig {
+            alias: Some("acme".to_string()),
+            url: "ghcr.io/acme".to_string(),
+            default: true,
+        }];
+        let opts = ConfigOptions {
+            default_registry: None,
+            clients: vec![],
+            tui: TuiOptions {
+                default_view: Some(DefaultView::Tree),
+                group_by_type: false,
+                tree_separators: vec!["/".to_string()],
+            },
+        };
+        write_config(&path, &opts, &registries, &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("registries + tui round-trip must parse");
+
+        // Registries survive.
+        assert_eq!(
+            cfg.registries, registries,
+            "registries must round-trip with tui options present"
+        );
+        // TUI options survive.
+        assert_eq!(
+            cfg.options.tui.default_view,
+            Some(DefaultView::Tree),
+            "default_view must survive alongside registries"
+        );
+        assert_eq!(
+            cfg.options.tui.tree_separators,
+            vec!["/".to_string()],
+            "tree_separators must survive alongside registries"
+        );
+    }
+
+    #[test]
+    fn write_config_tree_separators_special_chars_escape_correctly() {
+        // S1 (CWE-116): a separator containing a backslash must survive
+        // write_config → from_toml_str as the same single character.
+        // The backslash is also valid under S2 (exactly one char), so this
+        // test exercises both the escaping fix and a single-char separator.
+        use crate::config::declaration::TuiOptions;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            default_registry: None,
+            clients: vec![],
+            tui: TuiOptions {
+                default_view: None,
+                group_by_type: false,
+                tree_separators: vec!["\\".to_string()],
+            },
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg =
+            ProjectConfig::from_toml_str(&body).expect("backslash separator must round-trip through write_config");
+        assert_eq!(
+            cfg.options.tui.tree_separators,
+            vec!["\\".to_string()],
+            "backslash separator must round-trip verbatim"
+        );
+    }
+
+    #[test]
+    fn parse_unknown_key_under_tui_options_is_error() {
+        // `#[serde(deny_unknown_fields)]` on TuiOptions means a typo'd key
+        // must be rejected at parse time, not silently ignored.
+        let toml = r#"
+[options.tui]
+tree_separators_typo = 1
+"#;
+        let result = ProjectConfig::from_toml_str(toml);
+        assert!(
+            result.is_err(),
+            "unknown key under [options.tui] must be a parse error, got: {result:?}"
+        );
     }
 }

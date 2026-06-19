@@ -183,11 +183,37 @@ grim search --refresh --registry ghcr.io/acme
 ## grim tui {#tui}
 
 `grim tui` opens an interactive browser over a registry's catalog. It shows
-a flat, kind-grouped list with live install state in colour, and supports
+the catalog with live install state in colour, toggling between a flat
+kind-grouped list and a collapsible tree (press `t`), and supports
 multi-select with batch install, update, and delete. Press `?` in the TUI
-for the full key map; highlights are `v` to pick a version, `o` to open
-the selected entry's repository URL in the browser, `g` to switch scope,
-and `space` to mark rows.
+for the full key map; highlights are `t` to toggle tree/flat view, `v` to
+pick a version, `o` to open the selected entry's repository URL in the
+browser, `g` to switch scope, and `space` to mark rows.
+
+**Tree view** — pressing `t` switches the catalog between flat list mode and
+a collapsible tree grouped by registry host and repository path. In tree mode:
+
+| Key | Action |
+|-----|--------|
+| `t` | Toggle between flat list and tree view. |
+| `→` | Expand the selected group (reveal its children). Tree mode only. |
+| `←` | Collapse the selected group. On an already-collapsed group or on a leaf entry, jump to the parent group instead (ARIA-style navigation). Tree mode only. |
+| `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle); on a leaf entry, open the detail pane as usual. |
+| `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
+| `i` / `u` / `d` on a group | Install, update, or uninstall every leaf in the subtree (when no other rows are individually marked). Batch behavior follows the same selection precedence as the flat view. |
+
+Each group row shows a rollup glyph reflecting the worst install state of
+its descendants — `↑` when any descendant is outdated, `✱` when any is
+locally modified, and so on — so a collapsed tree still surfaces what needs
+attention.
+
+An active search (started with `/`) reveals matching entries even when their
+parent group is collapsed — the tree stays navigable in search mode and does
+not force a switch to flat view.
+
+Three config fields under `[options.tui]` in `grimoire.toml` let you set
+the opening view mode and control how paths are split into groups. See
+[`[options.tui]`][options-tui] for the full reference.
 
 Unlike `grim search`, the TUI browses a **single** registry — the effective
 default resolved from the precedence chain below. Multi-registry browse (and
@@ -416,6 +442,7 @@ the global scope rather than the discovered project:
 
 <!-- internal -->
 [global-options]: #global-options
+[options-tui]: ./configuration.md#options-tui
 
 <!-- external -->
 [mcp-spec]: https://spec.modelcontextprotocol.io/

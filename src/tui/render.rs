@@ -65,10 +65,40 @@ fn fit(s: &str, width: usize) -> String {
     }
 }
 
+/// A group row's tri-state mark, rolled up from its descendant leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkState {
+    /// No descendant leaf is marked.
+    None,
+    /// Some — but not all — descendant leaves are marked.
+    Partial,
+    /// Every descendant leaf is marked.
+    All,
+}
+
+/// Tree-group-specific display data carried by a [`RenderRow`] when the row
+/// projects a group node (absent for leaf / flat rows).
+///
+/// The arrow glyph (▾/▸) and the rollup label are already pre-formatted
+/// into `RenderRow.columns[0]` and `columns[2]` respectively, so
+/// `GroupRow` carries only the data that [`draw`] cannot recover from the
+/// columns — the tri-state mark, consumed to render the leftmost glyph
+/// column (`▣`/`▨`/blank) for group rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRow {
+    /// The tri-state mark rolled up from descendant leaves.
+    /// [`draw`] renders this as the leftmost-column glyph:
+    /// `▣` (All) / `▨` (Partial) / blank (None).
+    pub mark: MarkState,
+}
+
 /// One table row in the render model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRow {
     /// The visible columns, already formatted (kind, repo, tag, status).
+    /// In tree mode, `columns[0]` carries the indent prefix (two spaces per
+    /// depth level) and the arrow glyph for groups — the single canonical
+    /// representation of tree position.
     pub columns: [String; 4],
     /// Whether this row is the current selection.
     pub selected: bool,
@@ -76,6 +106,9 @@ pub struct RenderRow {
     pub marked: bool,
     /// The color the status cell should render in.
     pub status_color: ColorKey,
+    /// Group-display data when this row projects a tree group; `None` for
+    /// leaf rows and every flat-view row.
+    pub group: Option<GroupRow>,
 }
 
 /// The modal version-picker overlay, projected for display.
@@ -142,6 +175,8 @@ pub struct RenderModel {
     pub detail_focused: bool,
     /// Whether the help overlay is showing.
     pub show_help: bool,
+    /// Vertical scroll offset of the help overlay (rows).
+    pub help_scroll: u16,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
 }
@@ -192,7 +227,165 @@ fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked
         selected,
         marked,
         status_color: color,
+        group: None,
     }
+}
+
+/// Compute the tri-state mark for a group given its descendant row indices
+/// and the set of currently-marked rows.
+fn group_mark_state(descendant_rows: &[usize], marked: &std::collections::BTreeSet<usize>) -> MarkState {
+    if descendant_rows.is_empty() {
+        return MarkState::None;
+    }
+    let marked_count = descendant_rows.iter().filter(|i| marked.contains(i)).count();
+    if marked_count == 0 {
+        MarkState::None
+    } else if marked_count == descendant_rows.len() {
+        MarkState::All
+    } else {
+        MarkState::Partial
+    }
+}
+
+/// Project the tree view's flattened display rows into [`RenderRow`]s.
+///
+/// Pure: groups render an arrow + label + rollup label + tri-state mark;
+/// leaves render the bare final-segment label indented to their depth.
+fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
+    let flat = state.flattened();
+    flat.iter()
+        .enumerate()
+        .map(|(pos, display_row)| match display_row {
+            super::tree::DisplayRow::Group {
+                label,
+                depth,
+                collapsed,
+                rollup,
+                rows: descendant_rows,
+                ..
+            } => {
+                // Single status_view call — used for both the color tag and col 3.
+                let (worst_glyph, worst_label, color) = status_view(rollup.worst());
+                let mark = group_mark_state(descendant_rows, &state.marked);
+                let rollup_label = format!("{}/{} installed", rollup.installed, rollup.total);
+                // Arrow: ▾ expanded, ▸ collapsed.
+                let arrow = if *collapsed { "▸" } else { "▾" };
+                let indent = "  ".repeat(*depth);
+                let repo_text = format!("{indent}{arrow} {label}");
+                // Col 3 (Status): group status glyph from rollup.worst(), optionally
+                // prefixed with the tri-state mark glyph. The rollup label belongs in
+                // col 2 (Tag) only — NOT duplicated here.
+                let status_col = match mark {
+                    MarkState::None => format!("{worst_glyph} {worst_label}"),
+                    MarkState::Partial => format!("▨ {worst_glyph} {worst_label}"),
+                    MarkState::All => format!("▣ {worst_glyph} {worst_label}"),
+                };
+                RenderRow {
+                    columns: [
+                        fit(&repo_text, W_REPO),
+                        fit("", W_KIND),
+                        fit(&rollup_label, W_TAG),
+                        status_col,
+                    ],
+                    selected: pos == state.selected,
+                    marked: mark != MarkState::None,
+                    status_color: color,
+                    group: Some(GroupRow { mark }),
+                }
+            }
+            super::tree::DisplayRow::Leaf {
+                label,
+                depth,
+                row,
+                state: leaf_state,
+            } => {
+                let (glyph, status_label, color) = status_view(*leaf_state);
+                let indent = "  ".repeat(*depth);
+                let repo_text = format!("{indent}{label}");
+                let r = state.rows.get(*row);
+                let tag_cell = r
+                    .map(|row| match &row.pinned_version {
+                        Some(p) => format!("*{p}"),
+                        None if !row.version.is_empty() => row.version.clone(),
+                        None => row.latest_tag.clone(),
+                    })
+                    .unwrap_or_default();
+                RenderRow {
+                    columns: [
+                        fit(&repo_text, W_REPO),
+                        fit(r.map(|r| r.kind.as_str()).unwrap_or(""), W_KIND),
+                        fit(&tag_cell, W_TAG),
+                        format!("{glyph} {status_label}"),
+                    ],
+                    selected: pos == state.selected,
+                    marked: state.is_row_marked(*row),
+                    status_color: color,
+                    group: None,
+                }
+            }
+        })
+        .collect()
+}
+
+/// Build the detail-pane lines for a selected tree group (rollup summary),
+/// used in place of [`detail_lines`] when the selection is a group node.
+fn group_detail_lines(state: &TuiState) -> Vec<DetailLine> {
+    let flat = state.flattened();
+    let Some(super::tree::DisplayRow::Group {
+        key,
+        rollup,
+        rows: descendant_rows,
+        ..
+    }) = flat.get(state.selected)
+    else {
+        return vec![DetailLine::Text("no group selected".to_string())];
+    };
+
+    let mut lines = vec![
+        DetailLine::Blank,
+        DetailLine::Identifier(key.clone()),
+        DetailLine::Blank,
+        DetailLine::SectionLabel("Group Summary:"),
+        DetailLine::Blank,
+        DetailLine::MetaEntry {
+            label: "Total:",
+            value: rollup.total.to_string(),
+        },
+        DetailLine::MetaEntry {
+            label: "Installed:",
+            value: rollup.installed.to_string(),
+        },
+    ];
+    if rollup.outdated > 0 {
+        lines.push(DetailLine::MetaEntry {
+            label: "Outdated:",
+            value: rollup.outdated.to_string(),
+        });
+    }
+    if rollup.modified > 0 {
+        lines.push(DetailLine::MetaEntry {
+            label: "Modified:",
+            value: rollup.modified.to_string(),
+        });
+    }
+    if rollup.integrity_missing > 0 {
+        lines.push(DetailLine::MetaEntry {
+            label: "Integrity missing:",
+            value: rollup.integrity_missing.to_string(),
+        });
+    }
+    if rollup.not_installed > 0 {
+        lines.push(DetailLine::MetaEntry {
+            label: "Not installed:",
+            value: rollup.not_installed.to_string(),
+        });
+    }
+    lines.push(DetailLine::Blank);
+    lines.push(DetailLine::MetaEntry {
+        label: "Members:",
+        value: descendant_rows.len().to_string(),
+    });
+    lines
 }
 
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
@@ -214,21 +407,31 @@ pub fn frame(state: &TuiState) -> RenderModel {
         (state.query.clone(), false)
     };
 
-    let rows: Vec<RenderRow> = state
-        .filtered
-        .iter()
-        .enumerate()
-        .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
-        .map(|(pos, i, r)| {
-            let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
-            render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
-        })
-        .collect();
+    let rows: Vec<RenderRow> = if state.view_mode == crate::tui::state::ViewMode::Tree && !state.loading {
+        // Tree view is a pure projection over the flattened, collapse-aware
+        // tree (itself built over the `filtered` row set).
+        tree_render_rows(state)
+    } else {
+        state
+            .filtered
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
+            .map(|(pos, i, r)| {
+                let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
+                render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
+            })
+            .collect()
+    };
 
     // The offset is already clamped at mutation time
     // (`TuiState::scroll_detail`); the re-clamp here covers direct field
     // writes (the field is public for tests).
-    let detail = detail_lines(state.selected_row());
+    let detail = if state.view_mode == crate::tui::state::ViewMode::Tree && state.selected_is_group() {
+        group_detail_lines(state)
+    } else {
+        detail_lines(state.selected_row())
+    };
     let detail_scroll = state.detail_scroll.min(scroll_max(&detail, viewport(state.term_size)));
 
     // Status is transient only — loading / counts / batch results, or the
@@ -249,15 +452,32 @@ pub fn frame(state: &TuiState) -> RenderModel {
 
     // Widest → narrowest. `draw` picks the widest that fits; the last
     // (`? help`) is the irreducible minimum so help is always discoverable.
-    let hint_tiers = vec![
-        "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · / search · ? help · q quit"
-            .to_string(),
-        "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · / search · ? help · q quit".to_string(),
-        "↑↓ move · i/u/d act · v ver · g scope · / search · ? help · q quit".to_string(),
-        "↑↓ · i/u/d · v · g · / · ? help · q".to_string(),
-        "i/u/d v g / ? q".to_string(),
-        "? help".to_string(),
-    ];
+    //
+    // C5: hint tiers are view-mode-aware.
+    //   - `t tree` always appears (always available to toggle).
+    //   - `→/← expand/collapse` appears only in tree mode (inert in flat mode).
+    let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
+        vec![
+            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand/collapse · / search · ? help · q quit"
+                .to_string(),
+            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand · / search · ? help · q quit".to_string(),
+            "↑↓ move · i/u/d act · v ver · g scope · t tree · →/← expand · / search · ? help · q quit".to_string(),
+            "↑↓ i/u/d g t →/← / ? help q".to_string(),
+            "i/u/d v g t / ? q".to_string(),
+            "? help".to_string(),
+        ]
+    } else {
+        // Flat mode: `→/←` keys are inert — omit from hints to avoid misleading users.
+        vec![
+            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · / search · ? help · q quit"
+                .to_string(),
+            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · / search · ? help · q quit".to_string(),
+            "↑↓ move · i/u/d act · v ver · g scope · t tree · / search · ? help · q quit".to_string(),
+            "↑↓ i/u/d g t / ? help q".to_string(),
+            "i/u/d v g t / ? q".to_string(),
+            "? help".to_string(),
+        ]
+    };
     let hint = hint_tiers[0].clone();
 
     let picker = state.picker.as_ref().map(|p| {
@@ -304,6 +524,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         truncation_hint,
         detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
+        help_scroll: state.help_scroll,
         picker,
     }
 }
@@ -444,9 +665,26 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         }
         // Every cell is its own colored span; columns are already
         // fixed-width from `fit()` so the table never skews.
+        //
+        // Leftmost-column glyph: group rows render tri-state from `GroupRow.mark`
+        // (▣ All / ▨ Partial / blank None); leaf and flat rows use the binary
+        // `marked` flag (▣ / blank). This is the single canonical source for the
+        // leftmost mark column — `r.marked` is still accurate for batch-action
+        // detection but the glyph must reflect the tri-state for groups.
+        let mark_glyph = if let Some(group) = &r.group {
+            match group.mark {
+                MarkState::All => "▣ ",
+                MarkState::Partial => "▨ ",
+                MarkState::None => "  ",
+            }
+        } else if r.marked {
+            "▣ "
+        } else {
+            "  "
+        };
         let line = Line::from(vec![
             Span::styled(
-                if r.marked { "▣ " } else { "  " }.to_string(),
+                mark_glyph.to_string(),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{}  ", r.columns[0]), Style::default().fg(Color::White)),
@@ -547,7 +785,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     }
 
     if model.show_help {
-        draw_help(f);
+        draw_help(f, model.help_scroll);
     }
     if let Some(p) = &model.picker {
         draw_picker(f, p);
@@ -638,53 +876,107 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A centered help overlay listing every keybinding.
-fn draw_help(f: &mut Frame) {
-    let rows = [
+/// Every browse-mode keybinding shown in the `?` help overlay, as
+/// `(keys, description)` rows. A free function so a unit test can assert the
+/// overlay documents every action the event loop handles.
+fn help_entries() -> [(&'static str, &'static str); 16] {
+    [
         ("↑ / ↓", "move selection (scroll the detail pane when open)"),
-        ("pgup/pgdn", "scroll the detail pane (no focus needed)"),
+        ("j / k", "scroll the detail pane line by line (when open)"),
+        ("pgup/pgdn", "scroll the detail pane a page (no focus needed)"),
         ("space", "mark / unmark the row"),
         ("a / c", "mark all visible / clear marks"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
         ("v", "pick a specific version for the selected row"),
         ("o", "open the selected entry's repository URL"),
         ("g", "toggle scope: project ⇄ global"),
+        ("t", "toggle tree / flat view"),
+        ("→ / ←", "expand / collapse selected group (tree mode)"),
         ("/", "search; type to filter, enter to commit"),
         ("enter", "open the detail pane"),
         ("r", "refresh the catalog from the registry"),
-        ("? ", "this help (any key closes)"),
+        ("?", "this help (any key closes)"),
         ("q / esc", "quit"),
-    ];
-    let mut lines: Vec<Line> = vec![
+    ]
+}
+
+/// The content lines of the `?` help overlay: a "Keybindings" header, a blank
+/// separator, and one row per [`help_entries`] item. The count must equal
+/// [`crate::tui::state::HELP_BODY_LINES`] (the scroll-clamp source of truth) —
+/// guarded by `tests::help_body_line_count_matches_state`.
+fn help_lines() -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
             "Keybindings",
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
-    for (k, d) in rows {
+    for (k, d) in help_entries() {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {k:<10}"),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(d.to_string(), Style::default().fg(Color::White)),
+            Span::styled(d, Style::default().fg(Color::White)),
         ]));
     }
-    let area = centered_rect(60, 50, f.area());
+    lines
+}
+
+/// Height (rows) for the help overlay: `content_lines` body rows plus the top
+/// and bottom border, clamped to the available terminal height so the box
+/// never exceeds the screen. Sized to content so the full key map shows on a
+/// standard terminal (the previous fixed 50%-height box clipped ~7 rows at
+/// 80×24); on a shorter terminal the overlay scrolls (`↑`/`↓`, `j`/`k`).
+fn help_overlay_height(content_lines: usize, term_height: u16) -> u16 {
+    // body rows + top & bottom border.
+    let needed = u16::try_from(content_lines).unwrap_or(u16::MAX).saturating_add(2);
+    needed.min(term_height.max(1))
+}
+
+/// A centered help overlay listing every keybinding. Sized to its content so
+/// the full key map shows on a standard terminal; scrolls (offset `scroll`)
+/// when the terminal is too short to fit it all.
+fn draw_help(f: &mut Frame, scroll: u16) {
+    let lines = help_lines();
+    let full = f.area();
+    let height = help_overlay_height(lines.len(), full.height);
+    let area = centered_area_rows(full, 60, height);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).scroll((scroll, 0)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
-                    " help ",
+                    " help — ↑↓/j/k scroll, any key closes ",
                     Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                 )),
         ),
         area,
     );
+}
+
+/// A `width_pct`-wide, `height_rows`-tall rectangle centered in `area`. Unlike
+/// [`centered_rect`], the height is an absolute row count (clamped to `area`)
+/// rather than a percentage, so a content-sized overlay neither clips nor
+/// over-grows on tall terminals.
+fn centered_area_rows(area: Rect, width_pct: u16, height_rows: u16) -> Rect {
+    let height = height_rows.min(area.height);
+    let top = area.height.saturating_sub(height) / 2;
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(top), Constraint::Length(height), Constraint::Min(0)])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_pct) / 2),
+            Constraint::Percentage(width_pct),
+            Constraint::Percentage((100 - width_pct) / 2),
+        ])
+        .split(vert[1])[1]
 }
 
 /// A `pct_x` × `pct_y` percent rectangle centered in `area`.
@@ -830,6 +1122,51 @@ mod tests {
         assert!(!frame(&s).show_help);
         s.enter_help();
         assert!(frame(&s).show_help);
+    }
+
+    // Regression: the `?` help overlay must be tall enough to show EVERY
+    // body line on a standard 80×24 terminal. The previous fixed 50%-height
+    // box (`centered_rect(60, 50)`) gave ~10 content rows and clipped ~7 of
+    // the entries.
+    #[test]
+    fn help_overlay_fits_all_entries_on_standard_terminal() {
+        let lines = help_lines().len();
+        let h = help_overlay_height(lines, 24);
+        // every body line + top/bottom border must fit.
+        assert!(
+            h >= lines as u16 + 2,
+            "overlay (h={h}) must be tall enough for all {lines} body lines + borders at 80×24"
+        );
+        assert!(h <= 24, "overlay must never exceed the terminal height");
+    }
+
+    // The overlay must never grow past a short terminal (it clamps and scrolls;
+    // the box stays on-screen).
+    #[test]
+    fn help_overlay_height_clamps_to_short_terminal() {
+        assert_eq!(help_overlay_height(18, 8), 8, "clamp to a short terminal height");
+        assert_eq!(help_overlay_height(18, 1), 1, "never collapse below one row");
+    }
+
+    // The overlay must document the keys that were previously missing or newly
+    // added — j/k detail scroll and the tree expand/collapse + view toggle.
+    #[test]
+    fn help_overlay_documents_detail_scroll_and_tree_keys() {
+        let keys: Vec<&str> = help_entries().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"j / k"), "detail-scroll j/k must be documented");
+        assert!(keys.contains(&"→ / ←"), "tree expand/collapse must be documented");
+        assert!(keys.contains(&"t"), "view toggle must be documented");
+    }
+
+    // The scroll-clamp source of truth (`state::HELP_BODY_LINES`) must match the
+    // overlay's actual body line count, or help scroll mis-clamps.
+    #[test]
+    fn help_body_line_count_matches_state() {
+        assert_eq!(
+            help_lines().len() as u16,
+            crate::tui::state::HELP_BODY_LINES,
+            "HELP_BODY_LINES must equal the overlay's body line count"
+        );
     }
 
     #[test]
@@ -1062,6 +1399,282 @@ mod tests {
             m.rows[0].columns[0],
             fit("reg/acme/tool", W_REPO),
             "flat keeps the full ref"
+        );
+    }
+
+    // ── Step 3.4: tree frame spec tests ──────────────────────────────────────
+
+    // Tree frame projects group rows with arrow glyph (▾/▸), indent, and
+    // leaf rows with the bare label at non-zero depth.
+    #[test]
+    fn tree_frame_produces_group_rows_with_non_null_group_field() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        // Switch to tree mode
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        // frame() calls tree_render_rows() which is unimplemented → panics.
+        // That is the required failure for the spec test.
+        let m = frame(&s);
+        // When implemented, at least one row must have `group.is_some()`
+        // (the group header for "acme").
+        assert!(
+            m.rows.iter().any(|r| r.group.is_some()),
+            "tree frame must include at least one group row (group.is_some())"
+        );
+    }
+
+    // Tree group rows must have non-zero indent for leaf children.
+    // The indent is baked into `columns[0]` as two-space prefixes ("  " per depth
+    // level), which is the canonical single representation of tree depth — the
+    // `depth` field has been removed from `RenderRow` to eliminate the duplicate.
+    #[test]
+    fn tree_frame_leaves_have_nonzero_indent() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("reg/acme/alpha", ArtifactState::Installed)]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        let m = frame(&s);
+        // Leaf rows must be indented (columns[0] starts with "  " — at least one
+        // two-space indent level, since they are children of a group).
+        let leaves: Vec<&RenderRow> = m.rows.iter().filter(|r| r.group.is_none()).collect();
+        assert!(
+            leaves.iter().all(|r| r.columns[0].starts_with("  ")),
+            "leaf rows in tree view must be indented in columns[0]; cols: {:?}",
+            leaves.iter().map(|r| r.columns[0].as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // Tri-state mark: when no descendants are marked, the group's MarkState
+    // must be None. When all are marked, it must be All. When some, Partial.
+    #[test]
+    fn tree_frame_group_mark_state_tri_state() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+
+        // No marks → group must show MarkState::None
+        let m_no_marks = frame(&s);
+        let group_rows: Vec<&RenderRow> = m_no_marks.rows.iter().filter(|r| r.group.is_some()).collect();
+        assert!(
+            group_rows
+                .iter()
+                .all(|r| r.group.as_ref().unwrap().mark == MarkState::None),
+            "no marks → group MarkState must be None"
+        );
+
+        // Mark all descendants
+        s.toggle_mark_all_filtered();
+        let m_all_marks = frame(&s);
+        let group_rows_all: Vec<&RenderRow> = m_all_marks.rows.iter().filter(|r| r.group.is_some()).collect();
+        assert!(
+            group_rows_all
+                .iter()
+                .all(|r| r.group.as_ref().unwrap().mark == MarkState::All),
+            "all descendants marked → group MarkState must be All"
+        );
+
+        // Mark only one → Partial
+        s.clear_marks();
+        s.marked.insert(0); // mark only alpha
+        let m_partial = frame(&s);
+        let group_rows_partial: Vec<&RenderRow> = m_partial.rows.iter().filter(|r| r.group.is_some()).collect();
+        assert!(
+            group_rows_partial
+                .iter()
+                .all(|r| r.group.as_ref().unwrap().mark == MarkState::Partial),
+            "only one descendant marked → group MarkState must be Partial"
+        );
+    }
+
+    // Group detail pane: when the selection is a group in tree mode,
+    // group_detail_lines() is called and must return non-empty detail.
+    #[test]
+    fn tree_group_detail_pane_returns_non_empty_lines() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        // Manually select position 0 (expected to be the "acme" group)
+        s.selected = 0;
+        // frame() will call group_detail_lines() when selected_is_group() is true.
+        // Both are unimplemented → panics. Required failure mode.
+        let m = frame(&s);
+        // When implemented and selection is on a group, detail must be non-empty.
+        if s.selected_is_group() {
+            assert!(
+                !m.detail.is_empty(),
+                "group detail pane must return non-empty lines when a group is selected"
+            );
+        }
+    }
+
+    // Group-row col 3 must show the status glyph for rollup.worst(), NOT a
+    // second copy of the rollup label. For an unmarked group, no mark prefix.
+    // For a marked group (all descendants), the mark glyph prefixes it.
+    #[test]
+    fn tree_group_col3_shows_status_glyph_not_rollup_label() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::Installed),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+
+        // Unmarked group: col 3 must be "✓ installed" (rollup.worst() = Installed),
+        // NOT the rollup label like "2/2 installed".
+        let m_unmarked = frame(&s);
+        let group_row = m_unmarked
+            .rows
+            .iter()
+            .find(|r| r.group.is_some())
+            .expect("must have a group row");
+        assert_eq!(
+            group_row.columns[3], "✓ installed",
+            "unmarked group col 3 must be the status glyph, not the rollup label; got: {:?}",
+            group_row.columns[3]
+        );
+        // Col 3 must NOT contain the rollup label format.
+        assert!(
+            !group_row.columns[3].contains('/'),
+            "col 3 must not contain the rollup label fraction; got: {:?}",
+            group_row.columns[3]
+        );
+
+        // All-marked group: col 3 must include the mark glyph prefix.
+        s.toggle_mark_all_filtered();
+        let m_marked = frame(&s);
+        let group_row_marked = m_marked
+            .rows
+            .iter()
+            .find(|r| r.group.is_some())
+            .expect("must have a group row");
+        assert!(
+            group_row_marked.columns[3].starts_with('▣'),
+            "all-marked group col 3 must start with the ▣ mark glyph; got: {:?}",
+            group_row_marked.columns[3]
+        );
+        assert!(
+            group_row_marked.columns[3].contains("installed"),
+            "all-marked group col 3 must still show the status label; got: {:?}",
+            group_row_marked.columns[3]
+        );
+    }
+
+    // C1.5: A partial-marked group and a fully-marked group must render different
+    // leftmost-column glyphs. `draw()` consumes `GroupRow.mark` (the tri-state)
+    // for the leftmost column, not the binary `r.marked` field.
+    #[test]
+    fn draw_leftmost_col_partial_vs_full_group_mark_differ() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::Installed),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+
+        // Mark only one leaf → Partial
+        s.marked.insert(0);
+        let m_partial = frame(&s);
+        let group_partial = m_partial
+            .rows
+            .iter()
+            .find(|r| r.group.is_some())
+            .expect("must have a group row");
+        assert_eq!(
+            group_partial.group.as_ref().unwrap().mark,
+            MarkState::Partial,
+            "one-of-two marked must be Partial"
+        );
+
+        // Mark both leaves → All
+        s.marked.insert(1);
+        let m_all = frame(&s);
+        let group_all = m_all
+            .rows
+            .iter()
+            .find(|r| r.group.is_some())
+            .expect("must have a group row");
+        assert_eq!(
+            group_all.group.as_ref().unwrap().mark,
+            MarkState::All,
+            "both marked must be All"
+        );
+
+        // The two MarkState values must be distinct — the leftmost glyph differs.
+        assert_ne!(
+            group_partial.group.as_ref().unwrap().mark,
+            group_all.group.as_ref().unwrap().mark,
+            "Partial and All groups must differ in mark state (leftmost glyph)"
+        );
+    }
+
+    // C5: Hint tiers are view-mode-aware.
+    // In tree mode: `t tree` and `→/← expand/collapse` both appear.
+    // In flat mode: `t tree` appears, but `→/←` / `expand` are ABSENT (those keys
+    //   are inert in flat mode and must not be advertised).
+    #[test]
+    fn hint_tiers_are_view_mode_aware() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("reg/acme/alpha", ArtifactState::Installed)]);
+        s.set_default_registry(Some("reg".to_string()));
+
+        // ── Flat mode (default) ───────────────────────────────────────────────
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Flat);
+        let m_flat = frame(&s);
+        let widest_flat = &m_flat.hint_tiers[0];
+        // `t tree` always present.
+        assert!(
+            widest_flat.contains("t tree"),
+            "flat: widest tier must contain 't tree'; tier: {widest_flat:?}"
+        );
+        // `→/←` / `expand` must NOT appear in flat mode.
+        assert!(
+            !widest_flat.contains("expand"),
+            "flat: widest tier must NOT contain 'expand' (inert key); tier: {widest_flat:?}"
+        );
+        assert!(
+            m_flat.hint_tiers.iter().all(|t| !t.contains("expand")),
+            "flat: NO tier must contain 'expand'; tiers: {:?}",
+            m_flat.hint_tiers
+        );
+
+        // ── Tree mode ──────────────────────────────────────────────────────────
+        s.toggle_view_mode();
+        let m_tree = frame(&s);
+        let widest_tree = &m_tree.hint_tiers[0];
+        // `t tree` always present.
+        assert!(
+            widest_tree.contains("t tree"),
+            "tree: widest tier must contain 't tree'; tier: {widest_tree:?}"
+        );
+        // `→/←` expand/collapse must appear in tree mode.
+        assert!(
+            widest_tree.contains("expand"),
+            "tree: widest tier must contain 'expand'; tier: {widest_tree:?}"
+        );
+        // At least two tiers must mention "t tree".
+        let tiers_with_tree = m_tree.hint_tiers.iter().filter(|t| t.contains("t tree")).count();
+        assert!(
+            tiers_with_tree >= 2,
+            "tree: at least two hint tiers must contain 't tree'; tiers: {:?}",
+            m_tree.hint_tiers
         );
     }
 }

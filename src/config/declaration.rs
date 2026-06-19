@@ -18,6 +18,61 @@ use serde::{Deserialize, Serialize};
 use crate::config::hash;
 use crate::oci::Identifier;
 
+/// The view mode the catalog browser opens in, as set in `[options.tui]`.
+///
+/// Typed enum so an invalid value (e.g. `default_view = "list"`) is rejected
+/// as an unknown enum variant at deserialization — the value set is closed and
+/// serde enforces it, so no manual validation is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultView {
+    /// Flat list view (the built-in default when this field is absent).
+    Flat,
+    /// Grouped collapsible tree view.
+    Tree,
+}
+
+/// TUI-specific display options, nested under `[options.tui]`.
+///
+/// `#[serde(deny_unknown_fields)]` so an unknown key (e.g. a typo'd field
+/// name) surfaces as a parse error rather than a silent ignore. An invalid
+/// value for `default_view` (e.g. `"list"`) is rejected as an unknown enum
+/// variant at deserialization.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TuiOptions {
+    /// The view mode to open with. `"tree"` starts the browser in grouped
+    /// tree view; `"flat"` (or absent) starts in flat list mode.
+    /// An invalid value is rejected as an unknown enum variant at deserialization.
+    /// The runtime `t` key still toggles ephemerally — config is never
+    /// rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_view: Option<DefaultView>,
+    /// When true, insert a type-level group (skill / rule / agent / bundle)
+    /// between the registry root and the path segments in tree view.
+    #[serde(default)]
+    pub group_by_type: bool,
+    /// Characters on which the repository path is split into nested groups
+    /// in tree view. When absent or empty, `/` is used at runtime. Each
+    /// entry must be exactly one single-column printable character; empty,
+    /// multi-character, control, whitespace, or zero-width entries are a
+    /// parse error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tree_separators: Vec<String>,
+}
+
+impl TuiOptions {
+    /// True when no option has been set — used for `skip_serializing_if`
+    /// so an unconfigured `[options.tui]` table is omitted from the
+    /// serialized config.
+    ///
+    /// Derived from `PartialEq + Default` so any future field addition is
+    /// automatically reflected here without a manual update.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Optional config options shared by both scopes.
 ///
 /// `#[serde(deny_unknown_fields)]` so schema drift surfaces as a parse
@@ -36,6 +91,9 @@ pub struct ConfigOptions {
     /// the clients whose vendor dir is present, falling back to `claude`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clients: Vec<String>,
+    /// TUI display options (grouped tree view, separators, default mode).
+    #[serde(default, skip_serializing_if = "TuiOptions::is_empty")]
+    pub tui: TuiOptions,
 }
 
 /// One configured registry in the top-level `[[registries]]` array.

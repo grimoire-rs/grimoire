@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_tui_overhaul
-- **Active phase:** 7 — tree view + default-registry elision + group batch ops (impl complete)
-- **Step:** awaiting /swarm-review
-- **Last update:** 2026-05-16 (after Phase 7: tree view + group ops)
+- **Active phase:** 7 — tree view + default-registry elision + group batch ops (reverted; re-impl in progress as separate plan)
+- **Step:** awaiting /swarm-execute (re-implementation — see `.claude/state/plans/plan_tui_tree_view.md`)
+- **Last update:** 2026-06-19 (after 9538c59: tree view reverted; separate plan created)
 
 ---
 
@@ -176,6 +176,12 @@ the **shared seam** through the new `grim uninstall` command.
 
 ## Phase 7 — Tree view + default-registry elision + group batch ops
 
+> **Note:** The Phase 7 implementation was reverted in commit `9538c59`.
+> It is being re-implemented as a separate plan at
+> `.claude/state/plans/plan_tui_tree_view.md`. The design notes below
+> remain as historical context; do not treat them as the current
+> implementation target.
+
 User feedback: flat-list names are long (full `registry/repository` every
 row). Add a grouped tree.
 
@@ -235,4 +241,5 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Phase 5: manual-rig README TUI scenario documented. Impl complete (all 5 phases); formal /swarm-review left to the user (billed/user-triggered). `task verify` green throughout. |
 | 2026-05-16 | Polish (user feedback): fixed-width `fit()` columns (no skew on long ids), full per-cell colorization + colored borders/legend/selection, `?` help overlay, scope shown in title; +6 unit tests (40 TUI total) |
 | 2026-05-16 | Phase 7 (user feedback): tree view (`t`) — registry/`/`/dotted-leaf grouping, default-registry root elided, collapsible groups (`→/←`, `Enter`), whole-group mark/install/update/delete (`action_targets` resolves a group to its subtree). New pure `src/tui/tree.rs`. `task verify` green, 429 Rust + 66 pytest. |
+| 2026-06-19 | Phase 7 **reverted** in `9538c59` — tree view implementation removed from this branch. Re-implementation tracked in separate plan `.claude/state/plans/plan_tui_tree_view.md`. Three new `[options.tui]` config fields (`default_view`, `group_by_type`, `tree_separators`) are being re-landed as Phase 1 of the new plan. |
 | 2026-05-16 | Phase 6 (user feedback): UX polish + version picker. (a) header underline padded to full Status column; (b) grayed `type / to search` placeholder; (c) scope moved to a colored `PROJECT/GLOBAL MODE` box right of search; (d) persistent key hint right-aligned on legend line so `? help` survives transient status; (e) explicit highest-semver version in Tag column (`pick_highest_version` + `CatalogEntry.version`, serde-default backward-compatible); (f) modal version picker (`v`), lazy `list_tags` on open, pin sets install target. `task rust:verify` green, 412 tests. |

@@ -34,6 +34,31 @@ whose vendor directory or marker is present — falling back to all clients when
 none are detected. Unknown keys are rejected on parse, so a typo surfaces
 immediately rather than silently doing nothing.
 
+### `[options.tui]` {#options-tui}
+
+The optional `[options.tui]` sub-table tunes the interactive catalog browser
+launched by [`grim tui`][grim-tui]. All three fields are opt-in —
+an absent `[options.tui]` leaves the TUI at its built-in defaults.
+
+```toml
+[options.tui]
+default_view = "tree"
+group_by_type = true
+tree_separators = ["/", "-"]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_view` | `"flat"` or `"tree"` | `"flat"` | The view mode the browser opens in. `"tree"` starts in the collapsible grouped tree; `"flat"` starts in the plain list. An unrecognised value is a config parse error — the enum is strict. The runtime `t` key still toggles between modes ephemerally; the config is never auto-rewritten. |
+| `group_by_type` | boolean | `false` | When `true`, inserts an extra type-level group — `skill`, `rule`, `agent`, or `bundle` — between the registry root and the repository path segments in tree view. Has no effect in flat mode. |
+| `tree_separators` | array of single-character strings | (absent or `[]`) | The characters on which a repository path is split into nested tree groups. Omitting the field (or setting it to `[]`) leaves the array empty in the config file; at runtime, an empty array normalizes to `["/"]`. Add `"-"` to split on hyphens as well, so `code-review` becomes `code` → `review`. Each entry must be exactly one character; empty or multi-character entries are a parse error. |
+
+Configuration parse errors — including an unrecognised `default_view` value or an invalid `tree_separators` entry — exit 78 (`EX_CONFIG`).
+
+The registry host is always the tree root. When the browsed registry matches
+the configured default registry, the host node is elided from the display
+so leaf names stay short.
+
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member
 skills, rules, and [agents](./agents.md) at lock time:
@@ -273,6 +298,9 @@ volume cannot collide. Grim writes a self-managed `.grimoire/.gitignore`
 (contents: `*`) the first time it creates the `.grimoire/` directory, so the
 state file is kept out of version control without touching your root
 `.gitignore`.
+
+<!-- internal -->
+[grim-tui]: ./commands.md#tui
 
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry

@@ -108,6 +108,16 @@ pub enum ConfigErrorKind {
     /// `alias`, or a duplicate `alias` across the array.
     #[error("invalid [[registries]] entry: {reason}")]
     RegistryInvalid { reason: String },
+
+    /// A `tree_separators` entry is not a single printable single-column
+    /// character.
+    ///
+    /// Each entry must be exactly one Unicode scalar value that occupies one
+    /// terminal column, so the TUI tree splitter can treat it as a visible
+    /// single `char`. Empty, multi-character (e.g. `"::"`), control,
+    /// whitespace, and zero-width / wide entries are all rejected.
+    #[error("invalid tree_separators entry {entry:?}: each entry must be a single printable single-column character")]
+    TreeSeparatorInvalid { entry: String },
 }
 
 #[cfg(test)]

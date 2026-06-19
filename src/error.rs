@@ -118,7 +118,8 @@ fn classify_config(err: &ConfigError) -> ExitCode {
         ConfigErrorKind::TomlParse(_)
         | ConfigErrorKind::FileTooLarge { .. }
         | ConfigErrorKind::UnsupportedDeclarationHashVersion { .. }
-        | ConfigErrorKind::RegistryInvalid { .. } => ExitCode::ConfigError,
+        | ConfigErrorKind::RegistryInvalid { .. }
+        | ConfigErrorKind::TreeSeparatorInvalid { .. } => ExitCode::ConfigError,
         ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
         ConfigErrorKind::ArtifactValueMissingRegistry { .. } | ConfigErrorKind::ArtifactValueInvalid { .. } => {
             ExitCode::DataError

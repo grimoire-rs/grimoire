@@ -9,6 +9,8 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
+use std::collections::BTreeSet;
+
 use crate::catalog::SearchQuery;
 
 /// The install state of a catalog repository relative to the active
@@ -47,6 +49,18 @@ impl std::fmt::Display for ArtifactState {
             Self::IntegrityMissing => "integrity-missing",
         })
     }
+}
+
+/// Whether the catalog browser renders a flat list or a grouped tree.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    /// Flat list view (default at startup unless overridden by config).
+    #[default]
+    Flat,
+    /// Grouped collapsible tree view.
+    Tree,
 }
 
 /// Which interaction mode the screen is in.
@@ -118,7 +132,13 @@ pub struct TuiState {
     pub rows: Vec<TuiRow>,
     /// Indices into `rows` matching the current query, in row order.
     pub filtered: Vec<usize>,
-    /// Selection index *into `filtered`* (not into `rows`).
+    /// Selection index into the **active view's display list**: into
+    /// `filtered` in [`ViewMode::Flat`], into the flattened tree
+    /// ([`Self::flattened`], group headers interleaved) in
+    /// [`ViewMode::Tree`]. Never an index into `rows`. Interpret it only via
+    /// [`Self::selected_row_index`] / [`Self::flattened`]; relocate it across a
+    /// view switch or row rebuild via [`Self::select_row`] (identity-preserving)
+    /// so an un-marked action never targets the wrong artifact.
     pub selected: usize,
     /// Detail-pane vertical scroll offset (post-wrap rows). Clamped at
     /// both ends by [`Self::scroll_detail`]: 0 at the top, the content's
@@ -129,6 +149,10 @@ pub struct TuiState {
     /// input for the detail pane's scroll geometry. Kept current by the
     /// event loop (initial size + every resize event).
     pub term_size: (u16, u16),
+    /// Help-overlay vertical scroll offset (rows). Reset to 0 when the `?`
+    /// overlay opens and clamped by [`Self::scroll_help`] so the dialog can
+    /// scroll when it does not fully fit the terminal height.
+    pub help_scroll: u16,
     /// The live search query.
     pub query: String,
     /// Current interaction mode.
@@ -158,6 +182,16 @@ pub struct TuiState {
     /// `opencode`, …), surfaced in the status area. Pure display data — no
     /// effect on filtering or rows.
     pub clients: Vec<String>,
+    /// Whether the catalog renders as a flat list or a grouped tree.
+    pub view_mode: ViewMode,
+    /// The set of tree-group keys that are collapsed (descendants hidden).
+    pub collapsed: BTreeSet<String>,
+    /// When true, insert a type-level group between the registry root and
+    /// the path segments.
+    pub group_by_type: bool,
+    /// Characters (each a `String`) on which the repository path is split
+    /// into nested groups. Defaults to `["/"]`.
+    pub tree_separators: Vec<String>,
 }
 
 impl Default for TuiState {
@@ -170,6 +204,7 @@ impl Default for TuiState {
             // A sane universal default until the app reports the real
             // size (before the first key event is ever processed).
             term_size: (80, 24),
+            help_scroll: 0,
             query: String::new(),
             mode: Mode::List,
             loading: true,
@@ -181,9 +216,35 @@ impl Default for TuiState {
             picker: None,
             default_registry: None,
             clients: Vec::new(),
+            view_mode: ViewMode::Flat,
+            collapsed: BTreeSet::new(),
+            group_by_type: false,
+            tree_separators: vec!["/".into()],
         }
     }
 }
+
+/// A resort- and reshape-stable handle to "what the cursor is on", captured
+/// before a mutation (catalog refresh, view toggle, tree-option change) and
+/// re-applied after. Leaves are identified by their stable `repo` string and
+/// groups by their path-derived display key (both survive a `set_rows`
+/// resort and a tree reshape), so an un-marked action never silently retargets
+/// a different artifact or subtree.
+enum SelectionAnchor {
+    /// The selected leaf, by its stable `repo` string.
+    Leaf(String),
+    /// The selected group, by its display key, with the `repo` of its first
+    /// descendant as a fallback target when the key does not survive a reshape.
+    Group { key: String, first_repo: Option<String> },
+    /// Nothing actionable was selected.
+    None,
+}
+
+/// Body line count of the `?` help overlay: the "Keybindings" header, a blank
+/// separator, and one row per keybinding entry. Single source for help-scroll
+/// clamping; the entry text lives in [`super::render::help_entries`] and
+/// `render::tests::help_body_line_count_matches_state` guards it against drift.
+pub(crate) const HELP_BODY_LINES: u16 = 18;
 
 impl TuiState {
     /// A fresh state in the loading phase.
@@ -240,11 +301,13 @@ impl TuiState {
     ///   from the fresh set drop (the row no longer exists to act on).
     /// - **Cursor**: the selection follows the same `repo` **only while it is
     ///   still visible** — present in the row set *and* in the active filter;
-    ///   then it lands on that repo's new filtered position. If the repo
-    ///   vanished or the active query now filters it out, the cursor resets to
-    ///   the top of the filtered view (index 0) — the reset `set_rows` already
-    ///   applied — and `clamp_selection` only further adjusts in the degenerate
-    ///   empty-filter case (selection forced to 0). It never dangles.
+    ///   then it lands on that repo's new display position via
+    ///   [`Self::select_row`] (view-aware: the flattened tree position in tree
+    ///   mode, the `filtered` position in flat mode). If the repo vanished or
+    ///   the active query now filters it out, the cursor resets to the top of
+    ///   the view (index 0) — the reset `set_rows` already applied — and a
+    ///   view-aware clamp only further adjusts in the degenerate empty-display
+    ///   case (selection forced to 0). It never dangles.
     /// - **Filter**: the active query is untouched; `set_rows` recomputes
     ///   `filtered` against it.
     ///
@@ -258,7 +321,7 @@ impl TuiState {
             .iter()
             .filter_map(|&i| self.rows.get(i).map(|r| r.repo.clone()))
             .collect();
-        let selected_repo = self.selected_row().map(|r| r.repo.clone());
+        let selection = self.selection_anchor();
 
         for row in &mut fresh {
             let Some(existing) = self.rows.iter().find(|r| r.repo == row.repo) else {
@@ -288,29 +351,50 @@ impl TuiState {
                 .collect();
         }
 
-        // Re-position the cursor on the same repo, but only when it is still
-        // visible (present in `rows` *and* in the current `filtered` view).
-        // When it vanished or the active query filters it out, none of the
-        // `let` guards bind and `selected` keeps the index-0 reset `set_rows`
-        // applied — i.e. the cursor lands at the top of the filtered view.
-        // `clamp_selection` below then only matters in the empty-filter case.
-        if let Some(repo) = selected_repo
-            && let Some(rows_idx) = self.rows.iter().position(|r| r.repo == repo)
-            && let Some(filtered_pos) = self.filtered.iter().position(|&i| i == rows_idx)
-        {
-            self.selected = filtered_pos;
-        }
-        self.clamp_selection();
+        // Re-position the cursor on the same artifact (leaf) or subtree (group)
+        // by stable identity. In tree mode `selected` indexes the flattened
+        // display list (group headers interleaved), so a flat position would
+        // land on the wrong row — and a following un-marked install/update/
+        // delete would act on the wrong artifact or a different group's whole
+        // subtree. The anchor was captured before the `set_rows` resort.
+        self.restore_selection(selection);
     }
 
-    /// Number of selectable rows (the filtered view).
+    /// Number of selectable rows in the current view mode.
     fn display_len(&self) -> usize {
-        self.filtered.len()
+        match self.view_mode {
+            ViewMode::Flat => self.filtered.len(),
+            ViewMode::Tree => self.flattened().len(),
+        }
+    }
+
+    /// Clamp the selection into the tree's visible range after a collapse/expand,
+    /// using a `visible_len` already computed by the caller to avoid a redundant
+    /// tree rebuild.
+    fn clamp_tree_selection_to(&mut self, visible_len: usize) {
+        if visible_len == 0 {
+            self.selected = 0;
+        } else if self.selected >= visible_len {
+            self.selected = visible_len - 1;
+        }
     }
 
     /// The `rows` index of the current selection, if any.
+    ///
+    /// In flat mode: the selected index into `filtered`.
+    /// In tree mode: the `row` index of the selected leaf, or `None` when
+    /// a group is selected (groups have no single row).
     pub fn selected_row_index(&self) -> Option<usize> {
-        self.filtered.get(self.selected).copied()
+        match self.view_mode {
+            ViewMode::Flat => self.filtered.get(self.selected).copied(),
+            ViewMode::Tree => {
+                let flat = self.flattened();
+                match flat.get(self.selected) {
+                    Some(super::tree::DisplayRow::Leaf { row, .. }) => Some(*row),
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Whether the row at `rows` index `i` is marked.
@@ -319,9 +403,34 @@ impl TuiState {
     }
 
     /// Toggle the mark on the current selection. No-op without a
-    /// selectable target.
+    /// selectable target. In tree mode, marking a group materializes all
+    /// its descendant leaf `rows` indices into `marked` (smart toggle:
+    /// if all are marked, clear them; otherwise mark all).
     pub fn toggle_mark_selected(&mut self) {
-        if let Some(i) = self.selected_row_index()
+        if self.view_mode == ViewMode::Tree && self.selected_is_group() {
+            // Group mark: cascade into descendant leaf rows.
+            let flat = self.flattened();
+            let Some(display_row) = flat.get(self.selected) else {
+                return;
+            };
+            let descendant_rows: Vec<usize> = match display_row {
+                super::tree::DisplayRow::Group { rows, .. } => rows.clone(),
+                super::tree::DisplayRow::Leaf { .. } => return,
+            };
+            if descendant_rows.is_empty() {
+                return;
+            }
+            // Smart toggle: if ALL descendants are already marked, clear them;
+            // otherwise mark all of them.
+            let all_marked = descendant_rows.iter().all(|i| self.marked.contains(i));
+            if all_marked {
+                for i in &descendant_rows {
+                    self.marked.remove(i);
+                }
+            } else {
+                self.marked.extend(descendant_rows.iter().copied());
+            }
+        } else if let Some(i) = self.selected_row_index()
             && !self.marked.insert(i)
         {
             self.marked.remove(&i);
@@ -347,13 +456,26 @@ impl TuiState {
     }
 
     /// The `rows` indices a batch action should target: the marked set
-    /// when non-empty, otherwise the single selected row. Always returned
-    /// sorted and de-duplicated for deterministic, stable batch order.
+    /// when non-empty, otherwise the single selected row. In tree mode with
+    /// no marks, a group selection targets all its descendant leaf rows.
+    /// Always returned sorted and de-duplicated for deterministic, stable
+    /// batch order.
     pub fn action_targets(&self) -> Vec<usize> {
         if !self.marked.is_empty() {
             return self.marked.iter().copied().collect();
         }
-        // No marks: the single selection.
+        // No marks: check if a group is selected in tree mode.
+        if self.view_mode == ViewMode::Tree {
+            let flat = self.flattened();
+            if let Some(super::tree::DisplayRow::Group { rows, .. }) = flat.get(self.selected)
+                && !rows.is_empty()
+            {
+                let mut sorted = rows.clone();
+                sorted.sort_unstable();
+                return sorted;
+            }
+        }
+        // Fall back to the single selected row.
         self.selected_row_index().into_iter().collect()
     }
 
@@ -425,7 +547,12 @@ impl TuiState {
         self.detail_scroll = 0;
         self.query = query.into();
         self.recompute_filter();
-        self.clamp_selection();
+        // View-aware clamp: in tree mode `selected` indexes the flattened
+        // display list, which is longer than `filtered` (group headers), so
+        // clamping to `filtered.len()` would pull a valid tree cursor onto a
+        // different visible row. `display_len()` is the active view's row count.
+        let len = self.display_len();
+        self.clamp_tree_selection_to(len);
     }
 
     /// Move the selection by `delta` (saturating at both ends — never
@@ -469,6 +596,292 @@ impl TuiState {
         self.default_registry = registry;
     }
 
+    /// Seed the view mode from a typed [`crate::config::declaration::DefaultView`]
+    /// config value. `None` keeps the default (Flat).
+    pub fn set_view_mode_from_config(&mut self, default_view: Option<crate::config::declaration::DefaultView>) {
+        match default_view {
+            Some(crate::config::declaration::DefaultView::Tree) => self.view_mode = ViewMode::Tree,
+            Some(crate::config::declaration::DefaultView::Flat) | None => {}
+        }
+    }
+
+    /// Seed the tree build options from resolved config values.
+    pub fn set_tree_options(&mut self, group_by_type: bool, tree_separators: Vec<String>) {
+        // The grouping / separator change reshapes the flattened tree, so the
+        // pre-change `selected` (a flattened display index in tree mode) would
+        // point at a different row — including a different *group* whose
+        // un-marked batch action would hit an unrelated subtree. Preserve the
+        // cursor by stable leaf/group identity across the reshape.
+        let anchor = self.selection_anchor();
+        self.group_by_type = group_by_type;
+        self.tree_separators = if tree_separators.is_empty() {
+            vec!["/".into()]
+        } else {
+            tree_separators
+        };
+        self.restore_selection(anchor);
+    }
+
+    /// Toggle between [`ViewMode::Flat`] and [`ViewMode::Tree`]. Ephemeral —
+    /// never written back to config.
+    ///
+    /// Flat and tree views index `selected` in different coordinate spaces
+    /// (`filtered` vs the flattened display list), so the selection is
+    /// preserved by stable leaf/group identity: the selected artifact (or
+    /// group) is captured before the flip and re-located in the new view.
+    /// Without this, a single (un-marked) install/update/delete after a
+    /// toggle could act on a different artifact than the one under the cursor.
+    pub fn toggle_view_mode(&mut self) {
+        let anchor = self.selection_anchor();
+        self.view_mode = match self.view_mode {
+            ViewMode::Flat => ViewMode::Tree,
+            ViewMode::Tree => ViewMode::Flat,
+        };
+        self.restore_selection(anchor);
+    }
+
+    /// Move the selection cursor onto the display position of `rows` index
+    /// `row` in the current view. When the row is not visible (e.g. inside a
+    /// collapsed group), clamp into the visible range instead.
+    fn select_row(&mut self, row: usize) {
+        let pos = match self.view_mode {
+            ViewMode::Flat => self.filtered.iter().position(|&i| i == row),
+            ViewMode::Tree => self
+                .flattened()
+                .iter()
+                .position(|dr| matches!(dr, super::tree::DisplayRow::Leaf { row: r, .. } if *r == row)),
+        };
+        match pos {
+            Some(p) => self.selected = p,
+            None => {
+                let len = self.display_len();
+                self.clamp_tree_selection_to(len);
+            }
+        }
+    }
+
+    /// Capture a stable handle to the current selection (leaf `repo` or group
+    /// key) before a mutation that rebuilds rows or reshapes the tree. Paired
+    /// with [`Self::restore_selection`].
+    fn selection_anchor(&self) -> SelectionAnchor {
+        if self.view_mode == ViewMode::Tree {
+            let flat = self.flattened();
+            match flat.get(self.selected) {
+                Some(super::tree::DisplayRow::Leaf { row, .. }) => self
+                    .rows
+                    .get(*row)
+                    .map(|r| SelectionAnchor::Leaf(r.repo.clone()))
+                    .unwrap_or(SelectionAnchor::None),
+                Some(super::tree::DisplayRow::Group { key, rows, .. }) => SelectionAnchor::Group {
+                    key: key.clone(),
+                    first_repo: rows
+                        .iter()
+                        .min()
+                        .and_then(|&i| self.rows.get(i))
+                        .map(|r| r.repo.clone()),
+                },
+                None => SelectionAnchor::None,
+            }
+        } else {
+            match self.filtered.get(self.selected).and_then(|&i| self.rows.get(i)) {
+                Some(r) => SelectionAnchor::Leaf(r.repo.clone()),
+                None => SelectionAnchor::None,
+            }
+        }
+    }
+
+    /// Re-apply a [`SelectionAnchor`] after a rows rebuild / tree reshape,
+    /// preserving the cursor's artifact (leaf) or subtree (group) identity. A
+    /// group whose key did not survive a reshape falls back to a descendant
+    /// leaf — never a different group — so an un-marked batch action cannot hit
+    /// an unrelated subtree. A vanished target clamps view-aware into range.
+    fn restore_selection(&mut self, anchor: SelectionAnchor) {
+        match anchor {
+            SelectionAnchor::Leaf(repo) => self.select_repo_or_clamp(&repo),
+            SelectionAnchor::Group { key, first_repo } => {
+                // Prefer re-finding the same group by its path-derived key
+                // (stable across a resort / refresh with unchanged options).
+                if self.view_mode == ViewMode::Tree
+                    && let Some(pos) = self
+                        .flattened()
+                        .iter()
+                        .position(|dr| matches!(dr, super::tree::DisplayRow::Group { key: k, .. } if *k == key))
+                {
+                    self.selected = pos;
+                    return;
+                }
+                // The group key did not survive the reshape (e.g. group_by_type
+                // changed) or we are now in flat mode: fall back to a descendant
+                // leaf so the cursor stays inside the original subtree.
+                match first_repo {
+                    Some(repo) => self.select_repo_or_clamp(&repo),
+                    None => {
+                        let len = self.display_len();
+                        self.clamp_tree_selection_to(len);
+                    }
+                }
+            }
+            SelectionAnchor::None => {
+                let len = self.display_len();
+                self.clamp_tree_selection_to(len);
+            }
+        }
+    }
+
+    /// Relocate the cursor onto `repo` when it is still present and visible,
+    /// else clamp view-aware into range.
+    fn select_repo_or_clamp(&mut self, repo: &str) {
+        if let Some(rows_idx) = self.rows.iter().position(|r| r.repo == repo)
+            && self.filtered.contains(&rows_idx)
+        {
+            self.select_row(rows_idx);
+        } else {
+            let len = self.display_len();
+            self.clamp_tree_selection_to(len);
+        }
+    }
+
+    /// Return `true` when the current selection in tree mode points at a
+    /// [`super::tree::DisplayRow::Group`] node.
+    pub fn selected_is_group(&self) -> bool {
+        if self.view_mode != ViewMode::Tree {
+            return false;
+        }
+        let flat = self.flattened();
+        matches!(flat.get(self.selected), Some(super::tree::DisplayRow::Group { .. }))
+    }
+
+    /// Flatten the tree over the current filtered rows and return the
+    /// visible display rows (tree mode only; returns empty in flat mode —
+    /// callers must branch on [`Self::view_mode`]).
+    ///
+    /// When a search query is active (`!self.query.is_empty()`), collapsed
+    /// groups are treated as expanded so that matching descendants are never
+    /// hidden behind a collapsed ancestor. The `collapsed` set is preserved
+    /// and takes effect again when the query clears.
+    pub fn flattened(&self) -> Vec<super::tree::DisplayRow> {
+        let opts = super::tree::TreeBuildOptions {
+            default_registry: self.default_registry.clone(),
+            group_by_type: self.group_by_type,
+            separators: self.tree_separators.clone(),
+        };
+        let tree = super::tree::build(&self.rows, &self.filtered, &opts);
+        // While a query is active, ignore the collapsed set: the tree prunes
+        // to matching leaves only, so any collapsed ancestor would silently
+        // hide a visible match. The collapsed state is preserved and restored
+        // when the query clears.
+        //
+        // An owned empty set is used so the two branches agree on the type
+        // (both `&BTreeSet<String>`) without a heap alloc per call —
+        // the `if` evaluates once and the reference lives for the call.
+        let empty = BTreeSet::new();
+        let effective_collapsed: &BTreeSet<String> = if self.query.is_empty() { &self.collapsed } else { &empty };
+        super::tree::flatten(&tree, effective_collapsed)
+    }
+
+    /// Expand the selected group (remove it from the collapsed set). A
+    /// no-op when not in tree mode, or when the selected row is a leaf.
+    pub fn expand_selected(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        let flat = self.flattened();
+        if let Some(super::tree::DisplayRow::Group { key, .. }) = flat.get(self.selected) {
+            self.collapsed.remove(key);
+            // The flat list is stale after removing from collapsed; recompute length.
+            let new_len = self.flattened().len();
+            self.clamp_tree_selection_to(new_len);
+        }
+    }
+
+    /// Collapse the selected group (add it to the collapsed set). A no-op
+    /// when not in tree mode, or when the selected row is a leaf.
+    pub fn collapse_selected(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        let flat = self.flattened();
+        if let Some(super::tree::DisplayRow::Group { key, .. }) = flat.get(self.selected) {
+            let key = key.clone();
+            self.collapsed.insert(key);
+            // After collapsing, re-flatten to get the new visible length.
+            let new_len = self.flattened().len();
+            self.clamp_tree_selection_to(new_len);
+        }
+    }
+
+    /// Handle the `←` (Collapse) key with ARIA/tree-widget standard behavior:
+    ///
+    /// - On an expanded group: collapse it (same as [`Self::collapse_selected`]).
+    /// - On an already-collapsed group OR on a leaf: move the selection to the
+    ///   nearest ancestor group by scanning `flattened()` backward from the
+    ///   current position for the last row whose depth is strictly less than the
+    ///   current row's depth.
+    ///
+    /// A no-op when not in tree mode or there is no visible ancestor.
+    pub fn collapse_or_jump_to_parent(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        let flat = self.flattened();
+        let Some(selected_row) = flat.get(self.selected) else {
+            return;
+        };
+
+        // Extract the current depth and whether the row is a collapsed group.
+        let (current_depth, is_collapsed_group) = match selected_row {
+            super::tree::DisplayRow::Group { depth, collapsed, .. } => (*depth, *collapsed),
+            super::tree::DisplayRow::Leaf { depth, .. } => (*depth, false),
+        };
+
+        if !is_collapsed_group && matches!(selected_row, super::tree::DisplayRow::Group { .. }) {
+            // Expanded group: collapse it (standard ARIA behavior).
+            if let super::tree::DisplayRow::Group { key, .. } = selected_row {
+                let key = key.clone();
+                self.collapsed.insert(key);
+            }
+            let new_len = self.flattened().len();
+            self.clamp_tree_selection_to(new_len);
+        } else {
+            // Already-collapsed group or leaf: jump to the nearest ancestor.
+            // Scan backward from the row before the current selection.
+            if current_depth == 0 {
+                // Already at the root — no parent to jump to.
+                return;
+            }
+            let parent_pos = flat[..self.selected].iter().rposition(|row| {
+                let d = match row {
+                    super::tree::DisplayRow::Group { depth, .. } => *depth,
+                    super::tree::DisplayRow::Leaf { depth, .. } => *depth,
+                };
+                d < current_depth
+            });
+            if let Some(pos) = parent_pos {
+                self.selected = pos;
+            }
+        }
+    }
+
+    /// Toggle collapse of the selected group (expand if collapsed, collapse
+    /// if expanded). A no-op on leaves.
+    pub fn toggle_collapse_selected(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        let flat = self.flattened();
+        if let Some(super::tree::DisplayRow::Group { key, collapsed, .. }) = flat.get(self.selected) {
+            if *collapsed {
+                self.collapsed.remove(key);
+            } else {
+                let key = key.clone();
+                self.collapsed.insert(key);
+            }
+            // After toggling collapse state, recompute visible length.
+            let new_len = self.flattened().len();
+            self.clamp_tree_selection_to(new_len);
+        }
+    }
+
     /// Enter the detail pane for the current selection, starting at the
     /// top. A no-op when there is no selectable row.
     pub fn enter_detail(&mut self) {
@@ -483,9 +896,23 @@ impl TuiState {
         self.mode = Mode::Search;
     }
 
-    /// Show the keybinding help overlay.
+    /// Show the keybinding help overlay (reset to the top).
     pub fn enter_help(&mut self) {
+        self.help_scroll = 0;
         self.mode = Mode::Help;
+    }
+
+    /// Scroll the help overlay by `delta` rows, clamped to its scroll range.
+    /// The overlay is content-sized then capped to the terminal height; rows
+    /// beyond the inner viewport scroll. A no-op when the whole overlay fits.
+    pub fn scroll_help(&mut self, delta: i64) {
+        // Inner viewport = box height (body + 2 borders, capped to the
+        // screen) minus the 2 borders.
+        let box_h = HELP_BODY_LINES.saturating_add(2).min(self.term_size.1.max(1));
+        let viewport = box_h.saturating_sub(2);
+        let max = HELP_BODY_LINES.saturating_sub(viewport);
+        let next = (i64::from(self.help_scroll) + delta).clamp(0, i64::from(max));
+        self.help_scroll = u16::try_from(next).unwrap_or(0);
     }
 
     /// Leave detail / search / help and return to the list.
@@ -569,15 +996,6 @@ impl TuiState {
             .filter(|(_, r)| query.matches_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords))
             .map(|(i, _)| i)
             .collect();
-    }
-
-    /// Clamp the selection into the current filtered range.
-    fn clamp_selection(&mut self) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len() - 1;
-        }
     }
 }
 
@@ -1172,5 +1590,630 @@ mod tests {
         // Growing the terminal shrinks the range — the offset re-clamps.
         s.set_term_size((400, 200));
         assert_eq!(s.detail_scroll, 0, "content fits a huge pane: no scroll range left");
+    }
+
+    #[test]
+    fn scroll_help_clamps_to_range() {
+        let mut s = TuiState::new();
+        s.set_term_size((80, 8)); // short → the help overlay must scroll
+        s.scroll_help(-1);
+        assert_eq!(s.help_scroll, 0, "cannot scroll above the top");
+        s.scroll_help(100);
+        let bottom = s.help_scroll;
+        assert!(bottom > 0, "a short terminal leaves a scroll range");
+        s.scroll_help(100);
+        assert_eq!(s.help_scroll, bottom, "clamps at the bottom");
+        // A terminal tall enough to fit the whole overlay → no scroll range.
+        s.set_term_size((80, 50));
+        s.scroll_help(1);
+        assert_eq!(s.help_scroll, 0, "no scroll when the overlay fully fits");
+    }
+
+    // ── Step 3.2: tree-aware state spec tests ─────────────────────────────────
+
+    fn tree_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        TuiRow {
+            kind: kind.to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state,
+        }
+    }
+
+    fn tree_seeded() -> TuiState {
+        let mut s = TuiState::new();
+        // Two rows under the same registry → one group
+        s.set_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s
+    }
+
+    // `toggle_view_mode` flips Flat ⇄ Tree.
+    #[test]
+    fn toggle_view_mode_flips_flat_and_tree() {
+        let mut s = tree_seeded();
+        assert_eq!(s.view_mode, ViewMode::Flat, "default is Flat");
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Flat);
+    }
+
+    // Marks survive the flat ⇄ tree toggle (indices into `rows` unchanged).
+    #[test]
+    fn marks_survive_view_mode_toggle() {
+        let mut s = tree_seeded();
+        // Mark row 0 in flat mode
+        s.toggle_mark_selected();
+        assert!(s.is_row_marked(0), "row 0 marked in flat mode");
+        // Toggle to tree
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert!(s.is_row_marked(0), "mark must survive the flat→tree toggle");
+        // Toggle back to flat
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        assert!(s.is_row_marked(0), "mark must survive the tree→flat toggle");
+    }
+
+    // `selected_is_group()` returns true on a group line, false on a leaf.
+    #[test]
+    fn selected_is_group_returns_true_for_group_false_for_leaf() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        // tree_seeded() produces: "acme" group at position 0,
+        // leaves "alpha" and "beta" at positions 1 and 2.
+        s.selected = 0;
+        assert!(
+            s.selected_is_group(),
+            "position 0 (acme group header) must return true from selected_is_group()"
+        );
+        // Navigate to a leaf position.
+        s.selected = 1;
+        assert!(
+            !s.selected_is_group(),
+            "position 1 (a leaf) must return false from selected_is_group()"
+        );
+    }
+
+    // Codex-H regression: toggling view mode must keep the SAME artifact
+    // selected. Flat and tree index `selected` in different coordinate
+    // spaces, so a naive index reuse could retarget to a neighbor and make a
+    // single (un-marked) i/u/d act on the wrong artifact.
+    #[test]
+    fn view_toggle_preserves_selected_artifact() {
+        let mut s = tree_seeded();
+        // Flat: filtered = [0 (alpha), 1 (beta)]; select beta (rows index 1).
+        s.selected = 1;
+        assert_eq!(s.selected_row_index(), Some(1), "beta selected in flat mode");
+        // Flat → Tree: beta is a leaf at a different display position, but the
+        // selected artifact must remain beta (rows index 1), not a neighbor.
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert_eq!(
+            s.selected_row_index(),
+            Some(1),
+            "view toggle must keep beta (rows index 1) selected, not retarget to alpha"
+        );
+        // Tree → Flat round-trips back to beta.
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        assert_eq!(s.selected_row_index(), Some(1), "round-trip keeps beta selected");
+    }
+
+    // `selected_is_group()` returns false in flat mode (the early-return fast path).
+    #[test]
+    fn selected_is_group_returns_false_in_flat_mode() {
+        let s = tree_seeded();
+        // Default is Flat mode — selected_is_group() must return false
+        // without consulting the tree (fast path).
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        assert!(
+            !s.selected_is_group(),
+            "selected_is_group() must be false in flat mode (early-return fast path)"
+        );
+    }
+
+    // `action_targets()` with no marks and a group selected returns the group's
+    // sorted descendant leaf row indices (distinct from the cascade-mark test
+    // which marks first then calls action_targets on the marked set).
+    #[test]
+    fn action_targets_no_marks_group_selection_returns_descendant_indices() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 0;
+        assert!(s.selected_is_group(), "position 0 must be a group");
+        assert!(s.marked.is_empty(), "no marks before calling action_targets");
+        // action_targets() with no marks on a group → descendant leaf row indices.
+        let targets = s.action_targets();
+        assert!(
+            !targets.is_empty(),
+            "action_targets must return the group's descendant rows when no marks"
+        );
+        // The two rows in tree_seeded() are at indices 0 and 1 in `rows`.
+        // Both must be in targets.
+        assert!(
+            targets.contains(&0),
+            "row 0 (alpha) must be in action_targets; got: {targets:?}"
+        );
+        assert!(
+            targets.contains(&1),
+            "row 1 (beta) must be in action_targets; got: {targets:?}"
+        );
+        // Targets must be sorted.
+        let mut sorted = targets.clone();
+        sorted.sort_unstable();
+        assert_eq!(targets, sorted, "action_targets must return sorted indices");
+    }
+
+    // expand/collapse/toggle clamp the selection to the new visible length.
+    #[test]
+    fn expand_collapse_clamp_selection() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        // Collapse the group (selection goes to position 0 = the group header)
+        s.collapse_selected();
+        // Now the tree has only 1 visible row (collapsed group header);
+        // selection must be within range
+        let flat = s.flattened();
+        assert!(
+            s.selected < flat.len().max(1),
+            "selection must be in range after collapse"
+        );
+        // Expand restores descendants; selection still valid
+        s.expand_selected();
+        let flat_expanded = s.flattened();
+        assert!(!flat_expanded.is_empty());
+        assert!(
+            s.selected < flat_expanded.len(),
+            "selection must be in range after expand"
+        );
+    }
+
+    // Regression (swarm-review B1 / Codex): in tree mode a background catalog
+    // refresh must keep the cursor on the SAME artifact by identity, not snap
+    // it to a flat `filtered` position. `selected` is a flattened display
+    // index in tree mode (group headers interleaved), so assigning the flat
+    // position would land the cursor on a different row — and a following
+    // un-marked install/update/delete would hit the wrong artifact.
+    #[test]
+    fn merge_catalog_rows_preserves_tree_cursor_identity_beyond_filtered_len() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        // flattened = [acme(group, 0), alpha(leaf, 1), beta(leaf, 2)].
+        // Select beta — display index 2, which is BEYOND filtered.len()-1 (=1).
+        s.selected = 2;
+        assert_eq!(
+            s.selected_row().map(|r| r.repo.as_str()),
+            Some("reg/acme/beta"),
+            "precondition: beta selected at flattened index 2"
+        );
+        // A background refresh delivers the same repos (possibly re-sorted).
+        s.merge_catalog_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+        ]);
+        // The cursor must still be on beta — NOT clamped down to filtered.len()-1
+        // (which is alpha, the pre-fix bug).
+        assert_eq!(
+            s.selected_row().map(|r| r.repo.as_str()),
+            Some("reg/acme/beta"),
+            "tree cursor identity must survive a catalog refresh"
+        );
+    }
+
+    // Regression (swarm-review RC-3): changing structural tree options (e.g. a
+    // scope toggle bringing a different `[options.tui]`) reshapes the flattened
+    // tree, so the cursor must be relocated by stable identity rather than left
+    // at a now-stale flattened index.
+    #[test]
+    fn set_tree_options_preserves_selection_identity() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 2; // beta leaf
+        assert_eq!(s.selected_row().map(|r| r.repo.as_str()), Some("reg/acme/beta"));
+        // Enable group_by_type: shape becomes [skill(0), acme(1), alpha(2), beta(3)].
+        s.set_tree_options(true, vec!["/".to_string()]);
+        assert_eq!(
+            s.selected_row().map(|r| r.repo.as_str()),
+            Some("reg/acme/beta"),
+            "cursor identity must survive a tree-options reshape"
+        );
+    }
+
+    // A view toggle with a GROUP selected (no single row) must land the cursor
+    // on a valid flat row, never dangle (swarm-review test-coverage gap).
+    #[test]
+    fn toggle_view_mode_with_group_selected_lands_on_valid_row() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 0; // the acme group header
+        assert!(s.selected_is_group(), "precondition: a group is selected");
+        s.toggle_view_mode(); // → Flat
+        assert!(s.selected < s.filtered.len(), "selection must be in flat range");
+        assert!(
+            s.selected_row().is_some(),
+            "cursor must land on a valid row, not dangle"
+        );
+    }
+
+    // Tree-mode navigation/action over an empty filtered set must be safe
+    // (swarm-review test-coverage gap — the flat analog already exists).
+    #[test]
+    fn tree_mode_empty_filter_navigation_is_safe() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.apply_query("zzz-no-such-match");
+        assert!(s.flattened().is_empty(), "no rows match → empty flattened tree");
+        assert!(!s.selected_is_group(), "no group is selected over an empty tree");
+        assert!(s.action_targets().is_empty(), "no targets over an empty tree");
+        s.move_selection(3);
+        assert_eq!(s.selected, 0, "move over an empty tree keeps selection at 0");
+    }
+
+    // `move_selection` in tree mode saturates at the flattened (display) length,
+    // not the flat `filtered` length, and re-saturates after a collapse shrinks
+    // the visible set (swarm-review test-coverage gap).
+    #[test]
+    fn move_selection_tree_saturates_at_flattened_len() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree; flattened len = 3
+        s.move_selection(100);
+        assert_eq!(s.selected, s.flattened().len() - 1, "saturate at last display row");
+        assert_eq!(s.selected, 2, "flattened len is 3 (1 group + 2 leaves)");
+        // Collapse the group → only the group header remains visible.
+        s.selected = 0;
+        s.collapse_selected();
+        s.move_selection(100);
+        assert_eq!(
+            s.selected,
+            s.flattened().len() - 1,
+            "re-saturate to the smaller display"
+        );
+    }
+
+    // Two registries → two top-level groups, so a selection reset to index 0
+    // would land on the WRONG group (detectable).
+    fn two_group_tree() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            tree_row("reg/acme/x", "skill", ArtifactState::Installed),
+            tree_row("reg/zeta/y", "skill", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree; flattened = [acme(0), x(1), zeta(2), y(3)]
+        s
+    }
+
+    // Regression (swarm-review round-2 / Codex): a background refresh with a
+    // GROUP selected must keep the cursor on that group's subtree, not reset to
+    // a different group — else an un-marked batch action hits the wrong subtree.
+    #[test]
+    fn merge_catalog_rows_preserves_tree_group_selection_identity() {
+        let mut s = two_group_tree();
+        s.selected = 2; // the zeta group (NOT the first group)
+        assert!(s.selected_is_group(), "precondition: a group is selected");
+        let y_idx = s.rows.iter().position(|r| r.repo == "reg/zeta/y").unwrap();
+        assert_eq!(s.action_targets(), vec![y_idx], "precondition: zeta group targets y");
+        // Background refresh delivers the same repos.
+        s.merge_catalog_rows(vec![
+            tree_row("reg/acme/x", "skill", ArtifactState::Installed),
+            tree_row("reg/zeta/y", "skill", ArtifactState::NotInstalled),
+        ]);
+        let y_after = s.rows.iter().position(|r| r.repo == "reg/zeta/y").unwrap();
+        assert_eq!(
+            s.action_targets(),
+            vec![y_after],
+            "group selection must stay on the zeta subtree across a refresh, not reset to acme"
+        );
+    }
+
+    // Regression (swarm-review round-2 / Codex): a tree-options reshape (e.g. a
+    // scope toggle enabling group_by_type) with a GROUP selected must keep the
+    // cursor within the original subtree (the same group re-found, or one of its
+    // descendant leaves) — never a different group.
+    #[test]
+    fn set_tree_options_group_selection_stays_in_subtree() {
+        let mut s = two_group_tree();
+        s.selected = 2; // the zeta group
+        assert!(s.selected_is_group(), "precondition: a group is selected");
+        let y_idx = s.rows.iter().position(|r| r.repo == "reg/zeta/y").unwrap();
+        // Enable group_by_type → the tree reshapes (a type level is inserted).
+        s.set_tree_options(true, vec!["/".to_string()]);
+        let targets = s.action_targets();
+        assert!(!targets.is_empty(), "selection must stay actionable after a reshape");
+        assert!(
+            targets.iter().all(|&t| t == y_idx),
+            "targets must stay within the original zeta subtree, got {targets:?}"
+        );
+    }
+
+    // tree reflects the active filter (filtered subset → pruned tree).
+    #[test]
+    fn tree_reflects_active_filter() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+            tree_row("reg/other/gamma", "skill", ArtifactState::Installed),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree
+        // Apply a query that matches only "alpha"
+        s.apply_query("alpha");
+        let flat = s.flattened();
+        // beta and gamma must not appear in the flattened tree
+        let labels: Vec<String> = flat
+            .iter()
+            .map(|d| match d {
+                super::super::tree::DisplayRow::Group { label, .. } => label.clone(),
+                super::super::tree::DisplayRow::Leaf { label, .. } => label.clone(),
+            })
+            .collect();
+        assert!(
+            !labels.iter().any(|l| l == "beta" || l == "gamma"),
+            "filtered-out rows must not appear in the tree; labels: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "alpha" || l == "acme"),
+            "matching leaf or its ancestor must appear; labels: {labels:?}"
+        );
+    }
+
+    // Collapsing a group, then applying + clearing a filter must leave the group
+    // key in `collapsed` and the group rendering as collapsed.
+    #[test]
+    fn collapse_state_stable_across_filter_rebuilds() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+            tree_row("reg/acme/gamma", "skill", ArtifactState::Installed),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree
+
+        // Collapse the "acme" group (position 0).
+        s.selected = 0;
+        assert!(s.selected_is_group(), "position 0 must be the acme group");
+        s.collapse_selected();
+        let acme_key = "acme".to_string();
+        assert!(
+            s.collapsed.contains(&acme_key),
+            "acme must be in collapsed set after collapse_selected()"
+        );
+
+        // Apply a filter that matches only some leaves.
+        s.apply_query("alpha");
+        // The collapsed key must still be in the set.
+        assert!(
+            s.collapsed.contains(&acme_key),
+            "acme collapsed key must survive a filter application"
+        );
+
+        // Clear the filter.
+        s.apply_query("");
+        assert!(
+            s.collapsed.contains(&acme_key),
+            "acme collapsed key must survive clearing the filter"
+        );
+
+        // The group must render as collapsed in the flat list.
+        let flat = s.flattened();
+        let group_display = flat
+            .iter()
+            .find(|d| matches!(d, super::super::tree::DisplayRow::Group { key, .. } if key == &acme_key));
+        assert!(group_display.is_some(), "acme group must be in the flattened tree");
+        match group_display.unwrap() {
+            super::super::tree::DisplayRow::Group { collapsed, .. } => {
+                assert!(*collapsed, "acme group must render as collapsed");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Parent-cascade: toggling mark on a group materializes all descendant
+    // leaf `rows` indices into `marked`.
+    #[test]
+    fn group_mark_cascades_to_descendant_leaf_rows() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        // Select position 0 which should be the "acme" group header
+        s.selected = 0;
+        assert!(
+            s.selected_is_group(),
+            "position 0 must be a group in tree_seeded(); tree shape changed unexpectedly"
+        );
+        assert!(s.marked.is_empty(), "no marks before toggle");
+        s.toggle_mark_selected();
+        // Both descendant leaf rows (0 and 1) must now be marked
+        assert!(!s.marked.is_empty(), "group toggle must materialize descendant marks");
+        assert!(
+            s.marked.contains(&0) && s.marked.contains(&1),
+            "both descendant rows (0 and 1) must be marked; marked: {:?}",
+            s.marked
+        );
+    }
+
+    // Smart toggle: if all descendants are marked, a second group toggle clears them.
+    #[test]
+    fn group_mark_smart_toggle_all_marked_clears() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 0;
+        assert!(
+            s.selected_is_group(),
+            "position 0 must be a group in tree_seeded(); tree shape changed unexpectedly"
+        );
+        // First toggle: marks all
+        s.toggle_mark_selected();
+        let first_marked = s.marked.clone();
+        assert!(!first_marked.is_empty(), "first toggle must mark descendants");
+        // Second toggle: all already marked → clears them
+        s.toggle_mark_selected();
+        assert!(
+            s.marked.is_empty(),
+            "second toggle when all descendants marked must clear all; marked: {:?}",
+            s.marked
+        );
+    }
+
+    // `action_targets()` returns the marked set unchanged (descendant leaf
+    // row indices) after a group cascade mark.
+    #[test]
+    fn action_targets_returns_cascade_marked_descendants() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 0;
+        assert!(
+            s.selected_is_group(),
+            "position 0 must be a group in tree_seeded(); tree shape changed unexpectedly"
+        );
+        s.toggle_mark_selected();
+        let targets = s.action_targets();
+        assert!(!targets.is_empty(), "action_targets must return cascade-marked rows");
+        // Targets must only contain valid row indices
+        for &t in &targets {
+            assert!(t < s.rows.len(), "target index {t} out of bounds");
+        }
+    }
+
+    // C3: A query must not hide matching descendants behind a collapsed group.
+    // Collapse a group, set a query matching a descendant, assert the leaf appears.
+    // When the query clears, the group returns to its collapsed state.
+    #[test]
+    fn query_exposes_matches_behind_collapsed_ancestor() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree
+
+        // Collapse the "acme" group.
+        s.selected = 0;
+        assert!(s.selected_is_group(), "position 0 must be the acme group");
+        s.collapse_selected();
+        assert!(s.collapsed.contains("acme"), "acme must be collapsed");
+
+        // With no query: only the collapsed group header is visible.
+        let flat_collapsed = s.flattened();
+        assert_eq!(flat_collapsed.len(), 1, "collapsed group hides its 2 children");
+        assert!(
+            matches!(&flat_collapsed[0], super::super::tree::DisplayRow::Group { .. }),
+            "only the group header is visible when collapsed"
+        );
+
+        // Set a query matching the "beta" descendant.
+        s.apply_query("beta");
+        let flat_query = s.flattened();
+        // The "beta" leaf must appear — the collapsed state must not hide it.
+        let leaf_labels: Vec<String> = flat_query
+            .iter()
+            .filter_map(|d| match d {
+                super::super::tree::DisplayRow::Leaf { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leaf_labels.contains(&"beta".to_string()),
+            "beta must be visible in flattened() while query is active, even though its group is collapsed; got: {flat_query:?}"
+        );
+
+        // Clear the query: the group returns to its collapsed state.
+        s.apply_query("");
+        assert!(
+            s.collapsed.contains("acme"),
+            "acme must still be in collapsed set after query cleared"
+        );
+        let flat_after = s.flattened();
+        assert_eq!(
+            flat_after.len(),
+            1,
+            "after clearing the query, the group collapses again; got: {flat_after:?}"
+        );
+        assert!(
+            matches!(
+                &flat_after[0],
+                super::super::tree::DisplayRow::Group { collapsed: true, .. }
+            ),
+            "group header must render as collapsed after query cleared"
+        );
+    }
+
+    // Gap (a): set_view_mode_from_config routes correctly.
+    //   Some(Tree)  → ViewMode::Tree
+    //   None        → ViewMode::Flat (unchanged)
+    //   Some(Flat)  → ViewMode::Flat (unchanged)
+    #[test]
+    fn set_view_mode_from_config_tree_overrides_default() {
+        use crate::config::declaration::DefaultView;
+        let mut s = TuiState::new();
+        assert_eq!(s.view_mode, ViewMode::Flat, "default view mode must be Flat");
+
+        s.set_view_mode_from_config(Some(DefaultView::Tree));
+        assert_eq!(s.view_mode, ViewMode::Tree, "Some(Tree) must set Tree view mode");
+
+        // Reset and verify None leaves Flat.
+        let mut s2 = TuiState::new();
+        s2.set_view_mode_from_config(None);
+        assert_eq!(s2.view_mode, ViewMode::Flat, "None must leave view mode as Flat");
+
+        // Some(Flat) also leaves it Flat.
+        let mut s3 = TuiState::new();
+        s3.set_view_mode_from_config(Some(DefaultView::Flat));
+        assert_eq!(s3.view_mode, ViewMode::Flat, "Some(Flat) must leave view mode as Flat");
+    }
+
+    // Gap (b): set_tree_options normalizes empty separator list to ["/"].
+    #[test]
+    fn set_tree_options_normalizes_empty_separators_to_slash() {
+        let mut s = TuiState::new();
+
+        // Empty vec → normalized to ["/"].
+        s.set_tree_options(true, vec![]);
+        assert_eq!(
+            s.tree_separators,
+            vec!["/"],
+            "empty tree_separators must normalize to [\"/\"]"
+        );
+
+        // Non-empty vec passes through unchanged.
+        s.set_tree_options(false, vec![".".to_string(), "/".to_string()]);
+        assert_eq!(
+            s.tree_separators,
+            vec![".", "/"],
+            "non-empty tree_separators must be stored as-is"
+        );
+    }
+
+    // Gap (c): empty tree — flatten(build([], [], &opts), &collapsed) is empty.
+    #[test]
+    fn empty_rows_produce_empty_flat_tree() {
+        use crate::tui::tree::{TreeBuildOptions, build, flatten};
+        use std::collections::BTreeSet;
+
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+        };
+        let tree = build(&[], &[], &opts);
+        let collapsed: BTreeSet<String> = BTreeSet::new();
+        let flat = flatten(&tree, &collapsed);
+        assert!(
+            flat.is_empty(),
+            "flatten of an empty build must return an empty vec; got: {flat:?}"
+        );
     }
 }

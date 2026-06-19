@@ -175,14 +175,17 @@ grim search --refresh --registry ghcr.io/acme --format json
 
 `grim tui` browses a registry's catalog interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
-detail pane per entry. It browses a single registry (the effective default
-registry from the precedence chain — flag, env, global config, or the
-built-in fallback); multi-registry browse is planned for a future release.
-When the active scope has no `grimoire.toml` yet it offers to create one
-before starting via popup dialogs (the registry input is pre-filled with
-the effective default registry and the accepted value is persisted as
-`default_registry`; cancelling closes the TUI). Its install, update, and
-delete actions go through the same seams as
+detail pane per entry. Press `t` to toggle between the flat list and a
+grouped collapsible tree view; the tree's opening mode and path-splitting
+characters are configurable via `[options.tui]` in `grimoire.toml`
+(`default_view`, `group_by_type`, `tree_separators`). It browses a single
+registry (the effective default registry from the precedence chain — flag,
+env, global config, or the built-in fallback); multi-registry browse is
+planned for a future release. When the active scope has no `grimoire.toml`
+yet it offers to create one before starting via popup dialogs (the registry
+input is pre-filled with the effective default registry and the accepted
+value is persisted as `default_registry`; cancelling closes the TUI). Its
+install, update, and delete actions go through the same seams as
 `grim add`/`install`/`uninstall`. Press `?` inside for the full key map.
 
 `grim mcp` runs a local [Model Context Protocol][mcp-spec] server over

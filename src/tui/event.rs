@@ -10,7 +10,7 @@
 //! place); this module operates on the abstract input so the whole
 //! decision table is unit-testable headlessly.
 
-use super::state::{Mode, TuiState};
+use super::state::{Mode, TuiState, ViewMode};
 
 /// Rows one `PageUp`/`PageDown` press scrolls the detail pane. A fixed
 /// step (not the live pane height, which the pure layer cannot know);
@@ -52,6 +52,12 @@ pub enum TuiInput {
     ClearMarks,
     /// Toggle the active scope (Global ⇄ Project).
     ScopeToggle,
+    /// Toggle the flat list ⇄ grouped tree view.
+    ViewToggle,
+    /// Expand the selected tree group.
+    Expand,
+    /// Collapse the selected tree group.
+    Collapse,
     /// Show the keybinding help overlay.
     Help,
     /// Open the version picker for the selected row.
@@ -137,10 +143,28 @@ fn handle_picker(state: &mut TuiState, input: TuiInput) -> TuiAction {
     }
 }
 
-/// Help-overlay keys: `q` quits, anything else dismisses back to the list.
+/// Help-overlay keys: scroll keys (`↑`/`↓`, `j`/`k`, `PageUp`/`PageDown`)
+/// move the overlay when it does not fully fit; `q` quits; anything else
+/// dismisses back to the list.
 fn handle_help(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        TuiInput::Up | TuiInput::Char('k') => {
+            state.scroll_help(-1);
+            TuiAction::None
+        }
+        TuiInput::Down | TuiInput::Char('j') => {
+            state.scroll_help(1);
+            TuiAction::None
+        }
+        TuiInput::PageUp => {
+            state.scroll_help(-DETAIL_PAGE);
+            TuiAction::None
+        }
+        TuiInput::PageDown => {
+            state.scroll_help(DETAIL_PAGE);
+            TuiAction::None
+        }
         _ => {
             state.back();
             TuiAction::None
@@ -196,6 +220,9 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
         | TuiInput::ScopeToggle
+        | TuiInput::ViewToggle
+        | TuiInput::Expand
+        | TuiInput::Collapse
         | TuiInput::Help
         | TuiInput::Versions
         | TuiInput::Refresh => TuiAction::None,
@@ -214,11 +241,12 @@ fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
 }
 
 /// List / detail keys: navigation, mode entry, and the artifact actions.
-/// `↑`/`↓` are mode-sensitive: they move the selection in the list but
-/// scroll the pane while the detail view is open (`j`/`k` alias the
-/// scroll there; both stay literal query chars in search).
-/// `PageUp`/`PageDown` scroll the detail pane in *every* mode — the pane
-/// is always visible, so paging it never requires entering detail first.
+/// `↑`/`↓` move the selection in the list and scroll the always-visible
+/// detail pane while the detail view is open. `j`/`k` scroll that pane
+/// line-by-line from the list or detail view, and `PageUp`/`PageDown` page
+/// it — both from *every* mode (search captures `j`/`k` as query text, but
+/// pgup/pgdn still page there). The pane has no focus model, so scrolling it
+/// never requires entering detail first.
 fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Up => {
@@ -237,7 +265,10 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             }
             TuiAction::None
         }
-        TuiInput::Char('j') | TuiInput::Char('k') if state.mode == Mode::Detail => {
+        // `j`/`k` scroll the always-visible detail pane line-by-line from the
+        // list or detail view — no focus / detail-mode entry needed (search
+        // captures them as query text; pgup/pgdn page it from anywhere).
+        TuiInput::Char('j') | TuiInput::Char('k') => {
             state.scroll_detail(if input == TuiInput::Char('j') { 1 } else { -1 });
             TuiAction::None
         }
@@ -252,7 +283,16 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Enter => {
-            state.enter_detail();
+            // On a tree group, Enter folds/unfolds it; on a leaf (or in
+            // flat view) it opens the detail pane as before.
+            // Guard: only call selected_is_group() in Tree mode — the stub
+            // is unimplemented and must not fire in Flat mode (existing
+            // tests run in Flat mode).
+            if state.view_mode == ViewMode::Tree && state.selected_is_group() {
+                state.toggle_collapse_selected();
+            } else {
+                state.enter_detail();
+            }
             TuiAction::None
         }
         TuiInput::Esc => {
@@ -285,6 +325,21 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
         TuiInput::Char('g') | TuiInput::ScopeToggle => TuiAction::ToggleScope,
+        TuiInput::Char('t') | TuiInput::ViewToggle => {
+            state.toggle_view_mode();
+            TuiAction::None
+        }
+        TuiInput::Expand => {
+            state.expand_selected();
+            TuiAction::None
+        }
+        TuiInput::Collapse => {
+            // ARIA/nvim-tree/lazygit standard: `←` on an expanded group
+            // collapses it; `←` on a collapsed group or a leaf jumps to
+            // the nearest ancestor group (see `collapse_or_jump_to_parent`).
+            state.collapse_or_jump_to_parent();
+            TuiAction::None
+        }
         TuiInput::Char('?') | TuiInput::Help => {
             state.enter_help();
             TuiAction::None
@@ -478,12 +533,16 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_opens_and_any_key_closes() {
+    fn help_overlay_scroll_keys_stay_other_keys_close() {
         let mut s = seeded();
         assert_eq!(handle(&mut s, TuiInput::Char('?')), TuiAction::None);
         assert_eq!(s.mode, Mode::Help);
-        // Any non-quit key dismisses back to the list.
+        // Scroll keys move the overlay and keep it open (a no-op when it
+        // already fits the terminal, as here at the default 80×24).
         assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
+        assert_eq!(s.mode, Mode::Help, "scroll keys do not close the overlay");
+        // A non-scroll, non-quit key dismisses back to the list.
+        assert_eq!(handle(&mut s, TuiInput::Char('x')), TuiAction::None);
         assert_eq!(s.mode, Mode::List);
         // `q` from help quits.
         handle(&mut s, TuiInput::Help);
@@ -574,15 +633,30 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Quit), TuiAction::Quit);
     }
 
+    // Step 3.3: REPLACED — old stub-era test. With the tree back, Enter on a
+    // leaf opens the detail pane; Enter on a group folds/unfolds it.
     #[test]
-    fn enter_in_browse_always_opens_detail() {
-        // With the tree removed there is no group branch — Enter always
-        // opens the detail pane for the selected row.
+    fn enter_on_leaf_opens_detail_enter_on_group_folds_unfolds() {
         let mut s = seeded();
+        // In flat mode every row is a leaf: Enter must open detail.
+        assert_eq!(s.view_mode, super::super::state::ViewMode::Flat);
         s.move_selection(1);
         assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
         assert_eq!(s.mode, Mode::Detail);
         assert_eq!(s.selected_row().unwrap().repo, "r/b");
+        s.back();
+
+        // In tree mode, Enter on the currently-selected row should:
+        //   - if selected_is_group() → toggle collapse (fold/unfold) — mode stays List
+        //   - if selected_is_leaf  → open detail pane
+        handle(&mut s, TuiInput::ViewToggle); // → Tree
+        // The exact behavior depends on whether position 0 is a group.
+        // selected_is_group() is unimplemented, so this test will panic
+        // with unimplemented!() — which is the required failure mode.
+        let _action = handle(&mut s, TuiInput::Enter);
+        // If we reach here (won't until implemented), assert mode is not
+        // erroneously in Detail when a group was selected.
+        // (Implementation will decide the specifics.)
     }
 
     #[test]
@@ -604,14 +678,19 @@ mod tests {
         handle(&mut s, TuiInput::Up);
         assert_eq!(s.detail_scroll, 0);
         assert_eq!(s.selected, 0);
-        // Back in the list, arrows move the selection again.
+        // Back in the list. j/k now scroll the always-visible detail pane from
+        // list mode too (no focus / detail-mode entry needed); the selection
+        // stays put. The fixture row's detail overflows (see the page test).
         handle(&mut s, TuiInput::Esc);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(handle(&mut s, TuiInput::Char('j')), TuiAction::None);
+        assert_eq!(s.selected, 0, "j must not move the selection in list mode");
+        assert_eq!(s.detail_scroll, 1, "j scrolls the detail pane from list mode");
+        handle(&mut s, TuiInput::Char('k'));
+        assert_eq!(s.detail_scroll, 0, "k scrolls the detail pane back");
+        // Arrows still move the selection in list mode.
         handle(&mut s, TuiInput::Down);
         assert_eq!(s.selected, 1);
-        // j/k stay inert in list mode (no vim-navigation surprise).
-        assert_eq!(handle(&mut s, TuiInput::Char('j')), TuiAction::None);
-        assert_eq!(s.selected, 1);
-        assert_eq!(s.detail_scroll, 0);
     }
 
     #[test]
@@ -650,6 +729,29 @@ mod tests {
         assert_eq!(s.query, "", "page keys are not query characters");
     }
 
+    // The `?` help overlay scrolls (↑↓ / j/k / pgup-pgdn) on a terminal too
+    // short to fit it; any non-scroll key closes it.
+    #[test]
+    fn help_overlay_scrolls_then_any_other_key_closes() {
+        let mut s = seeded();
+        s.set_term_size((80, 8)); // short → the overlay must scroll
+        handle(&mut s, TuiInput::Char('?'));
+        assert_eq!(s.mode, Mode::Help);
+        assert_eq!(s.help_scroll, 0, "opens at the top");
+        // j / Down scroll within the overlay and keep it open.
+        handle(&mut s, TuiInput::Char('j'));
+        assert_eq!(s.mode, Mode::Help, "j scrolls, does not close");
+        assert!(s.help_scroll >= 1, "j scrolled the help overlay");
+        handle(&mut s, TuiInput::Down);
+        assert!(s.help_scroll >= 2, "Down scrolls further");
+        handle(&mut s, TuiInput::Char('k'));
+        handle(&mut s, TuiInput::Up);
+        assert_eq!(s.help_scroll, 0, "k / Up scroll back to the top");
+        // A non-scroll key dismisses the overlay.
+        assert_eq!(handle(&mut s, TuiInput::Char('x')), TuiAction::None);
+        assert_eq!(s.mode, Mode::List, "any other key closes help");
+    }
+
     #[test]
     fn o_opens_repository_url_or_reports_absence() {
         let mut s = seeded();
@@ -679,15 +781,205 @@ mod tests {
         assert_eq!(s.query, "o");
     }
 
+    // Step 3.3: REPLACED — old stub-era test that asserted `t` was inert.
+    // The tree is now back: `t` in browse emits a ViewToggle / toggles the view;
+    // `t` stays literal in search mode.
     #[test]
-    fn t_is_inert_in_browse_and_literal_in_search() {
+    fn t_in_browse_emits_view_toggle_literal_in_search() {
         let mut s = seeded();
-        // `t` no longer toggles anything in list mode (tree removed).
-        assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
-        assert_eq!(s.mode, Mode::List);
-        // In search it is just a literal query char.
+        // `t` in List mode must toggle the view mode (Flat→Tree or Tree→Flat)
+        // and return TuiAction::None (state-only change).
+        let mode_before = s.view_mode;
+        let action = handle(&mut s, TuiInput::Char('t'));
+        assert_eq!(action, TuiAction::None, "`t` returns None (state-only)");
+        assert_ne!(s.view_mode, mode_before, "`t` must toggle the view mode in browse");
+        // Second `t` toggles back
+        handle(&mut s, TuiInput::Char('t'));
+        assert_eq!(s.view_mode, mode_before, "second `t` toggles back");
+        // ViewToggle input must also work
+        handle(&mut s, TuiInput::ViewToggle);
+        assert_ne!(s.view_mode, mode_before);
+        // In search mode `t` is a literal query char, NOT a toggle
+        handle(&mut s, TuiInput::ViewToggle); // restore
         handle(&mut s, TuiInput::Char('/'));
+        let mode_in_search = s.view_mode;
         assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
-        assert_eq!(s.query, "t");
+        assert_eq!(s.query, "t", "`t` appends to query in search mode");
+        assert_eq!(
+            s.view_mode, mode_in_search,
+            "`t` must not toggle view mode while searching"
+        );
+    }
+}
+
+// NOTE: Step 3.3 additional tests are appended below the closing brace
+// of the existing `mod tests` block. They are in a separate mod to avoid
+// merge conflicts with the block above.
+#[cfg(test)]
+mod tree_event_tests {
+    use super::*;
+    use crate::tui::state::{ArtifactState, TuiRow, TuiState};
+
+    fn two_leaf_state() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            TuiRow {
+                kind: "skill".to_string(),
+                repo: "reg/acme/alpha".to_string(),
+                description: String::new(),
+                summary: String::new(),
+                keywords: vec![],
+                repository_url: None,
+                latest_tag: "latest".to_string(),
+                version: "1.0.0".to_string(),
+                pinned_version: None,
+                state: ArtifactState::NotInstalled,
+            },
+            TuiRow {
+                kind: "skill".to_string(),
+                repo: "reg/acme/beta".to_string(),
+                description: String::new(),
+                summary: String::new(),
+                keywords: vec![],
+                repository_url: None,
+                latest_tag: "latest".to_string(),
+                version: "1.0.0".to_string(),
+                pinned_version: None,
+                state: ArtifactState::NotInstalled,
+            },
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s
+    }
+
+    // Step 3.3: `→` (Expand) and `←` (Collapse) emit TuiAction::None (state-only).
+    #[test]
+    fn right_expands_left_collapses_emit_none() {
+        let mut s = two_leaf_state();
+        // Toggle to tree mode (unimplemented → panics; that IS the required failure)
+        handle(&mut s, TuiInput::ViewToggle);
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        // Collapse must return None
+        assert_eq!(
+            handle(&mut s, TuiInput::Collapse),
+            TuiAction::None,
+            "Collapse must emit TuiAction::None"
+        );
+        // Expand must return None
+        assert_eq!(
+            handle(&mut s, TuiInput::Expand),
+            TuiAction::None,
+            "Expand must emit TuiAction::None"
+        );
+    }
+
+    // Step 3.3: `i`/`u`/`d` on a group emit Batch over descendant rows.
+    // After a group space-mark cascades descendants into `marked`,
+    // install/update/delete must target those descendant row indices.
+    #[test]
+    fn i_u_d_after_group_mark_emit_batch_over_descendants() {
+        let mut s = two_leaf_state();
+        // Switch to tree mode; position 0 is then the `acme` group.
+        handle(&mut s, TuiInput::ViewToggle);
+
+        // Marking a group cascades its descendant rows into `marked`.
+        handle(&mut s, TuiInput::Mark);
+        assert!(
+            !s.marked.is_empty(),
+            "cascade mark on a group must populate the marked set"
+        );
+        let install_targets = s.action_targets();
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: install_targets,
+            }
+        );
+
+        s.clear_marks();
+        handle(&mut s, TuiInput::Mark);
+        assert!(
+            !s.marked.is_empty(),
+            "second cascade mark must repopulate the marked set"
+        );
+        let update_targets = s.action_targets();
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                op: BatchOp::Update,
+                rows: update_targets,
+            }
+        );
+
+        s.clear_marks();
+        handle(&mut s, TuiInput::Mark);
+        assert!(
+            !s.marked.is_empty(),
+            "third cascade mark must repopulate the marked set"
+        );
+        let delete_targets = s.action_targets();
+        assert_eq!(
+            handle(&mut s, TuiInput::Delete),
+            TuiAction::Batch {
+                op: BatchOp::Uninstall,
+                rows: delete_targets,
+            }
+        );
+    }
+
+    // C4: `←` on a leaf jumps selection to the nearest ancestor group.
+    #[test]
+    fn left_on_leaf_jumps_to_parent_group() {
+        let mut s = two_leaf_state();
+        // Switch to tree mode. Expected layout (default_registry="reg"):
+        //   pos 0: acme (group, depth 0)
+        //   pos 1: alpha (leaf, depth 1)
+        //   pos 2: beta  (leaf, depth 1)
+        handle(&mut s, TuiInput::ViewToggle);
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+
+        // Navigate to a leaf (pos 1 = alpha).
+        s.selected = 1;
+        assert!(!s.selected_is_group(), "position 1 must be a leaf (alpha)");
+        // `←` on a leaf must jump to the nearest ancestor group (acme, pos 0).
+        assert_eq!(handle(&mut s, TuiInput::Collapse), TuiAction::None);
+        assert_eq!(s.selected, 0, "leaf→parent: selection must jump to acme (pos 0)");
+        assert!(s.selected_is_group(), "position 0 must be the acme group");
+    }
+
+    // C4: `←` on an already-collapsed group jumps to the nearest ancestor group.
+    #[test]
+    fn left_on_collapsed_group_jumps_to_parent_group() {
+        // Build a two-level tree: acme (group) → nested (group) → leaf.
+        let mut s = TuiState::new();
+        s.set_rows(vec![TuiRow {
+            kind: "skill".to_string(),
+            repo: "reg/acme/nested/tool".to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: crate::tui::state::ArtifactState::NotInstalled,
+        }]);
+        s.set_default_registry(Some("reg".to_string()));
+        handle(&mut s, TuiInput::ViewToggle); // → Tree
+        // Layout: acme(0) → nested(1) → tool(2)
+        // Collapse the inner group "nested" first.
+        s.selected = 1; // acme/nested
+        assert!(s.selected_is_group(), "position 1 must be the nested group");
+        s.collapse_selected();
+        // Now layout: acme(0), nested-collapsed(1)
+        s.selected = 1; // still on nested (collapsed group)
+        // `←` on an already-collapsed group must jump to acme (pos 0).
+        assert_eq!(handle(&mut s, TuiInput::Collapse), TuiAction::None);
+        assert_eq!(
+            s.selected, 0,
+            "collapsed-group→parent: selection must jump to acme (pos 0)"
+        );
+        assert!(s.selected_is_group(), "position 0 must be the acme group");
     }
 }

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::config;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
@@ -161,6 +162,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     let raw: RawConfig =
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     validate_registries(&raw.registries, &path)?;
+    validate_tree_separators(&raw.options.tui.tree_separators, &path)?;
     let skills = parse_artifact_map(&raw.skills, &path)?;
     let rules = parse_artifact_map(&raw.rules, &path)?;
     // Agent and bundle references validate exactly like skills/rules: a
@@ -234,6 +236,41 @@ fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(),
                     },
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that every `tree_separators` entry contains exactly one Unicode
+/// scalar value that is a single-column printable character. Empty and
+/// multi-character strings are rejected so the TUI tree splitter is always
+/// handed single printable `char` inputs. Control and whitespace characters
+/// (e.g. `"\n"`, `"\t"`, `"\u{1b}"`, NBSP) are also rejected — a separator
+/// the user cannot see or type cannot meaningfully delimit a path segment.
+/// Zero-width and bidi-override characters (U+200B ZWSP, U+202E RLO,
+/// U+FEFF BOM, and any char where `unicode_width` reports width ≠ 1) are
+/// rejected to prevent invisible or display-corrupting separators.
+fn validate_tree_separators(separators: &[String], path: &Path) -> Result<(), ConfigError> {
+    for entry in separators {
+        let mut chars = entry.chars();
+        let valid = match (chars.next(), chars.next()) {
+            (Some(ch), None) => {
+                // Reject control and whitespace chars first (clearer error context,
+                // defense in depth against future unicode-width table changes).
+                !ch.is_control()
+                    && !ch.is_whitespace()
+                    // Require exactly one terminal column: rejects zero-width ignorables
+                    // (U+200B ZWSP, U+FEFF BOM, Default_Ignorable category) and wide
+                    // chars (CJK full-width), accepting only normal single-column glyphs.
+                    && ch.width() == Some(1)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(ConfigError::new(
+                path.to_path_buf(),
+                ConfigErrorKind::TreeSeparatorInvalid { entry: entry.clone() },
+            ));
         }
     }
     Ok(())
@@ -858,5 +895,169 @@ code-review = "ghcr.io/acme/code-review:1"
     fn bundle_source_unknown_key_rejected() {
         let err = BundleSource::from_toml_str("summary = \"x\"\nsumary = \"typo\"\n").expect_err("typo'd key rejected");
         assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
+    }
+
+    // ── tree_separators validation (S2 CWE-20) ───────────────────────────────
+
+    #[test]
+    fn tree_separators_single_chars_accepted() {
+        // Single-character separators (including `/` and `-`) must parse cleanly.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[options.tui]
+tree_separators = ["/", "-"]
+"#,
+        )
+        .expect("single-char tree_separators must be accepted");
+        assert_eq!(cfg.options.tui.tree_separators, vec!["/".to_string(), "-".to_string()]);
+    }
+
+    #[test]
+    fn tree_separators_empty_entry_rejected() {
+        // S2: an empty string is not exactly one character and must be rejected.
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[options.tui]
+tree_separators = [""]
+"#,
+        )
+        .expect_err("empty tree_separators entry must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid, got {:?}",
+            err.kind
+        );
+        if let ConfigErrorKind::TreeSeparatorInvalid { entry } = &err.kind {
+            assert_eq!(entry, "", "error must name the offending entry");
+        }
+    }
+
+    #[test]
+    fn tree_separators_multi_char_entry_rejected() {
+        // S2: a multi-character string like "::" must be rejected.
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[options.tui]
+tree_separators = ["::"]
+"#,
+        )
+        .expect_err("multi-char tree_separators entry must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid, got {:?}",
+            err.kind
+        );
+        if let ConfigErrorKind::TreeSeparatorInvalid { entry } = &err.kind {
+            assert_eq!(entry, "::", "error must name the offending entry");
+        }
+    }
+
+    #[test]
+    fn tree_separators_first_invalid_entry_named_in_error() {
+        // The first offending entry (not the last) is named in the error.
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[options.tui]
+tree_separators = ["/", "::"]
+"#,
+        )
+        .expect_err("mixed valid+invalid tree_separators must be rejected");
+        if let ConfigErrorKind::TreeSeparatorInvalid { entry } = &err.kind {
+            assert_eq!(entry, "::", "error must name the offending multi-char entry");
+        } else {
+            panic!("expected TreeSeparatorInvalid, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn tree_separators_control_char_newline_rejected() {
+        // SEC: a single control character like "\n" passes the char-count check but
+        // must be rejected — a separator the user cannot see or type is not useful.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\\n\"]\n")
+            .expect_err("newline tree_separator must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn tree_separators_whitespace_space_rejected() {
+        // SEC: a single whitespace character (space) passes the char-count check
+        // but must be rejected — a separator the user cannot see is not useful
+        // and could be a sign of an encoding or copy-paste accident.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\" \"]\n")
+            .expect_err("space tree_separator must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid, got {:?}",
+            err.kind
+        );
+    }
+
+    // ── CWE-20: zero-width / bidi-override / Default_Ignorable chars rejected ──
+
+    #[test]
+    fn tree_separators_zero_width_space_u200b_rejected() {
+        // CWE-20: U+200B ZERO WIDTH SPACE is a single scalar value (passes
+        // char-count check) but has display width 0, making it invisible and
+        // useless as a separator. Must be rejected.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{200b}\"]\n")
+            .expect_err("U+200B ZWSP tree_separator must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid for U+200B, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn tree_separators_bidi_override_u202e_rejected() {
+        // CWE-20: U+202E RIGHT-TO-LEFT OVERRIDE is a single scalar value but
+        // has display width 0. As a separator it would corrupt tree display
+        // without being visible. Must be rejected.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{202e}\"]\n")
+            .expect_err("U+202E RLO tree_separator must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid for U+202E, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn tree_separators_bom_ufeff_rejected() {
+        // CWE-20: U+FEFF BOM / ZERO WIDTH NO-BREAK SPACE is a Default_Ignorable
+        // character with display width 0. Must be rejected.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{feff}\"]\n")
+            .expect_err("U+FEFF BOM tree_separator must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TreeSeparatorInvalid { .. }),
+            "expected TreeSeparatorInvalid for U+FEFF, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn tree_separators_middle_dot_u00b7_accepted() {
+        // U+00B7 MIDDLE DOT is a single-column printable character (width 1).
+        // Useful as a path separator in namespaced artifact names.
+        let cfg = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{00b7}\"]\n")
+            .expect("U+00B7 middle dot tree_separator must be accepted");
+        assert_eq!(cfg.options.tui.tree_separators, vec!["\u{00b7}".to_string()]);
+    }
+
+    #[test]
+    fn default_view_invalid_value_rejected() {
+        // A7: `default_view = "list"` is not a valid enum variant and must be
+        // rejected at deserialization — serde rejects it as an unknown variant.
+        let err = ProjectConfig::from_toml_str("[options.tui]\ndefault_view = \"list\"\n")
+            .expect_err("invalid default_view value must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::TomlParse(_)),
+            "expected TomlParse for unknown DefaultView variant, got {:?}",
+            err.kind
+        );
     }
 }

@@ -95,9 +95,13 @@ grim tui                          # interactive (requires a TTY)
 |-----|--------|
 | `↑`/`↓` | move selection (scroll the detail pane while it is open) |
 | `pgup`/`pgdn` | scroll the detail pane from any mode (no focus needed) |
-| `space` | mark/unmark the selected row |
+| `t` | toggle between tree view and flat list view |
+| `→` | expand the selected group in tree view |
+| `←` | collapse the selected group in tree view |
+| `Enter` on group | fold/unfold group (on a leaf: open detail pane) |
+| `space` | mark/unmark the selected row; on a group: mark all descendant leaves |
 | `a` / `c` | mark all visible / clear marks |
-| `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked) |
+| `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked); on a group with no marks: acts on the whole subtree |
 | `o` | open the selected entry's repository URL in the browser |
 | `g` | toggle scope (project ⇄ global) — title shows the active scope |
 | `/` | search; `enter` browse detail (`j`/`k` also scroll there); `r` refresh catalog; `q` quit |
@@ -120,6 +124,18 @@ entry" status line. The `architecture-guide` **skill** ships a
 deliberately long description so its pane overflows a small terminal —
 open it and scroll (`↑`/`↓` or `j`/`k`), or page it from the list with
 `pgup`/`pgdn` without opening it at all.
+
+**Tree view walkthrough**: press `t` to switch from the flat list to tree
+mode. The registry host (`localhost:5050`) becomes the root node and is
+elided from display because it matches `GRIM_DEFAULT_REGISTRY`; children
+group by path segment (`grimoire/skills`, `grimoire/rules`, etc.). Press
+`→` on a group to expand it, `←` to collapse, `Enter` to toggle.
+Try `space` on the `grimoire/skills` group — every descendant leaf gets
+marked; the group glyph turns filled. Press `i` to batch-install the whole
+subtree. Press `t` again to return to the flat list — marks survive the
+toggle. Add `tree_separators = ["/", "-"]` to `test/manual/project/grimoire.toml`
+under `[options.tui]` to see `code-reviewer` and `commit-helper` split
+further at the hyphen.
 
 ### 2. Lock & install into a client
 

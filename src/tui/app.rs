@@ -98,6 +98,8 @@ pub struct TuiContext {
     /// Global ⇄ Project toggle. `None` ⇒ toggle is a no-op (e.g. no
     /// project config discoverable).
     pub alt: Option<ScopeSwap>,
+    /// Resolved TUI display options from `[options.tui]` in the config.
+    pub tui_options: crate::config::declaration::TuiOptions,
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
@@ -122,6 +124,10 @@ pub struct ScopeSwap {
     pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
     /// Human label (`project` / `global`).
     pub label: String,
+    /// This scope's resolved `[options.tui]` display options. Structural
+    /// options (`group_by_type` / `tree_separators`) follow the active scope
+    /// on a toggle; the runtime `t` view-mode choice stays ephemeral.
+    pub tui_options: crate::config::declaration::TuiOptions,
 }
 
 impl TuiContext {
@@ -142,6 +148,7 @@ impl TuiContext {
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
+            tui_options: std::mem::replace(&mut self.tui_options, alt.tui_options),
         };
         self.scope = alt.scope;
         self.alt = Some(now_alt);
@@ -173,6 +180,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // The browsed registry is the effective default: eliding its host
     // from the tree root keeps leaf names short (the user's ask).
     state.set_default_registry(Some(ctx.registry.clone()));
+    // Seed the tree display options from the resolved config.
+    state.set_view_mode_from_config(ctx.tui_options.default_view);
+    state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -264,6 +274,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 if ctx.toggle_scope() {
                     state.set_scope_label(&ctx.scope_label);
                     state.set_clients(client_names(&ctx));
+                    // Structural tree display options follow the active scope's
+                    // `[options.tui]` (the two scopes may differ). The runtime
+                    // `t` view-mode choice is deliberately NOT re-seeded from
+                    // config here, so a view toggled with `t` survives the swap.
+                    state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
                     recompute_states(&ctx, &mut state);
                     // The new scope has a different lock/state — re-check its
                     // installed rows against the registry.
@@ -526,6 +541,8 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
         KeyCode::Down => TuiInput::Down,
         KeyCode::PageUp => TuiInput::PageUp,
         KeyCode::PageDown => TuiInput::PageDown,
+        KeyCode::Right => TuiInput::Expand,
+        KeyCode::Left => TuiInput::Collapse,
         KeyCode::Enter => TuiInput::Enter,
         KeyCode::Esc => TuiInput::Esc,
         KeyCode::Backspace => TuiInput::Backspace,
@@ -1338,6 +1355,23 @@ mod tests {
         assert_eq!(map_key(mk(KeyCode::Tab)), None);
     }
 
+    // Step 3.5: `map_key` must map Left → Collapse and Right → Expand.
+    // These are the tree-navigation arrow bindings.
+    #[test]
+    fn map_key_left_and_right_map_to_collapse_and_expand() {
+        let mk = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        assert_eq!(
+            map_key(mk(KeyCode::Left)),
+            Some(TuiInput::Collapse),
+            "KeyCode::Left must map to TuiInput::Collapse"
+        );
+        assert_eq!(
+            map_key(mk(KeyCode::Right)),
+            Some(TuiInput::Expand),
+            "KeyCode::Right must map to TuiInput::Expand"
+        );
+    }
+
     fn installed_row(repo: &str) -> TuiRow {
         TuiRow {
             kind: "skill".to_string(),
@@ -1580,6 +1614,7 @@ mod tests {
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
+            tui_options: Default::default(),
         }
     }
 

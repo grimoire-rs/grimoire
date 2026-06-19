@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Collapsible grouped tree view in `grim tui` (toggle with `t`); configurable via `[options.tui]` — `default_view`, `group_by_type`, `tree_separators` *(tui)*
+
 ## [0.5.0] - 2026-06-19
 
 ### Added

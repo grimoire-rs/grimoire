@@ -32,6 +32,7 @@ pub mod init_dialog;
 pub mod render;
 pub mod state;
 pub mod terminal_guard;
+pub mod tree;
 pub mod update_check;
 
 #[allow(unused_imports)]
