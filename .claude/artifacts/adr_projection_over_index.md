@@ -80,9 +80,15 @@ Concretely:
 
 - Phase 2 adds `DisplayRow::Member`, a `bundle_members` cache, and
   `flatten_with_members`; the index contract is unchanged.
-- Future per-member install (Phase 3) must introduce a *separate* targeting
-  path for members — it must NOT promote them into `marked`/`action_targets`
-  without revisiting this ADR.
+- Per-member install (Phase 3, `plan_tui_member_nodes`) landed the
+  anticipated *separate* targeting path: `TuiAction::MemberAction { op,
+  repo, kind }` carries the member's own identity (never a `rows` index),
+  dispatched directly to `perform_member`. Members are **not** promoted
+  into `marked`/`action_targets`/`selected_row_index` — those stay no-op
+  for a `DisplayRow::Member`. The index contract is preserved; the ADR did
+  not need to be reopened. Bundle expand/collapse state lives in a separate
+  `expanded_bundles` set keyed by the full bundle repo (default-collapsed
+  polarity), orthogonal to the group `collapsed` set.
 - Any code reading `selected` must continue to branch on the view mode and
   handle `DisplayRow::Member` as a non-`rows` selection.
 
