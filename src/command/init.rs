@@ -5,11 +5,13 @@
 //!
 //! Project scope writes `./grimoire.toml`; `--global` writes
 //! `$GRIM_HOME/grimoire.toml`. An existing file is never overwritten
-//! (exit 64). The body is an `[options]` table (carrying
-//! `default_registry` when `--registry` is given, else snapshotting the
-//! `--registry` global flag or `$GRIM_DEFAULT_REGISTRY` when set) plus
-//! empty `[skills]` / `[rules]` tables. The built-in fallback registry is
-//! never snapshotted — it applies implicitly and must stay floating.
+//! (exit 64). When `--registry` is given (or the global `--registry` flag
+//! / `$GRIM_DEFAULT_REGISTRY` is set), the body includes a `[[registries]]`
+//! entry with `default = true` — the canonical on-disk shape that the
+//! resolver treats as authoritative. When no registry is supplied the body
+//! contains only empty `[skills]` / `[rules]` tables. The built-in fallback
+//! registry is never snapshotted — it applies implicitly and must stay
+//! floating.
 
 use anyhow::Context as _;
 use clap::Args;
@@ -29,7 +31,8 @@ pub struct InitArgs {
     #[arg(long)]
     pub global: bool,
 
-    /// Seed `[options].default_registry` with this value.
+    /// Seed the default registry as a `[[registries]]` entry with
+    /// `default = true`.
     #[arg(long)]
     pub registry: Option<String>,
 }
@@ -72,14 +75,16 @@ fn snapshot_registry<'a>(ctx: &'a Context, explicit: Option<&'a str>) -> Option<
     explicit.or_else(|| ctx.registry_flag()).or_else(|| ctx.registry_env())
 }
 
-/// Render the seed config. `[options]` is emitted only when there is
-/// something to put in it (a registry); the clients list stays unset so
-/// client detection applies (all clients when none are detected).
+/// Render the seed config. When a registry is given, emit a `[[registries]]`
+/// entry with `default = true` — the canonical on-disk shape the resolver
+/// treats as authoritative. When none is given, emit only the empty
+/// `[skills]` / `[rules]` tables (no `[[registries]]`, no `[options]`).
 fn render_config(registry: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(reg) = registry {
-        out.push_str("[options]\n");
-        out.push_str(&format!("default_registry = \"{reg}\"\n\n"));
+        out.push_str("[[registries]]\n");
+        out.push_str(&format!("url = \"{reg}\"\n"));
+        out.push_str("default = true\n\n");
     }
     out.push_str("[skills]\n\n[rules]\n");
     out
@@ -90,12 +95,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_includes_registry_when_present() {
+    fn render_includes_registries_array_when_present() {
+        // Contract (b): render_config(Some(…)) emits the [[registries]] shape,
+        // NOT [options]/default_registry.
         let body = render_config(Some("ghcr.io/acme"));
-        assert!(body.contains("[options]"));
-        assert!(body.contains("default_registry = \"ghcr.io/acme\""));
+        assert!(body.contains("[[registries]]"), "must contain [[registries]]");
+        assert!(body.contains("url = \"ghcr.io/acme\""), "must contain url");
+        assert!(body.contains("default = true"), "must contain default = true");
+        assert!(
+            !body.contains("default_registry ="),
+            "must NOT contain legacy default_registry"
+        );
+        assert!(!body.contains("[options]"), "must NOT contain [options]");
         assert!(body.contains("[skills]"));
         assert!(body.contains("[rules]"));
+    }
+
+    #[test]
+    fn render_output_parses_and_resolves_primary() {
+        // Contract (b) round-trip: the shape init writes is the shape the
+        // resolver treats as authoritative. Parse the rendered body and verify
+        // primary_registry == the seeded url.
+        use crate::config::registry_resolve::primary_registry;
+        use crate::config::resolve_registries;
+        let url = "ghcr.io/acme";
+        let body = render_config(Some(url));
+        let cfg =
+            crate::config::project_config::ProjectConfig::from_toml_str(&body).expect("rendered config must parse");
+        let set = resolve_registries(
+            None,
+            &cfg.registries,
+            cfg.options.default_registry.as_deref(),
+            &[],
+            None,
+            crate::command::FALLBACK_REGISTRY,
+        );
+        assert_eq!(primary_registry(&set), url, "primary must equal the seeded url");
     }
 
     #[test]

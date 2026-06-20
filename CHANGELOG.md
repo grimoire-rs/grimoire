@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Collapsible grouped tree view in `grim tui` (toggle with `t`); configurable via `[options.tui]` — `default_view`, `group_by_type`, `tree_separators` *(tui)*
 
+### Changed
+
+- `grim init` now writes the default registry as a `[[registries]]` entry with `default = true` instead of `[options].default_registry`. The `[[registries]]` shape is what the multi-registry resolver treats as authoritative, so fresh configs are unambiguous. `[options].default_registry` is deprecated for new writes but still read for back-compat. Two `[[registries]]` entries with `default = true` are now a parse error (exit 78).
+
 ## [0.5.0] - 2026-06-19
 
 ### Added

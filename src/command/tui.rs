@@ -16,9 +16,9 @@
 //! initialize one before the session starts via the popup-style
 //! [`crate::tui::init_dialog`]: a confirm popup plus a registry input
 //! pre-filled with the effective default registry (flag > env > config >
-//! the built-in fallback), so plain Enter accepts — and persists — a
-//! working `[options].default_registry`. Cancelling closes the TUI
-//! cleanly with exit 0.
+//! the built-in fallback), so plain Enter accepts — and persists as a
+//! `[[registries]]` entry with `default = true`. Cancelling closes the
+//! TUI cleanly with exit 0.
 
 use std::io::IsTerminal;
 
@@ -171,10 +171,10 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 /// built-in fallback), so plain Enter persists a working registry — and
 /// create the scope's `grimoire.toml` via `grim init`.
 ///
-/// Accepting the pre-filled fallback deliberately snapshots it into
-/// `[options].default_registry`: the dialog's accepted value is an
-/// explicit user choice, unlike bare `grim init` (which keeps the
-/// fallback floating — see `command/init.rs`).
+/// Accepting the pre-filled value deliberately snapshots it as a
+/// `[[registries]]` entry with `default = true` in the new config: the
+/// dialog's accepted value is an explicit user choice, unlike bare `grim init`
+/// (which keeps the fallback floating — see `command/init.rs`).
 ///
 /// # Errors
 ///
@@ -216,27 +216,31 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     Ok(InitPrompt::Ready)
 }
 
-/// Resolve the registry to browse via the centralized precedence (mirrors
-/// `grim search`): `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project
-/// config `default_registry` > global config (the global config is the
-/// lowest-priority fallback only for a non-global run) > the built-in
-/// [`crate::command::FALLBACK_REGISTRY`].
+/// Resolve the registry to browse via the unified primary-registry seam,
+/// mirroring `grim add` / `grim search`: an explicit `--registry` flag wins
+/// outright, then the scope is resolved and `primary_registry_for_scope`
+/// returns the `[[registries]]` primary (or falls through to the legacy
+/// `default_registry` chain and finally the built-in
+/// [`crate::command::FALLBACK_REGISTRY`]).
+///
+/// On scope-resolution failure (no `grimoire.toml` discoverable),
+/// [`crate::command::primary_registry_global_fallback`] is used so a
+/// `[[registries]]`-only global config is still honored — a user who
+/// configured only `[[registries]]` in their global config and runs `grim tui`
+/// from a directory without a project config gets the right registry.
 fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
     if let Some(r) = &args.registry {
         return r.clone();
     }
-    let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
-        .ok()
-        .and_then(|scope| scope.options.default_registry);
-    // `--global` maps to the global scope; the centralized helper gates the
-    // global-config fallback on it (same mapping `scope_resolution` applies).
-    let scope = if args.global {
-        ConfigScope::Global
-    } else {
-        ConfigScope::Project
-    };
-    let global_default = crate::command::global_config_default(ctx, scope);
-    crate::command::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
+    match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
+        Ok(scope) => crate::command::primary_registry_for_scope(ctx, &scope),
+        Err(_) => {
+            // Scope resolution failed (e.g. no config yet); fall back through
+            // the global-[[registries]]-aware helper so a [[registries]]-only
+            // global config is still honored.
+            crate::command::primary_registry_global_fallback(ctx)
+        }
+    }
 }
 
 /// The effective selected clients for a scope's TUI display, derived from
@@ -302,6 +306,39 @@ mod tests {
             config: Some(cfg),
         };
         assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
+    }
+
+    #[test]
+    fn resolve_registry_honors_global_registries_array_when_no_project_config() {
+        // Regression guard: a user with a [[registries]]-only global config
+        // (no [options].default_registry) running `grim tui` from a directory
+        // without a project grimoire.toml must get their declared registry —
+        // not the built-in fallback. The Err branch previously bypassed
+        // [[registries]] by calling only global_config_default +
+        // resolve_default_registry.
+        //
+        // Point the hermetic ctx at a temp dir that has a global config with
+        // [[registries]] but no project grimoire.toml. scope_resolution will
+        // fail (no project config), triggering the Err branch.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\nurl = \"global-tui.example\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        // No --config, no --global: scope_resolution tries to discover a
+        // project config in the CWD. In a hermetic test this may succeed or
+        // fail depending on CWD; pass a missing explicit config path to force
+        // scope resolution to error (no file at that path ⇒ Err branch).
+        let missing_cfg = tmp.path().join("no-such/grimoire.toml");
+        let a = TuiArgs {
+            registry: None,
+            refresh: false,
+            global: false,
+            config: Some(missing_cfg),
+        };
+        assert_eq!(resolve_registry(&ctx, &a), "global-tui.example");
     }
 
     #[test]

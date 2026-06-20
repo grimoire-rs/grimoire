@@ -28,9 +28,10 @@ forward and `grim status` to see where you stand.
 
 ## The Two Files
 
-`grimoire.toml` is the declaration: an `[options]` table for defaults
-(`default_registry`, `clients`, and the `[options.tui]` sub-table for the
-interactive browser) and `[skills]` / `[rules]` / `[agents]` / `[bundles]`
+`grimoire.toml` is the declaration: an optional `[[registries]]` array (the
+canonical way to set a default registry via a `default = true` entry), an
+`[options]` table for other defaults (`clients`, `[options.tui]` for the
+interactive browser), and `[skills]` / `[rules]` / `[agents]` / `[bundles]`
 tables mapping a binding name to a reference. You may edit it by hand; run
 `grim lock` afterwards.
 

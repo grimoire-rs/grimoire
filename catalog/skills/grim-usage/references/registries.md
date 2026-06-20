@@ -19,8 +19,8 @@ wins:
 
 1. `--registry` flag
 2. `GRIM_DEFAULT_REGISTRY` environment variable
-3. project config `[options].default_registry`
-4. global config `[options].default_registry`
+3. project config `[[registries]]` primary (or legacy `[options].default_registry` when no `[[registries]]` declared)
+4. global config `[[registries]]` primary (or legacy `[options].default_registry`)
 5. the built-in default `grim.ocx.sh` (applies only when nothing above
    is set)
 

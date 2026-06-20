@@ -83,6 +83,13 @@ pub struct ConfigOptions {
     /// Default registry for short identifiers (lower priority than
     /// `GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in
     /// `command::resolve_default_registry`).
+    ///
+    /// **Deprecated for new writes** — `grim init` now emits a
+    /// `[[registries]]` entry with `default = true` instead. This field is
+    /// still read for back-compat and folded into the resolution chain; it
+    /// is ignored for browse purposes when a `[[registries]]` array is
+    /// present (the array is authoritative). No `#[deprecated]` attribute
+    /// is added — the field is a serde key, not a callable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
     /// AI client targets install/update materialize into when `--client` is
@@ -115,8 +122,9 @@ pub struct RegistryConfig {
     /// `ghcr.io/acme`. Same shape as `[options].default_registry`.
     pub url: String,
     /// Marks this registry as the primary one short identifiers expand
-    /// against. At most one entry may set it; when none do, the first
-    /// entry is primary.
+    /// against. Exactly one entry MAY set it; setting it on two or more
+    /// entries is a parse error. When none set it, the first entry is
+    /// primary at resolution time.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
 }

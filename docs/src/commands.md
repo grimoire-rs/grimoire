@@ -45,11 +45,11 @@ These apply to every subcommand:
 ## grim init {#init}
 
 Writes a fresh `grimoire.toml` in the current directory. `--registry <ref>`
-seeds the `default_registry` option; without the flag, a set
-`GRIM_DEFAULT_REGISTRY` is snapshotted into the option instead (the built-in
-default registry is never written — it keeps floating with the binary).
-`--global` creates the global config at `$GRIM_HOME/grimoire.toml` instead
-of a project-local one.
+seeds the default registry as a `[[registries]]` entry with `default = true`;
+without the flag, a set `GRIM_DEFAULT_REGISTRY` is snapshotted the same way
+(the built-in default registry is never written — it keeps floating with the
+binary). `--global` creates the global config at `$GRIM_HOME/grimoire.toml`
+instead of a project-local one.
 
 ```sh
 grim init --registry ghcr.io/acme
@@ -223,11 +223,11 @@ span the full declared set.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
 one before starting, as popup dialogs: confirm the init, then accept or
-edit the registry to seed `default_registry` with. The input is pre-filled
-with the effective default — the `--registry` flag, then
-`GRIM_DEFAULT_REGISTRY`, then the global config, then the built-in
-`grim.ocx.sh` fallback — and the accepted value is persisted in the new
-config (clearing the input seeds nothing). Cancelling closes the TUI.
+edit the registry. The input is pre-filled with the effective default — the
+`--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the global config, then
+the built-in `grim.ocx.sh` fallback — and the accepted value is persisted as a
+`[[registries]]` entry with `default = true` in the new config (clearing the
+input seeds nothing). Cancelling closes the TUI.
 
 `enter` opens the detail pane for the selected row: the centered artifact
 reference, its `Summary:` and `Description:` sections, and a `Metadata:`

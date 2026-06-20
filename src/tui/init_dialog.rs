@@ -61,8 +61,9 @@ pub enum InitDialogInput {
 pub enum InitDialogOutcome {
     /// The user declined — close the TUI without initializing.
     Cancelled,
-    /// Initialize the scope's config, seeding `[options].default_registry`
-    /// with `registry` when present (a blanked-out input seeds nothing).
+    /// Initialize the scope's config, seeding a `[[registries]]` entry with
+    /// `default = true` and `registry` as the url when present (a blanked-out
+    /// input seeds nothing).
     Confirmed {
         /// The accepted registry input (trimmed; `None` when emptied).
         registry: Option<String>,
@@ -207,7 +208,7 @@ fn draw_dialog(f: &mut Frame, dialog: &InitDialog) {
             " default registry ",
             &[
                 Line::from(Span::styled(
-                    format!("seeded as [options].default_registry in {}", dialog.config_label),
+                    format!("seeded as [[registries]] default = true in {}", dialog.config_label),
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::default(),

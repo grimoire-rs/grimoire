@@ -389,3 +389,137 @@ def test_search_same_repo_in_two_registries_is_not_deduped(
     assert shared_repos[0] != shared_repos[1], (
         f"the two copies must be distinct fully-qualified refs, got: {shared_repos}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — legacy [options].default_registry still resolves (back-compat lock)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_default_registry_still_resolves(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A hand-written ``[options].default_registry`` config must still resolve
+    short references — backward compatibility guard for the deprecation.
+
+    After P2 migrates init to ``[[registries]]``, a pre-existing config using
+    the legacy field must continue to work unchanged (deprecate-and-read, not
+    remove).
+    """
+    make_artifact(
+        f"{unique_repo}/legacy-tool",
+        "skill",
+        {"legacy-tool/SKILL.md": "---\nname: legacy-tool\ndescription: d\n---\n# L\n"},
+        tag="1",
+    )
+
+    # Hand-write the legacy config shape.
+    (project_dir / "grimoire.toml").write_text(
+        f'[options]\ndefault_registry = "{REGISTRY_HOST}"\n\n[skills]\n\n[rules]\n'
+    )
+
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    short_ref = f"{unique_repo}/legacy-tool:1"
+    out = runner.json("add", short_ref)
+    assert out["kind"] == "skill"
+    assert out["status"] == "added", f"add with legacy config must succeed: {out!r}"
+
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert f"{REGISTRY_HOST}/{unique_repo}/legacy-tool" in cfg, (
+        f"legacy-resolved skill binding must use the legacy registry host; got:\n{cfg}"
+    )
+    # The legacy field must survive re-serialization (no destructive migration).
+    assert f'default_registry = "{REGISTRY_HOST}"' in cfg, (
+        f"write_config must preserve the legacy default_registry; got:\n{cfg}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — both fields present: array wins, legacy not used for short refs
+# ---------------------------------------------------------------------------
+
+
+def test_both_fields_array_wins(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """When both ``[options].default_registry`` and ``[[registries]]`` are
+    present, ``[[registries]]`` is authoritative for short-ref expansion.
+
+    A legacy ``default_registry`` pointing at the real registry and a
+    ``[[registries]]`` entry pointing at a non-existent host: if the array
+    wins, add fails (non-existent host); if the legacy wins, add succeeds.
+    We assert that the array wins (add fails with a network error, not success
+    with the legacy host).
+    """
+    make_artifact(
+        f"{unique_repo}/both-tool",
+        "skill",
+        {"both-tool/SKILL.md": "---\nname: both-tool\ndescription: d\n---\n# B\n"},
+        tag="1",
+    )
+
+    # Array points at a dead host; legacy points at the real registry.
+    # If the resolver erroneously uses the legacy path, add would succeed.
+    dead_host = "localhost:9999"
+    (project_dir / "grimoire.toml").write_text(
+        f'[options]\n'
+        f'default_registry = "{REGISTRY_HOST}"\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'url = "{dead_host}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    # add must attempt the dead host (array wins), fail, and exit non-zero.
+    result = runner.run("--format", "json", "add", f"{unique_repo}/both-tool:1", check=False)
+    assert result.returncode != 0, (
+        f"add must fail when [[registries]] points at an unreachable host; "
+        f"if it succeeded, legacy default_registry was used instead of the array. "
+        f"returncode={result.returncode}, stdout={result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — two default = true entries are rejected with exit 78
+# ---------------------------------------------------------------------------
+
+
+def test_two_defaults_rejected(
+    grim_at, project_dir: Path
+) -> None:
+    """A ``grimoire.toml`` with two ``[[registries]]`` entries both carrying
+    ``default = true`` must be rejected at parse time with exit 78 (EX_CONFIG)
+    and the error must mention "default".
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\n'
+        'url = "ghcr.io/acme"\n'
+        'default = true\n'
+        '\n'
+        '[[registries]]\n'
+        'url = "registry.corp/team"\n'
+        'default = true\n'
+        '\n'
+        '[skills]\n'
+        '\n'
+        '[rules]\n'
+    )
+
+    runner = grim_at(project_dir)
+    result = runner.run("status", check=False)
+    assert result.returncode == 78, (
+        f"two default = true entries must exit 78 (EX_CONFIG), "
+        f"got {result.returncode}; stderr: {result.stderr}"
+    )
+    assert "default" in result.stderr.lower(), (
+        f"error message must mention 'default'; got: {result.stderr!r}"
+    )

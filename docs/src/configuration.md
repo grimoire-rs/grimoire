@@ -11,8 +11,11 @@ The declaration file. An `[options]` table holds defaults, and `[skills]` /
 
 ```toml
 #:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+[[registries]]
+url = "ghcr.io/acme"
+default = true
+
 [options]
-default_registry = "ghcr.io/acme"
 clients = ["claude", "opencode"]
 
 [skills]
@@ -26,7 +29,7 @@ rust-style = "ghcr.io/acme/rust-style:2"
 code-reviewer = "ghcr.io/acme/code-reviewer:1"
 ```
 
-`default_registry` lets you write short references; `clients` selects which
+The `[[registries]]` entry with `default = true` sets the primary registry short references expand against; `clients` selects which
 [AI clients](./concepts.md#clients) `grim install` and `grim update` materialize
 into. It accepts a TOML array of client names (`claude`, `opencode`, `copilot`);
 when absent, the **detected** clients for the scope are targeted — every client
@@ -117,7 +120,20 @@ behaves exactly as before — `[options].default_registry`, the environment
 variable `GRIM_DEFAULT_REGISTRY`, and the `--registry` flag still drive the
 single-registry path. The two approaches do not mix: when any `[[registries]]`
 entry is declared, `[options].default_registry` is ignored for browse purposes
-(the `default = true` entry, or first entry, takes its role).
+(the `default = true` entry, or first entry, takes its role). The field is still
+read for back-compat and never destroyed on re-serialize, but `grim init` now
+writes the `[[registries]]` shape for new configs — `[options].default_registry`
+is deprecated for new writes.
+
+**Known limitation**: `grim login` / `grim logout` with no positional argument
+or `--registry` flag resolve the registry from the `--registry` flag,
+`GRIM_DEFAULT_REGISTRY`, and the built-in default only — they do not consult
+`[[registries]]`. Pass the registry explicitly (`grim login ghcr.io/acme`) when
+your config uses `[[registries]]`-only.
+
+**At-most-one `default = true`**: declaring two `[[registries]]` entries with
+`default = true` is a parse error (exit 78). When none set it, the first entry
+is the primary.
 
 ### Qualified references {#qualified-references}
 
@@ -278,10 +294,10 @@ network.
 
 A command-line flag always wins. For the registry, the environment variable
 wins over the config options: the registry resolves as `--registry`, then
-`GRIM_DEFAULT_REGISTRY`, then the project config's `default_registry` option,
-then the global config's, and finally the built-in default `grim.ocx.sh`
-when nothing is configured anywhere. The `--offline` toggle has no
-config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
+`GRIM_DEFAULT_REGISTRY`, then the project config (via `[[registries]]` primary or
+the legacy `[options].default_registry`), then the global config, and finally the
+built-in default `grim.ocx.sh` when nothing is configured anywhere. The `--offline`
+toggle has no config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
 ## Data layout
 

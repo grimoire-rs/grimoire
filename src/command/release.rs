@@ -280,21 +280,26 @@ fn parse_reference(
     }
 }
 
-/// The effective default registry for the publish reference, via the
-/// centralized precedence helper. Precedence (highest first): the
-/// `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the discovered
-/// project config `[options].default_registry` (best-effort — a publish run
-/// from outside a project tree simply has none), then the global config
-/// `[options].default_registry`, then the built-in
-/// [`crate::command::FALLBACK_REGISTRY`]. A release is never a global-scope
-/// operation, so the global config is always consulted as a fallback
-/// (project scope). Owned so the transient discovered config can drop.
+/// The effective default registry for the publish reference.
+///
+/// Routes through [`crate::command::primary_registry_for_scope`] — the same
+/// seam `add`/`search`/`mcp` use — so a `[[registries]]`-only config is
+/// honored by `release` without regression. A release is never a global-scope
+/// operation; scope is always resolved as project scope.
+///
+/// On scope-resolution failure (no `grimoire.toml` discoverable),
+/// [`crate::command::primary_registry_global_fallback`] is used instead of
+/// the legacy `[options].default_registry` chain so a `[[registries]]`-only
+/// global config is still honored.
 fn release_default_registry(ctx: &Context) -> String {
-    let project_default = crate::config::project_config::ProjectConfig::discover(None)
-        .ok()
-        .and_then(|d| d.config.options.default_registry);
-    let global_default = super::global_config_default(ctx, crate::config::scope::ConfigScope::Project);
-    super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
+    use super::scope_resolution;
+    // Best-effort: discover the project scope. On miss (no config in tree),
+    // fall back through the global-[[registries]]-aware helper so a user with
+    // a [[registries]]-only global config gets the right default.
+    match scope_resolution::resolve(ctx, false, None) {
+        Ok(scope) => super::primary_registry_for_scope(ctx, &scope),
+        Err(_) => super::primary_registry_global_fallback(ctx),
+    }
 }
 
 /// Move every cascade tag onto `digest`. The exact version (`version`) is
@@ -428,6 +433,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(release_default_registry(&ctx), crate::command::FALLBACK_REGISTRY);
+    }
+
+    #[test]
+    fn release_default_registry_honors_global_registries_array_when_no_project_config() {
+        // Regression guard: a user with a [[registries]]-only global config
+        // (no [options].default_registry, no project grimoire.toml) must get
+        // their declared registry — not the built-in fallback. The Err branch
+        // of `release_default_registry` previously bypassed [[registries]] by
+        // calling only global_config_default + resolve_default_registry.
+        let tmp = tempfile::tempdir().unwrap();
+        // Write a global config with [[registries]] only (no default_registry).
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\nurl = \"global-release.example\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(release_default_registry(&ctx), "global-release.example");
     }
 
     #[test]

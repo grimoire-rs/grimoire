@@ -205,4 +205,28 @@ url = "registry.corp/team"
         assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
         assert_eq!(cfg.registries[1].alias.as_deref(), Some("corp"));
     }
+
+    // ── Contract (a) for global scope — at-most-one-default ────────────────
+
+    #[test]
+    fn global_registries_two_defaults_rejected() {
+        // The shared parser applies the at-most-one-default check to both
+        // scopes; lock the contract for the global scope explicitly.
+        let err = GlobalConfig::from_toml_str(
+            r#"
+[[registries]]
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+url = "registry.corp/team"
+default = true
+"#,
+        )
+        .expect_err("two default = true entries must be rejected for global config");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert!(reason.contains("default"), "reason must mention 'default': {reason}");
+    }
 }

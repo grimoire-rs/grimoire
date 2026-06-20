@@ -600,4 +600,88 @@ tree_separators_typo = 1
             "unknown key under [options.tui] must be a parse error, got: {result:?}"
         );
     }
+
+    // ── Contract (c) — legacy default_registry preservation ────────────────
+
+    #[test]
+    fn write_config_preserves_legacy_default_registry() {
+        // Contract (c): write_config must not destroy a legacy `default_registry`
+        // field — no-destructive-migration guard. An add/remove/TUI-edit that
+        // re-serializes an existing config with a legacy default_registry must
+        // round-trip the field intact.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            default_registry: Some("ghcr.io/acme".to_string()),
+            clients: vec![],
+            tui: Default::default(),
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        // The legacy field must survive the round-trip.
+        assert!(
+            body.contains("default_registry = \"ghcr.io/acme\""),
+            "legacy default_registry must be preserved by write_config: {body}"
+        );
+        let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        assert_eq!(
+            cfg.options.default_registry.as_deref(),
+            Some("ghcr.io/acme"),
+            "re-parsed config must carry the legacy default_registry"
+        );
+    }
+
+    #[test]
+    fn write_config_mixed_legacy_and_array_round_trips() {
+        // Contract (c) mixed / G4: write_config with both default_registry and
+        // a [[registries]] array writes both back; re-parse round-trips both;
+        // resolve_registries on the result still resolves the array's primary
+        // (array wins per the resolver precedence).
+        use crate::config::declaration::RegistryConfig;
+        use crate::config::registry_resolve::primary_registry;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            default_registry: Some("legacy.example".to_string()),
+            clients: vec![],
+            tui: Default::default(),
+        };
+        let registries = vec![RegistryConfig {
+            alias: None,
+            url: "array.example".to_string(),
+            default: true,
+        }];
+        write_config(&path, &opts, &registries, &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Both fields survive.
+        assert!(
+            body.contains("default_registry = \"legacy.example\""),
+            "legacy default_registry must be preserved in mixed config: {body}"
+        );
+        assert!(
+            body.contains("[[registries]]"),
+            "[[registries]] must be present in mixed config: {body}"
+        );
+        let cfg = ProjectConfig::from_toml_str(&body).expect("mixed config must parse");
+        assert_eq!(cfg.options.default_registry.as_deref(), Some("legacy.example"));
+        assert_eq!(cfg.registries.len(), 1);
+        // Resolution: the array is authoritative, legacy is ignored for browse.
+        let set_resolved = crate::config::resolve_registries(
+            None,
+            &cfg.registries,
+            cfg.options.default_registry.as_deref(),
+            &[],
+            None,
+            crate::command::FALLBACK_REGISTRY,
+        );
+        assert_eq!(
+            primary_registry(&set_resolved),
+            "array.example",
+            "array must win over legacy in mixed config resolution"
+        );
+    }
 }

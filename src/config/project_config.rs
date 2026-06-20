@@ -177,11 +177,10 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 }
 
 /// Validate a `[[registries]]` array: every `url` non-empty, every present
-/// `alias` non-empty and unique across the array. Ordering and the
-/// `default` flag are normalized at resolution time (`resolve_registries`),
-/// so multiple `default = true` entries are tolerated here (the first
-/// wins); only structurally ambiguous input (empty url, empty or duplicate
-/// alias) is rejected.
+/// `alias` non-empty and unique across the array, and at most one entry
+/// sets `default = true`. At-most-one default is checked after the
+/// per-entry structural checks so a `default = true` entry necessarily
+/// already has a non-empty url — no separate check needed.
 fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
     let mut seen_aliases = std::collections::BTreeSet::new();
     for rc in registries {
@@ -237,6 +236,18 @@ fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(),
                 ));
             }
         }
+    }
+    // At-most-one-default check: two `default = true` entries are ambiguous
+    // and are rejected at parse time. `normalize_primary` is a defensive
+    // net for programmatically-built sets; on-disk configs must be unambiguous.
+    let default_count = registries.iter().filter(|rc| rc.default).count();
+    if default_count > 1 {
+        return Err(ConfigError::new(
+            path.to_path_buf(),
+            ConfigErrorKind::RegistryInvalid {
+                reason: "at most one [[registries]] entry may set default = true".to_string(),
+            },
+        ));
     }
     Ok(())
 }
@@ -1058,6 +1069,109 @@ tree_separators = ["/", "::"]
             matches!(err.kind, ConfigErrorKind::TomlParse(_)),
             "expected TomlParse for unknown DefaultView variant, got {:?}",
             err.kind
+        );
+    }
+
+    // ── Contract (a) — at-most-one-default validation ──────────────────────
+
+    #[test]
+    fn registries_two_defaults_rejected() {
+        // Two `default = true` entries must be rejected with RegistryInvalid,
+        // and the reason must mention "default".
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+url = "registry.corp/team"
+default = true
+"#,
+        )
+        .expect_err("two default = true entries must be rejected");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert!(reason.contains("default"), "reason must mention 'default': {reason}");
+    }
+
+    #[test]
+    fn registries_single_default_accepted() {
+        // Exactly one `default = true` must parse cleanly — boundary case.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+url = "registry.corp/team"
+"#,
+        )
+        .expect("exactly one default must be accepted");
+        assert_eq!(cfg.registries.len(), 2);
+        assert!(cfg.registries[0].default);
+        assert!(!cfg.registries[1].default);
+    }
+
+    #[test]
+    fn registries_no_default_accepted() {
+        // No `default = true` at all must parse cleanly — resolver promotes the first.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+url = "ghcr.io/acme"
+
+[[registries]]
+url = "registry.corp/team"
+"#,
+        )
+        .expect("zero defaults must be accepted");
+        assert_eq!(cfg.registries.len(), 2);
+        assert!(!cfg.registries[0].default);
+        assert!(!cfg.registries[1].default);
+    }
+
+    // ── Contract (d) — both-fields baseline: array wins, legacy ignored ────
+
+    #[test]
+    fn both_fields_present_array_wins_legacy_ignored() {
+        use crate::config::registry_resolve::primary_registry;
+        use crate::config::resolve_registries;
+        // Pre-migration baseline: when both `[options].default_registry` and
+        // `[[registries]]` are present, the array is authoritative for browse
+        // and the legacy field is ignored.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[options]
+default_registry = "legacy.example"
+
+[[registries]]
+url = "array.example"
+default = true
+"#,
+        )
+        .expect("mixed config must parse");
+        // The in-memory state carries both fields.
+        assert_eq!(cfg.options.default_registry.as_deref(), Some("legacy.example"));
+        assert_eq!(cfg.registries.len(), 1);
+        assert_eq!(cfg.registries[0].url, "array.example");
+        // When resolved: the array is authoritative, legacy is folded in only
+        // when no `[[registries]]` are present (step 3 of resolve_registries).
+        let set = resolve_registries(
+            None,
+            &cfg.registries,
+            cfg.options.default_registry.as_deref(),
+            &[],
+            None,
+            crate::command::FALLBACK_REGISTRY,
+        );
+        assert_eq!(primary_registry(&set), "array.example", "array must win over legacy");
+        // The legacy url must not appear in the resolved set at all.
+        assert!(
+            set.iter().all(|r| r.url != "legacy.example"),
+            "legacy url must be absent from the resolved set when array is present"
         );
     }
 }

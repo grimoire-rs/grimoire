@@ -143,6 +143,49 @@ pub fn registries_for_scope(
     )
 }
 
+/// The primary registry for a resolved scope via the same seam
+/// `add` / `search` / `mcp` use: `primary_registry(&registries_for_scope(…))`.
+///
+/// This is the unified consumer seam — `release` and `tui` route through it
+/// so that a `[[registries]]`-only config (no `[options].default_registry`)
+/// is honored by all commands, removing the inconsistency where PATH-A
+/// commands (`release_default_registry`, `resolve_registry`) previously
+/// resolved only through the legacy `default_registry` chain.
+///
+/// On scope-resolution failure the scope is absent; call
+/// [`primary_registry_global_fallback`] instead, which folds the global
+/// `[[registries]]` tier so a `[[registries]]`-only global config is still
+/// honored.
+pub fn primary_registry_for_scope(ctx: &crate::context::Context, scope: &scope_resolution::ResolvedScope) -> String {
+    crate::config::registry_resolve::primary_registry(&registries_for_scope(ctx, scope)).to_string()
+}
+
+/// The primary registry when scope resolution fails (e.g. `release` or `tui`
+/// run outside any project): folds the global `[[registries]]` and the legacy
+/// `[options].default_registry` tiers so a `[[registries]]`-only global config
+/// is honored — the same contract as [`registries_for_scope`]'s global-tier
+/// folding, but without a resolved project scope.
+///
+/// Precedence (mirrors [`crate::config::resolve_registries`] with empty project
+/// tiers):
+/// 1. `--registry` flag / `$GRIM_DEFAULT_REGISTRY` (via `ctx.default_registry`)
+/// 2. Global `[[registries]]` (first `default = true`, else first entry)
+/// 3. Global `[options].default_registry`
+/// 4. Built-in [`FALLBACK_REGISTRY`]
+pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String {
+    let global_regs = global_config_registries(ctx, crate::config::scope::ConfigScope::Project);
+    let global_default = global_config_default(ctx, crate::config::scope::ConfigScope::Project);
+    crate::config::registry_resolve::primary_registry(&crate::config::resolve_registries(
+        ctx.default_registry(),
+        &[],
+        None,
+        &global_regs,
+        global_default.as_deref(),
+        FALLBACK_REGISTRY,
+    ))
+    .to_string()
+}
+
 /// Build a classifiable usage error (exit 64) for a missing `login`
 /// credential input, routed through the top-level error so
 /// [`crate::error::classify_error`] sees it.
@@ -198,6 +241,7 @@ fn map_access_io(
 mod tests {
     use super::*;
     use crate::cli::options::{GlobalOptions, OutputFormat};
+    use crate::config::declaration::RegistryConfig;
     use crate::context::Context;
 
     fn opts(registry: Option<&str>) -> GlobalOptions {
@@ -265,6 +309,59 @@ mod tests {
         );
     }
 
+    // ── Contract (e)/(f) — primary_registry_for_scope regression guard ────
+
+    /// Build a minimal `ResolvedScope` from an in-memory registries slice so
+    /// tests can exercise `primary_registry_for_scope` without writing disk files.
+    fn make_scope(tmp: &tempfile::TempDir, registries: Vec<RegistryConfig>) -> scope_resolution::ResolvedScope {
+        use crate::config::declaration::DesiredSet;
+        use crate::install::install_state::InstallState;
+        use crate::install::path_anchor::AnchorRoots;
+        scope_resolution::ResolvedScope {
+            scope: crate::config::scope::ConfigScope::Project,
+            set: DesiredSet::default(),
+            options: crate::config::declaration::ConfigOptions::default(),
+            registries,
+            config_path: tmp.path().join("grimoire.toml"),
+            lock_path: tmp.path().join("grimoire.lock"),
+            state_path: InstallState::project_state_path(tmp.path()),
+            workspace: tmp.path().to_path_buf(),
+            roots: AnchorRoots {
+                workspace: tmp.path().to_path_buf(),
+                grim_home: tmp.path().to_path_buf(),
+                claude_root: None,
+                copilot_root: None,
+                opencode_skills: None,
+            },
+        }
+    }
+
+    #[test]
+    fn primary_registry_for_scope_returns_registries_primary() {
+        // Contract (e): primary_registry_for_scope returns the [[registries]]
+        // primary when present — NOT the fallback, NOT default_registry.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let regs = vec![RegistryConfig {
+            alias: None,
+            url: "array.example".to_string(),
+            default: true,
+        }];
+        let scope = make_scope(&tmp, regs);
+        assert_eq!(primary_registry_for_scope(&ctx, &scope), "array.example");
+    }
+
+    #[test]
+    fn primary_registry_for_scope_falls_back_when_no_registries() {
+        // Contract (e) boundary: no [[registries]] → legacy chain → fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let scope = make_scope(&tmp, vec![]);
+        // No registries, no default_registry in options, hermetic ctx (no env) →
+        // must fall back to FALLBACK_REGISTRY.
+        assert_eq!(primary_registry_for_scope(&ctx, &scope), FALLBACK_REGISTRY);
+    }
+
     #[test]
     fn global_config_default_degrades_to_none_when_absent() {
         // No global config on disk under the hermetic $GRIM_HOME ⇒ the
@@ -277,5 +374,67 @@ mod tests {
             global_config_default(&ctx, crate::config::scope::ConfigScope::Project),
             None
         );
+    }
+
+    // ── Regression guard: primary_registry_global_fallback ──────────────────
+    //
+    // These tests lock the contract of the shared Err-branch helper used by
+    // `release_default_registry` and `resolve_registry` when scope resolution
+    // fails (no project `grimoire.toml`). Before the fix both branches called
+    // `global_config_default` + `resolve_default_registry`, which ignored the
+    // global `[[registries]]` tier — a user with a `[[registries]]`-only
+    // global config always got the built-in fallback instead of their registry.
+
+    #[test]
+    fn global_fallback_honors_registries_array_in_global_config() {
+        // Regression: [[registries]]-only global config (no [options].default_registry)
+        // must resolve to the declared registry, not the built-in fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\nurl = \"global.example\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(primary_registry_global_fallback(&ctx), "global.example");
+    }
+
+    #[test]
+    fn global_fallback_honors_legacy_default_registry_in_global_config() {
+        // A global config with only [options].default_registry (no [[registries]])
+        // must still return that value.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"legacy.example\"\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(primary_registry_global_fallback(&ctx), "legacy.example");
+    }
+
+    #[test]
+    fn global_fallback_uses_builtin_when_no_global_config() {
+        // No global config on disk ⇒ built-in fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(primary_registry_global_fallback(&ctx), FALLBACK_REGISTRY);
+    }
+
+    #[test]
+    fn global_fallback_flag_registry_overrides_global_config() {
+        // --registry / $GRIM_DEFAULT_REGISTRY (ctx.default_registry) is the
+        // highest tier — it must win even when a [[registries]] entry is declared
+        // in the global config.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\nurl = \"global.example\"\ndefault = true\n",
+        )
+        .unwrap();
+        // Inject the flag tier via opts (no hermetic override — the flag is
+        // in the ctx directly via `registry_flag`).
+        let ctx = Context::new(&opts(Some("flag.example")));
+        assert_eq!(primary_registry_global_fallback(&ctx), "flag.example");
     }
 }
