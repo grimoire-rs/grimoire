@@ -30,6 +30,8 @@ use super::state::{ArtifactState, Mode, TuiState};
 pub enum ColorKey {
     /// Installed and intact.
     Installed,
+    /// A bundle member present only because the bundle provides it.
+    ViaBundle,
     /// Not present in this scope.
     NotInstalled,
     /// A newer pin is locked than what is on disk.
@@ -45,6 +47,7 @@ pub enum ColorKey {
 fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
     match state {
         ArtifactState::Installed => ("✓", "installed", ColorKey::Installed),
+        ArtifactState::ViaBundle => ("◆", "via-bundle", ColorKey::ViaBundle),
         ArtifactState::NotInstalled => ("·", "not-installed", ColorKey::NotInstalled),
         ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
@@ -1084,6 +1087,7 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
 fn legend_line(truncation_hint: &str) -> Line<'static> {
     let pairs = [
         ("✓ installed", ColorKey::Installed),
+        ("  ◆ via-bundle", ColorKey::ViaBundle),
         ("  ↑ outdated", ColorKey::Outdated),
         ("  ✱ modified", ColorKey::Modified),
         ("  ✘ integrity-missing", ColorKey::IntegrityMissing),
@@ -1231,6 +1235,7 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 fn color_for(key: ColorKey) -> Color {
     match key {
         ColorKey::Installed => Color::Green,
+        ColorKey::ViaBundle => Color::Cyan,
         ColorKey::NotInstalled => Color::DarkGray,
         ColorKey::Outdated => Color::Yellow,
         ColorKey::Modified => Color::Red,
@@ -1311,6 +1316,7 @@ mod tests {
     fn status_view_maps_every_state() {
         for (st, glyph, label, color) in [
             (ArtifactState::Installed, "✓", "installed", ColorKey::Installed),
+            (ArtifactState::ViaBundle, "◆", "via-bundle", ColorKey::ViaBundle),
             (
                 ArtifactState::NotInstalled,
                 "·",
@@ -1588,12 +1594,12 @@ mod tests {
 
     #[test]
     fn legend_line_appends_truncation_hint_only_when_present() {
-        // No hint ⇒ the legend keeps exactly its five glyph spans.
+        // No hint ⇒ the legend keeps exactly its six glyph spans.
         let base = legend_line("");
-        assert_eq!(base.spans.len(), 5, "five status glyphs, no trailing hint");
+        assert_eq!(base.spans.len(), 6, "six status glyphs, no trailing hint");
         // A non-empty hint adds one trailing span carrying the hint text.
         let with_hint = legend_line("(list truncated)");
-        assert_eq!(with_hint.spans.len(), 6, "glyphs plus the truncation span");
+        assert_eq!(with_hint.spans.len(), 7, "glyphs plus the truncation span");
         assert!(
             with_hint.spans.last().unwrap().content.contains("(list truncated)"),
             "the trailing span carries the hint text"

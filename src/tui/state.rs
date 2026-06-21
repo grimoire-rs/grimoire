@@ -32,6 +32,11 @@ pub enum ArtifactState {
     NotInstalled,
     /// Locked, recorded, every output present and content intact.
     Installed,
+    /// A bundle member that is present and intact but **not** also declared
+    /// standalone — it is installed only because a bundle provides it. Set on
+    /// member nodes only (a catalog row never derives it); `Modified`,
+    /// `Outdated`, and `IntegrityMissing` take precedence over it.
+    ViaBundle,
     /// Locked + recorded, but the locked pin is ahead of the record.
     Outdated,
     /// Recorded, outputs present, but on-disk content drifted.
@@ -46,6 +51,7 @@ impl std::fmt::Display for ArtifactState {
         f.write_str(match self {
             Self::NotInstalled => "not-installed",
             Self::Installed => "installed",
+            Self::ViaBundle => "via-bundle",
             Self::Outdated => "outdated",
             Self::Modified => "modified",
             Self::IntegrityMissing => "integrity-missing",

@@ -107,6 +107,10 @@ pub enum TuiAction {
         /// Artifact kind (never `Bundle` — per-member bundle-nesting rejected
         /// at `bundle_members.rs:72-74`).
         kind: crate::oci::ArtifactKind,
+        /// The bundle member's binding name (`BundleMember.name`), which is the
+        /// install-state / lock key for the member — NOT the repo basename
+        /// (they differ when the bundle aliases a member). Actions key by this.
+        name: String,
     },
     /// Rebuild the catalog from the registry.
     Refresh,
@@ -357,6 +361,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     member_repo: Some(repo),
                     kind,
                     state: member_state,
+                    label,
                     ..
                 }) = flat.get(state.selected)
                 {
@@ -368,9 +373,13 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                                 op: BatchOp::Install,
                                 repo: repo.clone(),
                                 kind: *kind,
+                                name: label.clone(),
                             };
                         }
-                        ArtifactState::Installed | ArtifactState::Outdated | ArtifactState::Modified => {
+                        ArtifactState::Installed
+                        | ArtifactState::ViaBundle
+                        | ArtifactState::Outdated
+                        | ArtifactState::Modified => {
                             state.set_status("already installed");
                             return TuiAction::None;
                         }
@@ -390,6 +399,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     member_repo: Some(repo),
                     kind,
                     state: member_state,
+                    label,
                     ..
                 }) = flat.get(state.selected)
                 {
@@ -398,6 +408,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     // F10: IntegrityMissing now allowed for Update (reinstall).
                     match member_state {
                         ArtifactState::Installed
+                        | ArtifactState::ViaBundle
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::IntegrityMissing => {
@@ -405,6 +416,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                                 op: BatchOp::Update,
                                 repo: repo.clone(),
                                 kind: *kind,
+                                name: label.clone(),
                             };
                         }
                         ArtifactState::NotInstalled => {
@@ -425,6 +437,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     member_repo: Some(repo),
                     kind,
                     state: member_state,
+                    label,
                     ..
                 }) = flat.get(state.selected)
                 {
@@ -432,6 +445,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     // F13: explicit arms — no `_ =>` wildcard over closed enum.
                     match member_state {
                         ArtifactState::Installed
+                        | ArtifactState::ViaBundle
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::IntegrityMissing => {
@@ -439,6 +453,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                                 op: BatchOp::Uninstall,
                                 repo: repo.clone(),
                                 kind: *kind,
+                                name: label.clone(),
                             };
                         }
                         ArtifactState::NotInstalled => {

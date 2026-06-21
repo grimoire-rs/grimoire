@@ -303,7 +303,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     recheck_rows(&ctx, &state, &mut checker, &rows);
                 }
             }
-            TuiAction::MemberAction { op, repo, kind } => {
+            TuiAction::MemberAction { op, repo, kind, name } => {
                 // P4.4: per-member install/update/uninstall.
                 // Offline guard: install/update need the network.
                 if ctx.offline && op != BatchOp::Uninstall {
@@ -316,7 +316,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             // related member reuses its row's pinned/latest tag,
                             // a non-catalog member falls back to "latest".
                             let tag = resolve_member_tag(&repo, &state.rows);
-                            match perform_member(&ctx, repo.clone(), kind, is_update, tag).await {
+                            match perform_member(&ctx, repo.clone(), kind, is_update, tag, name.clone()).await {
                                 Ok(l) => Some(l),
                                 Err(e) => {
                                     state.set_status(format!("member action failed: {e:#}"));
@@ -324,20 +324,22 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        BatchOp::Uninstall => match perform_member_uninstall(&ctx, repo.clone(), kind).await {
-                            Ok(notes) => {
-                                // Surface the first note (e.g. id-mismatch stale explanation)
-                                // instead of the bland "uninstalled" when the lock mutation
-                                // produced one; the bundle badge also flips to `stale` via
-                                // the `recompute_states` call below.
-                                let label = notes.into_iter().next().unwrap_or_else(|| "uninstalled".to_string());
-                                Some(label)
+                        BatchOp::Uninstall => {
+                            match perform_member_uninstall(&ctx, repo.clone(), kind, name.clone()).await {
+                                Ok(notes) => {
+                                    // Surface the first note (e.g. id-mismatch stale explanation)
+                                    // instead of the bland "uninstalled" when the lock mutation
+                                    // produced one; the bundle badge also flips to `stale` via
+                                    // the `recompute_states` call below.
+                                    let label = notes.into_iter().next().unwrap_or_else(|| "uninstalled".to_string());
+                                    Some(label)
+                                }
+                                Err(e) => {
+                                    state.set_status(format!("member uninstall failed: {e:#}"));
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                state.set_status(format!("member uninstall failed: {e:#}"));
-                                None
-                            }
-                        },
+                        }
                     };
                     if let Some(l) = label {
                         state.set_status(format!("{repo}: {l}"));
@@ -366,6 +368,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = detect_clients(&ctx.workspace, ctx.scope);
+                // Direct declarations decide the via-bundle badge: a member also
+                // declared standalone shows plain `installed`, not `via-bundle`.
+                let direct_repos = load_scope_declaration(&ctx)
+                    .map(|(_, _, set)| direct_declared_repos(&set))
+                    .unwrap_or_default();
 
                 let lock_members: Option<Vec<crate::oci::bundle::BundleMember>> = lock.as_ref().and_then(|l| {
                     // Find the LockedBundle whose `repo` matches this bundle_repo.
@@ -390,7 +397,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             let member_state = crate::oci::Identifier::parse(&m.id)
                                 .ok()
                                 .map(|parsed| {
-                                    derive_artifact_state(
+                                    member_display_state(
                                         m.kind,
                                         parsed.registry(),
                                         parsed.repository(),
@@ -398,6 +405,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                                         &install_state,
                                         &ctx.roots,
                                         &active,
+                                        &direct_repos,
                                     )
                                 })
                                 .unwrap_or(ArtifactState::NotInstalled);
@@ -532,7 +540,7 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos, _direct_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -584,7 +592,7 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos, _direct_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -718,6 +726,9 @@ fn drain_bundle_member_checks(
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = detect_clients(&ctx.workspace, ctx.scope);
+                let direct_repos = load_scope_declaration(ctx)
+                    .map(|(_, _, set)| direct_declared_repos(&set))
+                    .unwrap_or_default();
                 // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
                 let row_repos: std::collections::HashSet<&str> = state.rows.iter().map(|r| r.repo.as_str()).collect();
                 let nodes: Vec<super::bundle_members::MemberNode> = members
@@ -726,7 +737,7 @@ fn drain_bundle_member_checks(
                         let member_state = crate::oci::Identifier::parse(&m.id)
                             .ok()
                             .map(|parsed| {
-                                derive_artifact_state(
+                                member_display_state(
                                     m.kind,
                                     parsed.registry(),
                                     parsed.repository(),
@@ -734,6 +745,7 @@ fn drain_bundle_member_checks(
                                     &install_state,
                                     &ctx.roots,
                                     &active,
+                                    &direct_repos,
                                 )
                             })
                             .unwrap_or(ArtifactState::NotInstalled);
@@ -769,7 +781,7 @@ fn drain_bundle_member_checks(
 /// the same path the initial load uses) and merge them, preserving live
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
-    let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -777,6 +789,7 @@ fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog
         roots: &ctx.roots,
         active: &active,
         declared_bundle_repos: &declared_bundle_repos,
+        direct_repos: &direct_repos,
     };
     let fresh = rows_from_catalog(catalog, &badge);
     state.merge_catalog_rows(fresh);
@@ -844,7 +857,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
         .await
     {
         Ok(catalog) => {
-            let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
+            let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
             let active = detect_clients(&ctx.workspace, ctx.scope);
             let badge = BadgeContext {
                 lock: lock.as_ref(),
@@ -852,6 +865,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 roots: &ctx.roots,
                 active: &active,
                 declared_bundle_repos: &declared_bundle_repos,
+                direct_repos: &direct_repos,
             };
             let rows = rows_from_catalog(&catalog, &badge);
             let n = rows.len();
@@ -895,6 +909,10 @@ struct BadgeContext<'a> {
     roots: &'a AnchorRoots,
     active: &'a [ClientTarget],
     declared_bundle_repos: &'a std::collections::BTreeSet<String>,
+    /// `(kind, registry/repository)` declared directly in `[skills]`/`[rules]`/
+    /// `[agents]` — used to flag an installed-but-not-directly-declared row as
+    /// `ViaBundle` (present only because a bundle provides it).
+    direct_repos: &'a std::collections::BTreeSet<(ArtifactKind, String)>,
 }
 
 /// Project a catalog into TUI rows, deriving each state from the scope's
@@ -930,7 +948,9 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
     if row_kind(kind) == ArtifactKind::Bundle {
         derive_bundle_state(&format!("{registry}/{repository}"), ctx.declared_bundle_repos)
     } else {
-        derive_artifact_state(
+        // A row installed but not directly declared is present only via a bundle
+        // → ViaBundle, consistent with the member-node badge.
+        member_display_state(
             row_kind(kind),
             registry,
             repository,
@@ -938,6 +958,7 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
             ctx.state,
             ctx.roots,
             ctx.active,
+            ctx.direct_repos,
         )
     }
 }
@@ -1042,7 +1063,7 @@ fn derive_artifact_state(
 /// scope's lock + install-state (used after a scope toggle — the catalog
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
-    let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -1050,6 +1071,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         roots: &ctx.roots,
         active: &active,
         declared_bundle_repos: &declared_bundle_repos,
+        direct_repos: &direct_repos,
     };
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
@@ -1060,7 +1082,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     // otherwise only rebuilt on re-expand / scope toggle. Refresh it here too so
     // an expanded bundle's members reflect an install/uninstall immediately,
     // instead of showing the state captured when the bundle was first expanded.
-    refresh_member_states(state, lock.as_ref(), &install_state, &ctx.roots, &active);
+    refresh_member_states(state, lock.as_ref(), &install_state, &ctx.roots, &active, &direct_repos);
 }
 
 /// Re-derive the install state of every cached bundle-member node for the
@@ -1077,6 +1099,7 @@ fn refresh_member_states(
     install_state: &InstallState,
     roots: &AnchorRoots,
     active: &[ClientTarget],
+    direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
 ) {
     let scope_label = state.scope_label.clone();
     for ((entry_scope, _bundle_repo), cache) in state.bundle_members.iter_mut() {
@@ -1090,8 +1113,60 @@ fn refresh_member_states(
             let Some((registry, repository)) = node.member_repo.as_deref().and_then(split_repo) else {
                 continue;
             };
-            node.state = derive_artifact_state(node.kind, &registry, &repository, lock, install_state, roots, active);
+            node.state = member_display_state(
+                node.kind,
+                &registry,
+                &repository,
+                lock,
+                install_state,
+                roots,
+                active,
+                direct_repos,
+            );
         }
+    }
+}
+
+/// The set of `(kind, registry/repository)` an active scope declares **directly**
+/// (in `[skills]`/`[rules]`/`[agents]`) — the key by which the via-bundle badge
+/// decides whether a present member is also a standalone install.
+fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for (kind, map) in [
+        (ArtifactKind::Skill, &set.skills),
+        (ArtifactKind::Rule, &set.rules),
+        (ArtifactKind::Agent, &set.agents),
+    ] {
+        for id in map.values() {
+            out.insert((kind, id.registry_repository()));
+        }
+    }
+    out
+}
+
+/// The badge state for a bundle member node.
+///
+/// The install reality from [`derive_artifact_state`], except a present-and-intact
+/// member that is **not** also declared standalone is shown as
+/// [`ArtifactState::ViaBundle`] — it is installed only because the bundle provides
+/// it. `Modified` / `Outdated` / `IntegrityMissing` keep precedence (they are not
+/// the plain `Installed` state, so they are returned unchanged).
+#[allow(clippy::too_many_arguments)]
+fn member_display_state(
+    kind: ArtifactKind,
+    registry: &str,
+    repository: &str,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+) -> ArtifactState {
+    let derived = derive_artifact_state(kind, registry, repository, lock, state, roots, active);
+    if derived == ArtifactState::Installed && !direct_repos.contains(&(kind, format!("{registry}/{repository}"))) {
+        ArtifactState::ViaBundle
+    } else {
+        derived
     }
 }
 
@@ -1114,17 +1189,30 @@ fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
 ///
-/// Returns the active scope's lock, install state, and the set of declared
-/// bundle `registry/repository` values (from the live `[bundles]` table) used
-/// to derive bundle row state. The declaration is read fresh (the config can
-/// change while the TUI runs); any read failure degrades to an empty set.
-fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallState, std::collections::BTreeSet<String>) {
+/// Returns the active scope's lock, install state, the set of declared bundle
+/// `registry/repository` values (drives bundle row state), and the set of
+/// directly-declared `(kind, registry/repository)` (drives the via-bundle badge:
+/// an installed artifact NOT directly declared is present only via a bundle).
+/// The declaration is read fresh (the config can change while the TUI runs); any
+/// read failure degrades to empty sets.
+#[allow(clippy::type_complexity)]
+fn load_scope_for_badges(
+    ctx: &TuiContext,
+) -> (
+    Option<GrimoireLock>,
+    InstallState,
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<(ArtifactKind, String)>,
+) {
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-    let declared_bundle_repos = load_scope_declaration(ctx)
-        .map(|(_options, _registries, set)| set.bundles.values().map(|id| id.registry_repository()).collect())
+    let (declared_bundle_repos, direct_repos) = load_scope_declaration(ctx)
+        .map(|(_options, _registries, set)| {
+            let bundles = set.bundles.values().map(|id| id.registry_repository()).collect();
+            (bundles, direct_declared_repos(&set))
+        })
         .unwrap_or_default();
-    (lock, state, declared_bundle_repos)
+    (lock, state, declared_bundle_repos, direct_repos)
 }
 
 /// Lazily fetch the tag list for `row` and feed it to the open picker.
@@ -1205,8 +1293,8 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
         };
         state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
         let outcome = match op {
-            BatchOp::Install => perform(ctx, &row, false).await.map(|_| ()),
-            BatchOp::Update => perform(ctx, &row, true).await.map(|_| ()),
+            BatchOp::Install => perform(ctx, &row, false, None).await.map(|_| ()),
+            BatchOp::Update => perform(ctx, &row, true, None).await.map(|_| ()),
             BatchOp::Uninstall => perform_uninstall(ctx, &row),
         };
         match outcome {
@@ -1369,12 +1457,22 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
 /// declaration hash always matches the config — a TUI install is never an
 /// undeclared lock entry), and then only the acted-on artifact is
 /// materialized.
-async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Result<String> {
+async fn perform(
+    ctx: &TuiContext,
+    row: &TuiRow,
+    is_update: bool,
+    name_override: Option<&str>,
+) -> anyhow::Result<String> {
     let (registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
 
     let kind = row_kind(&row.kind);
-    let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+    // The declaration/lock binding name: an explicit override (a bundle member's
+    // own name, which is its lock/install key) wins; a catalog row falls back to
+    // the repo's last path segment.
+    let name = name_override
+        .map(str::to_string)
+        .unwrap_or_else(|| repository.rsplit('/').next().unwrap_or(&repository).to_string());
     // A user-pinned version (chosen in the picker) wins; otherwise the
     // representative tag, otherwise the conventional `latest`.
     let tag = row
@@ -1786,6 +1884,7 @@ async fn perform_member(
     kind: crate::oci::ArtifactKind,
     is_update: bool,
     tag: String,
+    name: String,
 ) -> anyhow::Result<String> {
     // C-12: validate split_repo at the boundary — return Err (no panic) on
     // a separator-less repo so the dispatch arm can show a status breadcrumb.
@@ -1810,7 +1909,10 @@ async fn perform_member(
         pinned_version: None,
         state: crate::tui::state::ArtifactState::NotInstalled,
     };
-    perform(ctx, &synthetic_row, is_update).await
+    // Use the member's own binding name (its lock/install key) for the
+    // declaration, not the repo basename — they differ when the bundle aliases
+    // the member.
+    perform(ctx, &synthetic_row, is_update, Some(&name)).await
 }
 
 /// Perform a member uninstall action, reusing the shared seams for file
@@ -1822,14 +1924,18 @@ async fn perform_member_uninstall(
     ctx: &TuiContext,
     repo: String,
     kind: crate::oci::ArtifactKind,
+    name: String,
 ) -> anyhow::Result<Vec<String>> {
     // C-12: validate split_repo at the boundary — return Err (no panic) on
     // a separator-less repo so the dispatch arm can show a status breadcrumb.
-    let Some((_registry, repository)) = split_repo(&repo) else {
+    if split_repo(&repo).is_none() {
         return Err(anyhow::anyhow!("malformed member repo: {repo}"));
-    };
+    }
     let member_kind = kind;
-    let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+    // `name` is the bundle member's binding name — its install-state / lock key,
+    // threaded from the member node. It is NOT the repo basename, which can
+    // differ when the bundle aliases a member; keying file deletion + undeclare
+    // by the basename would silently miss the record and orphan the files.
 
     // Hold the config flock for the whole read-modify-write so the keep-files
     // gate, the file deletion, and the undeclare see one consistent
@@ -2084,6 +2190,16 @@ mod tests {
     /// references it into a [`MemoryRegistry`], mirroring what
     /// `grim release` produces.
     async fn registry_with_bundle() -> Arc<dyn OciAccess> {
+        registry_with_bundle_at("demo").await
+    }
+
+    /// As [`registry_with_bundle`], but the member skill lives at repo
+    /// `grimoire/skills/<skill_segment>` while its name (the tar root, and the
+    /// install-state / lock key) stays `demo`. With `skill_segment != "demo"`
+    /// the member's repo basename differs from its install key — the
+    /// aliased-member case (a bundle referencing a skill whose repo is named
+    /// differently from the skill itself).
+    async fn registry_with_bundle_at(skill_segment: &str) -> Arc<dyn OciAccess> {
         use crate::oci::Algorithm;
         use crate::oci::access::memory_registry::MemoryRegistry;
         use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
@@ -2101,7 +2217,7 @@ mod tests {
         builder.append_data(&mut header, "demo/SKILL.md", body).unwrap();
         let tar_blob = builder.into_inner().unwrap();
 
-        let skill_repo = Identifier::new_registry("grimoire/skills/demo", "localhost:5050");
+        let skill_repo = Identifier::new_registry(format!("grimoire/skills/{skill_segment}"), "localhost:5050");
         let skill_layer = reg.push_blob(&skill_repo, &tar_blob).await.unwrap();
         let skill_manifest = OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
@@ -2126,8 +2242,10 @@ mod tests {
         // The bundle: a single members-layer naming the skill.
         let members = BundleManifest::new(vec![BundleMember {
             kind: ArtifactKind::Skill,
+            // The member name == the skill's tar root (`demo`), which the
+            // materializer requires; the skill's REPO segment may differ.
             name: "demo".to_string(),
-            id: "localhost:5050/grimoire/skills/demo:1.0.0".to_string(),
+            id: format!("localhost:5050/grimoire/skills/{skill_segment}:1.0.0"),
         }]);
         let members_blob = members.to_layer_bytes().unwrap();
         let bundle_repo = Identifier::new_registry("grimoire/bundles/starter-pack", "localhost:5050");
@@ -2203,7 +2321,7 @@ mod tests {
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
 
-        let label = perform(&ctx, &row, false).await.expect("bundle install succeeds");
+        let label = perform(&ctx, &row, false, None).await.expect("bundle install succeeds");
         assert_eq!(label, "installed");
 
         // Declared under [bundles], never [skills].
@@ -2234,13 +2352,14 @@ mod tests {
         );
 
         // The bundle row badge derives `installed` from its members.
-        let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
             roots: &ctx.roots,
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -2261,7 +2380,7 @@ mod tests {
         let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &row, false).await.expect("bundle install succeeds");
+        perform(&ctx, &row, false, None).await.expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
 
         perform_uninstall(&ctx, &row).expect("bundle uninstall succeeds");
@@ -2276,13 +2395,14 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert!(lock.skills.is_empty(), "members must be evicted from the lock");
 
-        let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
             roots: &ctx.roots,
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -2306,7 +2426,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false)
+        perform(&ctx, &bundle_row, false, None)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -2340,8 +2460,9 @@ mod tests {
         };
         assert_eq!(
             nodes[0].state,
-            ArtifactState::Installed,
-            "recompute_states must refresh a stale member-node state to Installed"
+            ArtifactState::ViaBundle,
+            "recompute_states must refresh the stale member-node state — here to ViaBundle, \
+             since demo is present only via the bundle (not declared standalone)"
         );
     }
 
@@ -2365,13 +2486,15 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "latest".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false).await.expect("skill install succeeds");
+        perform(&ctx, &skill_row, false, None)
+            .await
+            .expect("skill install succeeds");
 
         // 2. Install the bundle (also provides demo, pinned at :1.0.0).
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false)
+        perform(&ctx, &bundle_row, false, None)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -2406,7 +2529,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false)
+        perform(&ctx, &bundle_row, false, None)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -2432,6 +2555,201 @@ mod tests {
         assert!(
             !workspace.join(".claude/skills/demo").exists(),
             "the aliased bundle's member files must be deleted"
+        );
+    }
+
+    /// Derive a member's badge state the way the LoadBundleMembers / drain /
+    /// refresh paths do: lock + install-state + active clients + direct repos.
+    fn member_badge(ctx: &TuiContext, registry: &str, repository: &str) -> ArtifactState {
+        let lock = lock_io::load(&ctx.lock_path).ok();
+        let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+        let active = detect_clients(&ctx.workspace, ctx.scope);
+        let direct_repos = load_scope_declaration(ctx)
+            .map(|(_, _, set)| direct_declared_repos(&set))
+            .unwrap_or_default();
+        member_display_state(
+            ArtifactKind::Skill,
+            registry,
+            repository,
+            lock.as_ref(),
+            &install_state,
+            &ctx.roots,
+            &active,
+            &direct_repos,
+        )
+    }
+
+    #[tokio::test]
+    async fn bundle_member_shows_via_bundle_unless_also_declared_standalone() {
+        // A member present only because the bundle provides it shows ViaBundle;
+        // a member ALSO declared standalone shows plain Installed.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        assert_eq!(
+            member_badge(&ctx, "localhost:5050", "grimoire/skills/demo"),
+            ArtifactState::ViaBundle,
+            "a bundle-only member shows via-bundle"
+        );
+
+        // Also declare/install the member standalone → plain installed.
+        let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
+        skill_row.latest_tag = "1.0.0".to_string();
+        skill_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &skill_row, false, None)
+            .await
+            .expect("skill install succeeds");
+
+        assert_eq!(
+            member_badge(&ctx, "localhost:5050", "grimoire/skills/demo"),
+            ArtifactState::Installed,
+            "a member also declared standalone shows plain installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn modified_member_keeps_modified_over_via_bundle() {
+        // Precedence: a tampered (modified) bundle member shows Modified, not
+        // ViaBundle — only the plain Installed state is promoted.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+
+        // Tamper the materialized member file so its content hash drifts.
+        std::fs::write(workspace.join(".claude/skills/demo/SKILL.md"), b"tampered\n").unwrap();
+
+        assert_eq!(
+            member_badge(&ctx, "localhost:5050", "grimoire/skills/demo"),
+            ArtifactState::Modified,
+            "modified takes precedence over via-bundle"
+        );
+    }
+
+    #[tokio::test]
+    async fn aliased_member_uninstall_targets_member_name_not_basename() {
+        // Codex [high]: a bundle member whose skill repo basename ("cool-tool")
+        // differs from the member's install key ("demo", the skill's own name).
+        // The install-state record is keyed by the member name, so member delete
+        // must target that name — keying by the repo basename silently misses
+        // the record and orphans the files. The TUI now threads the member name
+        // (DisplayRow::Member.label) through the action.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle_at("cool-tool").await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        // The install record is keyed by the member name ("demo"), NOT the repo
+        // basename ("cool-tool").
+        let st = load_state(&ctx).unwrap();
+        assert!(
+            st.get(ArtifactKind::Skill, "demo").is_some(),
+            "install record is keyed by the bundle member name"
+        );
+        assert!(
+            st.get(ArtifactKind::Skill, "cool-tool").is_none(),
+            "no record exists under the repo basename"
+        );
+
+        // The badge derives by repo identity, so it shows via-bundle.
+        assert_eq!(
+            member_badge(&ctx, "localhost:5050", "grimoire/skills/cool-tool"),
+            ArtifactState::ViaBundle
+        );
+
+        // Member delete keyed by the member name removes the files (keying by
+        // the basename "cool-tool" would be a silent no-op).
+        perform_member_uninstall(
+            &ctx,
+            "localhost:5050/grimoire/skills/cool-tool".to_string(),
+            ArtifactKind::Skill,
+            "demo".to_string(),
+        )
+        .await
+        .expect("member uninstall succeeds");
+        assert!(
+            !workspace.join(".claude/skills/demo").exists(),
+            "the aliased member's files must be deleted when targeted by its name"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_row_for_bundle_only_artifact_shows_via_bundle() {
+        // A catalog ROW (not just the bundle member node) for an artifact that
+        // is installed only because a bundle provides it shows ViaBundle — the
+        // same badge it gets under the bundle, so the two views agree.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+
+        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &install_state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
+        };
+        assert_eq!(
+            derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),
+            ArtifactState::ViaBundle,
+            "a skill row present only via the bundle shows via-bundle"
+        );
+
+        // Declaring it standalone too flips the row to plain installed.
+        let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
+        skill_row.latest_tag = "1.0.0".to_string();
+        skill_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &skill_row, false, None)
+            .await
+            .expect("skill install succeeds");
+        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &install_state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
+        };
+        assert_eq!(
+            derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),
+            ArtifactState::Installed,
+            "once declared standalone the row is plain installed"
         );
     }
 
@@ -2463,8 +2781,9 @@ mod tests {
         );
         assert_eq!(
             state.rows[1].state,
-            ArtifactState::Installed,
-            "member row must be recomputed after a bundle install"
+            ArtifactState::ViaBundle,
+            "member row must be recomputed after a bundle install — ViaBundle, since \
+             the member is present only via the bundle (not declared standalone)"
         );
 
         // Deleting the bundle removes the member: its row must flip back.
@@ -2939,6 +3258,7 @@ mod tests {
             ArtifactKind::Skill,
             false,
             tag,
+            "demo".to_string(),
         )
         .await;
         assert!(
@@ -3081,6 +3401,7 @@ mod p2_app_member_node_tests {
             ArtifactKind::Skill,
             false,
             "latest".to_string(),
+            "noslash".to_string(),
         )
         .await;
 
@@ -3099,7 +3420,8 @@ mod p2_app_member_node_tests {
         std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
         let ctx = c12_ctx(workspace);
 
-        let result = perform_member_uninstall(&ctx, "noslash".to_string(), ArtifactKind::Skill).await;
+        let result =
+            perform_member_uninstall(&ctx, "noslash".to_string(), ArtifactKind::Skill, "noslash".to_string()).await;
 
         assert!(
             result.is_err(),

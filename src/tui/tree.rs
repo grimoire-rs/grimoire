@@ -53,7 +53,10 @@ impl Rollup {
     pub fn add(&mut self, state: ArtifactState) {
         self.total += 1;
         match state {
-            ArtifactState::Installed => self.installed += 1,
+            // Catalog-row leaves never derive `ViaBundle` (it is set on bundle
+            // member nodes only), but the match must stay total — count it as
+            // installed (it is present and intact).
+            ArtifactState::Installed | ArtifactState::ViaBundle => self.installed += 1,
             ArtifactState::NotInstalled => self.not_installed += 1,
             ArtifactState::Outdated => self.outdated += 1,
             ArtifactState::Modified => self.modified += 1,
