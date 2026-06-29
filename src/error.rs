@@ -201,7 +201,8 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::FrontmatterParse(_)
         | SkillErrorKind::MissingFrontmatter
         | SkillErrorKind::MetadataInvalid(_)
-        | SkillErrorKind::ValidationFailed(_) => ExitCode::DataError,
+        | SkillErrorKind::ValidationFailed(_)
+        | SkillErrorKind::GitProvenance(_) => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }
 }
@@ -434,6 +435,20 @@ mod tests {
             let err: anyhow::Error = Error::from(inner).into();
             assert_eq!(classify_error(&err), expected);
         }
+    }
+
+    #[test]
+    fn skill_git_provenance_error_classifies_as_data_error() {
+        use crate::oci::git_provenance::GitProvenanceError;
+        // The `--git` opt-in surfaces a missing `git` as a path-attributed
+        // SkillError; it must classify as a DataError (65), never a generic
+        // failure — the user explicitly asked for provenance.
+        let inner = SkillError::new(
+            "/w/skill",
+            SkillErrorKind::GitProvenance(GitProvenanceError::GitNotFound),
+        );
+        let err: anyhow::Error = Error::from(inner).into();
+        assert_eq!(classify_error(&err), ExitCode::DataError);
     }
 
     #[test]

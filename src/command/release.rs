@@ -31,7 +31,7 @@ use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags};
 use crate::oci::{Algorithm, ArtifactKind, Identifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
-use super::build::{detect_kind, read_bundle_members, validate_and_pack};
+use super::build::{derive_git_provenance, detect_kind, read_bundle_members, validate_and_pack};
 
 /// `grim release` arguments.
 #[derive(Debug, Args)]
@@ -66,6 +66,15 @@ pub struct ReleaseArgs {
     /// Ignored for skills and rules.
     #[arg(long)]
     pub pin: bool,
+
+    /// Embed git provenance (commit revision, commit date, and the `origin`
+    /// remote) from the artifact's working tree as OCI annotations. Off by
+    /// default so re-release stays byte-deterministic; with `--git` a
+    /// re-release from a different commit changes the digest and is refused
+    /// unless `--force`. Requires `git` and a repository (a non-git path
+    /// fails, 65).
+    #[arg(long)]
+    pub git: bool,
 }
 
 /// Run `grim release`.
@@ -95,7 +104,10 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         return release_bundle(ctx, args, &id, &repo, &version, &tags, &source).await;
     }
 
-    let packed = validate_and_pack(&args.path, kind, &version, Some(&source))?;
+    // `--git` (opt-in): derive provenance once before packing; a non-git path
+    // fails here (65), before anything is pushed.
+    let git = derive_git_provenance(&args.path, args.git).await?;
+    let packed = validate_and_pack(&args.path, kind, &version, Some(&source), git.as_ref())?;
 
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
     let manifest = OciManifest {
@@ -172,6 +184,14 @@ async fn release_bundle(
     source: &str,
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
     let (name, mut members, metadata) = read_bundle_members(&args.path)?;
+
+    // `--git` (opt-in): derive provenance FIRST so a non-git path fails here
+    // (65) before any registry work — no network side effects (the
+    // --skip-existing lookup, the --pin member resolution) on a path that
+    // cannot satisfy --git. Mirrors the skill/rule path in `run`, where derive
+    // precedes every registry call.
+    let git = derive_git_provenance(&args.path, args.git).await?;
+
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
     // Same --skip-existing semantics as the skill/rule/agent path.
@@ -194,9 +214,16 @@ async fn release_bundle(
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize bundle layer: {e}"))?;
     let layer_digest = Algorithm::Sha256.hash(&layer);
-    // An authored `repository` URL wins over the release-ref fallback
-    // inside `annotations_for_bundle`.
-    let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source), &metadata);
+    // An authored `repository` URL wins over a git remote, then the release-ref
+    // fallback, inside `annotations_for_bundle`.
+    let annotations = annotations_for_bundle(
+        &name,
+        version,
+        manifest.members.len(),
+        Some(source),
+        &metadata,
+        git.as_ref(),
+    );
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
@@ -379,11 +406,11 @@ fn preview_manifest_digest(manifest: &OciManifest) -> String {
         key.push_str(&format!("{}|{}|{}\n", d.digest, d.media_type, d.size));
     }
     for (k, v) in &manifest.annotations {
-        // `created` is the only non-deterministic annotation; exclude it
-        // so a dry-run preview is stable for identical content.
-        if k == "org.opencontainers.image.created" {
-            continue;
-        }
+        // Every annotation feeds the preview. `org.opencontainers.image.created`
+        // is only set under `--git`, where it is the per-commit date (not a
+        // wall-clock time), so it is deterministic for identical content and the
+        // dry-run preview matches the pushed digest. Without `--git` the key is
+        // absent entirely.
         key.push_str(&format!("{k}={v}\n"));
     }
     Algorithm::Sha256.hash(key.as_bytes()).to_string()

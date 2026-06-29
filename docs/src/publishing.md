@@ -154,6 +154,10 @@ accepted; write `keywords: rust,lint`, not `keywords: [rust, lint]`.
 came from. The value must be an `https://` URL (GitHub, GitLab, or any
 forge) — a `git@…` or `http://` value fails the release with exit 65, the
 same hard gate that guards [vendor metadata](./vendor-metadata.md#publish-validation).
+The URL must **not** carry embedded credentials: an authored
+`https://token@host/owner/repo` fails the release with exit 65 rather than
+publishing the secret in the manifest. (grim never strips an *authored*
+credential silently — only a git-derived `origin` remote is sanitized.)
 
 On the wire it travels as the standard `org.opencontainers.image.source`
 annotation, so registries that honor the key link the package to its
@@ -242,6 +246,60 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 An exact-version tag is immutable by default: if `1.2.3` already exists and
 points at different bytes, the release refuses rather than rewrite history.
 Pass `--force` only when you deliberately mean to move it.
+
+## Git provenance {#git-provenance}
+
+A published artifact rarely records which commit it was built from. Without
+that link, tracing a registry tag back to the source — for an audit, a
+rebuild, or a "why did this change" investigation — means guessing from
+timestamps.
+
+The opt-in `--git` flag closes that gap. Pass it to `grim build`,
+`grim release`, or `grim publish` and grim reads the artifact's git working
+tree and stamps three standard OCI annotations onto the manifest:
+
+| Annotation | Value |
+|---|---|
+| `org.opencontainers.image.revision` | the `HEAD` commit SHA, suffixed `-dirty` when tracked files differ from `HEAD` |
+| `org.opencontainers.image.created` | the commit date (RFC3339) — the *commit's* date, not a build clock |
+| `org.opencontainers.image.source` | the `origin` remote, normalized to an `https://` URL — **conditional**: the git-derived URL is **not used** when you authored a [`repository`](#metadata-repository) value (the authored URL wins) or the repo has no HTTPS-resolvable remote. The annotation itself is still emitted from the usual fallback (authored `repository`, else the tagless release reference) |
+
+```sh
+grim release ./code-review ghcr.io/acme/code-review:1.2.3 --git
+```
+
+The git remote only fills `source` when you did **not** author a
+[`repository`](#metadata-repository) value — an authored URL always wins, so
+the two never collide. Any credentials embedded in the remote
+(`https://token@host/...`) are stripped before the URL is written, so a token
+in your `origin` URL never reaches the annotation. A path that is not inside a
+git repository (or a host with no `git`) fails the release with exit 65 rather
+than silently dropping the provenance you asked for.
+
+There is a third outcome between those two. A repository with **no `origin`
+remote** — or one whose remote does not resolve to an HTTPS URL (an SSH-only
+host grim cannot rewrite, a `file://` remote, a bare local path) — is **not**
+an error: `revision` and `created` are still stamped, and `source` is simply
+omitted (falling back to whatever the authored `repository` or the tagless
+release reference supplies). Only an absent repository or a missing `git`
+fails.
+
+### Why it is opt-in {#git-idempotent}
+
+By default a re-release of identical content produces the same manifest
+digest, so re-running a release is a harmless no-op (the
+[overwrite guard](#dry-runs-and-overwrites) recognizes it). Embedding the
+commit ties the digest to that commit: a re-release from a *different* commit
+now changes the digest and is refused unless you pass `--force`. That is the
+correct behavior — the provenance genuinely changed — but it is why git
+provenance is something you ask for, not a silent default. The commit *date*
+(not a wall-clock build time) keeps a re-release from the **same** commit
+fully idempotent.
+
+Every read surface shows the provenance back: the [TUI](./commands.md#tui)
+detail pane adds `Revision:` and `Created:` rows, and
+[`grim search --format json`](./commands.md#search) exposes `revision` and
+`created` fields.
 
 ## Publishing bundles {#bundles}
 

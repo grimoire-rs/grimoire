@@ -135,6 +135,12 @@ pub struct TuiRow {
     /// HTTPS source-repository URL (already vetted by the catalog's
     /// `https://` read-back guard); target of the `o` open action.
     pub repository_url: Option<String>,
+    /// Publishing commit revision (`--git` opt-in), shown in the detail pane.
+    /// `None` when the artifact was not released with git provenance.
+    pub revision: Option<String>,
+    /// Publishing commit date (RFC3339, `--git` opt-in), shown in the detail
+    /// pane. `None` when the artifact carries no git provenance.
+    pub created: Option<String>,
     /// Publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the row marker + detail-pane highlight.
     pub deprecated: Option<String>,
@@ -1318,6 +1324,8 @@ mod tests {
             summary: String::new(),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
             repository_url: None,
+            revision: None,
+            created: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -1923,6 +1931,8 @@ mod tests {
             summary: String::new(),
             keywords: vec![],
             repository_url: None,
+            revision: None,
+            created: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -2767,6 +2777,8 @@ mod tests {
             summary: String::new(),
             keywords: vec![],
             repository_url: None,
+            revision: None,
+            created: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -3016,6 +3028,8 @@ mod p2_state_member_node_tests {
             summary: String::new(),
             keywords: vec![],
             repository_url: None,
+            revision: None,
+            created: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,

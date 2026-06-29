@@ -16,27 +16,71 @@
 //! `artifactType` (see [`crate::oci::ArtifactKind::artifact_type`]) is still
 //! resolved on the READ path as the first tier, to type artifacts published
 //! before this change. The mapping is
-//! **fully deterministic**: `org.opencontainers.image.created` is
-//! intentionally omitted because a wall-clock timestamp would make a
+//! **fully deterministic by default**: `org.opencontainers.image.created` is
+//! intentionally omitted because a *wall-clock* timestamp would make a
 //! re-release of identical content produce a different manifest digest,
 //! breaking the idempotent-release contract (reproducible-build practice
 //! drops volatile timestamps for the same reason). Rules have no
 //! description frontmatter, so the title/description are derived from the
 //! rule name and body with a sane default.
 //!
+//! The opt-in `--git` flag ([`GitProvenance`]) is the one exception: it stamps
+//! `org.opencontainers.image.revision` (commit SHA, `-dirty`-suffixed) and
+//! `…created` (the *per-commit* date, not a build time, so re-release from the
+//! same commit is still idempotent). See `adr_git_provenance_annotations.md`.
+//!
 //! `org.opencontainers.image.source` carries the authored `repository`
 //! metadata value (an HTTPS URL to the artifact's source repository — the
-//! OCI-spec meaning of the key) when present, falling back to the tagless
-//! release reference (`registry/repository`) for continuity. Consumers
-//! distinguish the two by the `https://` prefix.
+//! OCI-spec meaning of the key) when present, then a git-derived `origin`
+//! remote (only under `--git`), falling back to the tagless release reference
+//! (`registry/repository`) for continuity. Consumers distinguish a real
+//! source URL from the release-ref fallback by the `https://` prefix.
 
 use std::collections::BTreeMap;
 
 use crate::config::project_config::BundleMetadata;
 use crate::oci::ArtifactKind;
 use crate::oci::artifact_kind::KIND_ANNOTATION;
+use crate::oci::git_provenance::GitProvenance;
 use crate::oci::manifest::OciManifest;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
+
+/// Named inputs to [`source_annotation`], one per precedence tier. A struct
+/// (not three positional `Option<&str>` args) so the precedence is named at the
+/// call site — swapping `authored` and `fallback` would otherwise be a silent
+/// type-checking-clean mistake.
+struct SourceInputs<'a> {
+    /// The authored `repository` metadata value (highest precedence).
+    authored: Option<&'a str>,
+    /// Git provenance from the `--git` opt-in (contributes its `source_url`).
+    git: Option<&'a GitProvenance>,
+    /// The release-ref fallback (lowest precedence, for continuity).
+    fallback: Option<&'a str>,
+}
+
+/// Resolve `org.opencontainers.image.source`: an authored `repository` value
+/// wins, then a git-derived HTTPS remote (the `--git` opt-in), then the
+/// release-ref `fallback`. Shared by all four builders so the precedence is
+/// one source of truth — authored metadata is never shadowed by git.
+fn source_annotation(inputs: SourceInputs<'_>) -> Option<String> {
+    inputs
+        .authored
+        .or_else(|| inputs.git.and_then(|g| g.source_url.as_deref()))
+        .or(inputs.fallback)
+        .map(str::to_string)
+}
+
+/// Stamp the git provenance annotations (`org.opencontainers.image.revision`
+/// and `…created`) when `--git` supplied them. A no-op otherwise, which is
+/// why an ordinary release stays byte-deterministic (no wall-clock `created`).
+/// The commit date is per-commit, so a re-release from the same commit keeps
+/// the same digest — see `adr_git_provenance_annotations.md`.
+fn insert_git_provenance(a: &mut BTreeMap<String, String>, git: Option<&GitProvenance>) {
+    if let Some(g) = git {
+        a.insert("org.opencontainers.image.revision".to_string(), g.revision.clone());
+        a.insert("org.opencontainers.image.created".to_string(), g.created.clone());
+    }
+}
 
 /// Annotation key carrying a publisher-authored deprecation notice.
 ///
@@ -68,31 +112,54 @@ pub fn deprecation_message(annotations: &BTreeMap<String, String>) -> Option<Str
         .and_then(|v| normalize_deprecated(v))
 }
 
-/// An authored `repository` metadata value that is not an HTTPS URL.
+/// An authored `repository` metadata value rejected at publish time.
 ///
 /// Raised at publish time (`grim build` / `grim release`) so a bad value
 /// can never reach a registry; classified as DataError (65) through
 /// [`crate::skill::SkillErrorKind::MetadataInvalid`].
 #[derive(thiserror::Error, Debug)]
-#[error("invalid value '{value}' for metadata key 'repository': expected an https:// URL")]
-pub struct RepositoryUrlError {
-    /// The rejected authored value.
-    pub value: String,
+#[non_exhaustive]
+pub enum RepositoryUrlError {
+    /// The authored value is not an HTTPS URL.
+    #[error("invalid value '{value}' for metadata key 'repository': expected an https:// URL")]
+    NotHttps {
+        /// The rejected authored value.
+        value: String,
+    },
+    /// The authored value embeds userinfo (credentials) in its authority.
+    ///
+    /// The value is intentionally NOT echoed: surfacing a credentialed URL in
+    /// user-facing error output would leak the secret (CWE-200/522/532). This
+    /// is a deliberate asymmetry with the git-DERIVED path, which silently
+    /// strips userinfo because it is auto-derived — an *authored* credentialed
+    /// URL is a hard failure so the publisher fixes it before publishing.
+    #[error("repository URL must not contain embedded credentials")]
+    EmbeddedCredentials,
 }
 
 /// Validate an authored repository URL (publish-time gate).
 ///
 /// # Errors
 ///
-/// [`RepositoryUrlError`] when `value` does not start with `https://`.
+/// [`RepositoryUrlError::NotHttps`] when `value` does not start with
+/// `https://`; [`RepositoryUrlError::EmbeddedCredentials`] when its authority
+/// (the host portion up to the first `/`) carries userinfo (an `@`), e.g. an
+/// authored `https://token@host/o/r`.
 pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
-    if value.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(RepositoryUrlError {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return Err(RepositoryUrlError::NotHttps {
             value: value.to_string(),
-        })
+        });
+    };
+    // The authority is everything up to the first '/'. Reject embedded userinfo
+    // (RFC 3986 §3.2.1: credentials precede an '@' in the authority) — an
+    // authored credentialed URL must fail loudly, deliberately asymmetric with
+    // the git-derived path that auto-strips it.
+    let authority = rest.split_once('/').map_or(rest, |(authority, _)| authority);
+    if authority.contains('@') {
+        return Err(RepositoryUrlError::EmbeddedCredentials);
     }
+    Ok(())
 }
 
 /// Infer the artifact kind from a pulled manifest, resolving three tiers in
@@ -128,15 +195,17 @@ pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
 ///
 /// `fallback_source` is the release reference used for
 /// `org.opencontainers.image.source` only when the frontmatter has no
-/// authored `metadata.repository` URL. `com.grimoire.keywords` and
-/// `com.grimoire.summary` are emitted only when the frontmatter
-/// `metadata.keywords` / `metadata.summary` keys are present. The map is
-/// fully deterministic (no wall-clock `created`) so re-release is
-/// idempotent.
+/// authored `metadata.repository` URL. `git`, when supplied (`--git`), adds
+/// the revision/created annotations and contributes a source URL below the
+/// authored value. `com.grimoire.keywords` and `com.grimoire.summary` are
+/// emitted only when the frontmatter `metadata.keywords` / `metadata.summary`
+/// keys are present. Without `git` the map is fully deterministic (no
+/// wall-clock `created`) so re-release is idempotent.
 pub fn annotations_for_skill(
     fm: &SkillFrontmatter,
     version: &str,
     fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), fm.name.to_string());
@@ -152,16 +221,17 @@ pub fn annotations_for_skill(
     if let Some(license) = &fm.license {
         a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
     }
-    if let Some(src) = fm.metadata.get("repository").map(String::as_str).or(fallback_source) {
-        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: fm.metadata.get("repository").map(String::as_str),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // `org.opencontainers.image.created` is intentionally OMITTED: a
-    // wall-clock timestamp in the manifest would make a re-release of
-    // identical content produce a different manifest digest, breaking the
-    // idempotent-re-release contract (a hard requirement for a package
-    // manager). A deterministic content digest is the stronger guarantee;
-    // reproducible-build practice drops volatile timestamps for the same
-    // reason.
+    // `org.opencontainers.image.created` is OMITTED by default (a wall-clock
+    // timestamp would break the idempotent-re-release contract); the `--git`
+    // opt-in below stamps a deterministic per-commit date instead.
+    insert_git_provenance(&mut a, git);
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert("com.grimoire.keywords".to_string(), kw.clone());
     }
@@ -180,14 +250,15 @@ pub fn annotations_for_skill(
 /// the description is the first heading/paragraph of `body` or a
 /// deterministic default. Keywords come from the rule frontmatter's
 /// `extra` map (`keywords` key, comma-joined if a sequence). An authored
-/// `repository` URL (also from `extra`) wins over `fallback_source` for
-/// `org.opencontainers.image.source`.
+/// `repository` URL (also from `extra`) wins over a git-derived remote
+/// (`--git`) and `fallback_source` for `org.opencontainers.image.source`.
 pub fn annotations_for_rule(
     name: &str,
     fm: &RuleFrontmatter,
     body: &str,
     version: &str,
     fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), name.to_string());
@@ -196,10 +267,16 @@ pub fn annotations_for_rule(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Rule.to_string());
-    if let Some(src) = string_from_extra(fm, "repository").or_else(|| fallback_source.map(str::to_string)) {
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: string_from_extra(fm, "repository").as_deref(),
+        git,
+        fallback: fallback_source,
+    }) {
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // Omitted for idempotent re-release — see `annotations_for_skill`.
+    // Omitted by default for idempotent re-release; `--git` stamps it — see
+    // `annotations_for_skill`.
+    insert_git_provenance(&mut a, git);
     if let Some(kw) = string_from_extra(fm, "keywords") {
         a.insert("com.grimoire.keywords".to_string(), kw);
     }
@@ -226,6 +303,7 @@ pub fn annotations_for_agent(
     fm: &AgentFrontmatter,
     version: &str,
     fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), fm.name.to_string());
@@ -236,10 +314,16 @@ pub fn annotations_for_agent(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Agent.to_string());
-    if let Some(src) = fm.metadata.get("repository").map(String::as_str).or(fallback_source) {
-        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: fm.metadata.get("repository").map(String::as_str),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // Omitted `created` for idempotent re-release — see `annotations_for_skill`.
+    // Omitted `created` by default for idempotent re-release; `--git` stamps it
+    // — see `annotations_for_skill`.
+    insert_git_provenance(&mut a, git);
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert("com.grimoire.keywords".to_string(), kw.clone());
     }
@@ -268,6 +352,7 @@ pub fn annotations_for_bundle(
     member_count: usize,
     fallback_source: Option<&str>,
     metadata: &BundleMetadata,
+    git: Option<&GitProvenance>,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), name.to_string());
@@ -279,9 +364,14 @@ pub fn annotations_for_bundle(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Bundle.to_string());
-    if let Some(src) = metadata.repository.as_deref().or(fallback_source) {
-        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: metadata.repository.as_deref(),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
     }
+    insert_git_provenance(&mut a, git);
     if let Some(summary) = &metadata.summary {
         a.insert("com.grimoire.summary".to_string(), summary.clone());
     }
@@ -315,7 +405,7 @@ mod tests {
     #[test]
     fn skill_annotations_are_fully_deterministic() {
         let fm = skill_fm();
-        let a = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"));
+        let a = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"), None);
         assert_eq!(a["org.opencontainers.image.title"], "code-review");
         assert_eq!(a["org.opencontainers.image.description"], "Review code.");
         assert_eq!(a["org.opencontainers.image.version"], "1.2.3");
@@ -330,14 +420,14 @@ mod tests {
         assert!(!a.contains_key("org.opencontainers.image.created"));
 
         // Identical inputs ⇒ byte-identical annotations (idempotency).
-        let b = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"));
+        let b = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"), None);
         assert_eq!(a, b);
     }
 
     #[test]
     fn skill_without_license_or_keywords_omits_them() {
         let fm = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
-        let a = annotations_for_skill(&fm, "0.1.0", None);
+        let a = annotations_for_skill(&fm, "0.1.0", None, None);
         assert!(!a.contains_key("org.opencontainers.image.licenses"));
         assert!(!a.contains_key("org.opencontainers.image.source"));
         assert!(!a.contains_key("com.grimoire.keywords"));
@@ -348,7 +438,7 @@ mod tests {
     fn skill_summary_from_metadata() {
         let doc = "---\nname: s\ndescription: A long description that explains the skill in detail.\nmetadata:\n  summary: short blurb\n---\n";
         let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
-        let a = annotations_for_skill(&fm, "0.1.0", None);
+        let a = annotations_for_skill(&fm, "0.1.0", None, None);
         assert_eq!(a["com.grimoire.summary"], "short blurb");
         // The long description is still emitted verbatim and untouched.
         assert_eq!(
@@ -361,21 +451,21 @@ mod tests {
     fn rule_summary_from_extra() {
         let doc = "---\npaths: [\"a\"]\nsummary: terse rule blurb\n---\n# Rule\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
-        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
         assert_eq!(a["com.grimoire.summary"], "terse rule blurb");
     }
 
     #[test]
     fn rule_without_summary_omits_it() {
         let rf = RuleFrontmatter::default();
-        let a = annotations_for_rule("r", &rf, "# Rule\nbody\n", "1.0.0", None);
+        let a = annotations_for_rule("r", &rf, "# Rule\nbody\n", "1.0.0", None, None);
         assert!(!a.contains_key("com.grimoire.summary"));
     }
 
     #[test]
     fn rule_annotations_derive_title_and_description() {
         let rf = RuleFrontmatter::default();
-        let a = annotations_for_rule("rust-style", &rf, "# Rust Style\nbody\n", "3.0.0", None);
+        let a = annotations_for_rule("rust-style", &rf, "# Rust Style\nbody\n", "3.0.0", None, None);
         assert_eq!(a["org.opencontainers.image.title"], "rust-style");
         assert_eq!(a["org.opencontainers.image.description"], "Rust Style");
         assert_eq!(a["org.opencontainers.image.version"], "3.0.0");
@@ -385,7 +475,7 @@ mod tests {
     #[test]
     fn rule_without_body_uses_default_description() {
         let rf = RuleFrontmatter::default();
-        let a = annotations_for_rule("rust-style", &rf, "\n\n", "1.0.0", None);
+        let a = annotations_for_rule("rust-style", &rf, "\n\n", "1.0.0", None, None);
         assert_eq!(a["org.opencontainers.image.description"], "grimoire rule rust-style");
     }
 
@@ -524,7 +614,7 @@ mod tests {
     fn rule_keywords_from_extra_string() {
         let doc = "---\npaths: [\"a\"]\nkeywords: rust,style\n---\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
-        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
         assert_eq!(a["com.grimoire.keywords"], "rust,style");
     }
 
@@ -534,7 +624,7 @@ mod tests {
         // not accepted (it is silently ignored, not joined).
         let doc = "---\npaths: [\"a\"]\nkeywords:\n  - rust\n  - style\n---\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
-        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
         assert!(!a.contains_key("com.grimoire.keywords"));
     }
 
@@ -542,7 +632,12 @@ mod tests {
     fn agent_annotations_are_deterministic_and_complete() {
         let doc = "---\nname: code-reviewer\ndescription: Reviews diffs.\nmodel: sonnet\nmetadata:\n  keywords: review,agent\n  summary: terse blurb\n---\nbody\n";
         let parsed = AgentFrontmatter::parse_doc(doc, Path::new("code-reviewer.md")).unwrap();
-        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/code-reviewer:1.0.0"));
+        let a = annotations_for_agent(
+            &parsed.frontmatter,
+            "1.0.0",
+            Some("ghcr.io/acme/code-reviewer:1.0.0"),
+            None,
+        );
         assert_eq!(a["org.opencontainers.image.title"], "code-reviewer");
         assert_eq!(a["org.opencontainers.image.description"], "Reviews diffs.");
         assert_eq!(a["org.opencontainers.image.version"], "1.0.0");
@@ -551,7 +646,12 @@ mod tests {
         assert_eq!(a["com.grimoire.summary"], "terse blurb");
         assert_eq!(a["com.grimoire.kind"], "agent");
         assert!(!a.contains_key("org.opencontainers.image.created"));
-        let b = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/code-reviewer:1.0.0"));
+        let b = annotations_for_agent(
+            &parsed.frontmatter,
+            "1.0.0",
+            Some("ghcr.io/acme/code-reviewer:1.0.0"),
+            None,
+        );
         assert_eq!(a, b);
     }
 
@@ -559,7 +659,7 @@ mod tests {
     fn agent_without_catalog_metadata_omits_optional_keys() {
         let doc = "---\nname: a\ndescription: d\n---\nbody\n";
         let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
-        let a = annotations_for_agent(&parsed.frontmatter, "0.1.0", None);
+        let a = annotations_for_agent(&parsed.frontmatter, "0.1.0", None, None);
         assert!(!a.contains_key("org.opencontainers.image.source"));
         assert!(!a.contains_key("com.grimoire.keywords"));
         assert!(!a.contains_key("com.grimoire.summary"));
@@ -574,7 +674,7 @@ mod tests {
             repository: None,
             deprecated: None,
         };
-        let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata);
+        let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata, None);
         assert_eq!(a["org.opencontainers.image.title"], "python-stack");
         assert_eq!(
             a["org.opencontainers.image.description"],
@@ -587,7 +687,7 @@ mod tests {
 
     #[test]
     fn bundle_without_metadata_uses_default_description() {
-        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default());
+        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
         assert_eq!(
             a["org.opencontainers.image.description"],
             "grimoire bundle of 2 members"
@@ -602,7 +702,7 @@ mod tests {
     fn skill_deprecated_metadata_becomes_annotation() {
         let doc = "---\nname: s\ndescription: d\nmetadata:\n  deprecated: use foo/bar instead\n---\n";
         let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
-        let a = annotations_for_skill(&fm, "1.0.0", None);
+        let a = annotations_for_skill(&fm, "1.0.0", None, None);
         assert_eq!(a[DEPRECATED_ANNOTATION], "use foo/bar instead");
     }
 
@@ -611,17 +711,17 @@ mod tests {
         // Whitespace-only is treated as "not deprecated" (presence semantics).
         let blank = "---\nname: s\ndescription: d\nmetadata:\n  deprecated: '   '\n---\n";
         let fm = SkillFrontmatter::parse_doc(blank, Path::new("SKILL.md")).unwrap();
-        assert!(!annotations_for_skill(&fm, "1.0.0", None).contains_key(DEPRECATED_ANNOTATION));
+        assert!(!annotations_for_skill(&fm, "1.0.0", None, None).contains_key(DEPRECATED_ANNOTATION));
         // Absent key ⇒ no annotation.
         let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
-        assert!(!annotations_for_skill(&plain, "1.0.0", None).contains_key(DEPRECATED_ANNOTATION));
+        assert!(!annotations_for_skill(&plain, "1.0.0", None, None).contains_key(DEPRECATED_ANNOTATION));
     }
 
     #[test]
     fn rule_deprecated_from_extra_becomes_annotation() {
         let doc = "---\npaths: [\"a\"]\ndeprecated: superseded by rust-style-2\n---\n# R\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
-        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
         assert_eq!(a[DEPRECATED_ANNOTATION], "superseded by rust-style-2");
     }
 
@@ -629,7 +729,7 @@ mod tests {
     fn agent_deprecated_metadata_becomes_annotation() {
         let doc = "---\nname: a\ndescription: d\nmetadata:\n  deprecated: no longer maintained\n---\nbody\n";
         let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
-        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", None);
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", None, None);
         assert_eq!(a[DEPRECATED_ANNOTATION], "no longer maintained");
     }
 
@@ -639,10 +739,10 @@ mod tests {
             deprecated: Some("migrate to python-stack-2".to_string()),
             ..BundleMetadata::default()
         };
-        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &metadata);
+        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &metadata, None);
         assert_eq!(a[DEPRECATED_ANNOTATION], "migrate to python-stack-2");
         // Default (no deprecation) omits the key.
-        let plain = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default());
+        let plain = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
         assert!(!plain.contains_key(DEPRECATED_ANNOTATION));
     }
 
@@ -671,14 +771,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_repository_url_rejects_embedded_credentials() {
+        // An authored credentialed https URL is a hard failure (CWE-200/522):
+        // the publisher wrote it, so reject loudly rather than silently strip
+        // (the git-derived path strips; the authored path must not).
+        let err = validate_repository_url("https://token@github.com/o/r").unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain embedded credentials"),
+            "{err}"
+        );
+        // The rejected value (the credential) is never echoed in the message.
+        assert!(!err.to_string().contains("token"), "credential must not leak: {err}");
+        // A clean https URL still passes.
+        assert!(validate_repository_url("https://github.com/o/r").is_ok());
+    }
+
+    #[test]
     fn skill_repository_wins_over_fallback_source() {
         let doc = "---\nname: s\ndescription: d\nmetadata:\n  repository: https://github.com/acme/s\n---\n";
         let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
-        let a = annotations_for_skill(&fm, "1.0.0", Some("ghcr.io/acme/s"));
+        let a = annotations_for_skill(&fm, "1.0.0", Some("ghcr.io/acme/s"), None);
         assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/s");
         // Without an authored repository the fallback ref is kept (continuity).
         let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
-        let b = annotations_for_skill(&plain, "1.0.0", Some("ghcr.io/acme/s"));
+        let b = annotations_for_skill(&plain, "1.0.0", Some("ghcr.io/acme/s"), None);
         assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/s");
     }
 
@@ -686,12 +802,26 @@ mod tests {
     fn rule_repository_wins_over_fallback_source() {
         let doc = "---\npaths: [\"a\"]\nrepository: https://gitlab.com/acme/r\n---\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
-        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", Some("ghcr.io/acme/r"));
+        let a = annotations_for_rule(
+            "r",
+            &parsed.frontmatter,
+            &parsed.body,
+            "1.0.0",
+            Some("ghcr.io/acme/r"),
+            None,
+        );
         assert_eq!(a["org.opencontainers.image.source"], "https://gitlab.com/acme/r");
         // Non-string `repository` (string-only convention) is ignored ⇒ fallback.
         let seq = "---\npaths: [\"a\"]\nrepository:\n  - https://gitlab.com/acme/r\n---\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(seq, Path::new("r.md")).unwrap();
-        let b = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", Some("ghcr.io/acme/r"));
+        let b = annotations_for_rule(
+            "r",
+            &parsed.frontmatter,
+            &parsed.body,
+            "1.0.0",
+            Some("ghcr.io/acme/r"),
+            None,
+        );
         assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/r");
     }
 
@@ -699,7 +829,7 @@ mod tests {
     fn agent_repository_wins_over_fallback_source() {
         let doc = "---\nname: a\ndescription: d\nmetadata:\n  repository: https://github.com/acme/a\n---\nbody\n";
         let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
-        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/a"));
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/a"), None);
         assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/a");
     }
 
@@ -709,7 +839,7 @@ mod tests {
             repository: Some("https://github.com/acme/stack".to_string()),
             ..BundleMetadata::default()
         };
-        let a = annotations_for_bundle("stack", "1.0.0", 2, Some("ghcr.io/acme/stack"), &metadata);
+        let a = annotations_for_bundle("stack", "1.0.0", 2, Some("ghcr.io/acme/stack"), &metadata, None);
         assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/stack");
         let b = annotations_for_bundle(
             "stack",
@@ -717,7 +847,81 @@ mod tests {
             2,
             Some("ghcr.io/acme/stack"),
             &BundleMetadata::default(),
+            None,
         );
         assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/stack");
+    }
+
+    // ── git provenance (--git opt-in) ─────────────────────────────────
+
+    fn git_prov(source: Option<&str>) -> GitProvenance {
+        GitProvenance {
+            revision: "abc123def456-dirty".to_string(),
+            created: "2026-06-29T12:00:00+00:00".to_string(),
+            source_url: source.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn skill_git_stamps_revision_and_created() {
+        let fm = skill_fm();
+        let g = git_prov(None);
+        let a = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"), Some(&g));
+        assert_eq!(a["org.opencontainers.image.revision"], "abc123def456-dirty");
+        assert_eq!(a["org.opencontainers.image.created"], "2026-06-29T12:00:00+00:00");
+        // Without `--git` neither key is present (default determinism).
+        let plain = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/code-review:1.2.3"), None);
+        assert!(!plain.contains_key("org.opencontainers.image.revision"));
+        assert!(!plain.contains_key("org.opencontainers.image.created"));
+    }
+
+    #[test]
+    fn skill_git_is_idempotent_for_same_commit() {
+        // The same provenance ⇒ byte-identical annotations: a re-release from
+        // the same commit keeps the same manifest digest.
+        let fm = skill_fm();
+        let g = git_prov(Some("https://github.com/acme/code-review"));
+        let a = annotations_for_skill(&fm, "1.2.3", None, Some(&g));
+        let b = annotations_for_skill(&fm, "1.2.3", None, Some(&g));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn source_precedence_authored_over_git_over_fallback() {
+        // Authored `repository` wins even when a git remote is present.
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  repository: https://github.com/acme/authored\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
+        let g = git_prov(Some("https://github.com/acme/from-git"));
+        let a = annotations_for_skill(&fm, "1.0.0", Some("ghcr.io/acme/s"), Some(&g));
+        assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/authored");
+
+        // No authored repository ⇒ git remote wins over the release-ref fallback.
+        let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
+        let b = annotations_for_skill(&plain, "1.0.0", Some("ghcr.io/acme/s"), Some(&g));
+        assert_eq!(b["org.opencontainers.image.source"], "https://github.com/acme/from-git");
+
+        // No authored repository and a git remote with no URL ⇒ release-ref fallback.
+        let no_remote = git_prov(None);
+        let c = annotations_for_skill(&plain, "1.0.0", Some("ghcr.io/acme/s"), Some(&no_remote));
+        assert_eq!(c["org.opencontainers.image.source"], "ghcr.io/acme/s");
+    }
+
+    #[test]
+    fn rule_agent_bundle_stamp_git_provenance() {
+        let g = git_prov(Some("https://github.com/acme/x"));
+
+        let rf = RuleFrontmatter::default();
+        let r = annotations_for_rule("r", &rf, "# R\nbody\n", "1.0.0", None, Some(&g));
+        assert_eq!(r["org.opencontainers.image.revision"], "abc123def456-dirty");
+        assert_eq!(r["org.opencontainers.image.source"], "https://github.com/acme/x");
+
+        let adoc = "---\nname: a\ndescription: d\n---\nbody\n";
+        let af = AgentFrontmatter::parse_doc(adoc, Path::new("a.md")).unwrap();
+        let ag = annotations_for_agent(&af.frontmatter, "1.0.0", None, Some(&g));
+        assert_eq!(ag["org.opencontainers.image.created"], "2026-06-29T12:00:00+00:00");
+
+        let bd = annotations_for_bundle("b", "1.0.0", 2, None, &BundleMetadata::default(), Some(&g));
+        assert_eq!(bd["org.opencontainers.image.revision"], "abc123def456-dirty");
+        assert_eq!(bd["org.opencontainers.image.source"], "https://github.com/acme/x");
     }
 }

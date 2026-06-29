@@ -100,6 +100,16 @@ pub struct CatalogEntry {
     /// the prefix guard drops those instead of surfacing garbage).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_url: Option<String>,
+    /// `org.opencontainers.image.revision` — the publishing commit SHA (a
+    /// `-dirty` suffix marks an uncommitted working tree), present only when
+    /// the artifact was released with `--git`. Surfaced in the TUI detail pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// `org.opencontainers.image.created` — the publishing commit date
+    /// (RFC3339), present only when released with `--git`. Surfaced alongside
+    /// the revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
     /// `com.grimoire.deprecated`, the publisher's deprecation message when
     /// the representative tag's manifest marks the artifact deprecated.
     /// `None` when not deprecated. Surfaced as the search / TUI highlight.
@@ -577,6 +587,8 @@ impl Catalog {
             summary: None,
             keywords: Vec::new(),
             repository_url: None,
+            revision: None,
+            created: None,
             deprecated: None,
             latest_tag,
             version,
@@ -618,7 +630,7 @@ impl Catalog {
             Ok(m) => m,
             Err(_) => return bare(Some(tag), version.clone()),
         };
-        let (kind, description, summary, keywords, repository_url, deprecated) = manifest
+        let (kind, description, summary, keywords, repository_url, revision, created, deprecated) = manifest
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
@@ -641,12 +653,25 @@ impl Catalog {
                     .get("org.opencontainers.image.source")
                     .filter(|s| s.starts_with("https://"))
                     .cloned();
+                // Git provenance (the `--git` publish opt-in). Absent on an
+                // ordinary release.
+                let revision = m.annotations.get("org.opencontainers.image.revision").cloned();
+                let created = m.annotations.get("org.opencontainers.image.created").cloned();
                 // A non-empty `com.grimoire.deprecated` marks the artifact
                 // deprecated (the single read seam normalizes/trims).
                 let deprecated = crate::oci::annotations::deprecation_message(&m.annotations);
-                (kind, description, summary, keywords, repository_url, deprecated)
+                (
+                    kind,
+                    description,
+                    summary,
+                    keywords,
+                    repository_url,
+                    revision,
+                    created,
+                    deprecated,
+                )
             })
-            .unwrap_or((None, None, None, Vec::new(), None, None));
+            .unwrap_or((None, None, None, Vec::new(), None, None, None, None));
 
         CatalogEntry {
             registry: registry.to_string(),
@@ -656,6 +681,8 @@ impl Catalog {
             summary,
             keywords,
             repository_url,
+            revision,
+            created,
             deprecated,
             latest_tag: Some(tag),
             version,
@@ -859,6 +886,8 @@ mod tests {
                 summary: Some("review skill".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
                 repository_url: Some("https://github.com/acme/code-review".to_string()),
+                revision: Some("abc123def456-dirty".to_string()),
+                created: Some("2026-06-29T12:00:00+00:00".to_string()),
                 deprecated: Some("use acme/code-review-2".to_string()),
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
@@ -879,6 +908,16 @@ mod tests {
         let e = loaded.entries().next().unwrap();
         assert_eq!(e.kind.as_deref(), Some("skill"));
         assert_eq!(e.keywords, vec!["review", "quality"]);
+        assert_eq!(
+            e.revision.as_deref(),
+            Some("abc123def456-dirty"),
+            "git revision round-trips through disk"
+        );
+        assert_eq!(
+            e.created.as_deref(),
+            Some("2026-06-29T12:00:00+00:00"),
+            "git commit date round-trips through disk"
+        );
         assert_eq!(
             e.deprecated.as_deref(),
             Some("use acme/code-review-2"),
@@ -1091,6 +1130,47 @@ mod tests {
         assert_eq!(e.repository_url, None, "legacy release-ref source is not a URL");
     }
 
+    #[tokio::test]
+    async fn build_reads_git_provenance_annotations() {
+        // The `--git` opt-in stamps revision/created on the manifest; the
+        // catalog read path surfaces both onto the entry.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let inner = MemoryRegistry::new();
+        let reg = "localhost:5000";
+        let id = Identifier::new_registry("acme/traced".to_string(), reg.to_string());
+        let mut manifest = skill_manifest("k", "d");
+        manifest.annotations.insert(
+            "org.opencontainers.image.revision".to_string(),
+            "abc123def456-dirty".to_string(),
+        );
+        manifest.annotations.insert(
+            "org.opencontainers.image.created".to_string(),
+            "2026-06-29T12:00:00+00:00".to_string(),
+        );
+        let mdigest = inner.push_manifest(&id, &manifest).await.unwrap();
+        inner.put_tag(&id, "latest", &mdigest).await.unwrap();
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(CatalogRegistry {
+            inner,
+            repos: vec!["acme/traced".to_string()],
+            registry: reg.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+        });
+        let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
+            .await
+            .unwrap();
+        let e = cat.entries().next().expect("one entry");
+        assert_eq!(e.revision.as_deref(), Some("abc123def456-dirty"));
+        assert_eq!(e.created.as_deref(), Some("2026-06-29T12:00:00+00:00"));
+
+        // A skill published without `--git` carries neither.
+        assert_eq!(
+            cat.entries().next().unwrap().registry,
+            "localhost:5000",
+            "sanity: entry built"
+        );
+    }
+
     #[test]
     fn v1_entry_without_repository_url_deserializes() {
         // Backward compat: a cache written before the field existed parses
@@ -1100,6 +1180,9 @@ mod tests {
         assert_eq!(e.repository_url, None);
         // The same envelope predates `deprecated` too ⇒ defaults to None.
         assert_eq!(e.deprecated, None);
+        // …and predates the git provenance fields ⇒ both default to None.
+        assert_eq!(e.revision, None);
+        assert_eq!(e.created, None);
     }
 
     #[tokio::test]
@@ -1552,6 +1635,8 @@ mod tests {
             summary: Some("terse blurb".to_string()),
             keywords: vec!["lint".to_string()],
             repository_url: None,
+            revision: None,
+            created: None,
             deprecated: None,
             latest_tag: Some("latest".to_string()),
             version: None,

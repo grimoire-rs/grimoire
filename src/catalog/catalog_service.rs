@@ -70,6 +70,10 @@ pub struct CatalogRow {
     pub keywords: Vec<String>,
     /// The HTTPS source-repository URL, if any.
     pub repository_url: Option<String>,
+    /// The publishing commit revision (`--git` opt-in), if any.
+    pub revision: Option<String>,
+    /// The publishing commit date (RFC3339, `--git` opt-in), if any.
+    pub created: Option<String>,
     /// The publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the search / TUI deprecation highlight.
     pub deprecated: Option<String>,
@@ -215,6 +219,8 @@ pub async fn load_catalog(
                         description: e.description.clone(),
                         keywords: e.keywords.clone(),
                         repository_url: e.repository_url.clone(),
+                        revision: e.revision.clone(),
+                        created: e.created.clone(),
                         deprecated: e.deprecated.clone(),
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),

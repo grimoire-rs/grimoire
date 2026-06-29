@@ -123,6 +123,8 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             summary: r.summary,
             description: r.description,
             repository: r.repository_url,
+            revision: r.revision,
+            created: r.created,
             latest_tag: r.latest_tag,
             version: r.version,
             deprecated: r.deprecated,

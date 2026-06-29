@@ -56,6 +56,12 @@ pub struct PublishArgs {
     /// (default: skip entries whose exact-version tag already exists).
     #[arg(long, conflicts_with = "tag")]
     pub force: bool,
+
+    /// Embed git provenance (commit revision, commit date, and the `origin`
+    /// remote) as OCI annotations on every published entry. Forwarded to each
+    /// `release`; requires `git` and a repository (a non-git path fails, 65).
+    #[arg(long)]
+    pub git: bool,
 }
 
 /// A single entry in a kind table (`[skills.name]`, `[rules.name]`,
@@ -326,6 +332,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             force,
             skip_existing,
             pin: planned.pin,
+            git: args.git,
         };
 
         match super::release::run(ctx, &release_args).await {
@@ -2096,6 +2103,7 @@ mod tests {
             tag,
             dry_run,
             force,
+            git: false,
         }
     }
 

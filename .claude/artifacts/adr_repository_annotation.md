@@ -41,7 +41,13 @@ links a package to its repository through exactly this key).
 3. **Publish-time hard gate** — a `repository` value not starting with
    `https://` fails `grim build` / `grim release` with DataError (65) via
    the existing `MetadataInvalid` plumbing, matching the vendor-metadata
-   "bad literals hard-fail publish" precedent.
+   "bad literals hard-fail publish" precedent. An authored value whose
+   authority embeds userinfo (credentials, e.g. `https://token@host/o/r`)
+   is **rejected** by the same gate — the credential is never echoed in the
+   error (CWE-200/522). This is a deliberate asymmetry with the git-derived
+   `origin` path, which silently strips userinfo because it is auto-derived;
+   an authored credentialed URL is the publisher's mistake and must fail
+   loudly.
 4. **Read-back guard** — the catalog keeps the source annotation only when
    it starts with `https://` (`CatalogEntry::repository_url`). Legacy
    artifacts carrying a release ref degrade to "no URL" instead of

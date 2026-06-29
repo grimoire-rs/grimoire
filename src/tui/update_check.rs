@@ -414,6 +414,8 @@ mod tests {
             summary: String::new(),
             keywords: Vec::new(),
             repository_url: None,
+            revision: None,
+            created: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,

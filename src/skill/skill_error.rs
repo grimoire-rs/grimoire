@@ -87,6 +87,15 @@ pub enum SkillErrorKind {
     #[error("{0}")]
     ValidationFailed(String),
 
+    /// Deriving git provenance for the `--git` opt-in failed. The message is
+    /// intentionally static (no field interpolation): the underlying
+    /// [`GitProvenanceError`] — and its own source (git's stderr) — is carried
+    /// via `#[source]`, so [`SkillError`]'s `{:#}` chain renders the detail
+    /// once without the double-print the `Display`-embeds-the-kind guard
+    /// otherwise causes.
+    #[error("--git provenance failed")]
+    GitProvenance(#[source] crate::oci::git_provenance::GitProvenanceError),
+
     /// A filesystem operation failed.
     #[error("I/O error")]
     Io(#[source] io::Error),

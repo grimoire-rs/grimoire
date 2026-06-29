@@ -9,6 +9,7 @@ pub mod annotations;
 pub mod artifact_kind;
 pub mod bundle;
 pub mod digest;
+pub mod git_provenance;
 pub mod identifier;
 pub mod manifest;
 pub mod pinned_identifier;
@@ -22,6 +23,8 @@ pub mod tag_cache;
 pub use artifact_kind::ArtifactKind;
 #[allow(unused_imports)]
 pub use digest::{Algorithm, Digest};
+#[allow(unused_imports)]
+pub use git_provenance::GitProvenance;
 #[allow(unused_imports)]
 pub use identifier::Identifier;
 #[allow(unused_imports)]

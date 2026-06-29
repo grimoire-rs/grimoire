@@ -117,6 +117,20 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
         },
     ]);
+    // Git provenance (`--git` publish opt-in) — shown only when present so an
+    // ordinary artifact's detail pane is unchanged.
+    if let Some(revision) = &r.revision {
+        lines.push(DetailLine::MetaEntry {
+            label: "Revision:",
+            value: revision.clone(),
+        });
+    }
+    if let Some(created) = &r.created {
+        lines.push(DetailLine::MetaEntry {
+            label: "Created:",
+            value: created.clone(),
+        });
+    }
     if let Some(msg) = &r.deprecated {
         lines.push(DetailLine::MetaEntry {
             label: "Deprecated:",
@@ -403,6 +417,8 @@ mod tests {
             summary: "blurb".to_string(),
             keywords: vec![],
             repository_url: None,
+            revision: None,
+            created: None,
             deprecated: deprecated.map(str::to_string),
             latest_tag: "1.0.0".to_string(),
             version: "1.0.0".to_string(),
@@ -422,6 +438,40 @@ mod tests {
             _ => None,
         });
         assert_eq!(dep.as_deref(), Some("use acme/code-review-2"));
+    }
+
+    #[test]
+    fn detail_lines_show_git_provenance_when_present() {
+        let mut row = tui_row(None);
+        row.revision = Some("abc123def456-dirty".to_string());
+        row.created = Some("2026-06-29T12:00:00+00:00".to_string());
+        let lines = detail_lines(Some(&row));
+        let revision = lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry {
+                label: "Revision:",
+                value,
+            } => Some(value.clone()),
+            _ => None,
+        });
+        assert_eq!(revision.as_deref(), Some("abc123def456-dirty"));
+        let created = lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry {
+                label: "Created:",
+                value,
+            } => Some(value.clone()),
+            _ => None,
+        });
+        assert_eq!(created.as_deref(), Some("2026-06-29T12:00:00+00:00"));
+    }
+
+    #[test]
+    fn detail_lines_omit_git_provenance_when_absent() {
+        // An artifact published without `--git` shows neither row.
+        let lines = detail_lines(Some(&tui_row(None)));
+        assert!(!lines.iter().any(|l| matches!(
+            l,
+            DetailLine::MetaEntry { label: "Revision:", .. } | DetailLine::MetaEntry { label: "Created:", .. }
+        )));
     }
 
     #[test]

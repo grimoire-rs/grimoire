@@ -9,7 +9,7 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Scripted Publishing](#scripted-publishing) · [Bundles](#bundles) ·
 [Catalog Metadata](#catalog-metadata) · [Authentication](#authentication)
 
-Flags shown here are grim 0.4.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## Build, Then Release
@@ -175,6 +175,19 @@ says. Two invariants hold for every kind:
 *Where* the fields live differs by kind (skill/agent: the frontmatter
 `metadata` map; rule: top-level frontmatter; bundle: top-level TOML) —
 see [the per-kind examples][metadata].
+
+## Git Provenance
+
+`build`, `release`, and `publish` take an opt-in `--git` flag that stamps the
+publishing commit (revision, commit date, and the `origin` remote) onto the
+manifest as standard OCI annotations, surfaced in the TUI detail pane and
+`grim search --format json`. It is off by default so an ordinary re-release
+stays idempotent; with `--git` a re-release from a different commit changes
+the digest. A repo with no `origin` (or no HTTPS-resolvable remote) still
+succeeds — revision and commit date are stamped and the source is just
+omitted; only a non-git path or a missing `git` fails (exit 65). Confirm the
+flag with `grim release --help` and see the [publishing guide][publishing]
+for the trade-off.
 
 ## Authentication
 

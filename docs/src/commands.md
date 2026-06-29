@@ -290,7 +290,10 @@ grim tui --registry ghcr.io/acme
 file, [agent](./agents.md) `.md` file, or bundle `.toml` file without pushing
 it — a dry run for authors. `--kind <skill|rule|agent|bundle>` forces the
 artifact kind instead of auto-detecting it from the path. An agent always
-needs `--kind agent` — a bare `.md` packs as a rule.
+needs `--kind agent` — a bare `.md` packs as a rule. `--git` embeds
+[git provenance](./publishing.md#git-provenance) (commit revision, commit
+date, and the `origin` remote) so the preflight reflects what a release would
+stamp.
 
 ## grim release {#release}
 
@@ -305,7 +308,10 @@ exact-version tag already exists into a success no-op that pushes nothing —
 for manifest-driven publishers that re-run blanket releases and only want
 bumped versions pushed. A `.toml` path publishes a
 [bundle](./concepts.md#bundles); `--pin` then freezes its floating members to
-digests. See [Publishing](./publishing.md) for the full workflow.
+digests. `--git` embeds [git provenance](./publishing.md#git-provenance)
+(commit revision, date, and `origin` remote) as OCI annotations; it is
+off by default so an ordinary re-release stays idempotent. See
+[Publishing](./publishing.md) for the full workflow.
 
 Pointing `grim release` at a `publish.toml` (a file with a top-level
 `registry` key) produces a hint to use `grim publish` instead. The mirror
@@ -336,6 +342,8 @@ the published tag with a movable channel tag (e.g. `canary`); semver values
 are rejected with exit 65, keeping all semver releases in the manifest. A
 channel tag always moves on re-publish — no skip, no `--force` needed.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
+`--git` embeds [git provenance](./publishing.md#git-provenance) on every
+published entry (forwarded to each `release`); a non-git path fails (65).
 The [global `--registry` flag][global-options] overrides the manifest's
 `registry` value for staging runs or acceptance tests without editing the file.
 `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not**

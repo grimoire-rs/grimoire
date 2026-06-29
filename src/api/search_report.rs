@@ -12,11 +12,12 @@
 //!
 //! JSON format: an array of
 //! `{kind, repo, summary, description, version, latest_tag, repository,
-//! deprecated, status}` objects (the report wraps a `Vec`, serialized to the
-//! bare array — no wrapper object, per subsystem-cli-api.md). The
-//! `description` stays full and untruncated; both `version` and the
+//! revision, created, deprecated, status}` objects (the report wraps a `Vec`,
+//! serialized to the bare array — no wrapper object, per subsystem-cli-api.md).
+//! The `description` stays full and untruncated; both `version` and the
 //! representative `latest_tag` are kept; `repository` is the HTTPS source URL
-//! or `null`; `deprecated` is the deprecation message or `null`.
+//! or `null`; `revision`/`created` are the git provenance (`--git` opt-in) or
+//! `null`; `deprecated` is the deprecation message or `null`.
 
 use std::io::{self, Write};
 
@@ -40,6 +41,10 @@ pub struct SearchEntry {
     /// The HTTPS source-repository URL from the catalog read-back guard,
     /// if any. JSON-only — never shown as its own plain-table column.
     pub repository: Option<String>,
+    /// The publishing commit revision (`--git` opt-in), if any. JSON-only.
+    pub revision: Option<String>,
+    /// The publishing commit date (RFC3339, `--git` opt-in), if any. JSON-only.
+    pub created: Option<String>,
     /// The representative tag the metadata was read from (may be the moving
     /// `latest` pointer). Kept in JSON for fidelity; the plain table shows
     /// `version` instead.
@@ -59,7 +64,7 @@ pub struct SearchEntry {
 impl Serialize for SearchEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("SearchEntry", 9)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 11)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("summary", &self.summary)?;
@@ -67,6 +72,8 @@ impl Serialize for SearchEntry {
         s.serialize_field("version", &self.version)?;
         s.serialize_field("latest_tag", &self.latest_tag)?;
         s.serialize_field("repository", &self.repository)?;
+        s.serialize_field("revision", &self.revision)?;
+        s.serialize_field("created", &self.created)?;
         s.serialize_field("deprecated", &self.deprecated)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
@@ -176,6 +183,8 @@ mod tests {
             repo: repo.to_string(),
             summary: None,
             repository: None,
+            revision: None,
+            created: None,
             description: Some("desc".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -226,6 +235,8 @@ mod tests {
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("blurb".to_string()),
             repository: None,
+            revision: None,
+            created: None,
             description: None,
             latest_tag: Some("latest".to_string()),
             version: Some("2.1.0".to_string()),
@@ -248,6 +259,8 @@ mod tests {
             repo: "localhost:5000/acme/y".to_string(),
             summary: None,
             repository: None,
+            revision: None,
+            created: None,
             description: Some("d".to_string()),
             latest_tag: Some("stable".to_string()),
             version: None,
@@ -267,6 +280,8 @@ mod tests {
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("short blurb".to_string()),
             repository: None,
+            revision: None,
+            created: None,
             description: Some("a much longer description that should be hidden".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -287,6 +302,8 @@ mod tests {
             repo: "localhost:5000/acme/x".to_string(),
             summary: None,
             repository: None,
+            revision: None,
+            created: None,
             description: Some("the description text".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -309,6 +326,8 @@ mod tests {
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some(long.clone()),
             repository: None,
+            revision: None,
+            created: None,
             description: None,
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -329,6 +348,8 @@ mod tests {
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("short".to_string()),
             repository: None,
+            revision: None,
+            created: None,
             description: Some("the full long description".to_string()),
             latest_tag: Some("latest".to_string()),
             version: Some("1.2.0".to_string()),
@@ -365,6 +386,31 @@ mod tests {
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("github.com"), "plain table unchanged");
+    }
+
+    #[test]
+    fn json_carries_git_provenance_plain_table_does_not() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.revision = Some("abc123def456-dirty".to_string());
+        e.created = Some("2026-06-29T12:00:00+00:00".to_string());
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v[0]["revision"], "abc123def456-dirty");
+        assert_eq!(v[0]["created"], "2026-06-29T12:00:00+00:00");
+        // Absent ⇒ explicit null, key always present for stable consumers.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v[0]["revision"].is_null());
+        assert!(v[0]["created"].is_null());
+        // The plain table stays five columns — provenance never leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("abc123def456"), "plain table unchanged");
     }
 
     #[test]

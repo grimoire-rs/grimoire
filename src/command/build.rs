@@ -19,6 +19,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
 use crate::oci::annotations::{annotations_for_agent, annotations_for_rule, annotations_for_skill};
+use crate::oci::git_provenance::GitProvenance;
 use crate::skill::rule_frontmatter::RuleFrontmatter;
 use crate::skill::{
     pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file, validate_skill_dir,
@@ -33,6 +34,12 @@ pub struct BuildArgs {
     /// Force the artifact kind instead of auto-detecting it.
     #[arg(long, value_parser = ["skill", "rule", "agent", "bundle"])]
     pub kind: Option<String>,
+
+    /// Embed git provenance (commit revision, commit date, and the `origin`
+    /// remote) from the artifact's working tree as OCI annotations. Requires
+    /// `git` and a repository; a non-git path fails (65).
+    #[arg(long)]
+    pub git: bool,
 }
 
 /// The validated + packed artifact, shared by `build` and `release`.
@@ -76,12 +83,15 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
 /// `version` is the release version used in the annotations (`build`
 /// passes a placeholder; `release` passes the real version).
 /// `fallback_source` is the release reference for the source annotation,
-/// used only when the artifact has no authored `repository` URL.
+/// used only when the artifact has no authored `repository` URL. `git`, when
+/// supplied (`--git`), adds the revision/created annotations and a source URL
+/// below the authored value.
 pub fn validate_and_pack(
     path: &Path,
     kind: ArtifactKind,
     version: &str,
     fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
 ) -> anyhow::Result<PackedArtifact> {
     match kind {
         // Bundles are packed on a dedicated path (`pack_bundle`); the
@@ -100,7 +110,7 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             let tar = super::grim(pack_skill_dir(path))?;
-            let annotations = annotations_for_skill(&fm, version, fallback_source);
+            let annotations = annotations_for_skill(&fm, version, fallback_source, git);
             Ok(PackedArtifact {
                 kind,
                 name: fm.name.to_string(),
@@ -138,7 +148,7 @@ pub fn validate_and_pack(
                 crate::oci::annotations::string_from_extra(&fm, "repository").as_deref(),
             )?;
             let tar = super::grim(pack_rule_file(path))?;
-            let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, fallback_source);
+            let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, fallback_source, git);
             Ok(PackedArtifact {
                 kind,
                 name,
@@ -156,7 +166,7 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             let tar = super::grim(pack_agent_file(path))?;
-            let annotations = annotations_for_agent(&fm, version, fallback_source);
+            let annotations = annotations_for_agent(&fm, version, fallback_source, git);
             Ok(PackedArtifact {
                 kind,
                 name: fm.name.to_string(),
@@ -164,6 +174,23 @@ pub fn validate_and_pack(
                 annotations,
             })
         }
+    }
+}
+
+/// Derive git provenance for `path` when `--git` is set, mapping any failure
+/// to a path-attributed data error (65, via `SkillErrorKind::GitProvenance`).
+/// `Ok(None)` when `--git` is not requested — the default, byte-deterministic
+/// path. Shared by `build` and `release` so the failure semantics are one
+/// source of truth.
+pub async fn derive_git_provenance(path: &Path, enabled: bool) -> anyhow::Result<Option<GitProvenance>> {
+    if !enabled {
+        return Ok(None);
+    }
+    match GitProvenance::derive(path).await {
+        Ok(provenance) => Ok(Some(provenance)),
+        Err(e) => Err(anyhow::Error::from(crate::error::Error::from(
+            crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::GitProvenance(e)),
+        ))),
     }
 }
 
@@ -278,6 +305,9 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
 
     if kind == ArtifactKind::Bundle {
+        // A bundle build emits no annotations, but the `--git` "never a silent
+        // skip" contract still applies: a non-git path with `--git` fails (65).
+        derive_git_provenance(&args.path, args.git).await?;
         let (name, members, _metadata) = read_bundle_members(&args.path)?;
         let manifest = crate::oci::bundle::BundleManifest::new(members);
         let layer = manifest
@@ -291,7 +321,10 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
 
     // `build` is a local pre-flight: the version is a placeholder, no
     // source — `release` recomputes annotations with the real version.
-    let packed = validate_and_pack(&args.path, kind, "0.0.0-build", None)?;
+    // `--git` is honored here too so the preflight reflects the published
+    // annotation set (and fails early on a non-git path).
+    let git = derive_git_provenance(&args.path, args.git).await?;
+    let packed = validate_and_pack(&args.path, kind, "0.0.0-build", None, git.as_ref())?;
     let layer_digest = crate::oci::Algorithm::Sha256.hash(&packed.tar).to_string();
     let report = BuildReport::new(
         packed.kind,
@@ -370,7 +403,7 @@ mod tests {
             &dir.join("SKILL.md"),
             "---\nname: code-review\ndescription: Review code.\nmetadata:\n  keywords: a,b\n---\n# Body\n",
         );
-        let packed = validate_and_pack(&dir, ArtifactKind::Skill, "1.2.3", Some("src")).unwrap();
+        let packed = validate_and_pack(&dir, ArtifactKind::Skill, "1.2.3", Some("src"), None).unwrap();
         assert_eq!(packed.name, "code-review");
         assert!(!packed.tar.is_empty());
         assert_eq!(packed.annotations["org.opencontainers.image.version"], "1.2.3");
@@ -385,7 +418,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("code-review");
         write(&dir.join("SKILL.md"), "---\nname: wrong-name\ndescription: d\n---\n");
-        assert!(validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).is_err());
+        assert!(validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None, None).is_err());
     }
 
     #[test]
@@ -396,7 +429,7 @@ mod tests {
             &dir.join("SKILL.md"),
             "---\nname: s\ndescription: d\nmetadata:\n  claude.user-invocable: \"maybe\"\n---\n",
         );
-        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).unwrap_err();
+        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None, None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert!(format!("{err:#}").contains("claude.user-invocable"), "{err:#}");
     }
@@ -410,7 +443,7 @@ mod tests {
             &dir.join("SKILL.md"),
             "---\nname: s\ndescription: d\nmetadata:\n  repository: git@github.com:acme/s.git\n---\n",
         );
-        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).unwrap_err();
+        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None, None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert!(format!("{err:#}").contains("expected an https:// URL"), "{err:#}");
 
@@ -420,7 +453,7 @@ mod tests {
             &f,
             "---\npaths: [\"a\"]\nrepository: http://github.com/acme/r\n---\nbody\n",
         );
-        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None).unwrap_err();
+        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None, None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
 
         // Agent: authored via the metadata map.
@@ -429,7 +462,7 @@ mod tests {
             &a,
             "---\nname: rv\ndescription: d\nmetadata:\n  repository: ssh://git@x/y\n---\nbody\n",
         );
-        let err = validate_and_pack(&a, ArtifactKind::Agent, "1.0.0", None).unwrap_err();
+        let err = validate_and_pack(&a, ArtifactKind::Agent, "1.0.0", None, None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -441,7 +474,7 @@ mod tests {
             &dir.join("SKILL.md"),
             "---\nname: s\ndescription: d\nmetadata:\n  repository: https://github.com/acme/s\n---\n",
         );
-        let packed = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", Some("ghcr.io/acme/s")).unwrap();
+        let packed = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", Some("ghcr.io/acme/s"), None).unwrap();
         assert_eq!(
             packed.annotations["org.opencontainers.image.source"],
             "https://github.com/acme/s"
@@ -469,7 +502,7 @@ mod tests {
             &f,
             "---\npaths: [\"a\"]\nmetadata:\n  copilot.exclude-agent: everything\n---\nbody\n",
         );
-        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None).unwrap_err();
+        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None, None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert!(format!("{err:#}").contains("copilot.exclude-agent"), "{err:#}");
     }
@@ -482,7 +515,7 @@ mod tests {
             &f,
             "---\nname: code-reviewer\ndescription: Reviews diffs.\n---\nYou are a code reviewer.\n",
         );
-        let packed = validate_and_pack(&f, ArtifactKind::Agent, "1.0.0", Some("acme/code-reviewer")).unwrap();
+        let packed = validate_and_pack(&f, ArtifactKind::Agent, "1.0.0", Some("acme/code-reviewer"), None).unwrap();
         assert_eq!(packed.kind, ArtifactKind::Agent);
         assert_eq!(packed.name, "code-reviewer");
         assert!(!packed.tar.is_empty());
