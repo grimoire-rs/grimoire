@@ -8,8 +8,9 @@
 //! `default_registry` precedence chain (`command::resolve_default_registry`):
 //!
 //! - [`resolve_registries`] builds the ordered, deduped set of registries a
-//!   browse/search spans (`search`/`tui`/`mcp`), folding the legacy single
-//!   `default_registry` in only when no `[[registries]]` are declared.
+//!   browse/search spans (`search`/`tui`/`mcp`). Only the `--registry` flag
+//!   collapses the set to one; `$GRIM_DEFAULT_REGISTRY` is a tier-3 fallback
+//!   (folded in only when no `[[registries]]` are declared).
 //! - [`resolve_reference`] expands a user reference: an explicit registry
 //!   parses strictly, a qualified `alias/repo` substitutes the alias's url,
 //!   and a bare short id expands against the primary registry.
@@ -38,17 +39,19 @@ pub struct ResolvedRegistry {
 /// Build the ordered, deduped registry browse set.
 ///
 /// Precedence:
-/// 1. A forced single registry (the `--registry` flag or
-///    `$GRIM_DEFAULT_REGISTRY`) collapses the set to exactly that registry,
-///    preserving the historical "`--registry` searches only this one"
-///    behavior.
+/// 1. The `--registry` flag (`forced`) collapses the set to exactly that
+///    registry, preserving the historical "flag-only-registry searches only
+///    this one" behavior. Only the flag collapses; `$GRIM_DEFAULT_REGISTRY`
+///    (`env_default`) is a default for tier 3, not a collapse trigger.
 /// 2. Otherwise the declared `[[registries]]` are authoritative — project
 ///    entries then global entries, deduped by url (first occurrence wins).
 ///    Exactly one is marked primary: the first `default = true`, else the
-///    first entry.
+///    first entry. When `[[registries]]` is non-empty the `env_default` is
+///    NOT added to the browse set (it stays the short-id default only).
 /// 3. When no `[[registries]]` are declared anywhere, the legacy single
-///    `default_registry` chain applies (project, then global, then the
-///    built-in `fallback`).
+///    `default_registry` chain applies: `env_default`
+///    (`$GRIM_DEFAULT_REGISTRY`) then project, then global, then the
+///    built-in `fallback`.
 pub fn resolve_registries(
     forced: Option<&str>,
     project: &[RegistryConfig],
@@ -56,8 +59,10 @@ pub fn resolve_registries(
     global: &[RegistryConfig],
     global_default: Option<&str>,
     fallback: &str,
+    env_default: Option<&str>,
 ) -> Vec<ResolvedRegistry> {
-    // 1. An explicit flag / env forces exactly one registry.
+    // 1. The --registry flag forces exactly one registry. The env var is NOT
+    // a collapse trigger — it is folded in only at tier 3 below.
     if let Some(url) = forced.filter(|s| !s.is_empty()) {
         return vec![ResolvedRegistry {
             url: url.to_string(),
@@ -83,8 +88,11 @@ pub fn resolve_registries(
         return out;
     }
 
-    // 3. Legacy single default registry.
-    let url = project_default
+    // 3. Legacy single default registry: env > project > global > fallback.
+    // The env var is a default (tier 3) and is NOT consulted when
+    // `[[registries]]` are declared (tier 2 wins above).
+    let url = env_default
+        .or(project_default)
         .or(global_default)
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback)
@@ -163,6 +171,7 @@ mod tests {
             &[],
             None,
             "grim.ocx.sh",
+            None,
         );
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].url, "flag.example");
@@ -178,6 +187,7 @@ mod tests {
             &[rc(Some("corp"), "registry.corp/team", false)],
             None,
             "grim.ocx.sh",
+            None,
         );
         assert_eq!(set.len(), 2);
         assert_eq!(set[0].url, "ghcr.io/acme");
@@ -199,6 +209,7 @@ mod tests {
             &[],
             None,
             "grim.ocx.sh",
+            None,
         );
         assert_eq!(primary_registry(&set), "registry.corp/team");
         assert!(set[1].is_default);
@@ -214,6 +225,7 @@ mod tests {
             &[rc(Some("b"), "ghcr.io/acme", true)], // same url, global tier
             None,
             "grim.ocx.sh",
+            None,
         );
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].alias.as_deref(), Some("a"));
@@ -228,6 +240,7 @@ mod tests {
             &[],
             Some("glob.example"),
             "grim.ocx.sh",
+            None,
         );
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].url, "proj.example");
@@ -236,14 +249,14 @@ mod tests {
 
     #[test]
     fn no_registries_no_default_uses_fallback() {
-        let set = resolve_registries(None, &[], None, &[], None, "grim.ocx.sh");
+        let set = resolve_registries(None, &[], None, &[], None, "grim.ocx.sh", None);
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].url, "grim.ocx.sh");
     }
 
     #[test]
     fn reference_explicit_registry_parses_as_is() {
-        let set = resolve_registries(None, &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh");
+        let set = resolve_registries(None, &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh", None);
         let id = resolve_reference("ghcr.io/other/x:1", &set).expect("explicit parses");
         assert_eq!(id.registry(), "ghcr.io");
         assert_eq!(id.to_string(), "ghcr.io/other/x:1");
@@ -251,7 +264,7 @@ mod tests {
 
     #[test]
     fn reference_short_id_expands_against_primary() {
-        let set = resolve_registries(None, &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh");
+        let set = resolve_registries(None, &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh", None);
         let id = resolve_reference("code-review:stable", &set).expect("short id expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/code-review:stable");
     }
@@ -265,6 +278,7 @@ mod tests {
             &[],
             None,
             "grim.ocx.sh",
+            None,
         );
         let id = resolve_reference("corp/internal-tool:1", &set).expect("alias substitutes");
         assert_eq!(id.registry(), "registry.corp");
@@ -288,6 +302,7 @@ mod tests {
             &[],
             None,
             "grim.ocx.sh",
+            None,
         );
         let id = resolve_reference("code-review:stable", &set).expect("repo:tag expands against primary");
         assert_eq!(id.to_string(), "ghcr.io/acme/code-review:stable");
@@ -297,8 +312,96 @@ mod tests {
     fn reference_unknown_alias_prefix_expands_against_primary() {
         // `acme/x` where `acme` is not a configured alias is a multi-segment
         // repository path under the primary registry, exactly as today.
-        let set = resolve_registries(None, &[], Some("ghcr.io"), &[], None, "grim.ocx.sh");
+        let set = resolve_registries(None, &[], Some("ghcr.io"), &[], None, "grim.ocx.sh", None);
         let id = resolve_reference("acme/x:1", &set).expect("repo path expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/x:1");
+    }
+
+    // ── New tests for env_default semantics ────────────────────────────────
+
+    #[test]
+    fn env_default_does_not_collapse_when_registries_present() {
+        // `$GRIM_DEFAULT_REGISTRY` must NOT interpose when `[[registries]]`
+        // are declared — tier 2 (`[[registries]]`) wins; env is NOT added to
+        // the browse set.
+        let set = resolve_registries(
+            None,
+            &[
+                rc(Some("acme"), "ghcr.io/acme", true),
+                rc(Some("corp"), "registry.corp/team", false),
+            ],
+            None,
+            &[],
+            None,
+            "grim.ocx.sh",
+            Some("env.example"), // env_default must be ignored when [[registries]] present
+        );
+        assert_eq!(
+            set.len(),
+            2,
+            "[[registries]] declared → browse set must be the full array"
+        );
+        assert_eq!(set[0].url, "ghcr.io/acme");
+        assert_eq!(set[1].url, "registry.corp/team");
+        assert!(
+            set.iter().all(|r| r.url != "env.example"),
+            "env_default must NOT appear in browse set when [[registries]] is non-empty"
+        );
+    }
+
+    #[test]
+    fn env_default_is_single_default_when_no_registries() {
+        // When no `[[registries]]` exist, `$GRIM_DEFAULT_REGISTRY` is used as
+        // the single-default (tier 3 head), ahead of project and global config.
+        let set = resolve_registries(
+            None,
+            &[],
+            Some("proj.example"),
+            &[],
+            Some("glob.example"),
+            "grim.ocx.sh",
+            Some("env.example"),
+        );
+        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set[0].url, "env.example",
+            "env_default must head tier-3 when no [[registries]] are declared"
+        );
+    }
+
+    #[test]
+    fn flag_collapses_even_with_registries_and_env() {
+        // The `--registry` flag (`forced`) is the sole collapse trigger.
+        // Both `[[registries]]` and `env_default` are present; the flag
+        // still wins.
+        let set = resolve_registries(
+            Some("flag.example"),
+            &[rc(Some("acme"), "ghcr.io/acme", true)],
+            None,
+            &[],
+            None,
+            "grim.ocx.sh",
+            Some("env.example"),
+        );
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].url, "flag.example");
+    }
+
+    #[test]
+    fn env_default_beats_project_and_global_in_tier3() {
+        // In tier 3 the precedence chain is env > project > global > fallback.
+        let set = resolve_registries(
+            None,
+            &[],
+            Some("proj.example"),
+            &[],
+            Some("glob.example"),
+            "grim.ocx.sh",
+            Some("env.example"),
+        );
+        assert_eq!(
+            set[0].url, "env.example",
+            "env_default must beat project and global in tier 3"
+        );
     }
 }

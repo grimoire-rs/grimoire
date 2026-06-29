@@ -600,8 +600,11 @@ mod tests {
     use crate::tui::state::{ArtifactState, TuiRow};
 
     fn row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: "d".to_string(),
             summary: String::new(),
@@ -1062,8 +1065,11 @@ mod p2_event_member_node_tests {
     use crate::tui::tree::DisplayRow;
 
     fn bundle_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "bundle".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -1077,8 +1083,11 @@ mod p2_event_member_node_tests {
     }
 
     fn skill_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -1660,6 +1669,8 @@ mod tree_event_tests {
         s.set_rows(vec![
             TuiRow {
                 kind: "skill".to_string(),
+                registry: "reg".to_string(),
+                repository: "acme/alpha".to_string(),
                 repo: "reg/acme/alpha".to_string(),
                 description: String::new(),
                 summary: String::new(),
@@ -1672,6 +1683,8 @@ mod tree_event_tests {
             },
             TuiRow {
                 kind: "skill".to_string(),
+                registry: "reg".to_string(),
+                repository: "acme/beta".to_string(),
                 repo: "reg/acme/beta".to_string(),
                 description: String::new(),
                 summary: String::new(),
@@ -1790,6 +1803,8 @@ mod tree_event_tests {
         let mut s = TuiState::new();
         s.set_rows(vec![TuiRow {
             kind: "skill".to_string(),
+            registry: "reg".to_string(),
+            repository: "acme/nested/tool".to_string(),
             repo: "reg/acme/nested/tool".to_string(),
             description: String::new(),
             summary: String::new(),

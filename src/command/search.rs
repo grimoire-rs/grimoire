@@ -182,11 +182,19 @@ fn resolve_scope(
     }
 
     let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
-        // No scope resolves: browse the env/flag/fallback registry (no
+        // No scope resolves: browse the flag/env/fallback registry (no
         // config tiers) with empty badge inputs. With no scope to detect
         // against, treat every client as active (no output is filtered).
-        let registries =
-            crate::config::resolve_registries(ctx.default_registry(), &[], None, &[], None, super::FALLBACK_REGISTRY);
+        // Only the flag collapses the set; env is the tier-3 head.
+        let registries = crate::config::resolve_registries(
+            ctx.registry_flag(),
+            &[],
+            None,
+            &[],
+            None,
+            super::FALLBACK_REGISTRY,
+            ctx.registry_env(),
+        );
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
         return (
             registries,

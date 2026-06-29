@@ -48,11 +48,11 @@ Environment variables that matter here (full table:
 
 When a project draws from more than one registry, declare them in a
 `[[registries]]` array in `grimoire.toml` (or the global config). When
-the array is present it replaces the single-registry path: `grim search`
-and the MCP server browse **all declared registries at once** instead of
-one. The TUI currently browses a single registry and does not yet consume
-`[[registries]]` — multi-registry TUI support is planned for a later
-release.
+the array is present it replaces the single-registry path: `grim search`,
+`grim tui`, and the MCP server browse **all declared registries at once**
+instead of one. In the TUI each registry becomes its own collapsible tree
+root, with the registry prefix shown only when more than one registry
+resolves.
 
 Each entry:
 
@@ -74,9 +74,17 @@ url = "registry.corp.example/team"
 ```
 
 Project entries take precedence over global entries; duplicate URLs are
-deduped, first occurrence wins. An explicit `--registry` flag still
-collapses the browse to exactly that one registry regardless of what is
-declared.
+deduped, first occurrence wins.
+
+Browse-set precedence (what `grim search`, `grim tui`, and `grim mcp`
+browse):
+
+1. `--registry` flag — collapses browse to exactly that one registry.
+2. `[[registries]]` (project, then global) — authoritative when present;
+   `GRIM_DEFAULT_REGISTRY` does **not** collapse or restrict this set.
+3. Single-default fallback (no `[[registries]]` declared): `GRIM_DEFAULT_REGISTRY`
+   → project `[options].default_registry` → global `[options].default_registry`
+   → built-in `grim.ocx.sh`.
 
 A config with no `[[registries]]` behaves exactly as before — the
 `[options].default_registry` / `GRIM_DEFAULT_REGISTRY` / `--registry` /
@@ -173,20 +181,23 @@ grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 ```
 
-`grim tui` browses a registry's catalog interactively: kind-grouped list,
+`grim tui` browses your declared registries' catalogs interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
 detail pane per entry. Press `t` to toggle between the flat list and a
 grouped collapsible tree view; the tree's opening mode and path-splitting
 characters are configurable via `[options.tui]` in `grimoire.toml`
-(`default_view`, `group_by_type`, `tree_separators`). It browses a single
-registry (the effective default registry from the precedence chain — flag,
-env, global config, or the built-in fallback); multi-registry browse is
-planned for a future release. When the active scope has no `grimoire.toml`
-yet it offers to create one before starting via popup dialogs (the registry
-input is pre-filled with the effective default registry and the accepted
-value is persisted as `default_registry`; cancelling closes the TUI). Its
-install, update, and delete actions go through the same seams as
-`grim add`/`install`/`uninstall`. Press `?` inside for the full key map.
+(`default_view`, `group_by_type`, `tree_separators`). When `[[registries]]`
+are configured, the TUI browses all of them, one collapsible root per
+registry; with exactly one it elides that root. A `--registry` flag collapses
+the browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` does **not**
+collapse the browse set — it is only the short-id resolution default and the
+single-registry fallback when no `[[registries]]` is declared. When the active
+scope has no `grimoire.toml` yet it offers to create one before starting via
+popup dialogs (the registry input is pre-filled with the effective default
+registry and the accepted value is persisted as a `[[registries]]` entry with
+`default = true`; cancelling closes the TUI). Its install, update, and delete
+actions go through the same seams as `grim add`/`install`/`uninstall`. Press
+`?` inside for the full key map.
 
 `grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
 STDIO. An AI agent host such as [Claude Code][claude-code] connects to it

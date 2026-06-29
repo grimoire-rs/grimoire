@@ -197,7 +197,6 @@ Next:
 
 Multi-registry demo (browse-all-declared across two registries):
   cd test/manual/project-multi
-  unset GRIM_DEFAULT_REGISTRY       # else it forces a single-registry browse
   grim search                       # browses BOTH 5050/grimoire and 5051/tools
   grim lock                         # pins each FQ ref to its own registry
   grim install && grim status       # all 'installed' from across both registries

@@ -137,6 +137,7 @@ mod tests {
             &[],
             None,
             crate::command::FALLBACK_REGISTRY,
+            None,
         );
         assert_eq!(primary_registry(&set), url, "primary must equal the seeded url");
     }

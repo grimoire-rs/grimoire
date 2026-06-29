@@ -127,8 +127,8 @@ open it and scroll (`↑`/`↓` or `j`/`k`), or page it from the list with
 
 **Tree view walkthrough**: press `t` to switch from the flat list to tree
 mode. The registry host (`localhost:5050`) becomes the root node and is
-elided from display because it matches `GRIM_DEFAULT_REGISTRY`; children
-group by path segment (`grimoire/skills`, `grimoire/rules`, etc.). Press
+elided from display because exactly one registry resolves (single-registry
+scope); children group by path segment (`grimoire/skills`, `grimoire/rules`, etc.). Press
 `→` on a group to expand it, `←` to collapse, `Enter` to toggle.
 Try `space` on the `grimoire/skills` group — every descendant leaf gets
 marked; the group glyph turns filled. Press `i` to batch-install the whole
@@ -155,15 +155,11 @@ and a small `tools` subset (`commit-helper`, `security-baseline`) to a
 SECOND registry `localhost:5051/tools`. The `project-multi/` consumer
 declares both with `[[registries]]`, so one search browses both and
 fully-qualified refs across the two hosts lock and install together.
-
-> **Gotcha:** `$GRIM_DEFAULT_REGISTRY` (exported by `env.sh`) and the
-> `--registry` flag each **force a single-registry browse by design**,
-> overriding `[[registries]]`. `unset` it first so the declared registries
-> drive the browse set.
+`GRIM_DEFAULT_REGISTRY` (set by `env.sh`) is the short-id default only —
+it does not collapse the browse; only `--registry` does.
 
 ```sh
 cd test/manual/project-multi
-unset GRIM_DEFAULT_REGISTRY       # else it collapses the browse to just 5050
 cat grimoire.toml                 # two [[registries]]: primary (5050), tools (5051)
 
 grim search                       # browses BOTH 5050/grimoire AND 5051/tools
@@ -183,6 +179,64 @@ alias, the rest is appended to its `url`), not a persisted config form:
 #   localhost:5051/tools/skills/commit-helper:1
 grim add tools/skills/commit-helper:1
 ```
+
+### 2b. Multi-registry TUI: registry-tree projection
+
+The TUI browses every declared `[[registries]]` in one session, grouping by
+registry. With `env.sh` sourced (`GRIM_DEFAULT_REGISTRY` set), both roots
+still appear — the env var does not collapse the browse. Run it from the
+multi-registry project (needs a TTY):
+
+```sh
+cd test/manual/project-multi
+grim tui                          # interactive only — the TUI needs a real TTY
+```
+
+Verify (each maps to a design decision — see the plan / ADR):
+
+- **Two registry roots, not elided** (D-ELIDE): with two registries resolved,
+  neither host is elided — the tree shows BOTH `localhost:5050/grimoire` and
+  `localhost:5051/tools` as top-level roots. (Elision only kicks in when
+  *exactly one* registry resolves — that is the single-registry walkthrough in
+  scenario 1a, where the lone root is hidden.)
+- **Precedence order, not alphabetical** (F13): the `default = true` primary
+  (`localhost:5050/grimoire`) sorts FIRST, `tools` (`localhost:5051/tools`)
+  second — declaration/resolution order. Deeper levels stay alphabetical.
+- **Namespaced roots stay distinct** (D-TREE): the roots are the full
+  `host/namespace` (`…:5050/grimoire`, `…:5051/tools`), never collapsed under a
+  bare `localhost`. `commit-helper` appears under BOTH roots — one copy per
+  registry.
+- **Cross-registry batch**: expand both roots, `space` on each registry group to
+  mark all descendants, `i` to install — each package installs to its own
+  registry and the glyphs flip green under both roots.
+- **Empty / offline registry still shows as a root** (D-EMPTY + D-DEGRADE):
+  stop the second registry (`docker stop grim-manual-registry-2`, or
+  `docker compose -f test/manual/docker-compose.yml stop registry-2`), then `r`
+  to refresh — the `tools` root still renders (as a `0/0` root) and the status
+  line reports `offline: localhost:5051/tools`. Restart the container + `r` to
+  restore it.
+- **Status line clears after refresh** (regression guard): press `r`; once the
+  reload finishes the transient `refreshing catalog…` message must CLEAR — it
+  must not stay stuck. With everything healthy the status falls through to the
+  health line (empty) or the marked-count hint.
+- **Scope toggle re-elides** (D-ELIDE on `g`): press `g` to switch scope. A
+  scope that declares a single registry re-elides its root; a scope with
+  multiple registries keeps every root. The root set updates live.
+- **Namespaced bundle members resolve correctly** (B1c): expand a bundle that
+  lives in a namespaced registry — its members show their true install state
+  (e.g. `✓`/`via bundle`), not a stale `· not-installed`. They are matched
+  against the full `host/namespace`, never a first-`/` split to bare `localhost`.
+- **Flat list shows Registry column** (feature A): press `t` to switch to flat
+  view. With two registries resolved the table gains a leading **Registry** column
+  showing each row's registry display label (alias or URL) and the Repo cell
+  shortens to the registry-relative path. Switch back to single-registry project
+  and verify the column is absent (single-registry elision unchanged).
+- **Alias-based labels in tree roots and health line** (feature B): set
+  `alias = "tools"` on the `localhost:5051/tools` entry in
+  `test/manual/project-multi/grimoire.toml`, then `r` to refresh. The
+  `localhost:5051/tools` tree root must now read `tools (localhost:5051/tools)`.
+  Take the second registry offline — the status line must say `offline: tools
+  (localhost:5051/tools)` instead of the raw URL.
 
 ### 3. Multi-client transform (Copilot rule transform)
 

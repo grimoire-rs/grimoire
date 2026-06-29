@@ -42,7 +42,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim update` | Re-resolve, re-materialize, prune | [consume](references/consume.md) |
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
-| `grim search` / `tui` | Browse a registry's catalog | [registries](references/registries.md) |
+| `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |

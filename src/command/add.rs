@@ -677,6 +677,7 @@ tree_separators_typo = 1
             &[],
             None,
             crate::command::FALLBACK_REGISTRY,
+            None,
         );
         assert_eq!(
             primary_registry(&set_resolved),

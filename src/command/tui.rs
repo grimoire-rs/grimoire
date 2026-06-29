@@ -25,6 +25,7 @@ use std::io::IsTerminal;
 use clap::Args;
 
 use crate::cli::exit_code::ExitCode;
+use crate::config::ResolvedRegistry;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
@@ -86,11 +87,14 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    let registry = resolve_registry(ctx, args);
-
     let scope = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let access = super::access_seam(ctx)?;
+
+    // Resolve the full ordered registry set for the active scope via the shared
+    // multi-registry seam (mirrors `grim search` / `grim mcp`).
+    let registries = resolve_registries_for_tui(ctx, args, &scope);
+    let primary_registry = crate::config::primary_registry(&registries).to_string();
 
     // Resolve the *other* scope too so the TUI can toggle Global ⇄
     // Project at runtime. It is best-effort: if the alternate scope
@@ -99,23 +103,28 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     let alt = scope_resolution::resolve(ctx, !args.global, args.config.as_deref())
         .ok()
         .filter(|other| other.scope != scope.scope)
-        .map(|other| ScopeSwap {
-            scope: other.scope,
-            workspace: other.workspace.clone(),
-            lock_path: other.lock_path.clone(),
-            state_path: other.state_path.clone(),
-            config_path: other.config_path.clone(),
-            clients_default: other.options.clients.clone(),
-            clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
-            label: scope_label(other.scope).to_string(),
-            roots: other.roots,
-            tui_options: other.options.tui.clone(),
+        .map(|other| {
+            let alt_registries = resolve_registries_for_tui(ctx, args, &other);
+            let alt_primary = crate::config::primary_registry(&alt_registries).to_string();
+            ScopeSwap {
+                scope: other.scope,
+                workspace: other.workspace.clone(),
+                lock_path: other.lock_path.clone(),
+                state_path: other.state_path.clone(),
+                config_path: other.config_path.clone(),
+                clients_default: other.options.clients.clone(),
+                clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
+                label: scope_label(other.scope).to_string(),
+                roots: other.roots,
+                tui_options: other.options.tui.clone(),
+                registries: alt_registries,
+                primary_registry: alt_primary,
+            }
         });
 
     let tui_ctx = TuiContext {
-        // Per-registry cache file (borrow `registry` before it moves below).
-        catalog_path: ctx.paths().catalog_file_for(&registry),
-        registry,
+        primary_registry,
+        registries,
         access,
         offline: ctx.offline(),
         force_refresh: args.refresh,
@@ -244,6 +253,32 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
             crate::command::primary_registry_global_fallback(ctx)
         }
     }
+}
+
+/// Resolve the ordered registry set for a TUI session, mirroring the
+/// `grim search` / `grim mcp` seam (`catalog_service::load_catalog`).
+///
+/// Behavior (D-RESOLVE):
+/// - An explicit `--registry` flag collapses to exactly one registry, preserving
+///   the historical single-registry behavior for explicit overrides.
+/// - Otherwise, `[[registries]]` is authoritative; the legacy scalar
+///   `default_registry` and the global config tiers are folded in via
+///   [`super::registries_for_scope`] — the same seam `grim search` uses.
+/// - The built-in fallback (`FALLBACK_REGISTRY`) ensures a non-empty result.
+fn resolve_registries_for_tui(
+    ctx: &Context,
+    args: &TuiArgs,
+    scope: &scope_resolution::ResolvedScope,
+) -> Vec<ResolvedRegistry> {
+    if let Some(r) = &args.registry {
+        // Explicit --registry collapses to a single entry (historical behavior).
+        return vec![ResolvedRegistry {
+            url: r.clone(),
+            alias: None,
+            is_default: true,
+        }];
+    }
+    super::registries_for_scope(ctx, scope)
 }
 
 /// The effective selected clients for a scope's TUI display, derived from

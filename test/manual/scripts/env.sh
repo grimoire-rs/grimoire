@@ -21,11 +21,12 @@ _grim_repo_root="$(cd "$_grim_manual_dir/../.." && pwd)"
 
 export GRIM_HOME="$_grim_manual_dir/.grim-home"
 export GRIM_DEFAULT_REGISTRY="localhost:5050"
-# Both rig registries over plain HTTP: 5050 (primary `grimoire` catalog) and
-# 5051 (the `tools` multi-registry subset). COMMA-separated (the var is split
-# on ','); non-default loopback ports are not built-in HTTP, so opt them in
-# here. The default stays 5050; project-multi reaches 5051 via a [[registries]]
-# alias.
+# GRIM_DEFAULT_REGISTRY is the default for short-id resolution; it does NOT
+# collapse the multi-registry browse (only `--registry` does), so project-multi's
+# two [[registries]] are still browsed in full — the rig deliberately keeps it
+# set to demonstrate that.
+# Both rig registries over plain HTTP. COMMA-separated (split on ',');
+# non-default loopback ports are not built-in HTTP, so opt them in here.
 export GRIM_INSECURE_REGISTRIES="localhost:5050,localhost:5051"
 
 case ":$PATH:" in

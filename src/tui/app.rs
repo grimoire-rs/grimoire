@@ -14,6 +14,7 @@
 //! logic). This module is excluded from acceptance tests; its logic is
 //! covered headlessly by the pure modules' unit tests.
 
+use std::collections::BTreeMap;
 use std::io::{self};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,14 +23,17 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, Catalog, REGISTRY_COMPAT_DOCS_URL};
+use crate::catalog::catalog_service;
+use crate::catalog::registry_catalog::Catalog;
 use crate::command::add::{declare, relock_declared, write_config};
 use crate::command::grim;
 use crate::command::uninstall::undeclare_and_unlock;
+use crate::config::ResolvedRegistry;
 use crate::config::declaration::{ConfigOptions, DesiredSet};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
+use crate::env::grim_home;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::installer::{InstallOutcome, install_all};
@@ -42,6 +46,7 @@ use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
+use crate::store::paths::GrimPaths;
 
 use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
@@ -56,11 +61,17 @@ use tokio::sync::mpsc::Receiver;
 /// Everything the TUI needs to load the catalog and reuse the install
 /// path, resolved once by `command/tui.rs` before raw mode is entered.
 pub struct TuiContext {
-    /// The registry whose catalog is browsed. Also the effective default
-    /// registry: its host is elided as the tree root so names stay short.
-    pub registry: String,
-    /// The catalog cache file (`$GRIM_HOME/catalog.json`).
-    pub catalog_path: std::path::PathBuf,
+    /// Resolved registries for the active scope, in precedence order.
+    ///
+    /// Single-entry when `--registry` or `$GRIM_DEFAULT_REGISTRY` forces one
+    /// registry; multi-entry when the `[[registries]]` array declares several.
+    pub registries: Vec<ResolvedRegistry>,
+    /// The primary registry (first `is_default`, else the first entry).
+    ///
+    /// Used wherever a single registry string is needed: the effective default
+    /// for elision (D-ELIDE), the `UpdateChecker` registry seam, and the
+    /// init-dialog pre-fill. Mirrors `config::primary_registry(&self.registries)`.
+    pub primary_registry: String,
     /// The OCI-access seam (shared with the resolve/install path).
     pub access: Arc<dyn OciAccess>,
     /// Whether this invocation is offline (degrade, never crash).
@@ -103,8 +114,8 @@ pub struct TuiContext {
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
-/// Everything else in [`TuiContext`] (registry, catalog, access) is
-/// scope-independent.
+/// Registries and `primary_registry` are also scope-dependent and swap
+/// together with the rest — each scope may declare its own `[[registries]]`.
 pub struct ScopeSwap {
     /// Which scope this is.
     pub scope: ConfigScope,
@@ -128,6 +139,10 @@ pub struct ScopeSwap {
     /// options (`group_by_type` / `tree_separators`) follow the active scope
     /// on a toggle; the runtime `t` view-mode choice stays ephemeral.
     pub tui_options: crate::config::declaration::TuiOptions,
+    /// The ordered registry set for this scope (mirrors `TuiContext::registries`).
+    pub registries: Vec<ResolvedRegistry>,
+    /// The primary registry for this scope (mirrors `TuiContext::primary_registry`).
+    pub primary_registry: String,
 }
 
 impl TuiContext {
@@ -149,6 +164,8 @@ impl TuiContext {
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
             tui_options: std::mem::replace(&mut self.tui_options, alt.tui_options),
+            registries: std::mem::replace(&mut self.registries, alt.registries),
+            primary_registry: std::mem::replace(&mut self.primary_registry, alt.primary_registry),
         };
         self.scope = alt.scope;
         self.alt = Some(now_alt);
@@ -196,9 +213,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     state.set_offline(ctx.offline);
     state.set_scope_label(&ctx.scope_label);
     state.set_clients(client_names(&ctx));
-    // The browsed registry is the effective default: eliding its host
-    // from the tree root keeps leaf names short (the user's ask).
-    state.set_default_registry(Some(ctx.registry.clone()));
+    // The primary registry is the effective default: eliding it from the
+    // tree root keeps leaf names short (D-ELIDE).
+    state.set_default_registry(elision_registry(&ctx));
+    // The resolved registries in precedence order drive the multi-registry
+    // tree-root ordering (F13) and the empty-registry roots (D-EMPTY).
+    state.set_registry_order(registry_order(&ctx));
     // Seed the tree display options from the resolved config.
     state.set_view_mode_from_config(ctx.tui_options.default_view);
     state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
@@ -213,7 +233,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // while the user browses, feeding results back over `rx`. Offline
     // disables it entirely (no network); the checker is still created so the
     // event loop is shape-stable, it just never gets primed.
-    let (mut checker, mut rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.registry.clone());
+    let (mut checker, mut rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
     arm_background_checks(&ctx, &state, &mut checker);
 
     // Bundle-member fetch checker: a separate bounded JoinSet for lazy bundle
@@ -316,7 +336,21 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             // related member reuses its row's pinned/latest tag,
                             // a non-catalog member falls back to "latest".
                             let tag = resolve_member_tag(&repo, &state.rows);
-                            match perform_member(&ctx, repo.clone(), kind, is_update, tag, name.clone()).await {
+                            // B1c: thread the parent bundle's authoritative
+                            // registry so a namespaced registry (e.g.
+                            // `ghcr.io/acme`) is not mis-split on the first `/`.
+                            let parent_registry = member_parent_registry(&ctx, &repo);
+                            match perform_member(
+                                &ctx,
+                                repo.clone(),
+                                kind,
+                                is_update,
+                                tag,
+                                name.clone(),
+                                &parent_registry,
+                            )
+                            .await
+                            {
                                 Ok(l) => Some(l),
                                 Err(e) => {
                                     state.set_status(format!("member action failed: {e:#}"));
@@ -455,6 +489,13 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 if ctx.toggle_scope() {
                     state.set_scope_label(&ctx.scope_label);
                     state.set_clients(client_names(&ctx));
+                    // Recompute single-registry elision for the swapped scope —
+                    // the two scopes may declare a different registry count
+                    // (D-ELIDE: elide only when exactly one registry resolves).
+                    state.set_default_registry(elision_registry(&ctx));
+                    // The swapped scope may declare a different registry set —
+                    // re-seed the precedence order for the tree roots (F13).
+                    state.set_registry_order(registry_order(&ctx));
                     // Structural tree display options follow the active scope's
                     // `[options.tui]` (the two scopes may differ). The runtime
                     // `t` view-mode choice is deliberately NOT re-seeded from
@@ -509,11 +550,17 @@ fn arm_background_checks(ctx: &TuiContext, state: &TuiState, checker: &mut Updat
     if ctx.offline {
         return;
     }
-    // Invalidate results from the previous scope/refresh before re-arming.
+    // Invalidate results from the previous scope/refresh before re-arming so
+    // any in-flight per-row check stamped with the old generation is discarded
+    // on drain rather than applied to the new scope's row set.
     checker.bump_generation();
-    checker.spawn_catalog_refresh(ctx.catalog_path.clone());
-    // Force past the debounce: this is the launch/refresh/scope check, not a
-    // per-keystroke storm.
+    // Schedule a floating-tag re-check for every eligible (installed/outdated)
+    // row in the fresh catalog. The catalog itself is already loaded synchronously
+    // by `reload_into`/`load_into` before this is called; these background tasks
+    // only verify whether the pinned digest is still current. The `force=true`
+    // flag bypasses the search-debounce coalesce window so a launch/`r`/scope
+    // toggle always arms immediately rather than being swallowed by a recent
+    // keystroke timestamp.
     schedule_row_checks_forced(ctx, state, checker, Instant::now(), true);
 }
 
@@ -568,7 +615,14 @@ fn schedule_row_checks_forced(
 /// scope's lock pinned it to. `None` when the row carries no lock entry
 /// (then "newer tag" has no baseline) or its repo is malformed.
 fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
-    let (registry, repository) = split_repo(&row.repo)?;
+    // A2 / D-BACKGROUND: use the authoritative `registry` + `repository` fields
+    // directly so namespaced registries like "ghcr.io/acme" are matched exactly,
+    // without re-splitting `repo` on the first '/' (which would give just "ghcr.io").
+    let registry = row.registry.as_str();
+    let repository = row.repository.as_str();
+    if registry.is_empty() || repository.is_empty() {
+        return None;
+    }
     let locked = lock
         .iter_artifacts()
         .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)?;
@@ -790,6 +844,14 @@ fn drain_bundle_member_checks(
 /// (badges derived from the active scope's lock + install record, reusing
 /// the same path the initial load uses) and merge them, preserving live
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
+///
+/// Deferred Workstream-E scaffolding: the only producer of
+/// [`CheckMsg::CatalogReady`] is [`UpdateChecker::spawn_catalog_refresh`], a
+/// single-registry path `arm_background_checks` does not yet arm (the TUI's
+/// migration onto the multi-registry `catalog_service::load_catalog` seam is the
+/// deferred follow-up). This consumer + its `Catalog`-shaped sibling
+/// [`rows_from_catalog`] are retained, tested, and kept current (C4
+/// registry/repository fields) so re-arming is a one-line change, not a rebuild.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
@@ -852,24 +914,39 @@ async fn load_into(ctx: &TuiContext, state: &mut TuiState) {
     reload_into(ctx, state, ctx.force_refresh).await;
 }
 
-/// Load or rebuild the catalog into `state`. `force` rebuilds even a
-/// fresh cache. Any failure (offline included) degrades to a status-line
-/// message and whatever rows are already known — never a crash.
+/// Load or rebuild the catalog into `state` via `catalog_service::load_catalog`,
+/// fanning out over all `ctx.registries` in parallel and projecting each
+/// [`crate::catalog::catalog_service::CatalogGroup`] through [`project_group_rows`].
+///
+/// Degrades on any load failure: sets a status line and clears loading, so the
+/// TUI remains usable (offline included). The rows are only replaced on success —
+/// a failed refresh keeps the previously-loaded rows visible.
 async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
-    // The TUI browses a capped window (empty name-scope) and narrows
-    // in-memory via the pure state filter; a registry-wide walk is a
-    // cut-line shared with `search`.
-    //
-    // NOTE: the TUI still browses a SINGLE registry here, bypassing the shared
-    // `catalog_service::load_catalog` seam that `search`/`mcp` use. Migrating
-    // it onto that seam (so `[[registries]]` is honored) and rendering a
-    // collapsible registry tree is a deferred follow-up (Workstream E).
-    match Catalog::load_or_refresh_coordinated(&ctx.catalog_path, &ctx.registry, "", &ctx.access, ctx.offline, force)
-        .await
+    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
+    let active = detect_clients(&ctx.workspace, ctx.scope);
+    // The simpler catalog_service::BadgeContext (4 fields) drives the per-row
+    // StatusBadge derivation inside load_catalog itself.
+    let catalog_badges = catalog_service::BadgeContext {
+        lock: lock.as_ref(),
+        state: &install_state,
+        roots: &ctx.roots,
+        active: &active,
+    };
+    let paths = GrimPaths::new(grim_home());
+    match catalog_service::load_catalog(
+        &paths,
+        &ctx.registries,
+        "",
+        &ctx.access,
+        &catalog_badges,
+        ctx.offline,
+        force,
+    )
+    .await
     {
-        Ok(catalog) => {
-            let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
-            let active = detect_clients(&ctx.workspace, ctx.scope);
+        Ok(results) => {
+            // The richer TUI BadgeContext drives badge derivation inside project_group_rows
+            // (bundle-awareness + via-bundle detection go beyond the simple catalog badge).
             let badge = BadgeContext {
                 lock: lock.as_ref(),
                 state: &install_state,
@@ -879,36 +956,141 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 direct_repos: &direct_repos,
                 snapshot_repos: &snapshot_repos,
             };
-            let rows = rows_from_catalog(&catalog, &badge);
-            let n = rows.len();
-            state.set_rows(rows);
-            // Surface whether the browse window hit the cap so the row list
-            // is not read as exhaustive (CLI search warns on stderr; the TUI
-            // shows a quiet legend-line hint).
-            state.set_truncated(catalog.truncated());
-            state.set_status(if ctx.offline {
-                format!("offline — {n} cached entr{} ", if n == 1 { "y" } else { "ies" })
-            } else if n == 0 {
-                // An online build that yields nothing is most often a
-                // registry that gates the `_catalog` browse endpoint — say so,
-                // name the registries, and point at the registry-compatibility
-                // docs so an empty list reads as expected, not an error.
-                // Explicit-ref ops (install/add/release) work on those
-                // registries regardless. Registry list + docs URL are shared
-                // with the `grim search` warning (single source of truth).
-                format!(
-                    "0 entries — {CATALOG_GATED_REGISTRIES} gate `_catalog` browse (expected, not an error); \
-                     explicit-ref ops still work. See {REGISTRY_COMPAT_DOCS_URL}"
-                )
-            } else {
-                format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
-            });
+            let rows: Vec<TuiRow> = results
+                .groups
+                .iter()
+                .flat_map(|g| project_group_rows(g, &badge))
+                .collect();
+            // Aggregate health from group metadata.
+            let mut offline_regs: Vec<String> = Vec::new();
+            let mut truncated_regs: Vec<String> = Vec::new();
+            for g in &results.groups {
+                if g.served_offline {
+                    offline_regs.push(g.registry.clone());
+                }
+                if g.truncated {
+                    truncated_regs.push(g.registry.clone());
+                }
+            }
+            // Build URL → display-label map from the resolved registry set.
+            // When an alias is configured, the label is "alias (url)"; when
+            // no alias was declared, the URL is used directly as both key and
+            // label (fallback matches [`TuiState::registry_label`] semantics).
+            let registry_labels: BTreeMap<String, String> = ctx
+                .registries
+                .iter()
+                .map(|r| {
+                    let label = match &r.alias {
+                        Some(alias) => format!("{alias} ({url})", url = r.url),
+                        None => r.url.clone(),
+                    };
+                    (r.url.clone(), label)
+                })
+                .collect();
+            apply_catalog_results(
+                state,
+                rows,
+                super::state::RegistryHealth {
+                    offline: offline_regs,
+                    truncated: truncated_regs,
+                },
+                results.any_truncated(),
+                elision_registry(ctx),
+                registry_order(ctx),
+                registry_labels,
+            );
         }
         Err(e) => {
+            tracing::warn!(error = %e, "catalog load failed; TUI degrading to empty rows");
+            state.set_status(format!("catalog load failed: {e}"));
             state.set_loading(false);
-            state.set_status(format!("catalog unavailable: {e}"));
         }
     }
+}
+
+/// Apply the success-arm state mutations of a catalog load to `state`.
+///
+/// This is the pure, unit-testable half of [`reload_into`]'s `Ok` branch.
+/// All mutations are driven by pre-computed values so the function requires
+/// no I/O — it can be exercised in a unit test without a [`TuiContext`] or
+/// a catalog service call.
+///
+/// Invariants enforced here (GAP-2):
+/// - `set_rows` clears the `loading` flag and marks (no stale indices).
+/// - `set_default_registry` / `set_registry_order` keep D-ELIDE / F13 in sync.
+/// - `set_registry_health` stores the per-registry offline/truncated verdict.
+/// - `set_registry_labels` stores the alias map for display (A/B display labels).
+/// - `set_status(String::new())` is the **B1 regression guard**: clears the
+///   transient "refreshing catalog…" / "loading catalog…" message on success
+///   so the status falls through to the registry-health line (D-DEGRADE) or
+///   marked-count.  Any caller that skips this call will regress B1.
+fn apply_catalog_results(
+    state: &mut TuiState,
+    rows: Vec<TuiRow>,
+    health: super::state::RegistryHealth,
+    truncated: bool,
+    elision: Option<String>,
+    order: Vec<String>,
+    labels: BTreeMap<String, String>,
+) {
+    state.set_rows(rows);
+    // Elide the registry prefix from tree labels only when exactly one registry
+    // is in scope — with multiple registries each tree root already names its
+    // registry, so elision would be misleading (D-ELIDE).
+    state.set_default_registry(elision);
+    // Keep the tree-root precedence order in sync with the resolved set (F13).
+    state.set_registry_order(order);
+    state.set_registry_health(health);
+    state.set_truncated(truncated);
+    // Store URL → alias labels so the flat list's Registry column and tree
+    // registry-root labels can show human-friendly names (A, B display labels).
+    state.set_registry_labels(labels);
+    // Clear the transient message so the render status falls through to the
+    // registry-health line (D-DEGRADE) or marked-count; `set_rows` already
+    // cleared the loading flag. Empty/gated registries surface as 0/0 tree
+    // roots (D-EMPTY), so no count string is needed here.
+    state.set_status(String::new());
+}
+
+/// Resolve a catalog entry's optional kind field, substituting `"-"` when
+/// absent. Used in both [`project_group_rows`] and [`rows_from_catalog`] so
+/// the substitution logic is a single source of truth.
+fn kind_or_dash(kind: &Option<String>) -> String {
+    kind.clone().unwrap_or_else(|| "-".to_string())
+}
+
+/// Project one [`catalog_service::CatalogGroup`]'s rows into TUI rows, deriving
+/// each [`super::state::ArtifactState`] badge from the richer TUI [`BadgeContext`]
+/// (bundle-aware, via-bundle detection). Mirrors [`rows_from_catalog`] but
+/// consumes a `CatalogGroup` (from the multi-registry seam) instead of a
+/// single-registry [`Catalog`].
+fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext) -> Vec<TuiRow> {
+    group
+        .rows
+        .iter()
+        .map(|e| {
+            let kind = kind_or_dash(&e.kind);
+            let row_state = derive_row_state(&kind, &e.registry, &e.repository, ctx);
+            TuiRow {
+                kind,
+                // C4: authoritative registry + repository from the catalog entry,
+                // never re-derived by splitting `repo`.
+                registry: e.registry.clone(),
+                repository: e.repository.clone(),
+                repo: e.repo(),
+                description: e.description.clone().unwrap_or_default(),
+                summary: e.summary.clone().unwrap_or_default(),
+                keywords: e.keywords.clone(),
+                repository_url: e.repository_url.clone(),
+                latest_tag: e.latest_tag.clone().unwrap_or_default(),
+                // Show the explicit highest version; fall back to the
+                // representative tag when no semver tag exists.
+                version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
+                pinned_version: None,
+                state: row_state,
+            }
+        })
+        .collect()
 }
 
 /// Per-scope inputs for deriving a catalog row's badge state: the active lock,
@@ -937,10 +1119,14 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
     catalog
         .entries()
         .map(|e| {
-            let kind = e.kind.clone().unwrap_or_else(|| "-".to_string());
+            let kind = kind_or_dash(&e.kind);
             let row_state = derive_row_state(&kind, &e.registry, &e.repository, ctx);
             TuiRow {
                 kind,
+                // C4: authoritative registry + repository from the catalog entry,
+                // never re-derived by splitting `repo`.
+                registry: e.registry.clone(),
+                repository: e.repository.clone(),
                 repo: e.repo(),
                 description: e.description.clone().unwrap_or_default(),
                 summary: e.summary.clone().unwrap_or_default(),
@@ -1130,9 +1316,10 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         snapshot_repos: &snapshot_repos,
     };
     for r in &mut state.rows {
-        if let Some((registry, repository)) = split_repo(&r.repo) {
-            r.state = derive_row_state(&r.kind, &registry, &repository, &badge);
-        }
+        // A2: use authoritative registry + repository fields directly so
+        // namespaced registries ("ghcr.io/acme") are matched exactly without
+        // re-splitting `repo` on the first '/' (which would give "ghcr.io").
+        r.state = derive_row_state(&r.kind, &r.registry, &r.repository, &badge);
     }
     // Member-node states live in a separate cache (`bundle_members`) that is
     // otherwise only rebuilt on re-expand / scope toggle. Refresh it here too so
@@ -1140,6 +1327,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     // instead of showing the state captured when the bundle was first expanded.
     refresh_member_states(
         state,
+        &ctx.registries,
         lock.as_ref(),
         &install_state,
         &ctx.roots,
@@ -1155,10 +1343,18 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
 ///
 /// Only `Ready` entries keyed under the active `scope_label` are touched (the
 /// other scope's cache is cleared on toggle, never recomputed here). A member
-/// whose `member_repo` is absent or unsplittable is left unchanged — it never
-/// resolved to a real artifact.
+/// whose `member_repo` is absent is left unchanged — it never resolved to a
+/// real artifact.
+///
+/// A member's authoritative registry is its parent bundle's registry
+/// (D-BACKGROUND), derived from the cache key's `bundle_repo` against the
+/// resolved set — never a first-`/` split of `member_repo`, which would
+/// mis-attribute a namespaced registry like `ghcr.io/acme` to bare `ghcr.io`
+/// and miss the install record.
+#[allow(clippy::too_many_arguments)]
 fn refresh_member_states(
     state: &mut TuiState,
+    registries: &[ResolvedRegistry],
     lock: Option<&GrimoireLock>,
     install_state: &InstallState,
     roots: &AnchorRoots,
@@ -1167,17 +1363,19 @@ fn refresh_member_states(
     snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
 ) {
     let scope_label = state.scope_label.clone();
-    for ((entry_scope, _bundle_repo), cache) in state.bundle_members.iter_mut() {
+    for ((entry_scope, bundle_repo), cache) in state.bundle_members.iter_mut() {
         if *entry_scope != scope_label {
             continue;
         }
         let crate::tui::bundle_members::BundleMemberCache::Ready(nodes) = cache else {
             continue;
         };
+        let parent_registry = member_parent_registry_from_registries(registries, bundle_repo);
         for node in nodes.iter_mut() {
-            let Some((registry, repository)) = node.member_repo.as_deref().and_then(split_repo) else {
+            let Some(member_repo) = node.member_repo.as_deref() else {
                 continue;
             };
+            let (registry, repository) = member_registry_repository(&parent_registry, member_repo);
             node.state = member_display_state(
                 node.kind,
                 &registry,
@@ -1297,12 +1495,13 @@ async fn load_versions(ctx: &TuiContext, state: &mut TuiState, row: usize) {
         state.cancel_version();
         return;
     };
-    let Some((registry, repository)) = split_repo(&r.repo) else {
+    // A2: use authoritative registry + repository fields directly.
+    if r.registry.is_empty() || r.repository.is_empty() {
         state.set_status(format!("malformed catalog repo: {}", r.repo));
         state.cancel_version();
         return;
-    };
-    let id = Identifier::new_registry(repository, registry);
+    }
+    let id = Identifier::new_registry(&r.repository, &r.registry);
     match ctx.access.list_tags(&id).await {
         Ok(Some(tags)) if !tags.is_empty() => state.set_picker_tags(order_tags(tags)),
         Ok(_) => {
@@ -1408,8 +1607,12 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
 /// provides keeps its files ([`bundle_provides_files`]) — the delete
 /// degrades to dropping the direct declaration, like `grim remove`.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
-    let (_registry, repository) =
-        split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
+    // Authoritative repository field (never first-slash-split `repo`, which
+    // mis-attributes namespaced registries — D-TREE).
+    let repository = row.repository.clone();
+    if repository.is_empty() {
+        return Err(anyhow::anyhow!("malformed catalog repo: {}", row.repo));
+    }
     let kind = row_kind(&row.kind);
     let basename = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
@@ -1537,8 +1740,15 @@ async fn perform(
     is_update: bool,
     name_override: Option<&str>,
 ) -> anyhow::Result<String> {
-    let (registry, repository) =
-        split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
+    // Use the authoritative registry/repository fields directly — never
+    // first-slash-split `repo`, which mis-attributes namespaced registries like
+    // `ghcr.io/acme` to the bare host (D-TREE / D-BACKGROUND). The fields equal
+    // a first-slash split for bare-host registries, so single-registry behavior
+    // is preserved.
+    let (registry, repository) = (row.registry.clone(), row.repository.clone());
+    if registry.is_empty() || repository.is_empty() {
+        return Err(anyhow::anyhow!("malformed catalog repo: {}", row.repo));
+    }
 
     let kind = row_kind(&row.kind);
     // The declaration/lock binding name: an explicit override (a bundle member's
@@ -1834,6 +2044,60 @@ fn split_repo(repo: &str) -> Option<(String, String)> {
     repo.split_once('/').map(|(r, p)| (r.to_string(), p.to_string()))
 }
 
+/// The resolved registry urls in precedence order — the input the tree's
+/// multi-registry root ordering (F13) and empty-registry roots (D-EMPTY)
+/// consume via [`TuiState::set_registry_order`].
+fn registry_order(ctx: &TuiContext) -> Vec<String> {
+    ctx.registries.iter().map(|r| r.url.clone()).collect()
+}
+
+/// The registry whose root prefix is elided from tree labels — `Some` only
+/// when exactly one registry is in scope (D-ELIDE); `None` otherwise so each
+/// root names its own registry and namespaced roots stay distinguishable.
+fn elision_registry(ctx: &TuiContext) -> Option<String> {
+    (ctx.registries.len() == 1).then(|| ctx.primary_registry.clone())
+}
+
+/// Split a bundle member `repo` into its authoritative `(registry,
+/// repository)` using the parent bundle's `parent_registry` rather than the
+/// first `/` — members are same-registry as their bundle (D-BACKGROUND), so a
+/// namespaced registry like `ghcr.io/acme` is never mis-split. Falls back to
+/// the remainder after the first `/` when `repo` does not carry the
+/// `parent_registry/` prefix (defensive; catalog-derived members always do).
+fn member_registry_repository(parent_registry: &str, repo: &str) -> (String, String) {
+    let repository = repo
+        .strip_prefix(&format!("{parent_registry}/"))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            repo.split_once('/')
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_default()
+        });
+    (parent_registry.to_string(), repository)
+}
+
+/// The authoritative registry a bundle member belongs to, given the resolved
+/// registry set: the longest resolved registry url that prefixes `repo`. A
+/// member shares its parent bundle's registry (D-BACKGROUND) and the bundle was
+/// browsed from one of the resolved registries, so the longest matching url is
+/// exactly the parent bundle row's registry — even when a host and a
+/// `host/namespace` are both in scope. Falls back to the first-`/` host when no
+/// resolved registry matches (defensive).
+fn member_parent_registry_from_registries(registries: &[ResolvedRegistry], repo: &str) -> String {
+    registries
+        .iter()
+        .map(|r| r.url.as_str())
+        .filter(|url| repo == *url || repo.strip_prefix(url).is_some_and(|rest| rest.starts_with('/')))
+        .max_by_key(|url| url.len())
+        .map(str::to_string)
+        .unwrap_or_else(|| split_repo(repo).map(|(reg, _)| reg).unwrap_or_default())
+}
+
+/// [`member_parent_registry_from_registries`] keyed off a [`TuiContext`].
+fn member_parent_registry(ctx: &TuiContext, repo: &str) -> String {
+    member_parent_registry_from_registries(&ctx.registries, repo)
+}
+
 /// Candidate opener command lines for the current platform, tried in
 /// order until one spawns. A tiny polyfill instead of an extra crate:
 ///
@@ -1961,6 +2225,7 @@ async fn perform_member(
     is_update: bool,
     tag: String,
     name: String,
+    parent_registry: &str,
 ) -> anyhow::Result<String> {
     // C-12: validate split_repo at the boundary — return Err (no panic) on
     // a separator-less repo so the dispatch arm can show a status breadcrumb.
@@ -1973,8 +2238,17 @@ async fn perform_member(
     // `"latest"`. We seed it as `latest_tag` (pinned_version stays `None`) so
     // `perform`'s tag precedence (pinned → latest_tag → "latest") yields it.
     // F11: use `repo` directly (owned by-value); no redundant `.clone()`.
+    //
+    // B1c: split the member repo into the authoritative registry + repository
+    // using the parent bundle's registry (members are same-registry as their
+    // bundle, D-BACKGROUND) so a namespaced registry like `ghcr.io/acme` is
+    // never mis-split on the first `/`. The C-12 guard above already proved a
+    // separator exists.
+    let (registry, repository) = member_registry_repository(parent_registry, &repo);
     let synthetic_row = TuiRow {
         kind: kind.to_string(),
+        registry,
+        repository,
         repo,
         description: String::new(),
         summary: String::new(),
@@ -2095,6 +2369,147 @@ mod tests {
         assert_eq!(split_repo("noslash"), None);
     }
 
+    // B1c: a member of a namespaced registry must keep the whole `host/namespace`
+    // as its registry — never the first-slash host — so the synthetic row routes
+    // to the right registry.
+    #[test]
+    fn member_registry_repository_uses_namespaced_parent_registry() {
+        let (registry, repository) = member_registry_repository("ghcr.io/acme", "ghcr.io/acme/tools/foo");
+        assert_eq!(registry, "ghcr.io/acme", "registry must be the full namespaced parent");
+        assert_eq!(
+            repository, "tools/foo",
+            "repository must be the remainder after the parent prefix"
+        );
+    }
+
+    #[test]
+    fn member_registry_repository_falls_back_when_prefix_absent() {
+        // Defensive: when `repo` does not carry the parent prefix, split after
+        // the first slash so the synthetic row still has a non-empty repository.
+        let (registry, repository) = member_registry_repository("other.io/ns", "ghcr.io/acme/foo");
+        assert_eq!(registry, "other.io/ns", "registry is the supplied parent registry");
+        assert_eq!(
+            repository, "acme/foo",
+            "repository falls back to the post-first-slash remainder"
+        );
+    }
+
+    // The synthetic member row built for a namespaced parent carries the full
+    // namespaced registry, not the first-slash host (regression for B1c).
+    #[test]
+    fn member_synthetic_registry_matches_namespaced_parent() {
+        let parent_registry = "ghcr.io/acme";
+        let repo = "ghcr.io/acme/skills/code-review";
+        let (registry, repository) = member_registry_repository(parent_registry, repo);
+        assert_eq!(registry, parent_registry);
+        assert_eq!(repository, "skills/code-review");
+        // Round-trips back to the original repo string.
+        assert_eq!(format!("{registry}/{repository}"), repo);
+    }
+
+    // B1 residual (refresh_member_states): a member's registry is derived from
+    // its parent bundle's repo against the resolved set (D-BACKGROUND), so when a
+    // bare host and a `host/namespace` are both configured the longest matching
+    // url wins. A first-`/` split would mis-attribute the member to bare `ghcr.io`
+    // and `member_display_state` would miss the install record (member shown
+    // NotInstalled though installed). Guards the derivation refresh_member_states
+    // now relies on.
+    #[test]
+    fn member_parent_registry_from_registries_prefers_namespaced_over_bare_host() {
+        let registries = vec![
+            ResolvedRegistry {
+                url: "ghcr.io".to_string(),
+                alias: None,
+                is_default: false,
+            },
+            ResolvedRegistry {
+                url: "ghcr.io/acme".to_string(),
+                alias: None,
+                is_default: true,
+            },
+        ];
+        let parent = member_parent_registry_from_registries(&registries, "ghcr.io/acme/bundles/starter-pack");
+        assert_eq!(
+            parent, "ghcr.io/acme",
+            "the longest matching registry url wins, not the bare host"
+        );
+
+        // The member shares the bundle's registry; the synthetic split keeps the
+        // namespaced registry whole and routes the lookup to the right record.
+        let (registry, repository) = member_registry_repository(&parent, "ghcr.io/acme/skills/demo");
+        assert_eq!(registry, "ghcr.io/acme");
+        assert_eq!(repository, "skills/demo");
+    }
+
+    // project_group_rows projects a CatalogGroup's CatalogRows into TuiRows that
+    // preserve the authoritative registry + repository split (never re-derived
+    // from the joined `repo` by a first-slash split).
+    #[test]
+    fn project_group_rows_preserves_registry_repository_split() {
+        use crate::catalog::catalog_service::{CatalogGroup, CatalogRow};
+        use crate::install::status_badge::StatusBadge;
+
+        let group = CatalogGroup {
+            registry: "ghcr.io/acme".to_string(),
+            alias: None,
+            truncated: false,
+            built_at: String::new(),
+            served_offline: false,
+            rows: vec![CatalogRow {
+                kind: Some("skill".to_string()),
+                registry: "ghcr.io/acme".to_string(),
+                repository: "tools/code-review".to_string(),
+                summary: Some("a summary".to_string()),
+                description: Some("a description".to_string()),
+                keywords: vec!["lint".to_string()],
+                repository_url: Some("https://example.invalid/repo".to_string()),
+                latest_tag: Some("1.2.3".to_string()),
+                version: Some("1.2.3".to_string()),
+                badge: StatusBadge::NotInstalled,
+            }],
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let install_state = InstallState::empty(tmp.path());
+        let roots = test_roots(tmp.path());
+        let declared_bundle_repos = std::collections::BTreeSet::new();
+        let direct_repos = std::collections::BTreeSet::new();
+        let snapshot_repos = std::collections::BTreeSet::new();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
+        };
+
+        let rows = project_group_rows(&group, &badge);
+        assert_eq!(rows.len(), 1, "one catalog row → one TUI row");
+        let r = &rows[0];
+        assert_eq!(
+            r.registry, "ghcr.io/acme",
+            "registry must be the authoritative namespaced value"
+        );
+        assert_eq!(
+            r.repository, "tools/code-review",
+            "repository must be the authoritative value"
+        );
+        assert_eq!(
+            r.repo, "ghcr.io/acme/tools/code-review",
+            "repo joins registry + repository"
+        );
+        assert_eq!(r.kind, "skill");
+        assert_eq!(r.latest_tag, "1.2.3");
+        assert_eq!(r.version, "1.2.3");
+        assert_eq!(
+            r.state,
+            ArtifactState::NotInstalled,
+            "uninstalled skill derives NotInstalled"
+        );
+    }
+
     #[test]
     fn map_key_covers_the_alphabet() {
         let mk = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
@@ -2127,8 +2542,11 @@ mod tests {
     }
 
     fn installed_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -2179,6 +2597,81 @@ mod tests {
         assert!(
             is_generation_fresh(1, 1),
             "a catalog stamped under the live generation is reconciled"
+        );
+    }
+
+    // GAP-2: apply_catalog_results sets rows/health/order and clears status (B1 guard).
+    #[test]
+    fn apply_catalog_results_clears_status_and_sets_all_fields() {
+        let mut s = TuiState::new();
+        // Pre-populate a transient message (simulates "refreshing catalog…").
+        s.set_status("refreshing catalog…");
+
+        let rows = vec![installed_row("ghcr.io/acme/skill-a")];
+        let health = crate::tui::state::RegistryHealth {
+            offline: vec!["ghcr.io/offline".to_string()],
+            truncated: vec![],
+        };
+        apply_catalog_results(
+            &mut s,
+            rows,
+            health,
+            false,
+            None, // no single-registry elision
+            vec!["ghcr.io/acme".to_string(), "ghcr.io/offline".to_string()],
+            BTreeMap::new(), // no aliases in this fixture
+        );
+
+        // B1 regression guard: status must be cleared so D-DEGRADE can surface.
+        assert_eq!(s.status_line, "", "B1: status must be cleared on success arm");
+        // Rows replaced.
+        assert_eq!(s.rows.len(), 1, "rows must be replaced by apply_catalog_results");
+        // Registry health set.
+        assert_eq!(
+            s.registry_health.offline,
+            vec!["ghcr.io/offline"],
+            "registry_health.offline must be set"
+        );
+        assert!(s.registry_health.truncated.is_empty(), "truncated must be empty");
+        // Registry order set (F13).
+        assert_eq!(
+            s.registry_order,
+            vec!["ghcr.io/acme", "ghcr.io/offline"],
+            "registry_order must reflect precedence order"
+        );
+        // Truncated indicator cleared.
+        assert!(!s.truncated, "truncated must be false");
+        // Loading flag cleared (set_rows clears it).
+        assert!(!s.loading, "loading must be cleared by set_rows");
+        // Registry labels set (empty map in this fixture → labels map is empty).
+        assert!(
+            s.registry_labels.is_empty(),
+            "registry_labels must reflect the passed map (empty in this fixture)"
+        );
+    }
+
+    // GAP-2 extension: apply_catalog_results propagates non-empty labels map.
+    #[test]
+    fn apply_catalog_results_propagates_registry_labels() {
+        let mut s = TuiState::new();
+        let mut labels = BTreeMap::new();
+        labels.insert("ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string());
+        apply_catalog_results(
+            &mut s,
+            vec![],
+            crate::tui::state::RegistryHealth {
+                offline: vec![],
+                truncated: vec![],
+            },
+            false,
+            None,
+            vec!["ghcr.io/acme".into()],
+            labels,
+        );
+        assert_eq!(
+            s.registry_label("ghcr.io/acme"),
+            "acme (ghcr.io/acme)",
+            "registry_labels must be propagated to TuiState by apply_catalog_results"
         );
     }
 
@@ -2233,6 +2726,169 @@ mod tests {
         assert_eq!(checks.len(), 1, "only the installed + locked row is rechecked");
         assert_eq!(checks[0].repo, "r/a");
         assert_eq!(checks[0].locked_digest, crate::oci::Digest::Sha256(sha('1')));
+    }
+
+    // GAP-3 / D-BACKGROUND: a namespaced registry ("ghcr.io/acme") must be
+    // matched exactly via `row.registry` + `row.repository`, not via a first-'/'
+    // split of `row.repo` (which would give "ghcr.io" / "acme/skills/demo" and
+    // miss the lock entry keyed under "ghcr.io/acme").
+    #[test]
+    fn post_batch_checks_namespaced_registry_produces_correct_identifier() {
+        // Build a lock with an entry under the namespaced registry "ghcr.io/acme".
+        let namespaced_id = Identifier::new_registry("skills/demo", "ghcr.io/acme")
+            .clone_with_digest(crate::oci::Digest::Sha256(sha('9')));
+        let locked_namespaced = crate::lock::locked_artifact::LockedArtifact::direct(
+            "demo".to_string(),
+            ArtifactKind::Skill,
+            crate::oci::PinnedIdentifier::try_from(namespaced_id).unwrap(),
+        );
+        let lock = lock_fixture(vec![locked_namespaced], Vec::new());
+
+        // Build a TuiRow with the correct authoritative registry/repository fields.
+        // installed_row() splits on the first '/' and would produce registry="ghcr.io"
+        // (wrong) — construct the row directly.
+        let row = TuiRow {
+            kind: "skill".to_string(),
+            registry: "ghcr.io/acme".to_string(),
+            repository: "skills/demo".to_string(),
+            repo: "ghcr.io/acme/skills/demo".to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: Vec::new(),
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::Installed,
+        };
+        let rows = vec![row];
+
+        let checks = post_batch_checks(&lock, &rows, &[0]);
+
+        assert_eq!(
+            checks.len(),
+            1,
+            "D-BACKGROUND: namespaced registry row must produce a RowCheck"
+        );
+        assert_eq!(
+            checks[0].repo, "ghcr.io/acme/skills/demo",
+            "RowCheck.repo must equal the full registry/repository reference"
+        );
+        assert_eq!(
+            checks[0].locked_digest,
+            crate::oci::Digest::Sha256(sha('9')),
+            "RowCheck.locked_digest must match the pinned digest from the lock"
+        );
+    }
+
+    // GAP-4: direct unit tests for elision_registry and registry_order.
+    // These two pure helpers are the only seam between TuiContext and the
+    // tree's multi-registry root projection — testing them directly locks
+    // the contract described in their doc comments without a full TUI render.
+
+    /// Minimal TuiContext carrying only the registry fields; enough for the
+    /// pure helpers `elision_registry` and `registry_order`.
+    fn ctx_with_registries(registries: Vec<ResolvedRegistry>, primary: &str) -> TuiContext {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        let access: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
+        let dummy = std::path::PathBuf::from("/tmp/gap4");
+        TuiContext {
+            registries,
+            primary_registry: primary.to_string(),
+            access,
+            offline: false,
+            force_refresh: false,
+            scope: ConfigScope::Project,
+            workspace: dummy.clone(),
+            lock_path: dummy.join("grimoire.lock"),
+            state_path: dummy.join("install-state.json"),
+            config_path: dummy.join("grimoire.toml"),
+            roots: AnchorRoots {
+                workspace: dummy.clone(),
+                grim_home: dummy.clone(),
+                claude_root: None,
+                copilot_root: None,
+                opencode_skills: None,
+            },
+            clients_default: Vec::new(),
+            clients_selected: Vec::new(),
+            scope_label: "project".to_string(),
+            alt: None,
+            tui_options: Default::default(),
+        }
+    }
+
+    #[test]
+    fn elision_registry_returns_some_for_single_registry() {
+        // D-ELIDE: exactly one registry → elide its prefix from tree labels.
+        let ctx = ctx_with_registries(
+            vec![ResolvedRegistry {
+                url: "ghcr.io/acme".to_string(),
+                alias: None,
+                is_default: true,
+            }],
+            "ghcr.io/acme",
+        );
+        assert_eq!(elision_registry(&ctx), Some("ghcr.io/acme".to_string()));
+    }
+
+    #[test]
+    fn elision_registry_returns_none_for_multi_registry() {
+        // D-ELIDE: two registries → both roots must name their registry.
+        let ctx = ctx_with_registries(
+            vec![
+                ResolvedRegistry {
+                    url: "ghcr.io/acme".to_string(),
+                    alias: None,
+                    is_default: true,
+                },
+                ResolvedRegistry {
+                    url: "ghcr.io/other".to_string(),
+                    alias: None,
+                    is_default: false,
+                },
+            ],
+            "ghcr.io/acme",
+        );
+        assert_eq!(elision_registry(&ctx), None);
+    }
+
+    #[test]
+    fn registry_order_preserves_precedence_order() {
+        // F13: registry roots in the tree follow the precedence order of
+        // `[[registries]]` declarations — first declared = first root.
+        let ctx = ctx_with_registries(
+            vec![
+                ResolvedRegistry {
+                    url: "ghcr.io/acme".to_string(),
+                    alias: None,
+                    is_default: true,
+                },
+                ResolvedRegistry {
+                    url: "registry.corp.example/team".to_string(),
+                    alias: Some("internal".to_string()),
+                    is_default: false,
+                },
+            ],
+            "ghcr.io/acme",
+        );
+        assert_eq!(
+            registry_order(&ctx),
+            vec!["ghcr.io/acme".to_string(), "registry.corp.example/team".to_string()],
+        );
+    }
+
+    #[test]
+    fn registry_order_single_entry_returns_one_element_vec() {
+        let ctx = ctx_with_registries(
+            vec![ResolvedRegistry {
+                url: "ghcr.io/acme".to_string(),
+                alias: None,
+                is_default: true,
+            }],
+            "ghcr.io/acme",
+        );
+        assert_eq!(registry_order(&ctx), vec!["ghcr.io/acme".to_string()]);
     }
 
     #[test]
@@ -2369,8 +3025,12 @@ mod tests {
     /// `access` and targeting the claude client.
     fn test_ctx(workspace: &std::path::Path, access: Arc<dyn OciAccess>) -> TuiContext {
         TuiContext {
-            registry: "localhost:5050".to_string(),
-            catalog_path: workspace.join("catalog.json"),
+            registries: vec![ResolvedRegistry {
+                url: "localhost:5050".to_string(),
+                alias: None,
+                is_default: true,
+            }],
+            primary_registry: "localhost:5050".to_string(),
             access,
             offline: false,
             force_refresh: false,
@@ -3199,8 +3859,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path().to_path_buf();
         let ctx = TuiContext {
-            registry: "localhost:5050".to_string(),
-            catalog_path: workspace.join("catalog.json"),
+            registries: vec![ResolvedRegistry {
+                url: "localhost:5050".to_string(),
+                alias: None,
+                is_default: true,
+            }],
+            primary_registry: "localhost:5050".to_string(),
             access: Arc::new(MemoryRegistry::new()),
             offline: false,
             force_refresh: false,
@@ -3228,8 +3892,11 @@ mod tests {
     /// Build a minimal `TuiRow` sufficient for the related-highlight check
     /// inside `drain_bundle_member_checks`.
     fn bundle_row_for_drain(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "bundle".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -3362,6 +4029,8 @@ mod tests {
             bundle_row_for_drain("reg/acme/bundle"),
             TuiRow {
                 kind: "skill".to_string(),
+                registry: "reg.example.io".to_string(),
+                repository: "acme/my-skill".to_string(),
                 repo: skill_repo.to_string(),
                 description: String::new(),
                 summary: String::new(),
@@ -3445,6 +4114,8 @@ mod tests {
         // "1.0.0" (the only published tag).
         let catalog_rows = vec![TuiRow {
             kind: "skill".to_string(),
+            registry: "localhost:5050".to_string(),
+            repository: "grimoire/skills/demo".to_string(),
             repo: "localhost:5050/grimoire/skills/demo".to_string(),
             description: String::new(),
             summary: String::new(),
@@ -3474,6 +4145,7 @@ mod tests {
             false,
             tag,
             "demo".to_string(),
+            "localhost:5050",
         )
         .await;
         assert!(
@@ -3499,8 +4171,11 @@ mod p2_app_member_node_tests {
     use super::*;
 
     fn tui_row_with_tag(repo: &str, latest_tag: &str, pinned_version: Option<&str>) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -3574,8 +4249,12 @@ mod p2_app_member_node_tests {
         use crate::oci::access::memory_registry::MemoryRegistry;
         let access: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
         TuiContext {
-            registry: "localhost:5050".to_string(),
-            catalog_path: workspace.join("catalog.json"),
+            registries: vec![ResolvedRegistry {
+                url: "localhost:5050".to_string(),
+                alias: None,
+                is_default: true,
+            }],
+            primary_registry: "localhost:5050".to_string(),
             access,
             offline: false,
             force_refresh: false,
@@ -3617,6 +4296,7 @@ mod p2_app_member_node_tests {
             false,
             "latest".to_string(),
             "noslash".to_string(),
+            "localhost:5050",
         )
         .await;
 

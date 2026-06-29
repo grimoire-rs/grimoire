@@ -28,6 +28,13 @@ pub struct TreeBuildOptions {
     /// into nested groups. `/` is always honored structurally even if
     /// absent; an empty list defaults to `["/"]`.
     pub separators: Vec<String>,
+    /// The resolved registries in precedence order (F13). In a
+    /// multi-registry session (`default_registry == None`) the registry-root
+    /// nodes are emitted in this order rather than the `BTreeMap`'s
+    /// alphabetical order, and every entry yields a root even with zero
+    /// matching rows (D-EMPTY). Empty in single-registry / elided sessions —
+    /// the tree is then byte-identical to the pre-multi-registry behavior.
+    pub registry_order: Vec<String>,
 }
 
 /// Aggregate install-state counts over a group's descendant leaves, so a
@@ -248,98 +255,77 @@ fn normalize_separators(separators: &[String]) -> Vec<char> {
     chars
 }
 
-/// Split one `registry/repository` reference into its group path segments,
-/// the bare leaf name, and a flag indicating whether the default registry
-/// prefix was elided.
+/// Split one catalog entry's authoritative `registry` + `repository` into
+/// group path segments, the bare leaf name, and a flag indicating whether
+/// the default-registry prefix was elided (D-ELIDE).
 ///
-/// The returned tuple is `(groups, leaf, registry_elided)`.
-/// - `groups` contains the group path segments (registry host when not
-///   elided, plus any intermediate path components).
-/// - `leaf` is the bare final-segment label.
-/// - `registry_elided` is `true` when the `default_registry` prefix (including
-///   any namespace) was stripped, `false` when it was kept as the root group.
+/// The returned tuple is `(groups, leaf, registry_elided)`:
+/// - `groups` — the group-path segments above the leaf (registry root when
+///   not elided, plus any intermediate path components from `repository`).
+/// - `leaf` — the bare final-segment label (last component of `repository`).
+/// - `registry_elided` — `true` when the `registry` equals `default_registry`
+///   and was therefore omitted as the tree root (single-registry sessions look
+///   identical to today); `false` when the registry is kept as the root group.
 ///
-/// This is the **single source of truth** for registry-elision logic;
-/// callers (including `build()`) must consume `registry_elided` directly
-/// rather than re-deriving it with a host-only comparison.
-///
-/// The `sep_chars` control further splitting of path components beyond the
-/// structural `/` registry separator.
-///
-/// A4 note: `strip_default_registry` in `render.rs` applies the same full-prefix
-/// match (`repo.strip_prefix(reg).and_then(|r| r.strip_prefix('/'))`), so both
-/// functions agree on the namespace rule. Any future change to the elision logic
-/// must update both sites in the same commit.
-fn segments(repo: &str, default_registry: Option<&str>, sep_chars: &[char]) -> (Vec<String>, String, bool) {
-    let mut segs: Vec<String> = Vec::new();
+/// Unlike the old signature this takes the pre-split `registry` and
+/// `repository` fields directly, so namespaced registries like
+/// `ghcr.io/acme` never require re-splitting on `/`.
+fn segments(
+    registry: &str,
+    repository: &str,
+    default_registry: Option<&str>,
+    sep_chars: &[char],
+) -> (Vec<String>, String, bool) {
+    // D-ELIDE: elide the registry root iff exactly the default registry.
+    let registry_elided = default_registry == Some(registry);
 
-    // Determine the repository path after the registry portion. When `repo`
-    // begins with the (possibly namespaced) `default_registry`, elide the
-    // entire `default_registry + '/'` prefix — matching the flat view's
-    // `strip_default_registry` so both views segment a row identically
-    // (e.g. `default_registry = "ghcr.io/acme"` elides the whole namespace,
-    // not just the `ghcr.io` host).
-    let (repository, registry_elided): (&str, bool) = if let Some(reg) = default_registry
-        && let Some(rest) = repo.strip_prefix(reg)
-        && let Some(rest) = rest.strip_prefix('/')
-    {
-        // Default registry (including any namespace) elided — no root group.
-        (rest, true)
-    } else if let Some((reg, path)) = repo.split_once('/') {
-        // A non-default registry: its host is the tree root group.
-        segs.push(reg.to_string());
-        (path, false)
+    // Split repository by '/' first, then apply extra separators within each
+    // slash-separated component.  Filter empty strings from leading/trailing
+    // or consecutive separators.
+    let mut parts: Vec<String> = Vec::new();
+    for slash_part in repository.split('/') {
+        if slash_part.is_empty() {
+            continue;
+        }
+        split_on_extra_seps(slash_part, sep_chars, &mut parts);
+    }
+
+    // Edge case: bare identifier (no repository components).
+    if parts.is_empty() {
+        if registry_elided {
+            return (vec![], registry.to_string(), true);
+        } else {
+            return (vec![], registry.to_string(), false);
+        }
+    }
+
+    // Safe: `parts` is non-empty (early-return above handles the empty case).
+    // `pop()` removes the last element, leaving the intermediate path segments.
+    let Some(leaf) = parts.pop() else {
+        return (vec![], String::new(), registry_elided);
+    };
+
+    // Build cumulative full-path group keys.
+    // When not elided: registry verbatim is the first group key.
+    // Each subsequent component appends with '/' to the running prefix.
+    let mut groups: Vec<String> = Vec::new();
+    let mut prefix = if !registry_elided {
+        groups.push(registry.to_string());
+        registry.to_string()
     } else {
-        // Malformed (no registry separator) — treat the whole string as a
-        // single top-level leaf rather than crashing.
-        (repo, true)
+        String::new()
     };
 
-    // Split the repository path on separators. Each piece except the last
-    // is a group; the last piece is the leaf label.
-    //
-    // We split on the full separator set (which always contains '/').
-    // First, split on '/' to get path components, then for each component
-    // except the last, check if it contains other separators and split
-    // further.
-    //
-    // Filter empty strings: leading/trailing/consecutive separators in the
-    // repository path produce empty pieces from `str::split`. Empty pieces
-    // become invisible empty-label group nodes in the tree, so we discard
-    // them here. validate_tree_separators is the upstream guard; this is
-    // belt-and-suspenders for malformed OCI paths that sneak through.
-    let path_parts: Vec<&str> = repository.split('/').filter(|s| !s.is_empty()).collect();
-    let Some((last_part, prefix_parts)) = path_parts.split_last() else {
-        return (segs, repository.to_string(), registry_elided);
-    };
-
-    // All prefix path components (split on non-'/' separators too).
-    for part in prefix_parts {
-        split_on_extra_seps(part, sep_chars, &mut segs);
+    for part in parts {
+        prefix = if prefix.is_empty() {
+            part.clone()
+        } else {
+            format!("{prefix}/{part}")
+        };
+        groups.push(prefix.clone());
     }
 
-    // The last path component: split on non-'/' separators. Everything
-    // but the final piece becomes a group; the final piece is the leaf.
-    let extra_seps: Vec<char> = sep_chars.iter().copied().filter(|&c| c != '/').collect();
-    if extra_seps.is_empty() {
-        // No extra separators — the whole last part is the leaf.
-        let leaf = last_part.to_string();
-        return (segs, leaf, registry_elided);
-    }
-
-    // Split the last component on extra separators. Filter empty pieces
-    // (from leading/trailing/consecutive separators in the path component).
-    let sub_parts: Vec<&str> = split_on_chars(last_part, &extra_seps)
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect();
-    let Some((leaf_part, sub_groups)) = sub_parts.split_last() else {
-        return (segs, last_part.to_string(), registry_elided);
-    };
-    for g in sub_groups {
-        segs.push((*g).to_string());
-    }
-    (segs, (*leaf_part).to_string(), registry_elided)
+    (groups, leaf, registry_elided)
 }
 
 /// Split a path component on all separator chars (not `/`) and push the
@@ -397,9 +383,25 @@ impl Trie {
         let mut rows: Vec<usize> = Vec::new();
 
         // Groups first (BTreeMap iterates label-sorted).
-        for (label, child) in self.groups {
+        for (key_raw, child) in self.groups {
+            // `segments()` inserts cumulative full-path keys for registry and
+            // repository groups (e.g. "ghcr.io/acme", "ghcr.io/acme/tools").
+            // The *display* label is the short component (last segment after
+            // the last '/'), except at depth 0 where the registry root is
+            // shown verbatim (e.g. "ghcr.io/acme" at depth 0 is the full
+            // registry name).  Type-group keys inserted by `build()` are
+            // already short (e.g. "skill"), so `rsplit_once('/')` returns
+            // `None` and the whole key is used unchanged.
+            let label = if parent_key.is_empty() {
+                // Depth 0 — keep the full key (registry verbatim or short key).
+                key_raw.clone()
+            } else {
+                // Depth > 0 — strip the cumulative prefix to get the short
+                // component name.  For short keys (no '/') this is a no-op.
+                key_raw.rsplit_once('/').map(|(_, s)| s).unwrap_or(&key_raw).to_string()
+            };
             let key = if parent_key.is_empty() {
-                label.clone()
+                key_raw
             } else {
                 format!("{parent_key}/{label}")
             };
@@ -458,7 +460,11 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         // It is true when the full `default_registry` prefix (including any
         // namespace such as "ghcr.io/acme") was stripped. `build()` must NOT
         // re-derive this with a host-only comparison — that was A1's bug.
-        let (mut groups, leaf, registry_elided) = segments(&r.repo, opts.default_registry.as_deref(), &sep_chars);
+        //
+        // C5 / D-TREE: pass the authoritative `registry` and `repository`
+        // fields directly so namespaced registries never require re-splitting.
+        let (mut groups, leaf, registry_elided) =
+            segments(&r.registry, &r.repository, opts.default_registry.as_deref(), &sep_chars);
 
         // Insert a type-level group between the registry root and the path
         // segments when `group_by_type` is enabled. The insertion point is:
@@ -472,7 +478,39 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         trie.insert(&groups, leaf, i, r.state);
     }
 
-    let (roots, _, _) = trie.into_nodes("", 0);
+    // F13 / D-EMPTY: in a multi-registry session the registry roots follow the
+    // resolution precedence order, not the BTreeMap's alphabetical order, and
+    // every resolved registry yields a root even with zero matching rows. The
+    // gate is false in single-registry / elided sessions (no `registry_order`),
+    // so the tree stays byte-identical to the pre-multi-registry behavior.
+    let multi_registry = opts.default_registry.is_none() && !opts.registry_order.is_empty();
+
+    if multi_registry {
+        // D-EMPTY: seed a root for every resolved registry so a registry with no
+        // matching rows still renders (rollup 0/0). Top-level trie keys are the
+        // registry strings — `segments` returns the registry as `groups[0]` when
+        // not elided — so `or_default()` merges with any rows already inserted.
+        for reg in &opts.registry_order {
+            trie.groups.entry(reg.clone()).or_default();
+        }
+    }
+
+    let (mut roots, _, _) = trie.into_nodes("", 0);
+
+    if multi_registry {
+        // F13: reorder the top-level roots into precedence order. A stable sort
+        // keys each root by its index in `registry_order`; any root whose key is
+        // not in the list sorts to `usize::MAX` and keeps its relative order
+        // AFTER the ordered registry roots. Deeper levels stay BTreeMap-sorted.
+        roots.sort_by_key(|node| {
+            let key = match node {
+                Node::Group(g) => g.key.as_str(),
+                Node::Leaf(l) => l.key.as_str(),
+            };
+            opts.registry_order.iter().position(|r| r == key).unwrap_or(usize::MAX)
+        });
+    }
+
     Tree { roots }
 }
 
@@ -532,9 +570,9 @@ pub fn flatten(
 ///   (P1 default) means no members are spliced — identical to Phase 2 behavior
 ///   when this function is called with the real gate in P3.1.
 ///
-/// Note (P1 / GAP-1): during the stub phase the splice still fires on cache
-/// presence (existing behavior is preserved) so existing tests continue to
-/// pass. P3.1 adds the `expanded_bundles.contains(&leaf_key)` gate.
+/// The splice is gated on BOTH `expanded_bundles.contains(&bundle_repo)` and a
+/// cache entry being present: a collapsed bundle leaf (absent from
+/// `expanded_bundles`) yields zero member rows regardless of cache state.
 pub fn flatten_with_members(
     tree: &Tree,
     collapsed: &BTreeSet<String>,
@@ -733,8 +771,11 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: kind.to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -751,11 +792,34 @@ mod tests {
         row(repo, "skill", state)
     }
 
+    /// Build a `TuiRow` with an explicitly split `registry` + `repository`.
+    ///
+    /// Use this instead of `row()` / `skill_row()` when the authoritative
+    /// registry includes a namespace path component (e.g. "ghcr.io/acme")
+    /// that the simple first-'/' split in `row()` would misclassify.
+    fn row2(registry: &str, repository: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        TuiRow {
+            kind: kind.to_string(),
+            registry: registry.to_string(),
+            repository: repository.to_string(),
+            repo: format!("{registry}/{repository}"),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state,
+        }
+    }
+
     fn opts_default(default_registry: Option<&str>) -> TreeBuildOptions {
         TreeBuildOptions {
             default_registry: default_registry.map(|s| s.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         }
     }
 
@@ -799,6 +863,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), ".".to_string()],
+            registry_order: Vec::new(),
         };
         let rows = vec![skill_row("reg/acme/code.review", ArtifactState::Installed)];
         let t = build(&rows, &[0], &opts);
@@ -821,6 +886,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), "-".to_string()],
+            registry_order: Vec::new(),
         };
         let rows = vec![skill_row("reg/acme/code-review", ArtifactState::Installed)];
         let t = build(&rows, &[0], &opts);
@@ -868,7 +934,15 @@ mod tests {
     // matching the flat view's `strip_default_registry` — not just the host.
     #[test]
     fn namespaced_default_registry_root_is_fully_elided() {
-        let rows = vec![skill_row("ghcr.io/acme/skills/code-review", ArtifactState::Installed)];
+        // row() splits on first '/', giving registry="ghcr.io" — wrong for a
+        // namespaced registry "ghcr.io/acme". Use row2() instead so the
+        // authoritative registry field matches the default_registry exactly.
+        let rows = vec![row2(
+            "ghcr.io/acme",
+            "skills/code-review",
+            "skill",
+            ArtifactState::Installed,
+        )];
         let t = build(&rows, &[0], &opts_default(Some("ghcr.io/acme")));
         let s = shape(&t);
         // Neither the host nor the namespace survives as a group.
@@ -948,6 +1022,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec![],
+            registry_order: Vec::new(),
         };
         let opts_slash = opts_default(Some("reg"));
         let rows = vec![skill_row("reg/acme/code.review", ArtifactState::Installed)];
@@ -992,6 +1067,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         };
         let rows = vec![
             row("reg/acme/tool", "skill", ArtifactState::Installed),
@@ -1048,6 +1124,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string(), "-".to_string()],
+            registry_order: Vec::new(),
         };
         let rows = vec![row("reg/acme/code-review", "skill", ArtifactState::Installed)];
         let t = build(&rows, &[0], &opts);
@@ -1193,14 +1270,19 @@ mod tests {
             default_registry: Some("ghcr.io/acme".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         };
-        // repo: "ghcr.io/acme/skills/code-review"
-        // After eliding "ghcr.io/acme/", repository path = "skills/code-review"
+        // registry = "ghcr.io/acme", repository = "skills/code-review"
+        // After eliding "ghcr.io/acme" (matches default_registry), path = "skills/code-review"
         // groups: ["skills"], leaf: "code-review"
         // With group_by_type: type group "skill" inserted at index 0 (registry was elided)
         // Expected: skill(0) → skills(1) → code-review leaf(2)
-        let rows = vec![row(
-            "ghcr.io/acme/skills/code-review",
+        //
+        // Use row2() because row() splits on first '/', yielding registry="ghcr.io"
+        // instead of the correct "ghcr.io/acme".
+        let rows = vec![row2(
+            "ghcr.io/acme",
+            "skills/code-review",
             "skill",
             ArtifactState::Installed,
         )];
@@ -1239,6 +1321,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         };
         let rows = vec![row("ghcr.io/acme/tool", "skill", ArtifactState::Installed)];
         let t = build(&rows, &[0], &opts);
@@ -1273,8 +1356,10 @@ mod tests {
 
     // ── C-4 flatten_with_members ──────────────────────────────────────────────
     //
-    // All of these tests FAIL until P3 implements `flatten_with_members`.
-    // They call the stub, which panics with `unimplemented!`.
+    // These tests pin the member-splice contract (C-4): Ready caches splice one
+    // Member row per member after the bundle leaf, the Loading/Failed/Offline
+    // states each splice exactly one placeholder, the scope key isolates caches,
+    // and the output is deterministic and index-isolated.
 
     use crate::oci::ArtifactKind;
     use crate::tui::bundle_members::{BundleMemberCache, BundleMemberKey, MemberNode};
@@ -1558,11 +1643,12 @@ mod tests {
     }
 }
 
-// ── P2 Specify tests — phase 2 contracts ─────────────────────────────────────
+// ── P2 member-node contracts (C-1 through C-12) ──────────────────────────────
 //
-// These tests encode the contracts C-1 through C-12 from plan_tui_member_nodes.
-// They MUST compile and MUST FAIL against the P1 stubs/unimplemented logic.
-// Do NOT implement production logic here — tests only.
+// These tests encode the member-node contracts from plan_tui_member_nodes:
+// bundle leaves default-collapsed (C-2), members splice iff the bundle key is in
+// `expanded_bundles` (C-3), `collapsed`/`expanded_bundles` orthogonality (C-2b),
+// and `member_repo` population per cache state (C-10).
 #[cfg(test)]
 mod p2_member_node_tests {
     use std::collections::{BTreeSet, HashMap};
@@ -1573,8 +1659,11 @@ mod p2_member_node_tests {
     use crate::tui::tree::{DisplayRow, TreeBuildOptions, build, flatten, flatten_with_members};
 
     fn tui_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: kind.to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -1600,6 +1689,7 @@ mod p2_member_node_tests {
             default_registry: Some(default_registry.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         }
     }
 
@@ -2005,6 +2095,341 @@ mod p2_member_node_tests {
         assert!(
             member.unwrap().is_none(),
             "C-10: Failed placeholder must have member_repo = None"
+        );
+    }
+}
+
+// ── Multi-registry tree grouping (C5 / D-TREE / D-ELIDE / AC F10) ──────────
+//
+// These tests exercise `segments` and `build` for the multi-registry tree:
+// cumulative namespaced group keys, single-registry elision, distinct roots per
+// namespace on a shared host, type-group placement below the registry root, and
+// the single-registry regression shape.
+#[cfg(test)]
+mod spec_multi_registry_tree_tests {
+    use super::*;
+    use crate::tui::state::{ArtifactState, TuiRow};
+
+    /// Build a `TuiRow` with explicit `registry`/`repository` fields.
+    ///
+    /// Used in tests that need to assert multi-registry behavior — the
+    /// authoritative split is provided by the caller, NOT re-derived from
+    /// `repo` (which would mask the very bug these tests guard against).
+    fn row_with_reg(registry: &str, repository: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        TuiRow {
+            kind: kind.to_string(),
+            registry: registry.to_string(),
+            repository: repository.to_string(),
+            repo: format!("{registry}/{repository}"),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state,
+        }
+    }
+
+    fn opts_elide(default_registry: &str) -> TreeBuildOptions {
+        TreeBuildOptions {
+            default_registry: Some(default_registry.to_string()),
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
+        }
+    }
+
+    fn opts_no_elide() -> TreeBuildOptions {
+        TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
+        }
+    }
+
+    // C5 worked example (F5): namespaced multi-registry → distinct cumulative group keys
+    //
+    // segments("ghcr.io/acme", "tools/foo", None, &['/'])
+    //   → groups = ["ghcr.io/acme", "ghcr.io/acme/tools"], leaf = "foo", elided = false
+    #[test]
+    fn spec_segments_namespaced_multi_registry_cumulative_keys() {
+        let (groups, leaf, elided) = segments("ghcr.io/acme", "tools/foo", None, &['/']);
+        assert!(
+            !elided,
+            "namespaced registry root must not be elided when no default_registry"
+        );
+        assert_eq!(leaf, "foo", "leaf must be the final path segment");
+        assert_eq!(
+            groups,
+            vec!["ghcr.io/acme".to_string(), "ghcr.io/acme/tools".to_string()],
+            "group keys must be cumulative full paths, with registry root as first element"
+        );
+    }
+
+    // C5 worked example (F19 / D-ELIDE): single-registry elision is identical to today
+    //
+    // segments("grim.ocx.sh", "foo/bar", Some("grim.ocx.sh"), &['/'])
+    //   → groups = ["foo"], leaf = "bar", elided = true
+    #[test]
+    fn spec_segments_single_registry_elided_matches_legacy_behavior() {
+        let (groups, leaf, elided) = segments("grim.ocx.sh", "foo/bar", Some("grim.ocx.sh"), &['/']);
+        assert!(elided, "registry must be elided when default_registry matches");
+        assert_eq!(leaf, "bar", "leaf must be the final segment of repository");
+        assert_eq!(
+            groups,
+            vec!["foo".to_string()],
+            "elided session: groups must contain only the repository segments, not the registry"
+        );
+    }
+
+    // D-TREE: two namespaces on same host must produce distinct root keys.
+    // Neither root should be the bare host "ghcr.io" — that would merge them.
+    #[test]
+    fn spec_segments_same_host_two_namespaces_produce_distinct_root_keys() {
+        let (groups_a, _, _) = segments("ghcr.io/acme", "skill", None, &['/']);
+        let (groups_b, _, _) = segments("ghcr.io/other", "skill", None, &['/']);
+        let root_a = groups_a.first().map(|s| s.as_str());
+        let root_b = groups_b.first().map(|s| s.as_str());
+        assert_ne!(
+            root_a, root_b,
+            "two namespaces on the same host must produce distinct roots"
+        );
+        assert_eq!(
+            root_a,
+            Some("ghcr.io/acme"),
+            "root for ghcr.io/acme must be the full namespace"
+        );
+        assert_eq!(
+            root_b,
+            Some("ghcr.io/other"),
+            "root for ghcr.io/other must be the full namespace"
+        );
+    }
+
+    // D-TREE / AC: build with 2 namespaced registries → exactly 2 top-level roots
+    // in precedence order, keyed by the authoritative registry string.
+    #[test]
+    fn spec_build_two_namespaced_registries_yield_two_registry_roots() {
+        let rows = vec![
+            row_with_reg("ghcr.io/acme", "skill-a", "skill", ArtifactState::NotInstalled),
+            row_with_reg("ghcr.io/other", "skill-b", "skill", ArtifactState::NotInstalled),
+        ];
+        let filtered: Vec<usize> = vec![0, 1];
+        let tree = build(&rows, &filtered, &opts_no_elide());
+        assert_eq!(
+            tree.roots.len(),
+            2,
+            "two registries must produce exactly two top-level group roots; got: {:?}",
+            tree.roots
+                .iter()
+                .map(|n| match n {
+                    Node::Group(g) => &g.key,
+                    Node::Leaf(l) => &l.key,
+                })
+                .collect::<Vec<_>>()
+        );
+        let root_keys: Vec<&str> = tree
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                Node::Group(g) => Some(g.key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            root_keys.contains(&"ghcr.io/acme"),
+            "ghcr.io/acme must be a registry root"
+        );
+        assert!(
+            root_keys.contains(&"ghcr.io/other"),
+            "ghcr.io/other must be a registry root"
+        );
+    }
+
+    // D-ELIDE: single-registry → registry root is elided (no "grim.ocx.sh" root node)
+    #[test]
+    fn spec_build_single_registry_elided_has_no_registry_root_node() {
+        let rows = vec![row_with_reg(
+            "grim.ocx.sh",
+            "acme/tool",
+            "skill",
+            ArtifactState::NotInstalled,
+        )];
+        let filtered = vec![0];
+        let tree = build(&rows, &filtered, &opts_elide("grim.ocx.sh"));
+        let registry_root = tree
+            .roots
+            .iter()
+            .find(|n| matches!(n, Node::Group(g) if g.key == "grim.ocx.sh"));
+        assert!(
+            registry_root.is_none(),
+            "single-registry session: tree must have no registry root node (elided)"
+        );
+        // The top-level root should be the first path segment of the repository.
+        let root_key = match tree.roots.first() {
+            Some(Node::Group(g)) => g.key.as_str(),
+            other => panic!("expected a group root, got: {other:?}"),
+        };
+        assert_eq!(root_key, "acme", "elided root must be the first repository segment");
+    }
+
+    // C5 F7: group_by_type inserts the type segment at index 1 (below registry root),
+    // NOT at index 0 (which would be the wrong placement when a registry root is present).
+    #[test]
+    fn spec_build_group_by_type_inserts_below_registry_root_not_at_root() {
+        let rows = vec![row_with_reg(
+            "ghcr.io/acme",
+            "tools/foo",
+            "skill",
+            ArtifactState::NotInstalled,
+        )];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: true,
+            separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
+        };
+        let filtered = vec![0];
+        let tree = build(&rows, &filtered, &opts);
+        let root_group = match tree.roots.first() {
+            Some(Node::Group(g)) => g,
+            other => panic!("expected registry root group, got: {other:?}"),
+        };
+        assert_eq!(root_group.key, "ghcr.io/acme", "first root must be the registry");
+        let type_child = match root_group.children.first() {
+            Some(Node::Group(g)) => g,
+            other => panic!("expected type group below registry root, got: {other:?}"),
+        };
+        assert_eq!(
+            type_child.label, "skill",
+            "type group ('skill') must be first child below the registry root"
+        );
+    }
+
+    // AC F10 regression: single-registry view must be unchanged after multi-registry refactor.
+    // The row key, group key, and prefix shape for a single-registry session must be
+    // identical to pre-change behavior — no registry root, path-based grouping only.
+    #[test]
+    fn spec_build_single_registry_regression_shape_unchanged() {
+        let rows = vec![
+            row_with_reg("reg", "acme/alpha", "skill", ArtifactState::Installed),
+            row_with_reg("reg", "acme/beta", "skill", ArtifactState::NotInstalled),
+        ];
+        let filtered = vec![0, 1];
+        let tree = build(&rows, &filtered, &opts_elide("reg"));
+        // Top-level root must be "acme", NOT "reg" (registry is elided)
+        let root = match tree.roots.first() {
+            Some(Node::Group(g)) => g,
+            _ => panic!("expected a group root"),
+        };
+        assert_eq!(
+            root.key, "acme",
+            "single-registry regression: root key must be 'acme' (path-based), not 'reg/acme'"
+        );
+        assert_eq!(root.depth, 0, "root group must be at depth 0");
+        // Leaves must be at depth 1 inside the "acme" group
+        assert_eq!(root.children.len(), 2, "acme must have 2 leaf children (alpha, beta)");
+    }
+
+    /// Build a `TreeBuildOptions` for a multi-registry (non-elided) session with
+    /// an explicit precedence order.
+    fn opts_ordered(order: &[&str]) -> TreeBuildOptions {
+        TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: order.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // F13: registry roots follow `registry_order` precedence, NOT the BTreeMap's
+    // alphabetical order. `["reg-z", "reg-a"]` → first root key is "reg-z".
+    #[test]
+    fn spec_build_registry_roots_follow_precedence_order_not_alphabetical() {
+        let rows = vec![
+            row_with_reg("reg-z", "alpha", "skill", ArtifactState::NotInstalled),
+            row_with_reg("reg-a", "beta", "skill", ArtifactState::NotInstalled),
+        ];
+        let tree = build(&rows, &[0, 1], &opts_ordered(&["reg-z", "reg-a"]));
+        let root_keys: Vec<&str> = tree
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                Node::Group(g) => Some(g.key.as_str()),
+                Node::Leaf(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            root_keys,
+            vec!["reg-z", "reg-a"],
+            "registry roots must follow precedence order, not alphabetical; got: {root_keys:?}"
+        );
+    }
+
+    // D-EMPTY: a registry in `registry_order` with zero matching rows still
+    // yields a root node (rollup total 0), so the user sees every browsed
+    // registry even when one returned nothing.
+    #[test]
+    fn spec_build_empty_registry_still_yields_root_node() {
+        // Only reg-a has a row; reg-empty has none but is in the order.
+        let rows = vec![row_with_reg("reg-a", "alpha", "skill", ArtifactState::NotInstalled)];
+        let tree = build(&rows, &[0], &opts_ordered(&["reg-a", "reg-empty"]));
+        let empty_root = tree.roots.iter().find_map(|n| match n {
+            Node::Group(g) if g.key == "reg-empty" => Some(g),
+            _ => None,
+        });
+        let empty_root = empty_root.expect("D-EMPTY: a 0-row registry must still render a root node");
+        assert_eq!(
+            empty_root.rollup.total, 0,
+            "D-EMPTY: empty registry root rollup total must be 0"
+        );
+        assert!(
+            empty_root.children.is_empty(),
+            "D-EMPTY: empty registry root has no children"
+        );
+        // Precedence order still holds: reg-a before reg-empty.
+        let root_keys: Vec<&str> = tree
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                Node::Group(g) => Some(g.key.as_str()),
+                Node::Leaf(_) => None,
+            })
+            .collect();
+        assert_eq!(root_keys, vec!["reg-a", "reg-empty"], "order preserved with empty root");
+    }
+
+    // Regression guard: with an empty `registry_order` the gate is off, so the
+    // build is byte-identical to the pre-multi-registry behavior (BTreeMap order,
+    // no seeded empty roots).
+    #[test]
+    fn spec_build_empty_registry_order_is_identical_to_unordered() {
+        let rows = vec![
+            row_with_reg("reg-z", "alpha", "skill", ArtifactState::NotInstalled),
+            row_with_reg("reg-a", "beta", "skill", ArtifactState::NotInstalled),
+        ];
+        let with_empty_order = build(&rows, &[0, 1], &opts_no_elide());
+        let baseline = build(&rows, &[0, 1], &opts_no_elide());
+        assert_eq!(
+            with_empty_order, baseline,
+            "empty registry_order must not change the tree"
+        );
+        // And it stays alphabetical (BTreeMap) — reg-a before reg-z.
+        let root_keys: Vec<&str> = with_empty_order
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                Node::Group(g) => Some(g.key.as_str()),
+                Node::Leaf(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            root_keys,
+            vec!["reg-a", "reg-z"],
+            "no registry_order → BTreeMap alphabetical"
         );
     }
 }

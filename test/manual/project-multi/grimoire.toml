@@ -2,22 +2,18 @@
 #
 #   cd test/manual/project-multi
 #   source ../scripts/env.sh
-#   unset GRIM_DEFAULT_REGISTRY   # see note below — it forces a single registry
 #   grim search                  # browses BOTH declared registries
 #   grim lock && grim install    # pins the fully-qualified refs below
 #   grim status                  # all 'installed'
 #
 # Declaring two registries with `[[registries]]` makes `grim search`
 # (no --registry) browse ALL declared registries and surface packages from
-# each (browse-all-declared). bootstrap.sh publishes the primary `grimoire`
-# catalog to 5050 and a small `tools` subset (commit-helper, security-baseline)
-# to 5051, so both registries have content to browse.
-#
-# IMPORTANT — `$GRIM_DEFAULT_REGISTRY` (set by scripts/env.sh) and the
-# `--registry` flag each FORCE a single-registry browse by design, which
-# overrides `[[registries]]`. To exercise browse-all here, `unset
-# GRIM_DEFAULT_REGISTRY` first (the `default = true` registry below then
-# anchors short-id resolution).
+# each (browse-all-declared). GRIM_DEFAULT_REGISTRY (set by env.sh) is the
+# default for short-id resolution; it does NOT collapse the browse — only the
+# `--registry` flag does. So with env.sh sourced, both [[registries]] are
+# still browsed in full. bootstrap.sh publishes the primary `grimoire` catalog
+# to 5050 and a small `tools` subset (commit-helper, security-baseline) to
+# 5051, so both registries have content to browse.
 #
 # Declared refs are FULLY QUALIFIED. The `alias/repo:tag` shorthand is a
 # `grim add` CLI convenience (expanded at add-time, e.g.

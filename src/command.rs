@@ -123,9 +123,11 @@ pub fn global_config_registries(
 /// Assemble the ordered registry browse set for a resolved scope.
 ///
 /// The single seam `search` / `tui` / `mcp` call to get the multi-registry
-/// set: it folds the `--registry` flag / `$GRIM_DEFAULT_REGISTRY`, the
-/// scope's `[[registries]]` + `[options].default_registry`, and the global
-/// config's tiers through [`crate::config::resolve_registries`] so the
+/// set: the `--registry` flag (`ctx.registry_flag`) collapses to exactly one
+/// registry; otherwise the scope's `[[registries]]` are authoritative; when
+/// no `[[registries]]` exist the legacy single-default chain
+/// (`$GRIM_DEFAULT_REGISTRY` > project `[options].default_registry` > global >
+/// fallback) applies — all via [`crate::config::resolve_registries`] so the
 /// precedence is single-sourced.
 pub fn registries_for_scope(
     ctx: &crate::context::Context,
@@ -134,12 +136,13 @@ pub fn registries_for_scope(
     let global_registries = global_config_registries(ctx, scope.scope);
     let global_default = global_config_default(ctx, scope.scope);
     crate::config::resolve_registries(
-        ctx.default_registry(),
+        ctx.registry_flag(),
         &scope.registries,
         scope.options.default_registry.as_deref(),
         &global_registries,
         global_default.as_deref(),
         FALLBACK_REGISTRY,
+        ctx.registry_env(),
     )
 }
 
@@ -168,20 +171,23 @@ pub fn primary_registry_for_scope(ctx: &crate::context::Context, scope: &scope_r
 ///
 /// Precedence (mirrors [`crate::config::resolve_registries`] with empty project
 /// tiers):
-/// 1. `--registry` flag / `$GRIM_DEFAULT_REGISTRY` (via `ctx.default_registry`)
+/// 1. `--registry` flag (`ctx.registry_flag`): collapses to exactly one registry.
+///    Only the flag collapses; `$GRIM_DEFAULT_REGISTRY` is a tier-3 default.
 /// 2. Global `[[registries]]` (first `default = true`, else first entry)
-/// 3. Global `[options].default_registry`
-/// 4. Built-in [`FALLBACK_REGISTRY`]
+/// 3. `$GRIM_DEFAULT_REGISTRY` (`ctx.registry_env`) → global
+///    `[options].default_registry` → built-in [`FALLBACK_REGISTRY`]
+///    (legacy single-default chain, only when no `[[registries]]` present)
 pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String {
     let global_regs = global_config_registries(ctx, crate::config::scope::ConfigScope::Project);
     let global_default = global_config_default(ctx, crate::config::scope::ConfigScope::Project);
     crate::config::registry_resolve::primary_registry(&crate::config::resolve_registries(
-        ctx.default_registry(),
+        ctx.registry_flag(),
         &[],
         None,
         &global_regs,
         global_default.as_deref(),
         FALLBACK_REGISTRY,
+        ctx.registry_env(),
     ))
     .to_string()
 }
@@ -423,17 +429,18 @@ mod tests {
 
     #[test]
     fn global_fallback_flag_registry_overrides_global_config() {
-        // --registry / $GRIM_DEFAULT_REGISTRY (ctx.default_registry) is the
-        // highest tier — it must win even when a [[registries]] entry is declared
-        // in the global config.
+        // Only the --registry flag collapses the browse set — it must win even
+        // when a [[registries]] entry is declared in the global config. Note:
+        // $GRIM_DEFAULT_REGISTRY is NOT a collapse trigger; it only heads the
+        // tier-3 single-default chain when no [[registries]] are declared.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("grimoire.toml"),
             "[[registries]]\nurl = \"global.example\"\ndefault = true\n",
         )
         .unwrap();
-        // Inject the flag tier via opts (no hermetic override — the flag is
-        // in the ctx directly via `registry_flag`).
+        // Inject the flag tier via opts (the flag is in ctx directly via
+        // `registry_flag`; no hermetic override needed for this tier).
         let ctx = Context::new(&opts(Some("flag.example")));
         assert_eq!(primary_registry_global_fallback(&ctx), "flag.example");
     }

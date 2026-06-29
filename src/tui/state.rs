@@ -9,7 +9,7 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::catalog::SearchQuery;
 
@@ -109,7 +109,22 @@ pub struct VersionPicker {
 pub struct TuiRow {
     /// `skill` / `rule`, or `-` when the manifest declared no kind.
     pub kind: String,
-    /// `registry/repository` reference.
+    /// Authoritative registry host + optional namespace (tree group key).
+    ///
+    /// Sourced from the catalog entry directly — never re-derived by splitting
+    /// `repo` — so namespaced registries like `ghcr.io/acme` are handled
+    /// correctly (D-TREE).
+    pub registry: String,
+    /// Repository path within the registry, segmented below the registry root
+    /// by the tree builder (D-TREE).
+    pub repository: String,
+    /// Fully-qualified `registry/repository` reference.
+    ///
+    /// Kept alongside `registry`/`repository` for compatibility with the many
+    /// production paths that key on this field (search filter, badge lookup,
+    /// update-check identity). Always equals the [`Self::repo`] accessor; full
+    /// removal (migrating every `row.repo` read to `row.repo()`) is a deferred
+    /// follow-up.
     pub repo: String,
     /// Catalog description (empty string when absent).
     pub description: String,
@@ -131,6 +146,33 @@ pub struct TuiRow {
     pub pinned_version: Option<String>,
     /// The install status of this repository in the active scope.
     pub state: ArtifactState,
+}
+
+impl TuiRow {
+    /// The fully-qualified `registry/repository` reference, derived from the
+    /// authoritative [`Self::registry`] and [`Self::repository`] fields.
+    ///
+    /// Equals the stored `repo` field, which is retained for the many callers
+    /// that key on it; collapsing the two into this accessor is a deferred
+    /// follow-up.
+    pub fn repo(&self) -> String {
+        format!("{}/{}", self.registry, self.repository)
+    }
+}
+
+/// Per-registry health summary, aggregated from the loaded
+/// [`crate::catalog::catalog_service::CatalogResults`].
+///
+/// One seam for the status line: offline registries and truncated registries
+/// are named so the user can tell which registries need attention.
+///
+/// C6 stub — aggregation logic is implement phase (T4).
+#[derive(Debug, Clone, Default)]
+pub struct RegistryHealth {
+    /// Registry URLs that were served from offline / stale cache.
+    pub offline: Vec<String>,
+    /// Registry URLs whose browse window was truncated at the cap.
+    pub truncated: Vec<String>,
 }
 
 /// The whole screen model.
@@ -200,6 +242,12 @@ pub struct TuiState {
     /// Characters (each a `String`) on which the repository path is split
     /// into nested groups. Defaults to `["/"]`.
     pub tree_separators: Vec<String>,
+    /// The resolved registries in precedence order (F13). Threaded into
+    /// [`super::tree::TreeBuildOptions`] so the tree's registry roots follow
+    /// resolution precedence (not alphabetical order) and every resolved
+    /// registry yields a root even with zero matching rows. Empty in
+    /// single-registry / elided sessions.
+    pub registry_order: Vec<String>,
     /// Ephemeral per-scope cache for bundle member nodes.
     ///
     /// Keyed by `(scope_label, bundle_repo)` so entries from one scope are
@@ -226,6 +274,23 @@ pub struct TuiState {
     /// - Pruned on `merge_catalog_rows` (same bundle-rows-only prune).
     /// - Cleared on scope toggle in `app.rs`.
     pub expanded_bundles: BTreeSet<String>,
+    /// Per-registry health summary (C6).
+    ///
+    /// Aggregated from [`crate::catalog::catalog_service::CatalogResults`] on
+    /// each catalog load, so the status line can name which registries are
+    /// offline or truncated. Empty on the initial default state.
+    ///
+    /// C6 stub — aggregation wired in implement phase (T4).
+    pub registry_health: RegistryHealth,
+    /// Display labels for registries: maps registry URL → configured alias.
+    ///
+    /// When a `[[registries]]` entry has an `alias`, it is stored here so
+    /// the flat list's Registry column and the tree registry-root rows can
+    /// show the alias instead of the raw URL. Falls back to the URL when
+    /// no alias was configured (see [`Self::registry_label`]).
+    ///
+    /// Populated on each successful catalog load via [`Self::set_registry_labels`].
+    pub registry_labels: BTreeMap<String, String>,
 }
 
 impl Default for TuiState {
@@ -254,8 +319,11 @@ impl Default for TuiState {
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: vec!["/".into()],
+            registry_order: Vec::new(),
             bundle_members: HashMap::new(),
             expanded_bundles: BTreeSet::new(),
+            registry_health: RegistryHealth::default(),
+            registry_labels: BTreeMap::new(),
         }
     }
 }
@@ -715,6 +783,50 @@ impl TuiState {
         self.default_registry = registry;
     }
 
+    /// Set the resolved registries in precedence order (F13). Drives the
+    /// tree's registry-root ordering and the empty-registry roots (D-EMPTY).
+    pub fn set_registry_order(&mut self, order: Vec<String>) {
+        self.registry_order = order;
+    }
+
+    /// Set the per-registry health summary (C6). Replaces the previous value
+    /// wholesale; called from `reload_into` on each successful catalog load.
+    pub fn set_registry_health(&mut self, health: RegistryHealth) {
+        self.registry_health = health;
+    }
+
+    /// Store registry URL → display label mapping. Replaces the previous map
+    /// wholesale; called from `apply_catalog_results` on each successful load.
+    ///
+    /// Each entry maps a registry URL to its configured alias (or to the URL
+    /// itself when no alias was declared), so display code can call
+    /// [`Self::registry_label`] without knowing whether an alias was set.
+    pub fn set_registry_labels(&mut self, labels: BTreeMap<String, String>) {
+        self.registry_labels = labels;
+    }
+
+    /// Return the display label for a registry URL.
+    ///
+    /// Returns the mapped alias when one was set via [`Self::set_registry_labels`],
+    /// otherwise returns the URL unchanged. Callers can always use this as the
+    /// display string without a separate alias-existence check.
+    pub fn registry_label(&self, url: &str) -> String {
+        self.registry_labels
+            .get(url)
+            .cloned()
+            .unwrap_or_else(|| url.to_string())
+    }
+
+    /// Whether more than one registry is currently in scope.
+    ///
+    /// Used to gate the flat list's Registry column: with a single registry
+    /// every row belongs to the same origin, so the column is redundant.
+    /// With multiple registries the column identifies which registry each
+    /// artifact came from.
+    pub fn is_multi_registry(&self) -> bool {
+        self.registry_order.len() > 1
+    }
+
     /// Seed the view mode from a typed [`crate::config::declaration::DefaultView`]
     /// config value. `None` keeps the default (Flat).
     pub fn set_view_mode_from_config(&mut self, default_view: Option<crate::config::declaration::DefaultView>) {
@@ -898,6 +1010,7 @@ impl TuiState {
             default_registry: self.default_registry.clone(),
             group_by_type: self.group_by_type,
             separators: self.tree_separators.clone(),
+            registry_order: self.registry_order.clone(),
         };
         let tree = super::tree::build(&self.rows, &self.filtered, &opts);
         // While a query is active, ignore the collapsed set: the tree prunes
@@ -1192,8 +1305,11 @@ mod tests {
     use super::*;
 
     fn row(repo: &str, desc: &str, kw: &[&str], state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: desc.to_string(),
             summary: String::new(),
@@ -1793,8 +1909,11 @@ mod tests {
     // ── Step 3.2: tree-aware state spec tests ─────────────────────────────────
 
     fn tree_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: kind.to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -2636,6 +2755,8 @@ mod tests {
         let mut s = TuiState::new();
         let bundle_row = TuiRow {
             kind: "bundle".to_string(),
+            registry: "reg".to_string(),
+            repository: "acme/bundle-x".to_string(),
             repo: "reg/acme/bundle-x".to_string(),
             description: String::new(),
             summary: String::new(),
@@ -2747,6 +2868,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
         };
         let tree = build(&[], &[], &opts);
         let collapsed: BTreeSet<String> = BTreeSet::new();
@@ -2755,6 +2877,112 @@ mod tests {
             flat.is_empty(),
             "flatten of an empty build must return an empty vec; got: {flat:?}"
         );
+    }
+
+    /// A two-registry tree-view `TuiState`: `reg-a/skill-a` and `reg-b/skill-b`,
+    /// no elision, registry roots ordered `[reg-a, reg-b]` (F13).
+    fn two_registry_tree_state() -> TuiState {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("reg-a/skill-a", "from reg-a", &[], ArtifactState::NotInstalled),
+            row("reg-b/skill-b", "from reg-b", &[], ArtifactState::NotInstalled),
+        ]);
+        s.set_registry_order(vec!["reg-a".to_string(), "reg-b".to_string()]);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        s
+    }
+
+    // AC F11: marking BOTH registry roots cascades into the leaves of BOTH
+    // registries — `marked` and `action_targets()` cover every descendant.
+    #[test]
+    fn mark_cascade_across_two_registry_roots_targets_both_registries() {
+        let mut s = two_registry_tree_state();
+        // Locate the two registry-root group positions in the flattened display.
+        let flat = s.flattened();
+        let root_positions: Vec<usize> = flat
+            .iter()
+            .enumerate()
+            .filter_map(|(i, dr)| match dr {
+                crate::tui::tree::DisplayRow::Group { key, depth: 0, .. } if key == "reg-a" || key == "reg-b" => {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            root_positions.len(),
+            2,
+            "both registry roots must be visible group rows; flat={flat:?}"
+        );
+
+        // Mark each registry root in turn (group mark cascades to descendants).
+        for pos in root_positions {
+            s.selected = pos;
+            assert!(s.selected_is_group(), "position {pos} must be a registry-root group");
+            s.toggle_mark_selected();
+        }
+
+        // The two leaf rows are rows[0] (reg-a/skill-a) and rows[1] (reg-b/skill-b).
+        let reg_a_leaf = s.rows.iter().position(|r| r.repo == "reg-a/skill-a").unwrap();
+        let reg_b_leaf = s.rows.iter().position(|r| r.repo == "reg-b/skill-b").unwrap();
+        assert!(
+            s.marked.contains(&reg_a_leaf) && s.marked.contains(&reg_b_leaf),
+            "marking both roots must mark leaves from BOTH registries; marked={:?}",
+            s.marked
+        );
+        let targets = s.action_targets();
+        assert!(
+            targets.contains(&reg_a_leaf) && targets.contains(&reg_b_leaf),
+            "action_targets() must include leaves from BOTH registries; targets={targets:?}"
+        );
+    }
+
+    // AC F12: a query that matches only reg-a's leaf keeps reg-a's root visible
+    // as an ancestor of the match; reg-b surfaces NO matching leaf (it appears
+    // only as an empty D-EMPTY root — "collapsed" with a 0/0 rollup, never
+    // hiding a match). Cross-registry filtering shows exactly the one match.
+    #[test]
+    fn search_keeps_matching_registry_root_as_ancestor_drops_non_matching_leaves() {
+        let mut s = two_registry_tree_state();
+        // Match only the reg-a leaf by its unique repository segment.
+        s.apply_query("skill-a");
+        let flat = s.flattened();
+        let group_keys: Vec<&str> = flat
+            .iter()
+            .filter_map(|dr| match dr {
+                crate::tui::tree::DisplayRow::Group { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            group_keys.contains(&"reg-a"),
+            "matching registry root 'reg-a' must remain as an ancestor; groups={group_keys:?}"
+        );
+        // The only leaf shown is reg-a's match — reg-b's skill-b is filtered out,
+        // so reg-b surfaces no matching descendant (it is empty / collapsed).
+        let leaf_labels: Vec<&str> = flat
+            .iter()
+            .filter_map(|dr| match dr {
+                crate::tui::tree::DisplayRow::Leaf { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            leaf_labels,
+            vec!["skill-a"],
+            "only reg-a's matching leaf is shown; got {leaf_labels:?}"
+        );
+        // If reg-b's empty root is present (D-EMPTY), it must carry no descendants.
+        if let Some(crate::tui::tree::DisplayRow::Group { rows, .. }) = flat
+            .iter()
+            .find(|dr| matches!(dr, crate::tui::tree::DisplayRow::Group { key, .. } if key == "reg-b"))
+        {
+            assert!(
+                rows.is_empty(),
+                "non-matching reg-b root must surface no matching descendants"
+            );
+        }
     }
 }
 
@@ -2772,8 +3000,11 @@ mod p2_state_member_node_tests {
     use crate::tui::bundle_members::{BundleMemberCache, MemberNode};
 
     fn bundle_tui_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "bundle".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -3031,6 +3262,65 @@ mod p2_state_member_node_tests {
         assert!(
             !s.expanded_bundles.contains("reg-b/acme/bundle"),
             "F3: reg-b/acme/bundle must be pruned (not in fresh rows)"
+        );
+    }
+
+    // --- registry_label / set_registry_labels / is_multi_registry ---
+
+    // registry_label returns mapped alias when present.
+    #[test]
+    fn registry_label_returns_alias_when_mapped() {
+        let mut s = TuiState::new();
+        let mut labels = BTreeMap::new();
+        labels.insert("ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string());
+        s.set_registry_labels(labels);
+        assert_eq!(
+            s.registry_label("ghcr.io/acme"),
+            "acme (ghcr.io/acme)",
+            "registry_label must return the mapped alias"
+        );
+    }
+
+    // registry_label falls back to the URL when no alias is configured.
+    #[test]
+    fn registry_label_falls_back_to_url_when_no_alias() {
+        let s = TuiState::new(); // empty labels
+        assert_eq!(
+            s.registry_label("ghcr.io/other"),
+            "ghcr.io/other",
+            "registry_label must fall back to the URL itself when not mapped"
+        );
+    }
+
+    // is_multi_registry is false when registry_order has one entry.
+    #[test]
+    fn is_multi_registry_false_for_single_registry() {
+        let mut s = TuiState::new();
+        s.set_registry_order(vec!["ghcr.io/acme".into()]);
+        assert!(
+            !s.is_multi_registry(),
+            "is_multi_registry must be false for single-registry order"
+        );
+    }
+
+    // is_multi_registry is true when registry_order has two or more entries.
+    #[test]
+    fn is_multi_registry_true_for_two_registries() {
+        let mut s = TuiState::new();
+        s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        assert!(
+            s.is_multi_registry(),
+            "is_multi_registry must be true for two-registry order"
+        );
+    }
+
+    // is_multi_registry is false when registry_order is empty.
+    #[test]
+    fn is_multi_registry_false_for_empty_order() {
+        let s = TuiState::new(); // empty order
+        assert!(
+            !s.is_multi_registry(),
+            "is_multi_registry must be false when registry_order is empty"
         );
     }
 }

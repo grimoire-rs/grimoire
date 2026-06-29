@@ -85,18 +85,20 @@ bundle, agreeing bundles coalesce, and disagreeing bundles fail closed; see the
 A project that pulls artifacts from more than one registry can declare all
 of them in a `[[registries]]` array instead of juggling `--registry` flags.
 When the array is present it becomes the authoritative browse set for
-[`grim search`](./commands.md#search) and the [MCP server](./commands.md#mcp);
-an explicit `--registry` flag still collapses the browse to exactly that one
-registry. The [TUI](./commands.md#tui) currently browses a single registry
-and does not yet consume `[[registries]]` — multi-registry TUI support is
-planned for a future release.
+[`grim search`](./commands.md#search), the [MCP server](./commands.md#mcp), and
+the [TUI](./commands.md#tui) — `grim tui` browses all declared registries, one
+collapsible root per registry. An explicit `--registry` flag still collapses the
+browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` does **not**
+collapse the browse set — it is the short-id resolution default and only
+applies as the single-registry fallback when no `[[registries]]` array is
+declared.
 
 Each entry has one required field and two optional fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `url` | yes | Registry host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. |
-| `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. |
+| `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. The TUI uses the alias as the display label in the flat list's Registry column and as the tree registry-root row label; entries without an alias fall back to the raw URL. |
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
 
 ```toml
@@ -292,12 +294,23 @@ the result, so a floating tag never serves a stale pin. Pass `--offline` (or set
 `GRIM_OFFLINE`) to work from the cache alone and fail rather than reach the
 network.
 
-A command-line flag always wins. For the registry, the environment variable
-wins over the config options: the registry resolves as `--registry`, then
-`GRIM_DEFAULT_REGISTRY`, then the project config (via `[[registries]]` primary or
-the legacy `[options].default_registry`), then the global config, and finally the
-built-in default `grim.ocx.sh` when nothing is configured anywhere. The `--offline`
-toggle has no config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
+A command-line flag always wins. Registry resolution operates on two separate
+precedences depending on context:
+
+**Browse-set** (what `grim search`, the TUI, and `grim mcp` browse): `--registry`
+flag → project `[[registries]]` → global `[[registries]]` → single default
+(`GRIM_DEFAULT_REGISTRY` → project `[options].default_registry` → global
+`[options].default_registry` → built-in `grim.ocx.sh`). The single-default tier
+applies only when no `[[registries]]` array is declared anywhere. Only the
+`--registry` flag collapses browse to one registry; `GRIM_DEFAULT_REGISTRY` does
+not restrict the browse set when `[[registries]]` is configured.
+
+**Short-id resolution** (expanding a bare `name:tag` to a full registry URL):
+`--registry` flag → `GRIM_DEFAULT_REGISTRY` → project `[options].default_registry`
+(or the primary entry of project `[[registries]]`) → global config → built-in
+`grim.ocx.sh`.
+
+The `--offline` toggle has no config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
 ## Data layout
 

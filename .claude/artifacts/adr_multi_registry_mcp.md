@@ -76,6 +76,20 @@ browses a single registry via `Catalog::load_or_refresh_coordinated` directly
 TUI multi-registry browse and the `VisibleRow` collapsible registry-tree are
 deferred to a follow-up workstream.
 
+> **Update (2026-06-28 — issue #16 follow-up):** the deferred TUI work
+> landed. `reload_into` now consumes `catalog_service::load_catalog` and fans
+> out over `ctx.registries` (`[[registries]]`), projecting each
+> `CatalogGroup` into the TUI's richer per-row state. The TUI renders a
+> collapsible registry-tree: registry-authoritative grouping (namespaced
+> `host/namespace` registries stay distinct, never first-`/` split),
+> precedence-ordered roots (F13), single-registry root elision (D-ELIDE), and
+> empty/offline registries surfaced as `0/0` roots with a health status line
+> (D-EMPTY / D-DEGRADE). The only code still on the single-registry
+> `Catalog::load_or_refresh_coordinated` path is
+> `UpdateChecker::spawn_catalog_refresh` (the background catalog auto-refresh),
+> which `arm_background_checks` no longer arms — re-wiring it onto
+> `load_catalog` is the remaining smaller follow-up.
+
 ### 2. Multiple registries — additive `[[registries]]`
 
 Config gains an optional `[[registries]]` array of `RegistryConfig { alias:
@@ -90,6 +104,12 @@ deduped by url. The single-default precedence chain
 (`resolve_default_registry`) is kept verbatim for commands that need one
 registry. `ResolvedScope` carries the registry list the same way it carries
 `options`.
+
+> **Update (2026-06-28):** `$GRIM_DEFAULT_REGISTRY` is demoted from the
+> forced-front (collapse) tier to the single-default tier — only the
+> `--registry` flag forces a single-registry browse; `[[registries]]` is
+> authoritative for the browse set even when the env var is set. Short-id
+> resolution precedence is unchanged.
 
 ### 3. Qualified references use the `alias/repo` form (never `alias:repo`)
 

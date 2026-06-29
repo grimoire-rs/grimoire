@@ -121,12 +121,15 @@ impl CatalogResults {
         self.groups.iter().any(|g| g.truncated)
     }
 
-    /// Flatten every group's rows into one list sorted by `registry/repository`
-    /// — the shape `grim search`'s flat table consumes.
+    /// Flatten every group's rows into one list in registry **declaration
+    /// order** — the resolution precedence carried by [`Self::groups`] — with
+    /// each group already sorted by repository. The default registry's
+    /// artifacts come first, then each subsequent registry's, so `grim search`'s
+    /// flat table matches the TUI tree's F13 precedence order rather than a
+    /// global alphabetical merge (which would interleave registries and, for
+    /// equal-prefix hosts, order non-deterministically by repository name).
     pub fn into_flat_rows(self) -> Vec<CatalogRow> {
-        let mut rows: Vec<CatalogRow> = self.groups.into_iter().flat_map(|g| g.rows).collect();
-        rows.sort_by_key(|a| a.repo());
-        rows
+        self.groups.into_iter().flat_map(|g| g.rows).collect()
     }
 }
 

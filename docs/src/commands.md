@@ -165,7 +165,9 @@ substring against repository, summary, description, and keywords; an empty
 query lists the whole catalog. When `[[registries]]` are configured, all
 of them are browsed and the results are flattened into one table.
 `--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
-browse to exactly that one registry.
+browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` is only the
+short-id resolution default — it does not restrict the browse set when
+`[[registries]]` is configured.
 
 The plain table shows each entry's short summary (`com.grimoire.summary`),
 falling back to the description when no summary is set. On an interactive
@@ -182,10 +184,13 @@ grim search --refresh --registry ghcr.io/acme
 
 ## grim tui {#tui}
 
-`grim tui` opens an interactive browser over a registry's catalog. It shows
-the catalog with live install state in colour, toggling between a flat
-kind-grouped list and a collapsible tree (press `t`), and supports
-multi-select with batch install, update, and delete. Press `?` in the TUI
+`grim tui` opens an interactive browser over your declared registries'
+catalogs. It shows the catalog with live install state in colour, toggling
+between a flat kind-grouped list and a collapsible tree (press `t`). When
+more than one registry is configured, the flat list adds a leading **Registry**
+column showing the configured alias (or the raw URL when no alias was set), and
+the Repo cell is shortened to the registry-relative path so names stay readable.
+It supports multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
 browser, `g` to switch scope, and `space` to mark rows.
@@ -222,11 +227,16 @@ Three config fields under `[options.tui]` in `grimoire.toml` let you set
 the opening view mode and control how paths are split into groups. See
 [`[options.tui]`][options-tui] for the full reference.
 
-Unlike `grim search`, the TUI browses a **single** registry — the effective
-default resolved from the precedence chain below. Multi-registry browse (and
-a collapsible registry tree) across declared `[[registries]]` is planned for
-a later release; today only `grim search` and the MCP `grim_search` tool
-span the full declared set.
+Like `grim search`, the TUI browses **every** registry declared in
+`[[registries]]`, grouping entries under one collapsible root per registry.
+When exactly one registry resolves, its root prefix is elided to keep names
+short; with several, the roots are ordered by resolution precedence, and a
+registry that is empty or offline still appears as an empty `0/0` root so the
+full configured set stays visible. An explicit `--registry` flag collapses the
+browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` is only the
+short-id resolution default — it does not collapse the browse set when
+`[[registries]]` is configured; in that case both `grim search` and `grim tui`
+browse all declared registries regardless of whether the env var is set.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
 one before starting, as popup dialogs: confirm the init, then accept or

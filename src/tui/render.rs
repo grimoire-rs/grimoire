@@ -19,6 +19,12 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use super::detail::{
     CATALOG_WIDTH, DETAIL_MIN_WIDTH, DetailLine, W_KIND, W_REPO, W_STATUS, W_TAG, detail_lines, scroll_max, viewport,
 };
+
+/// Width of the Registry column shown in flat-view multi-registry mode.
+///
+/// Kept in `render.rs` (not `detail.rs`) because the column is only used by
+/// the flat-view list renderer, never by the detail pane or tree layout.
+const W_REGISTRY: usize = 20;
 use super::state::{ArtifactState, Mode, TuiState};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
@@ -224,7 +230,7 @@ pub struct GroupRow {
 /// One table row in the render model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRow {
-    /// The visible columns, already formatted (kind, repo, tag, status).
+    /// The visible columns, already formatted (repo, kind, tag, status).
     /// In tree mode, `columns[0]` carries the indent prefix (two spaces per
     /// depth level) and the arrow glyph for groups — the single canonical
     /// representation of tree position.
@@ -238,6 +244,12 @@ pub struct RenderRow {
     /// Group-display data when this row projects a tree group; `None` for
     /// leaf rows and every flat-view row.
     pub group: Option<GroupRow>,
+    /// The Registry column value for flat-view multi-registry mode.
+    ///
+    /// Set to the registry display label (alias or URL) when
+    /// [`RenderModel::show_registry_column`] is true; `None` for tree rows
+    /// and single-registry flat rows (where the column is elided).
+    pub registry: Option<String>,
 }
 
 /// The modal version-picker overlay, projected for display.
@@ -308,6 +320,12 @@ pub struct RenderModel {
     pub help_scroll: u16,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
+    /// Whether the flat-view list should prepend a Registry column.
+    ///
+    /// True when more than one registry is in scope (the column tells the user
+    /// which registry each artifact came from). False for single-registry
+    /// sessions where every row shares the same origin.
+    pub show_registry_column: bool,
 }
 
 /// Pick the widest hint tier whose text (plus a one-cell right margin)
@@ -337,7 +355,15 @@ fn strip_default_registry<'a>(repo: &'a str, default_registry: Option<&str>) -> 
 
 /// Build the visible cells for one catalog row. `repo_text` is the
 /// Repo-column content (the full reference, default registry elided).
-fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked: bool) -> RenderRow {
+/// `registry` is the Registry-column label in flat multi-registry mode;
+/// `None` in single-registry and all tree modes.
+fn render_leaf(
+    r: &super::state::TuiRow,
+    repo_text: &str,
+    selected: bool,
+    marked: bool,
+    registry: Option<String>,
+) -> RenderRow {
     let (glyph, label, color) = status_view(r.state);
     // A user-pinned version shows with a leading `*`; otherwise the
     // explicit highest version, falling back to the tag.
@@ -357,6 +383,7 @@ fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked
         marked,
         status_color: color,
         group: None,
+        registry,
     }
 }
 
@@ -380,12 +407,16 @@ fn group_mark_state(descendant_rows: &[usize], marked: &std::collections::BTreeS
 ///
 /// Pure: groups render an arrow + label + rollup label + tri-state mark;
 /// leaves render the bare final-segment label indented to their depth.
-fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
-    let flat = state.flattened();
+///
+/// `flat` is the caller-owned result of [`TuiState::flattened`]; threading it
+/// in avoids a redundant rebuild when `frame()` also needs it for the detail
+/// branch (P1 dedup: compute once, thread to both).
+fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<RenderRow> {
     flat.iter()
         .enumerate()
         .map(|(pos, display_row)| match display_row {
             super::tree::DisplayRow::Group {
+                key,
                 label,
                 depth,
                 collapsed,
@@ -402,7 +433,15 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                 // Arrow: ▾ expanded, ▸ collapsed.
                 let arrow = if *collapsed { "▸" } else { "▾" };
                 let indent = "  ".repeat(*depth);
-                let repo_text = format!("{indent}{arrow} {label}");
+                // B: registry-root groups show "alias (url)" when an alias was
+                // configured, or the plain URL otherwise.  Non-registry groups
+                // (org, path segment) keep their existing label unchanged.
+                let display_label = if state.registry_labels.contains_key(key.as_str()) {
+                    state.registry_label(key)
+                } else {
+                    label.clone()
+                };
+                let repo_text = format!("{indent}{arrow} {display_label}");
                 // Col 3 (Status): group status glyph from rollup.worst(), optionally
                 // prefixed with the tri-state mark glyph. The rollup label belongs in
                 // col 2 (Tag) only — NOT duplicated here.
@@ -422,6 +461,7 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                     marked: mark != MarkState::None,
                     status_color: color,
                     group: Some(GroupRow { mark }),
+                    registry: None,
                 }
             }
             super::tree::DisplayRow::Leaf {
@@ -463,6 +503,7 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                     marked: state.is_row_marked(*row),
                     status_color: color,
                     group: None,
+                    registry: None,
                 }
             }
             super::tree::DisplayRow::Member {
@@ -496,6 +537,7 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                     marked: false,
                     status_color: color,
                     group: None,
+                    registry: None,
                 }
             }
         })
@@ -504,8 +546,10 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
 
 /// Build the detail-pane lines for a selected tree group (rollup summary),
 /// used in place of [`detail_lines`] when the selection is a group node.
-fn group_detail_lines(state: &TuiState) -> Vec<DetailLine> {
-    let flat = state.flattened();
+///
+/// `flat` is the caller-owned result of [`TuiState::flattened`]; threading it
+/// in avoids a redundant rebuild (P1 dedup: shared with `tree_render_rows`).
+fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<DetailLine> {
     let Some(super::tree::DisplayRow::Group {
         key,
         rollup,
@@ -622,19 +666,44 @@ pub fn frame(state: &TuiState) -> RenderModel {
         (state.query.clone(), false)
     };
 
+    // P1: compute the flat display list ONCE in tree mode — shared between the
+    // row projection (tree_render_rows) and the detail branch below, avoiding
+    // 2-3 redundant rebuilds per frame. In flat mode the list is never needed
+    // so the allocation is skipped entirely.
+    //
+    // `flat_ref` defaults to an empty slice in flat mode; it is never read
+    // in that mode, so no `expect` is needed — no allocation occurs for
+    // the non-Tree case and no lint suppression is required.
+    let tree_flat: Vec<super::tree::DisplayRow> = if state.view_mode == crate::tui::state::ViewMode::Tree {
+        state.flattened()
+    } else {
+        Vec::new()
+    };
+    let flat_ref: &[super::tree::DisplayRow] = &tree_flat;
+
     let rows: Vec<RenderRow> = if state.view_mode == crate::tui::state::ViewMode::Tree && !state.loading {
         // Tree view is a pure projection over the flattened, collapse-aware
         // tree (itself built over the `filtered` row set).
-        tree_render_rows(state)
+        tree_render_rows(state, flat_ref)
     } else {
+        // A: In multi-registry flat mode, add a Registry column showing the
+        // display label (alias or URL) and shorten Repo to the registry-relative
+        // `repository` path.  Single-registry behavior is unchanged (D-ELIDE).
+        let multi = state.is_multi_registry();
         state
             .filtered
             .iter()
             .enumerate()
             .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
             .map(|(pos, i, r)| {
-                let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
-                render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
+                let (repo_text, registry) = if multi {
+                    // Shorten to registry-relative repository; show registry label.
+                    (r.repository.as_str(), Some(state.registry_label(&r.registry)))
+                } else {
+                    // Single-registry: existing elision behavior (D-ELIDE).
+                    (strip_default_registry(&r.repo, state.default_registry.as_deref()), None)
+                };
+                render_leaf(r, repo_text, pos == state.selected, state.is_row_marked(i), registry)
             })
             .collect()
     };
@@ -645,13 +714,12 @@ pub fn frame(state: &TuiState) -> RenderModel {
     let detail = if state.view_mode == crate::tui::state::ViewMode::Tree {
         // In tree mode, selection can be a group, a bundle-member virtual row,
         // or a regular leaf. Each dispatches to its own detail builder.
-        let flat = state.flattened();
-        match flat.get(state.selected) {
-            Some(super::tree::DisplayRow::Group { .. }) => group_detail_lines(state),
+        match flat_ref.get(state.selected) {
+            Some(super::tree::DisplayRow::Group { .. }) => group_detail_lines(state, flat_ref),
             Some(super::tree::DisplayRow::Member { .. }) => {
                 // Member rows are virtual; fetch the MemberNode from the cache
                 // and delegate to detail_lines_for_member.
-                member_detail_lines_from_state(state, flat.get(state.selected))
+                member_detail_lines_from_state(state, flat_ref.get(state.selected))
             }
             // Leaf: delegate to the standard row detail builder.
             Some(super::tree::DisplayRow::Leaf { .. }) => detail_lines(state.selected_row()),
@@ -666,10 +734,45 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // Status is transient only — loading / counts / batch results, or the
     // marked-set action keys (contextual). The always-on key summary lives
     // in `hint` so a transient message can never hide `? help`.
+    // C6 / D-DEGRADE: compose registry health degradation message when any
+    // registry is offline or truncated (shown when no higher-priority
+    // transient message overrides — takes precedence over marked count).
+    // P2: short-circuit to avoid any allocation when both lists are empty.
+    // SEC1: map each URL through `sanitize_member_label` before joining so
+    // registry URLs from the catalog cannot inject terminal escape sequences.
+    let registry_health_status = {
+        let h = &state.registry_health;
+        if h.offline.is_empty() && h.truncated.is_empty() {
+            String::new()
+        } else {
+            // B: show the alias-based label (SEC1: sanitize against escape injection).
+            let mut parts: Vec<String> = Vec::new();
+            if !h.offline.is_empty() {
+                let names: Vec<String> = h
+                    .offline
+                    .iter()
+                    .map(|url| sanitize_member_label(&state.registry_label(url)))
+                    .collect();
+                parts.push(format!("offline: {}", names.join(", ")));
+            }
+            if !h.truncated.is_empty() {
+                let names: Vec<String> = h
+                    .truncated
+                    .iter()
+                    .map(|url| sanitize_member_label(&state.registry_label(url)))
+                    .collect();
+                parts.push(format!("truncated: {}", names.join(", ")));
+            }
+            parts.join(" · ")
+        }
+    };
+
     let status = if !state.status_line.is_empty() {
         state.status_line.clone()
     } else if state.loading {
         "loading catalog…".to_string()
+    } else if !registry_health_status.is_empty() {
+        registry_health_status
     } else if state.marked.is_empty() {
         String::new()
     } else {
@@ -755,6 +858,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
         show_help: state.mode == Mode::Help,
         help_scroll: state.help_scroll,
         picker,
+        // A: only show Registry column when more than one registry is in scope;
+        // the tree view never needs it (registry roots are already tree nodes).
+        show_registry_column: state.is_multi_registry() && state.view_mode != crate::tui::state::ViewMode::Tree,
     }
 }
 
@@ -872,7 +978,24 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         search_row[1],
     );
 
-    let header = ListItem::new(Line::from(Span::styled(
+    // A: when more than one registry is in scope, prepend a Registry column to
+    // the header and each flat-view row.  Tree-mode rows never carry a registry
+    // (they express it via the group node label), so the column is flat-only.
+    let header_text = if model.show_registry_column {
+        format!(
+            "  {:<gw$}  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
+            "Registry",
+            model.headers[0],
+            model.headers[1],
+            model.headers[2],
+            model.headers[3],
+            gw = W_REGISTRY,
+            rw = W_REPO,
+            kw = W_KIND,
+            tw = W_TAG,
+            sw = W_STATUS,
+        )
+    } else {
         format!(
             "  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
             model.headers[0],
@@ -883,7 +1006,10 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             kw = W_KIND,
             tw = W_TAG,
             sw = W_STATUS,
-        ),
+        )
+    };
+    let header = ListItem::new(Line::from(Span::styled(
+        header_text,
         accent.add_modifier(Modifier::UNDERLINED),
     )));
     let mut items: Vec<ListItem> = vec![header];
@@ -911,11 +1037,19 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         } else {
             "  "
         };
-        let line = Line::from(vec![
-            Span::styled(
-                mark_glyph.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+        // A: registry span (flat multi-registry mode only).
+        let mut spans = vec![Span::styled(
+            mark_glyph.to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )];
+        if model.show_registry_column {
+            let reg_label = r.registry.as_deref().unwrap_or("");
+            spans.push(Span::styled(
+                format!("{:<gw$}  ", reg_label, gw = W_REGISTRY),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.extend([
             Span::styled(format!("{}  ", r.columns[0]), Style::default().fg(Color::White)),
             Span::styled(
                 format!("{}  ", r.columns[1]),
@@ -929,7 +1063,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
-        items.push(ListItem::new(line));
+        items.push(ListItem::new(Line::from(spans)));
     }
     let list = List::new(items)
         .block(
@@ -1256,8 +1390,11 @@ mod tests {
     }
 
     fn row(repo: &str, state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: "review code".to_string(),
             summary: String::new(),
@@ -1649,11 +1786,9 @@ mod tests {
         // Switch to tree mode
         s.toggle_view_mode();
         assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
-        // frame() calls tree_render_rows() which is unimplemented → panics.
-        // That is the required failure for the spec test.
+        // In tree mode the frame must include the "acme" group header row, so at
+        // least one render row carries `group.is_some()`.
         let m = frame(&s);
-        // When implemented, at least one row must have `group.is_some()`
-        // (the group header for "acme").
         assert!(
             m.rows.iter().any(|r| r.group.is_some()),
             "tree frame must include at least one group row (group.is_some())"
@@ -1743,10 +1878,8 @@ mod tests {
         assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
         // Manually select position 0 (expected to be the "acme" group)
         s.selected = 0;
-        // frame() will call group_detail_lines() when selected_is_group() is true.
-        // Both are unimplemented → panics. Required failure mode.
+        // When the selection is a group, frame() routes to group_detail_lines().
         let m = frame(&s);
-        // When implemented and selection is on a group, detail must be non-empty.
         if s.selected_is_group() {
             assert!(
                 !m.detail.is_empty(),
@@ -1859,8 +1992,9 @@ mod tests {
 
     // ── C-2 sanitize_member_label ─────────────────────────────────────────────
     //
-    // These tests FAIL until P3 implements the function body.
-    // Each test row corresponds to one row in the C-2 contract table.
+    // Each test row corresponds to one row in the C-2 contract table: control
+    // chars, bidi overrides/isolates, and zero-width chars are stripped before
+    // a raw member label reaches the terminal.
 
     /// Helper: assert no control chars, no bidi overrides/isolates, no zero-width
     /// code points in the sanitized output.
@@ -2089,8 +2223,11 @@ mod p2_render_member_node_tests {
     use crate::tui::state::{ArtifactState, TuiRow, TuiState, ViewMode};
 
     fn bundle_tui_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "bundle".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -2104,8 +2241,11 @@ mod p2_render_member_node_tests {
     }
 
     fn skill_tui_row(repo: &str) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
             kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -2131,7 +2271,8 @@ mod p2_render_member_node_tests {
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
 
-        let render_rows = tree_render_rows(&s);
+        let flat = s.flattened();
+        let render_rows = tree_render_rows(&s, &flat);
 
         // Find the leaf row (non-group).
         let leaf_row = render_rows.iter().find(|r| r.group.is_none());
@@ -2158,7 +2299,8 @@ mod p2_render_member_node_tests {
         // so the full repo IS "acme/bundle-x".
         s.expanded_bundles.insert("acme/bundle-x".to_string());
 
-        let render_rows = tree_render_rows(&s);
+        let flat = s.flattened();
+        let render_rows = tree_render_rows(&s, &flat);
 
         let leaf_row = render_rows.iter().find(|r| r.group.is_none());
         assert!(leaf_row.is_some(), "C-1: must have at least one leaf render row");
@@ -2180,7 +2322,8 @@ mod p2_render_member_node_tests {
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
 
-        let render_rows = tree_render_rows(&s);
+        let flat = s.flattened();
+        let render_rows = tree_render_rows(&s, &flat);
 
         let leaf_row = render_rows.iter().find(|r| r.group.is_none());
         assert!(leaf_row.is_some(), "C-1: must have at least one leaf render row");
@@ -2211,7 +2354,8 @@ mod p2_render_member_node_tests {
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
 
-        let render_rows = tree_render_rows(&s);
+        let flat = s.flattened();
+        let render_rows = tree_render_rows(&s, &flat);
 
         // Gather leaf rows (non-group).
         let leaf_rows: Vec<&RenderRow> = render_rows.iter().filter(|r| r.group.is_none()).collect();
@@ -2239,6 +2383,424 @@ mod p2_render_member_node_tests {
         assert!(
             any_no_arrow,
             "C-1: at least one leaf must have NO arrow prefix (the skill leaf)"
+        );
+    }
+}
+
+// ── Multi-registry render projection + RegistryHealth status line ──────────
+//
+// These tests synthesize a multi-registry TuiState and assert the RenderModel
+// produced by `frame()`: two registry root rows in tree view, registry-root
+// elision in single-registry mode, and the RegistryHealth (offline / truncated)
+// status-line composition.
+#[cfg(test)]
+mod spec_multi_registry_render_tests {
+    use super::*;
+    use crate::tui::state::{ArtifactState, RegistryHealth, TuiRow, TuiState, ViewMode};
+
+    fn row_with_reg(registry: &str, repository: &str, state: ArtifactState) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            registry: registry.to_string(),
+            repository: repository.to_string(),
+            repo: format!("{registry}/{repository}"),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state,
+        }
+    }
+
+    // AC L1: 2-registry tree view → RenderModel has 2 registry root rows (group rows).
+    // Proves multi-registry tree projection end-to-end (headlessly), including
+    // F13 precedence ordering and the D-EMPTY gate (multi_registry = default_registry.is_none()
+    // && !registry_order.is_empty() — both conditions must hold for registry roots to appear).
+    #[test]
+    fn spec_frame_two_registry_tree_yields_two_registry_root_rows() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::NotInstalled),
+            row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
+        ]);
+        // Multi-registry → no elision (default_registry stays None)
+        assert!(
+            s.default_registry.is_none(),
+            "precondition: no elision for 2-registry set"
+        );
+        // SPEC-W1 / GAP-1: set_registry_order activates the F13/D-EMPTY gate
+        // (multi_registry = default_registry.is_none() && !registry_order.is_empty()).
+        // Without this call the gate is false and registry roots would not appear
+        // in F13 precedence order (the old test missed this path).
+        s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        // Switch to tree view to exercise the registry-grouped tree projection
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        let m = frame(&s);
+        // Two registry roots must appear as group rows in the RenderModel.
+        let group_rows: Vec<_> = m.rows.iter().filter(|r| r.group.is_some()).collect();
+        assert!(
+            group_rows.len() >= 2,
+            "2-registry tree must render at least 2 group rows (one per registry root); got {} group rows",
+            group_rows.len()
+        );
+        // The group labels must include the two registry names
+        let group_labels: Vec<&str> = group_rows.iter().map(|r| r.columns[0].trim()).collect();
+        assert!(
+            group_labels.iter().any(|l| l.contains("ghcr.io/acme")),
+            "ghcr.io/acme registry root must appear in rendered rows; got: {group_labels:?}"
+        );
+        assert!(
+            group_labels.iter().any(|l| l.contains("ghcr.io/other")),
+            "ghcr.io/other registry root must appear in rendered rows; got: {group_labels:?}"
+        );
+        // F13 / SPEC-W1: ghcr.io/acme is first in registry_order, so its group row
+        // must appear before ghcr.io/other in the rendered output.
+        let first_group_label = group_labels[0];
+        assert!(
+            first_group_label.contains("ghcr.io/acme"),
+            "F13: ghcr.io/acme (first in registry_order) must be the first group row; got: {first_group_label:?}"
+        );
+    }
+
+    // D-EMPTY: a registry declared in registry_order but with zero matching rows
+    // still renders a 0/0 group root in tree mode (so the user knows the registry
+    // was resolved even when empty).
+    #[test]
+    fn spec_frame_empty_registry_in_order_renders_zero_zero_group_root() {
+        let mut s = TuiState::new();
+        // No rows from "ghcr.io/empty"; one row from another registry.
+        s.set_rows(vec![row_with_reg(
+            "ghcr.io/acme",
+            "skill-a",
+            ArtifactState::NotInstalled,
+        )]);
+        // D-EMPTY gate: both conditions must hold — no elision AND non-empty order.
+        // "ghcr.io/empty" has zero matching rows; it must still get a group root.
+        s.set_registry_order(vec!["ghcr.io/empty".into(), "ghcr.io/acme".into()]);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        let m = frame(&s);
+        let group_rows: Vec<_> = m.rows.iter().filter(|r| r.group.is_some()).collect();
+        let group_labels: Vec<&str> = group_rows.iter().map(|r| r.columns[0].trim()).collect();
+        // "ghcr.io/empty" must appear as a group root despite having zero rows.
+        assert!(
+            group_labels.iter().any(|l| l.contains("ghcr.io/empty")),
+            "D-EMPTY: a registry with zero rows must still render a group root; group_labels: {group_labels:?}"
+        );
+        // Verify the empty registry group shows a 0/0 rollup (Tag column).
+        let empty_group = group_rows
+            .iter()
+            .find(|r| r.columns[0].contains("ghcr.io/empty"))
+            .expect("ghcr.io/empty group row must exist");
+        assert_eq!(
+            empty_group.columns[2].trim(),
+            "0/0",
+            "D-EMPTY: empty registry group must show 0/0 rollup; got: {:?}",
+            empty_group.columns[2]
+        );
+    }
+
+    // AC L1: 1-registry tree view → 0 registry root rows (registry root is elided).
+    #[test]
+    fn spec_frame_single_registry_tree_yields_zero_registry_root_rows() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("grim.ocx.sh", "acme/alpha", ArtifactState::NotInstalled),
+            row_with_reg("grim.ocx.sh", "acme/beta", ArtifactState::NotInstalled),
+        ]);
+        // Single registry → elide (default_registry = Some(primary))
+        s.set_default_registry(Some("grim.ocx.sh".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        let m = frame(&s);
+        // No row should have "grim.ocx.sh" as its group label
+        let registry_root_rows: Vec<_> = m
+            .rows
+            .iter()
+            .filter(|r| r.group.is_some() && r.columns[0].contains("grim.ocx.sh"))
+            .collect();
+        assert!(
+            registry_root_rows.is_empty(),
+            "single-registry (elided) tree must have no 'grim.ocx.sh' registry root row; got: {registry_root_rows:?}"
+        );
+    }
+
+    // C6 / D-DEGRADE: registry_health.offline non-empty → status line names offline registry.
+    #[test]
+    fn spec_frame_offline_registry_appears_in_status_line() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec!["ghcr.io/acme".to_string()],
+            truncated: vec![],
+        };
+        let m = frame(&s);
+        assert!(
+            m.status.contains("ghcr.io/acme"),
+            "status line must name the offline registry 'ghcr.io/acme'; got: {:?}",
+            m.status
+        );
+    }
+
+    // C6 / D-DEGRADE: all registries offline → status line indicates all-offline.
+    #[test]
+    fn spec_frame_all_registries_offline_status_message() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec!["ghcr.io/acme".to_string(), "ghcr.io/other".to_string()],
+            truncated: vec![],
+        };
+        let m = frame(&s);
+        // When all registries are offline, the status must signal it
+        assert!(
+            m.status.to_lowercase().contains("offline"),
+            "status line must indicate offline state when all registries are offline; got: {:?}",
+            m.status
+        );
+    }
+
+    // C6: registry_health.truncated non-empty → status line mentions truncation.
+    #[test]
+    fn spec_frame_truncated_registry_appears_in_status_line() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec![],
+            truncated: vec!["ghcr.io/other".to_string()],
+        };
+        let m = frame(&s);
+        assert!(
+            m.status.contains("ghcr.io/other"),
+            "status line must name the truncated registry; got: {:?}",
+            m.status
+        );
+    }
+
+    // AC F11: mark-cascade on a registry root (multi-registry tree) materializes
+    // all descendant leaf indices into `marked`.
+    //
+    // This complements the existing single-registry cascade test. The registry
+    // root is a group node in the multi-registry tree; marking it must cascade
+    // to all descendants across both registries when multiple roots share the
+    // same multi-registry tree.
+    #[test]
+    fn spec_mark_cascade_on_registry_root_marks_all_descendants() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("ghcr.io/acme", "alpha", ArtifactState::NotInstalled),
+            row_with_reg("ghcr.io/acme", "beta", ArtifactState::Installed),
+        ]);
+        // No elision — 2 registries (even if same here, the point is a group root exists)
+        assert!(s.marked.is_empty(), "precondition: no marks");
+        s.toggle_view_mode(); // → Tree mode
+        s.selected = 0; // position 0 should be the "ghcr.io/acme" registry root
+        assert!(s.selected_is_group(), "position 0 must be a group (registry root)");
+        s.toggle_mark_selected();
+        assert!(
+            !s.marked.is_empty(),
+            "marking the registry root group must cascade to descendant leaves"
+        );
+        assert!(
+            s.marked.contains(&0) && s.marked.contains(&1),
+            "both descendant rows (0 and 1) must be marked after registry-root cascade; marked: {:?}",
+            s.marked
+        );
+    }
+
+    // Edge 5/14: selection anchor fallback when anchor registry is absent after reload.
+    // After a reload that removes one registry, the anchor should fall back to the
+    // first visible row of the next registry root in precedence order.
+    #[test]
+    fn spec_selection_anchor_fallback_when_registry_absent_after_reload() {
+        let mut s = TuiState::new();
+        // Initial state: 2 registries, cursor on something in the first registry
+        s.set_rows(vec![
+            row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::NotInstalled),
+            row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
+        ]);
+        s.toggle_view_mode(); // → Tree
+        // Move selection to the first leaf (ghcr.io/acme registry)
+        s.selected = 1; // position 1 should be the leaf under ghcr.io/acme
+        // Simulate reload that removes ghcr.io/acme entirely
+        s.set_rows(vec![row_with_reg(
+            "ghcr.io/other",
+            "skill-b",
+            ArtifactState::NotInstalled,
+        )]);
+        // After reload, the anchor (ghcr.io/acme) is absent.
+        // The cursor must fall back to the first visible row of ghcr.io/other.
+        let flat = s.flattened();
+        let first_visible_idx = 0;
+        assert_eq!(
+            s.selected,
+            first_visible_idx,
+            "selection must fall back to the first visible row when anchor registry is absent; \
+             got selected={}, flattened length={}",
+            s.selected,
+            flat.len()
+        );
+    }
+
+    // A: flat multi-registry view → show_registry_column true, rows carry
+    // registry label, Repo cell shortened to registry-relative `repository`.
+    #[test]
+    fn spec_flat_multi_registry_shows_registry_column() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed),
+            row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
+        ]);
+        // Multi-registry: no elision, two entries in registry_order.
+        s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        // Flat view (default after TuiState::new).
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        let m = frame(&s);
+
+        assert!(
+            m.show_registry_column,
+            "flat multi-registry must set show_registry_column"
+        );
+        // Repo cell must be the registry-relative path only.
+        assert_eq!(
+            m.rows[0].columns[0].trim(),
+            fit("skill-a", W_REPO).trim(),
+            "Repo cell must be registry-relative (no host prefix)"
+        );
+        assert_eq!(
+            m.rows[1].columns[0].trim(),
+            fit("skill-b", W_REPO).trim(),
+            "Repo cell for second registry must be registry-relative"
+        );
+        // Each row must carry its registry label (URL fallback — no alias set).
+        assert_eq!(
+            m.rows[0].registry.as_deref(),
+            Some("ghcr.io/acme"),
+            "row 0 must carry registry label"
+        );
+        assert_eq!(
+            m.rows[1].registry.as_deref(),
+            Some("ghcr.io/other"),
+            "row 1 must carry registry label"
+        );
+    }
+
+    // A: single-registry flat view → show_registry_column false, behavior unchanged.
+    #[test]
+    fn spec_flat_single_registry_no_registry_column() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row_with_reg(
+            "grim.ocx.sh",
+            "acme/skill-a",
+            ArtifactState::Installed,
+        )]);
+        // Single-registry elision.
+        s.set_default_registry(Some("grim.ocx.sh".into()));
+        s.set_registry_order(vec!["grim.ocx.sh".into()]);
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        let m = frame(&s);
+
+        assert!(
+            !m.show_registry_column,
+            "single-registry flat view must not show Registry column"
+        );
+        // Row must not carry a registry label.
+        assert_eq!(
+            m.rows[0].registry, None,
+            "single-registry flat row must have registry: None"
+        );
+        // Repo cell must be the elided form (no host prefix).
+        assert_eq!(
+            m.rows[0].columns[0].trim(),
+            fit("acme/skill-a", W_REPO).trim(),
+            "single-registry flat Repo cell must strip the default registry host"
+        );
+    }
+
+    // B: tree registry-root label shows "alias (url)" when alias configured.
+    #[test]
+    fn spec_tree_registry_root_shows_alias_label_when_alias_set() {
+        use std::collections::BTreeMap;
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed),
+            row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
+        ]);
+        s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        // Map ghcr.io/acme to alias "acme" — label becomes "acme (ghcr.io/acme)".
+        let mut labels = BTreeMap::new();
+        labels.insert("ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string());
+        labels.insert("ghcr.io/other".to_string(), "ghcr.io/other".to_string());
+        s.set_registry_labels(labels);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        let m = frame(&s);
+
+        let group_labels: Vec<&str> = m
+            .rows
+            .iter()
+            .filter(|r| r.group.is_some())
+            .map(|r| r.columns[0].trim())
+            .collect();
+        assert!(
+            group_labels.iter().any(|l| l.contains("acme (ghcr.io/acme)")),
+            "aliased registry root must show 'alias (url)' in tree label; got: {group_labels:?}"
+        );
+        // Other registry (no alias) shows raw URL.
+        assert!(
+            group_labels.iter().any(|l| l.contains("ghcr.io/other")),
+            "non-aliased registry root must show raw URL; got: {group_labels:?}"
+        );
+    }
+
+    // B: tree registry-root label shows plain URL when no alias is configured.
+    #[test]
+    fn spec_tree_registry_root_shows_url_when_no_alias() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed)]);
+        s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        // No alias set — registry_labels empty, fallback is the URL itself.
+        assert!(s.registry_labels.is_empty(), "precondition: no labels set");
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        let m = frame(&s);
+
+        let group_labels: Vec<&str> = m
+            .rows
+            .iter()
+            .filter(|r| r.group.is_some())
+            .map(|r| r.columns[0].trim())
+            .collect();
+        assert!(
+            group_labels.iter().any(|l| l.contains("ghcr.io/acme")),
+            "tree registry root without alias must show raw URL; got: {group_labels:?}"
+        );
+    }
+
+    // B: registry health status line shows alias label when alias configured.
+    #[test]
+    fn spec_health_status_shows_alias_label() {
+        use std::collections::BTreeMap;
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec!["ghcr.io/acme".to_string()],
+            truncated: vec![],
+        };
+        // Map ghcr.io/acme → "acme (ghcr.io/acme)" alias label.
+        let mut labels = BTreeMap::new();
+        labels.insert("ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string());
+        s.set_registry_labels(labels);
+        let m = frame(&s);
+
+        assert!(
+            m.status.contains("acme (ghcr.io/acme)"),
+            "health status must show alias label when alias configured; got: {:?}",
+            m.status
         );
     }
 }

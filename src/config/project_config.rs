@@ -1166,6 +1166,7 @@ default = true
             &[],
             None,
             crate::command::FALLBACK_REGISTRY,
+            None,
         );
         assert_eq!(primary_registry(&set), "array.example", "array must win over legacy");
         // The legacy url must not appear in the resolved set at all.
