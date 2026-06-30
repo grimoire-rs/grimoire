@@ -28,11 +28,12 @@ project, and a `teardown.sh`.
 | `project/grimoire.toml` | Ready-made single-registry consumer project (floating `:1` tags) |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
-| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset |
+| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset + deep-fold solo package, write the global two-registry config |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops both registries) |
 | `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset) |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
+| `.grim-home/grimoire.toml` | Global config bootstrap writes via `grim config` — two `[[registries]]` (5050/grimoire default + 5051/tools); browse both from anywhere with `--global` |
 
 ## Quick start
 
@@ -51,6 +52,7 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0, 2.0.0 |
 | skill | `localhost:5050/grimoire/skills/architecture-guide` | 1.0.0 |
 | skill | `localhost:5050/grimoire/skills/old-reviewer` | 1.0.0 (deprecated — drives the deprecation surface) |
+| skill | `localhost:5050/grimoire/playbooks/ci/release/cut-release` | 1.0.0 (deep solo path — drives the tree-fold demo) |
 | rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0, 1.1.0 |
 | rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
 | rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
@@ -126,17 +128,30 @@ deliberately long description so its pane overflows a small terminal —
 open it and scroll (`↑`/`↓` or `j`/`k`), or page it from the list with
 `pgup`/`pgdn` without opening it at all.
 
-**Tree view walkthrough**: press `t` to switch from the flat list to tree
-mode. The registry host (`localhost:5050`) becomes the root node and is
-elided from display because exactly one registry resolves (single-registry
-scope); children group by path segment (`grimoire/skills`, `grimoire/rules`, etc.). Press
-`→` on a group to expand it, `←` to collapse, `Enter` to toggle.
-Try `space` on the `grimoire/skills` group — every descendant leaf gets
+**Tree view walkthrough**: run this one with a single registry forced so the
+root elides — `grim tui --registry localhost:5050/grimoire`. (Bootstrap now
+writes a global two-registry config, and global `[[registries]]` union into
+every project's browse set, so a bare `grim tui` from `project/` resolves
+BOTH registries and shows two roots. Only the `--registry` flag collapses the
+browse to exactly one, which is what makes the lone root elide.) Press `t` to
+switch from the flat list to tree mode. The registry host
+(`localhost:5050/grimoire`) becomes the root node and is elided from display
+because exactly one registry resolves; children group by path segment
+(`skills`, `rules`, etc.). Press `→` on a group to expand it, `←` to collapse,
+`Enter` to toggle.
+Try `space` on the `skills` group — every descendant leaf gets
 marked; the group glyph turns filled. Press `i` to batch-install the whole
 subtree. Press `t` again to return to the flat list — marks survive the
 toggle. Add `tree_separators = ["/", "-"]` to `test/manual/project/grimoire.toml`
 under `[options.tui]` to see `code-reviewer` and `commit-helper` split
 further at the hyphen.
+
+Note the `playbooks/ci/release` node sitting beside `skills`/`rules`: it is a
+single **folded** node, not three nested groups. `cut-release` is the only
+package in that chain, so `playbooks` → `ci` → `release` (each a single-child
+group) join into one row — the "longest empty prefix" / compact-folders
+fold. Expand it (`→`) and the lone `cut-release` leaf sits directly under the
+joined node. This is the dedicated check in scenario 1c.
 
 ### 1b. Deprecated package highlight (issue #15)
 
@@ -161,6 +176,43 @@ grim add localhost:5050/grimoire/skills/old-reviewer:1
 A current package (e.g. `code-reviewer`) carries no marker, a `null`
 `deprecated` JSON field, and warns on neither search nor add — the contrast
 is the point.
+
+### 1c. TUI tree-fold ("longest empty prefix") check
+
+`cut-release` is published ALONE under the deep path
+`localhost:5050/grimoire/playbooks/ci/release/cut-release`. It is the only
+package in that chain, so each of `playbooks`, `ci`, `release` has exactly one
+child — the tree joins them into ONE folded node (VS Code "compact folders").
+The namespace level directly above the package is kept, so the lone
+`cut-release` leaf is NOT absorbed.
+
+`grim tui` (needs a TTY). Two ways to see it:
+
+```sh
+# A) Global two-registry config (bootstrap wrote it): two roots, fold under primary.
+grim tui --global
+#   localhost:5050/grimoire
+#     playbooks/ci/release        <- ONE folded node (not three nested groups)
+#       cut-release               <- the single leaf, kept above the package
+#     skills/ rules/ agents/ bundles/   <- siblings, each branches (no fold)
+#   localhost:5051/tools          <- second root, not elided
+
+# B) Single registry forced: root elides, the fold node stands alone.
+grim tui --registry localhost:5050/grimoire
+```
+
+Verify:
+
+- **One folded node, not a chain** (issue #19): the row reads
+  `playbooks/ci/release` as a single `/`-joined label, not three separate
+  expandable groups. Press `→` once and the `cut-release` leaf appears directly
+  beneath it.
+- **The leaf is never absorbed**: the join stops at `release` because its only
+  child (`cut-release`) is a leaf — `playbooks/ci/release/cut-release` would be
+  wrong (one namespace level is always kept above a package).
+- **Siblings don't fold**: `skills`, `rules`, `agents`, `bundles` each branch
+  (2+ children), so they stay as their own single-segment groups next to the
+  folded `playbooks/ci/release`.
 
 ### 2. Lock & install into a client
 
@@ -371,8 +423,11 @@ cat grimoire.toml grimoire.lock
 
 ### 7. Global scope
 
+`bootstrap.sh` already wrote the global config (`$GRIM_HOME/grimoire.toml`
+with the two registries), so skip `grim --global init` here — it would error
+`config already exists` (exit 64) on the existing file. Just add + install:
+
 ```sh
-grim --global init
 grim --global add localhost:5050/grimoire/rules/security-baseline:1
 grim --global install
 ```

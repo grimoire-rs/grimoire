@@ -187,7 +187,27 @@ release2() { # <path> <repo-subpath> <name> <version> [forced-kind]
 release2 "$CATALOG/skills/commit-helper" skills commit-helper 1.0.0
 release2 "$CATALOG/rules/security-baseline.md" rules security-baseline 1.0.0
 
-log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*"
+# 7. DEEP-NESTED SOLO PACKAGE (tree-fold / "longest empty prefix" demo).
+#    `cut-release` is the ONLY package under the `playbooks/ci/release/`
+#    chain. Each of those segments has exactly one child, so the TUI tree
+#    joins playbooks→ci→release into ONE folded node with `cut-release` as
+#    its single leaf. `release()` builds `$REGISTRY/$NS/<subpath>/<name>:<ver>`,
+#    so the subpath here is the multi-segment `playbooks/ci/release`.
+release "$CATALOG/skills/cut-release" "playbooks/ci/release" cut-release 1.0.0
+
+# 8. GLOBAL CONFIG (two [[registries]] via the `grim config` command).
+#    Writes $GRIM_HOME/grimoire.toml so `grim search --global` / `grim tui
+#    --global` browse BOTH registries from anywhere — no need to cd into
+#    project-multi/. The rig OWNS this ephemeral global config (teardown wipes
+#    .grim-home), so delete it first: a re-bootstrap then yields EXACTLY the
+#    two registries below — deterministic regardless of any prior .grim-home
+#    state — and the first `registry add` recreates the file from scratch.
+log "writing global config ($GRIM_HOME/grimoire.toml) with two registries"
+rm -f "$GRIM_HOME/grimoire.toml"
+"$GRIM" config --global registry add primary --url "$REGISTRY/$NS" --default
+"$GRIM" config --global registry add tools --url "$REGISTRY2/$NS2"
+
+log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*; deep-fold solo package at $REGISTRY/$NS/playbooks/ci/release/cut-release"
 cat >&2 <<EOF
 
 Next:
@@ -205,6 +225,18 @@ Multi-registry demo (browse-all-declared across two registries):
   grim install && grim status       # all 'installed' from across both registries
   # alias form is a 'grim add' convenience:
   grim add tools/skills/commit-helper:1   # 'tools' -> localhost:5051/tools/...
+
+Global config (two registries, browse from anywhere — no project needed):
+  grim config --global registry list      # primary (5050, default) + tools (5051)
+  grim search --global                     # browses BOTH from \$GRIM_HOME/grimoire.toml
+  grim tui --global                        # same, interactive
+
+Tree-fold demo (single-child chain collapses to one node):
+  grim tui --global                        # under localhost:5050/grimoire the
+                                           #   playbooks/ci/release chain folds to
+                                           #   ONE node, leaf 'cut-release'
+  grim tui --registry localhost:5050/grimoire   # single registry -> root elided,
+                                                #   fold node stands alone
 
 Outdated / update demo (lock at an OLD pin, then roll forward):
   # the project pins code-reviewer at the floating :1, so 'grim lock' here
