@@ -154,7 +154,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: None,
+            registry: Vec::new(),
         }
     }
 

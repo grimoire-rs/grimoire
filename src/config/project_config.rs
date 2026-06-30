@@ -1187,7 +1187,7 @@ default = true
         // When resolved: the array is authoritative, legacy is folded in only
         // when no `[[registries]]` are present (step 3 of resolve_registries).
         let set = resolve_registries(
-            None,
+            &[],
             &cfg.registries,
             cfg.options.default_registry.as_deref(),
             &[],

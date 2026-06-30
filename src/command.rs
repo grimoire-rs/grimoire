@@ -124,8 +124,8 @@ pub fn global_config_registries(
 /// Assemble the ordered registry browse set for a resolved scope.
 ///
 /// The single seam `search` / `tui` / `mcp` call to get the multi-registry
-/// set: the `--registry` flag (`ctx.registry_flag`) collapses to exactly one
-/// registry; otherwise the scope's `[[registries]]` are authoritative; when
+/// set: the `--registry` flag(s) (`ctx.registry_flags`) collapse to exactly
+/// those registries; otherwise the scope's `[[registries]]` are authoritative; when
 /// no `[[registries]]` exist the legacy single-default chain
 /// (`$GRIM_DEFAULT_REGISTRY` > project `[options].default_registry` > global >
 /// fallback) applies — all via [`crate::config::resolve_registries`] so the
@@ -137,7 +137,7 @@ pub fn registries_for_scope(
     let global_registries = global_config_registries(ctx, scope.scope);
     let global_default = global_config_default(ctx, scope.scope);
     crate::config::resolve_registries(
-        ctx.registry_flag(),
+        ctx.registry_flags(),
         &scope.registries,
         scope.options.default_registry.as_deref(),
         &global_registries,
@@ -172,8 +172,8 @@ pub fn primary_registry_for_scope(ctx: &crate::context::Context, scope: &scope_r
 ///
 /// Precedence (mirrors [`crate::config::resolve_registries`] with empty project
 /// tiers):
-/// 1. `--registry` flag (`ctx.registry_flag`): collapses to exactly one registry.
-///    Only the flag collapses; `$GRIM_DEFAULT_REGISTRY` is a tier-3 default.
+/// 1. `--registry` flag(s) (`ctx.registry_flags`): collapse to exactly those
+///    registries. Only the flag collapses; `$GRIM_DEFAULT_REGISTRY` is a tier-3 default.
 /// 2. Global `[[registries]]` (first `default = true`, else first entry)
 /// 3. `$GRIM_DEFAULT_REGISTRY` (`ctx.registry_env`) → global
 ///    `[options].default_registry` → built-in [`FALLBACK_REGISTRY`]
@@ -182,7 +182,7 @@ pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String
     let global_regs = global_config_registries(ctx, crate::config::scope::ConfigScope::Project);
     let global_default = global_config_default(ctx, crate::config::scope::ConfigScope::Project);
     crate::config::registry_resolve::primary_registry(&crate::config::resolve_registries(
-        ctx.registry_flag(),
+        ctx.registry_flags(),
         &[],
         None,
         &global_regs,
@@ -274,7 +274,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: registry.map(str::to_string),
+            registry: registry.into_iter().map(str::to_string).collect(),
         }
     }
 

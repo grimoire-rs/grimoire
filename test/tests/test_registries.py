@@ -132,6 +132,66 @@ def test_search_multi_registry_browses_all_declared(
     )
 
 
+@pytest.mark.parametrize("style", ["comma", "repeat"])
+def test_search_multi_registry_flag_browses_all(
+    grim_at, project_dir: Path, registry: str, style: str
+) -> None:
+    """``--registry`` accepts several registries — comma-separated
+    (``--registry a,b``) or repeated (``--registry a --registry b``) — and
+    browses all of them at once, overriding any configured ``[[registries]]``.
+
+    Two namespaces simulate two registries (same pattern as the config test).
+    The project config declares only the FIRST namespace, so if the flag were
+    single-valued the second namespace's artifact would be missing — the test
+    proves the flag spans both.
+    """
+    ns1 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns2 = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    make_artifact(
+        f"{ns1}/flag-skill-ns1",
+        "skill",
+        {"flag-skill-ns1/SKILL.md": "---\nname: flag-skill-ns1\ndescription: from ns1\n---\n# S1\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Flag skill ns1"},
+    )
+    make_artifact(
+        f"{ns2}/flag-rule-ns2",
+        "rule",
+        {"flag-rule-ns2.md": "---\npaths: ['**/*.rs']\n---\n# R2\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Flag rule ns2"},
+    )
+
+    # Config declares only ns1; the flag must override and span both.
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\nurl = "{REGISTRY_HOST}/{ns1}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    reg1 = f"{REGISTRY_HOST}/{ns1}"
+    reg2 = f"{REGISTRY_HOST}/{ns2}"
+    if style == "comma":
+        flag_args = ["--registry", f"{reg1},{reg2}"]
+    else:
+        flag_args = ["--registry", reg1, "--registry", reg2]
+
+    result = runner.run("--format", "json", "search", *flag_args, "--refresh", check=False)
+    assert result.returncode == 0, (
+        f"multi-registry --registry ({style}) must exit 0, got {result.returncode}; "
+        f"stderr: {result.stderr}"
+    )
+    rows = json.loads(result.stdout)
+    repos = [r.get("repo", "") for r in rows]
+
+    assert any("flag-skill-ns1" in repo for repo in repos), (
+        f"--registry ({style}) must browse the first registry, got repos: {repos}"
+    )
+    assert any("flag-rule-ns2" in repo for repo in repos), (
+        f"--registry ({style}) must browse the second registry too, got repos: {repos}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — qualified alias reference resolves via [[registries]] alias
 # ---------------------------------------------------------------------------

@@ -131,7 +131,7 @@ mod tests {
         let cfg =
             crate::config::project_config::ProjectConfig::from_toml_str(&body).expect("rendered config must parse");
         let set = resolve_registries(
-            None,
+            &[],
             &cfg.registries,
             cfg.options.default_registry.as_deref(),
             &[],
@@ -159,7 +159,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: Some("flag.example".to_string()),
+            registry: vec!["flag.example".to_string()],
         };
         let ctx = Context::new(&opts);
         assert_eq!(snapshot_registry(&ctx, None), Some("flag.example"));

@@ -904,7 +904,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: registry.map(str::to_string),
+            registry: registry.into_iter().map(str::to_string).collect(),
         }
     }
 

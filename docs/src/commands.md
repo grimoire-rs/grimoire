@@ -16,7 +16,7 @@ These apply to every subcommand:
 | `--format <plain\|json>` | Output format for structured results (default `plain`). |
 | `--global` | Operate on the global scope instead of the discovered project. |
 | `--config <path>` | Use an explicit project config file. |
-| `--registry <ref>` | Default registry for short identifiers. |
+| `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
 | `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
 
@@ -257,7 +257,9 @@ substring against repository, summary, description, and keywords; an empty
 query lists the whole catalog. When `[[registries]]` are configured, all
 of them are browsed and the results are flattened into one table.
 `--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
-browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` is only the
+browse to exactly the registries it names — repeatable and comma-separated
+(`--registry a,b` or `--registry a --registry b`), first value is primary.
+`GRIM_DEFAULT_REGISTRY` is only the
 short-id resolution default — it does not restrict the browse set when
 `[[registries]]` is configured.
 
@@ -339,7 +341,8 @@ When exactly one registry resolves, its root prefix is elided to keep names
 short; with several, the roots are ordered by resolution precedence, and a
 registry that is empty or offline still appears as an empty `0/0` root so the
 full configured set stays visible. An explicit `--registry` flag collapses the
-browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` is only the
+browse to exactly the registries it names — repeatable and comma-separated
+for several at once. `GRIM_DEFAULT_REGISTRY` is only the
 short-id resolution default — it does not collapse the browse set when
 `[[registries]]` is configured; in that case both `grim search` and `grim tui`
 browse all declared registries regardless of whether the env var is set.

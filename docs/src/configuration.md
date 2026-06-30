@@ -93,7 +93,8 @@ When the array is present it becomes the authoritative browse set for
 [`grim search`](./commands.md#search), the [MCP server](./commands.md#mcp), and
 the [TUI](./commands.md#tui) — `grim tui` browses all declared registries, one
 collapsible root per registry. An explicit `--registry` flag still collapses the
-browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` does **not**
+browse to exactly the registries it names — repeatable and comma-separated
+(`--registry a,b`) for several at once. `GRIM_DEFAULT_REGISTRY` does **not**
 collapse the browse set — it is the short-id resolution default and only
 applies as the single-registry fallback when no `[[registries]]` array is
 declared.
@@ -307,7 +308,8 @@ flag → project `[[registries]]` → global `[[registries]]` → single default
 (`GRIM_DEFAULT_REGISTRY` → project `[options].default_registry` → global
 `[options].default_registry` → built-in `grim.ocx.sh`). The single-default tier
 applies only when no `[[registries]]` array is declared anywhere. Only the
-`--registry` flag collapses browse to one registry; `GRIM_DEFAULT_REGISTRY` does
+`--registry` flag collapses browse — to exactly the registries it names
+(repeatable / comma-separated); `GRIM_DEFAULT_REGISTRY` does
 not restrict the browse set when `[[registries]]` is configured.
 
 **Short-id resolution** (expanding a bare `name:tag` to a full registry URL):

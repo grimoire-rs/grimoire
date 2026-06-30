@@ -45,11 +45,13 @@ fn scope_label(scope: ConfigScope) -> &'static str {
 /// `grim tui` arguments.
 #[derive(Debug, Args)]
 pub struct TuiArgs {
-    /// Registry to browse. Precedence (highest first): this flag (or the
-    /// global `--registry`), then `GRIM_DEFAULT_REGISTRY`, then project config
-    /// `default_registry`, then global config.
-    #[arg(long)]
-    pub registry: Option<String>,
+    /// Registries to browse; repeatable and comma-separated (`--registry a,b`
+    /// or `--registry a --registry b`) to browse several at once. Precedence
+    /// (highest first): this flag (or the global `--registry`), then
+    /// `GRIM_DEFAULT_REGISTRY`, then project config `default_registry`, then
+    /// global config.
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub registry: Vec<String>,
 
     /// Force a catalog rebuild even if the cache is fresh (governs the
     /// initial load only; the interactive `r` key always forces a reload).
@@ -238,7 +240,7 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
 /// configured only `[[registries]]` in their global config and runs `grim tui`
 /// from a directory without a project config gets the right registry.
 fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
-    if let Some(r) = &args.registry {
+    if let Some(r) = args.registry.first() {
         return r.clone();
     }
     match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
@@ -259,8 +261,8 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
 /// `grim search` / `grim mcp` seam (`catalog_service::load_catalog`).
 ///
 /// Behavior (D-RESOLVE):
-/// - An explicit `--registry` flag collapses to exactly one registry, preserving
-///   the historical single-registry behavior for explicit overrides.
+/// - An explicit `--registry` flag (repeatable / comma-separated) collapses to
+///   exactly those registries (in order, deduped, first is primary).
 /// - Otherwise, `[[registries]]` is authoritative; the legacy scalar
 ///   `default_registry` and the global config tiers are folded in via
 ///   [`super::registries_for_scope`] — the same seam `grim search` uses.
@@ -270,13 +272,18 @@ fn resolve_registries_for_tui(
     args: &TuiArgs,
     scope: &scope_resolution::ResolvedScope,
 ) -> Vec<ResolvedRegistry> {
-    if let Some(r) = &args.registry {
-        // Explicit --registry collapses to a single entry (historical behavior).
-        return vec![ResolvedRegistry {
-            url: r.clone(),
-            alias: None,
-            is_default: true,
-        }];
+    if !args.registry.is_empty() {
+        // Explicit --registry collapses to exactly those registries (in order,
+        // deduped, first is primary).
+        return crate::config::resolve_registries(
+            &args.registry,
+            &[],
+            None,
+            &[],
+            None,
+            crate::command::FALLBACK_REGISTRY,
+            None,
+        );
     }
     super::registries_for_scope(ctx, scope)
 }
@@ -311,7 +318,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: None,
+            registry: Vec::new(),
         }
     }
 
@@ -319,7 +326,7 @@ mod tests {
     fn explicit_registry_wins() {
         let ctx = Context::new(&opts());
         let a = TuiArgs {
-            registry: Some("ghcr.io".to_string()),
+            registry: vec!["ghcr.io".to_string()],
             refresh: false,
             global: false,
             config: None,
@@ -338,7 +345,7 @@ mod tests {
         std::fs::write(&cfg, "[options]\n").unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let a = TuiArgs {
-            registry: None,
+            registry: Vec::new(),
             refresh: false,
             global: false,
             config: Some(cfg),
@@ -371,7 +378,7 @@ mod tests {
         // scope resolution to error (no file at that path ⇒ Err branch).
         let missing_cfg = tmp.path().join("no-such/grimoire.toml");
         let a = TuiArgs {
-            registry: None,
+            registry: Vec::new(),
             refresh: false,
             global: false,
             config: Some(missing_cfg),
@@ -384,7 +391,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let a = TuiArgs {
-            registry: None,
+            registry: Vec::new(),
             refresh: false,
             global: true,
             config: None,
@@ -402,7 +409,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let a = TuiArgs {
-            registry: None,
+            registry: Vec::new(),
             refresh: false,
             global: false,
             config: Some(tmp.path().join("nope/grimoire.toml")),

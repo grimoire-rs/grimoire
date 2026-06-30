@@ -45,7 +45,7 @@ impl GrimMcpServer {
             refresh: args.refresh.unwrap_or(false),
             // Locked to the server's configured registry set — the tool exposes
             // no registry override (SSRF / CWE-918; see `SearchToolArgs`).
-            registry: None,
+            registry: Vec::new(),
             global: self.inner.global,
             config: self.inner.config.clone(),
         };

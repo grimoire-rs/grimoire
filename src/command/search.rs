@@ -10,9 +10,10 @@
 //! AND of terms over kind / repo / summary / description / keywords, plus
 //! bare kind keywords — `skill`/`rule`/`bundle` and plurals — acting as kind
 //! filters; an empty query lists everything), and badged against the scope's
-//! lock + install-state. An explicit `--registry` collapses the browse set
-//! to exactly that registry; otherwise the declared `[[registries]]` (or the
-//! single default) are all browsed and flattened into one table.
+//! lock + install-state. An explicit `--registry` (repeatable /
+//! comma-separated) collapses the browse set to exactly those registries;
+//! otherwise the declared `[[registries]]` (or the single default) are all
+//! browsed and flattened into one table.
 //!
 //! State is data: `search` always exits 0, even with no results. Offline
 //! degrades — the catalog layer serves whatever is cached and never errors
@@ -48,11 +49,13 @@ pub struct SearchArgs {
     #[arg(long)]
     pub refresh: bool,
 
-    /// Registry to search. Precedence (highest first): this flag (or the
-    /// global `--registry`), then `GRIM_DEFAULT_REGISTRY`, then project config
-    /// `default_registry`, then global config.
-    #[arg(long)]
-    pub registry: Option<String>,
+    /// Registries to search; repeatable and comma-separated (`--registry a,b`
+    /// or `--registry a --registry b`) to browse several at once. Precedence
+    /// (highest first): this flag (or the global `--registry`), then
+    /// `GRIM_DEFAULT_REGISTRY`, then project config `default_registry`, then
+    /// global config.
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub registry: Vec<String>,
 
     /// Search the global scope's lock/state for badges instead of the
     /// discovered project.
@@ -158,7 +161,8 @@ fn warn_unsupported_browse(offline: bool, result_empty: bool) -> bool {
 /// Resolve the registry browse set and best-effort badge inputs for the
 /// search. The registry set spans every configured `[[registries]]` (or the
 /// single default), so `grim search` browses all of them at once; an
-/// explicit `--registry` collapses the set to exactly that registry. Badge
+/// explicit `--registry` (repeatable / comma-separated) collapses the set to
+/// exactly those registries. Badge
 /// derivation is best-effort — a missing project config just means "nothing
 /// installed" rather than a hard failure.
 fn resolve_scope(
@@ -172,14 +176,11 @@ fn resolve_scope(
     Vec<ClientTarget>,
 ) {
     // An explicit `--registry` on the command collapses the browse set to
-    // exactly that registry (historical single-registry `--registry`
-    // behavior), independent of any `[[registries]]` declared in config.
-    if let Some(r) = &args.registry {
-        let registries = vec![crate::config::ResolvedRegistry {
-            url: r.clone(),
-            alias: None,
-            is_default: true,
-        }];
+    // exactly those registries (in order, deduped, first is primary),
+    // independent of any `[[registries]]` declared in config.
+    if !args.registry.is_empty() {
+        let registries =
+            crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_REGISTRY, None);
         let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
         return (registries, lock, state, roots, active);
     }
@@ -190,7 +191,7 @@ fn resolve_scope(
         // against, treat every client as active (no output is filtered).
         // Only the flag collapses the set; env is the tier-3 head.
         let registries = crate::config::resolve_registries(
-            ctx.registry_flag(),
+            ctx.registry_flags(),
             &[],
             None,
             &[],
@@ -248,7 +249,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: None,
+            registry: Vec::new(),
         }
     }
 
@@ -256,7 +257,7 @@ mod tests {
         SearchArgs {
             query: None,
             refresh: false,
-            registry: None,
+            registry: Vec::new(),
             global: false,
             config: None,
         }
@@ -282,7 +283,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
-        a.registry = Some("ghcr.io".to_string());
+        a.registry = vec!["ghcr.io".to_string()];
         let (registries, ..) = resolve_scope(&ctx, &a);
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, "ghcr.io");

@@ -79,7 +79,9 @@ deduped, first occurrence wins.
 Browse-set precedence (what `grim search`, `grim tui`, and `grim mcp`
 browse):
 
-1. `--registry` flag — collapses browse to exactly that one registry.
+1. `--registry` flag — collapses browse to exactly the registries it names.
+   Repeatable and comma-separated (`--registry a,b` or `--registry a
+   --registry b`); the first value is the primary (short-id default).
 2. `[[registries]]` (project, then global) — authoritative when present;
    `GRIM_DEFAULT_REGISTRY` does **not** collapse or restrict this set.
 3. Single-default fallback (no `[[registries]]` declared): `GRIM_DEFAULT_REGISTRY`
@@ -175,7 +177,8 @@ match fields and kind-filter keywords with `grim search --help`. When
 `[[registries]]` are configured, all
 of them are browsed and flattened into one table. The catalog is cached
 under `$GRIM_HOME` — pass `--refresh` to rebuild it from the registry,
-`--registry` to collapse the browse to exactly that one registry. Plain
+`--registry` to collapse the browse to exactly the registries it names
+(repeatable / comma-separated for several at once). Plain
 output shows the one-line summary (truncated to the terminal); piped
 output and `--format json` keep the full description, and JSON adds a
 `repository` URL field for tooling.
@@ -199,7 +202,8 @@ characters are configurable via `[options.tui]` in `grimoire.toml`
 (`default_view`, `group_by_type`, `tree_separators`). When `[[registries]]`
 are configured, the TUI browses all of them, one collapsible root per
 registry; with exactly one it elides that root. A `--registry` flag collapses
-the browse to exactly that one registry. `GRIM_DEFAULT_REGISTRY` does **not**
+the browse to exactly the registries it names (repeatable /
+comma-separated). `GRIM_DEFAULT_REGISTRY` does **not**
 collapse the browse set — it is only the short-id resolution default and the
 single-registry fallback when no `[[registries]]` is declared. When the active
 scope has no `grimoire.toml` yet it offers to create one before starting via

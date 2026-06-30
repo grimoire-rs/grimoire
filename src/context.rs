@@ -33,8 +33,10 @@ use crate::store::{BlobStore, GrimPaths};
 // subsystem so its shape is driven by real call sites.
 pub struct Context {
     grim_home: PathBuf,
-    /// The `--registry` flag value only (highest registry precedence).
-    registry_flag: Option<String>,
+    /// The `--registry` flag values only (highest registry precedence), in
+    /// the order given. Multiple values browse several registries at once;
+    /// the first is the default short identifiers expand against.
+    registry_flag: Vec<String>,
     /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
     registry_env: Option<String>,
     offline: bool,
@@ -95,10 +97,19 @@ impl Context {
         &self.grim_home
     }
 
-    /// The `--registry` flag value, if given. Highest registry precedence —
-    /// the precedence helper orders this above env and config.
+    /// The first `--registry` flag value, if any. Highest registry
+    /// precedence — the precedence helper orders this above env and config.
+    /// This is the single-registry view used for short-id expansion and the
+    /// single-target commands (`login` / `init` / `publish`); the full set is
+    /// [`Self::registry_flags`].
     pub fn registry_flag(&self) -> Option<&str> {
-        self.registry_flag.as_deref()
+        self.registry_flag.first().map(String::as_str)
+    }
+
+    /// All `--registry` flag values, in order. The browse set (`search` /
+    /// `tui` / `mcp`) collapses to exactly these when non-empty.
+    pub fn registry_flags(&self) -> &[String] {
+        &self.registry_flag
     }
 
     /// `$GRIM_DEFAULT_REGISTRY`, if set.
@@ -111,7 +122,7 @@ impl Context {
     /// CLI-arg-first then this) — config defaults are layered in by
     /// `command::resolve_default_registry`, not here.
     pub fn default_registry(&self) -> Option<&str> {
-        self.registry_flag.as_deref().or(self.registry_env.as_deref())
+        self.registry_flag().or(self.registry_env.as_deref())
     }
 
     /// Whether all network access is disabled for this invocation.
@@ -186,7 +197,7 @@ impl Context {
     pub fn hermetic(grim_home: std::path::PathBuf) -> Self {
         Self {
             grim_home,
-            registry_flag: None,
+            registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
             test_access: None,
@@ -206,7 +217,7 @@ impl Context {
     pub fn with_access(grim_home: std::path::PathBuf, access: impl OciAccess + 'static) -> Self {
         Self {
             grim_home,
-            registry_flag: None,
+            registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
             test_access: Some(Arc::new(access)),
@@ -223,7 +234,7 @@ impl Context {
     ) -> Self {
         Self {
             grim_home,
-            registry_flag: Some(registry_flag),
+            registry_flag: vec![registry_flag],
             registry_env: None,
             offline: false,
             test_access: Some(Arc::new(access)),
@@ -243,7 +254,7 @@ mod tests {
             log_level: None,
             config: None,
             global: false,
-            registry: None,
+            registry: Vec::new(),
         }
     }
 
@@ -266,7 +277,7 @@ mod tests {
     #[test]
     fn cli_registry_overrides_and_grim_home_resolves() {
         let mut o = opts();
-        o.registry = Some("ghcr.io/acme".to_string());
+        o.registry = vec!["ghcr.io/acme".to_string()];
         let ctx = Context::new(&o);
         assert_eq!(ctx.default_registry(), Some("ghcr.io/acme"));
         assert!(ctx.grim_home().is_absolute() || ctx.grim_home().ends_with(".grimoire"));
@@ -279,9 +290,20 @@ mod tests {
         // here — that is `unsafe` and the crate forbids it; the env accessor is
         // exercised structurally.)
         let mut o = opts();
-        o.registry = Some("ghcr.io/acme".to_string());
+        o.registry = vec!["ghcr.io/acme".to_string()];
         let ctx = Context::new(&o);
         assert_eq!(ctx.registry_flag(), Some("ghcr.io/acme"));
         assert_eq!(ctx.default_registry(), Some("ghcr.io/acme"));
+    }
+
+    #[test]
+    fn multiple_registry_flags_surface_all_with_first_as_default() {
+        let mut o = opts();
+        o.registry = vec!["a.example".to_string(), "b.example".to_string()];
+        let ctx = Context::new(&o);
+        // Full browse set preserved in order; first value is the single default.
+        assert_eq!(ctx.registry_flags(), &["a.example", "b.example"]);
+        assert_eq!(ctx.registry_flag(), Some("a.example"));
+        assert_eq!(ctx.default_registry(), Some("a.example"));
     }
 }

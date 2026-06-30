@@ -60,9 +60,12 @@ pub struct GlobalOptions {
     #[arg(long, global = true)]
     pub global: bool,
 
-    /// Default registry for short identifiers without an explicit registry.
-    #[arg(long, global = true)]
-    pub registry: Option<String>,
+    /// Registry override for short identifiers and the browse set.
+    /// Repeatable and comma-separated to span several registries at once
+    /// (`--registry a,b` or `--registry a --registry b`); the first value is
+    /// the default short identifiers expand against.
+    #[arg(long, global = true, value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub registry: Vec<String>,
 }
 
 #[cfg(test)]

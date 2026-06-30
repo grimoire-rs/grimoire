@@ -709,7 +709,7 @@ tree_separators_typo = 1
         assert_eq!(cfg.registries.len(), 1);
         // Resolution: the array is authoritative, legacy is ignored for browse.
         let set_resolved = crate::config::resolve_registries(
-            None,
+            &[],
             &cfg.registries,
             cfg.options.default_registry.as_deref(),
             &[],
