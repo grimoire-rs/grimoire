@@ -220,6 +220,15 @@ its descendants — `↑` when any descendant is outdated, `✱` when any is
 locally modified, and so on — so a collapsed tree still surfaces what needs
 attention.
 
+**Compact namespaces** — a run of namespace segments that never branches
+collapses into one row whose label is the joined path, the same idea as [VS
+Code's "compact folders"][vscode-compact] folding `a/b/c` when each level
+holds a single child. The join merges namespace groups into each other only —
+never a namespace into the package row directly below it — and stops where the
+path branches, so a registry holding only `acme/team/skills/lint` and
+`acme/team/skills/fmt` shows `acme/team/skills` as one group above the `lint`
+and `fmt` leaves. A registry root always keeps its own row.
+
 **Bundle member expansion** — when the selected row is a bundle leaf, pressing
 `→` (or `Enter`) reveals its members as indented child rows badged
 `(via bundle)`. Member rows are read-only: they reflect what a bundle
@@ -478,6 +487,7 @@ the global scope rather than the discovered project:
 [options-tui]: ./configuration.md#options-tui
 
 <!-- external -->
+[vscode-compact]: https://code.visualstudio.com/docs/getstarted/userinterface
 [mcp-spec]: https://spec.modelcontextprotocol.io/
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
 [opencode]: https://opencode.ai/

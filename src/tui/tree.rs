@@ -451,6 +451,15 @@ impl Trie {
 pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tree {
     let sep_chars = normalize_separators(&opts.separators);
     let mut trie = Trie::default();
+    // `(depth, key)` of structural nodes that must keep their own row even with
+    // a single child, so the issue #19 path-compression never absorbs them:
+    // registry roots (the alias + health anchor) and type groups (the
+    // `group_by_type` category boundary). The depth qualifier matters because
+    // `into_nodes` mints cumulative full-path keys, so a depth-1 namespace node
+    // can byte-equal a depth-0 registry-root key (e.g. registries "ghcr.io" and
+    // "ghcr.io/acme" coexisting) — keying on the string alone would wrongly
+    // exempt that namespace from compression.
+    let mut exempt: BTreeSet<(usize, String)> = BTreeSet::new();
 
     for &i in filtered {
         let Some(r) = rows.get(i) else {
@@ -466,13 +475,28 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         let (mut groups, leaf, registry_elided) =
             segments(&r.registry, &r.repository, opts.default_registry.as_deref(), &sep_chars);
 
+        // A kept (non-elided) registry root anchors the alias + health line.
+        // Registry roots are always depth 0.
+        if !registry_elided {
+            exempt.insert((0, r.registry.clone()));
+        }
+
         // Insert a type-level group between the registry root and the path
         // segments when `group_by_type` is enabled. The insertion point is:
         //   - index 0 when the registry was elided (type group is the new root)
         //   - index 1 when the registry was kept (type group sits after the host)
         if opts.group_by_type {
-            let insert_at = if registry_elided { 0 } else { 1 };
-            groups.insert(insert_at, r.kind.clone());
+            // The type-group key matches `into_nodes`: the bare kind when the
+            // registry is elided (type sits at the root, depth 0), else
+            // `registry/kind` (the type sits under the registry root, depth 1).
+            let type_depth = if registry_elided { 0 } else { 1 };
+            let type_key = if registry_elided {
+                r.kind.clone()
+            } else {
+                format!("{}/{}", r.registry, r.kind)
+            };
+            exempt.insert((type_depth, type_key));
+            groups.insert(type_depth, r.kind.clone());
         }
 
         trie.insert(&groups, leaf, i, r.state);
@@ -492,6 +516,8 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         // not elided — so `or_default()` merges with any rows already inserted.
         for reg in &opts.registry_order {
             trie.groups.entry(reg.clone()).or_default();
+            // Seeded (possibly empty) registry roots are anchors too (depth 0).
+            exempt.insert((0, reg.clone()));
         }
     }
 
@@ -511,7 +537,72 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         });
     }
 
+    // Issue #19 ("longest empty prefix"): collapse single-child group chains so
+    // an unbranched namespace path renders as one joined row. Runs last so it
+    // sees the final root set and order; registry-root order is preserved
+    // because those keys are exempt and therefore never rewritten.
+    let roots = roots.into_iter().map(|node| compress(node, &exempt, 0)).collect();
+
     Tree { roots }
+}
+
+/// Path-compress single-child group chains (issue #19, "longest empty
+/// prefix"): a group whose only child is itself a group is joined with that
+/// child — the pair render as one row whose label is the `/`-joined path —
+/// repeated until the node branches (2+ children) or its sole child is a leaf.
+/// A group whose only child is a *leaf* is never joined: one namespace level
+/// is kept directly above a package (matching VS Code's "compact folders").
+///
+/// `exempt` holds the `(depth, key)` pairs of structural nodes that must keep
+/// their own row even with a single child — registry roots and type groups. An
+/// exempt node is never absorbed into its child, but its descendants still
+/// compress. The pair is keyed by depth so a namespace node cannot escape
+/// compression merely because its cumulative key string equals a registry
+/// root's key at a different depth.
+///
+/// `depth` is the depth the returned node occupies; the whole subtree is
+/// renumbered from here so indentation stays contiguous after a join (the
+/// `rows`/`rollup` aggregates are unchanged — a single-child parent and its
+/// absorbed child cover the exact same descendant leaves).
+fn compress(node: Node, exempt: &BTreeSet<(usize, String)>, depth: usize) -> Node {
+    match node {
+        Node::Leaf(leaf) => Node::Leaf(LeafNode { depth, ..leaf }),
+        Node::Group(mut g) => {
+            while !exempt.contains(&(depth, g.key.clone()))
+                && g.children.len() == 1
+                && matches!(g.children[0], Node::Group(_))
+            {
+                let Node::Group(child) = g.children.remove(0) else {
+                    unreachable!("the `while` guard checked the sole child is a Group")
+                };
+                g.label = format!("{}/{}", g.label, child.label);
+                // Adopt the deeper child's identity: the joined node renders the
+                // full path and keys the collapse-set by the deepest segment.
+                g.key = child.key;
+                g.children = child.children;
+            }
+            let GroupNode {
+                key,
+                label,
+                children,
+                rows,
+                rollup,
+                ..
+            } = g;
+            let children = children
+                .into_iter()
+                .map(|child| compress(child, exempt, depth + 1))
+                .collect();
+            Node::Group(GroupNode {
+                key,
+                label,
+                depth,
+                children,
+                rows,
+                rollup,
+            })
+        }
+    }
 }
 
 /// Flatten the tree to the visible lines: a preorder walk where a
@@ -862,7 +953,10 @@ mod tests {
         );
     }
 
-    // With `["/", "."]`: `acme/code.review` → groups `[acme, code]`, leaf `review`
+    // With `["/", "."]`: `acme/code.review` splits into groups `[acme, code]`
+    // + leaf `review`. The unbranched acme→code chain then path-compresses
+    // (issue #19) into one `acme/code` row above the `review` leaf; the split
+    // is still proven by the leaf being `review`, not `code.review`.
     #[test]
     fn dot_separator_splits_final_segment() {
         let opts = TreeBuildOptions {
@@ -876,16 +970,14 @@ mod tests {
         let s = shape(&t);
         assert_eq!(
             s,
-            vec![
-                ("acme".to_string(), 0, true),
-                ("code".to_string(), 1, true),
-                ("review".to_string(), 2, false),
-            ],
-            "dot separator must produce acme → code → review nesting"
+            vec![("acme/code".to_string(), 0, true), ("review".to_string(), 1, false),],
+            "dot splits code.review → review leaf; acme→code joins to 'acme/code'"
         );
     }
 
-    // With `["/", "-"]`: `acme/code-review` → groups `[acme, code]`, leaf `review`
+    // With `["/", "-"]`: `acme/code-review` splits into groups `[acme, code]`
+    // + leaf `review`; the unbranched acme→code chain path-compresses (#19)
+    // into one `acme/code` row. Split still proven by the `review` leaf.
     #[test]
     fn hyphen_separator_splits_when_configured() {
         let opts = TreeBuildOptions {
@@ -899,12 +991,8 @@ mod tests {
         let s = shape(&t);
         assert_eq!(
             s,
-            vec![
-                ("acme".to_string(), 0, true),
-                ("code".to_string(), 1, true),
-                ("review".to_string(), 2, false),
-            ],
-            "hyphen separator must nest acme → code → review when configured"
+            vec![("acme/code".to_string(), 0, true), ("review".to_string(), 1, false),],
+            "hyphen splits code-review → review leaf; acme→code joins to 'acme/code'"
         );
     }
 
@@ -1065,6 +1153,194 @@ mod tests {
         );
     }
 
+    // ── issue #19: join single-child group chains ("longest empty prefix") ────
+    //
+    // A group whose only child is itself a group is joined with that child
+    // into one row whose label is the `/`-joined path, repeated until the
+    // node branches (2+ children) or reaches a leaf. Registry roots and type
+    // groups are exempt. A group whose only child is a *leaf* is never joined
+    // (one namespace level is kept above a package — matching VS Code's
+    // "compact folders").
+
+    // Every package lives under a/b/c → the a→b→c chain is an empty prefix
+    // that joins into a single "a/b/c" group above the branch (foo, bar).
+    #[test]
+    fn join_single_child_group_chain_collapses_to_one_row() {
+        let rows = vec![
+            skill_row("reg/a/b/c/foo", ArtifactState::Installed),
+            skill_row("reg/a/b/c/bar", ArtifactState::NotInstalled),
+        ];
+        let t = build(&rows, &[0, 1], &opts_default(Some("reg")));
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("a/b/c".to_string(), 0, true),
+                ("bar".to_string(), 1, false),
+                ("foo".to_string(), 1, false),
+            ],
+            "single-child group chain a→b→c must join into one 'a/b/c' row"
+        );
+    }
+
+    // a→b is single-child (joins), but b branches into x and y — the join
+    // stops at the branch point and each branch keeps its own structure.
+    #[test]
+    fn join_stops_at_branch_point() {
+        let rows = vec![
+            skill_row("reg/a/b/x/foo", ArtifactState::Installed),
+            skill_row("reg/a/b/y/bar", ArtifactState::NotInstalled),
+        ];
+        let t = build(&rows, &[0, 1], &opts_default(Some("reg")));
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("a/b".to_string(), 0, true),
+                ("x".to_string(), 1, true),
+                ("foo".to_string(), 2, false),
+                ("y".to_string(), 1, true),
+                ("bar".to_string(), 2, false),
+            ],
+            "join must stop where the chain branches (b has two children)"
+        );
+    }
+
+    // "a" has exactly one child, but it is a *leaf* — the namespace level
+    // directly above a package is kept (group→leaf is never joined).
+    #[test]
+    fn join_never_absorbs_a_single_leaf_child() {
+        let rows = vec![skill_row("reg/a/foo", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        assert_eq!(
+            shape(&t),
+            vec![("a".to_string(), 0, true), ("foo".to_string(), 1, false)],
+            "a group with a single leaf child must not be joined"
+        );
+    }
+
+    // Multi-registry: the registry root is a display anchor (alias + health)
+    // and keeps its own row even though its only child is the a/b/c chain;
+    // the namespace chain *below* it still joins.
+    #[test]
+    fn join_exempts_registry_root() {
+        let rows = vec![
+            row2("ghcr.io/acme", "a/b/c/foo", "skill", ArtifactState::Installed),
+            row2("ghcr.io/acme", "a/b/c/bar", "skill", ArtifactState::NotInstalled),
+        ];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec!["ghcr.io/acme".to_string()],
+        };
+        let t = build(&rows, &[0, 1], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("ghcr.io/acme".to_string(), 0, true),
+                ("a/b/c".to_string(), 1, true),
+                ("bar".to_string(), 2, false),
+                ("foo".to_string(), 2, false),
+            ],
+            "registry root must not be absorbed; the namespace chain below it joins"
+        );
+    }
+
+    // group_by_type: the type group ('skill') is a category boundary and must
+    // not be joined into the namespace chain below it.
+    #[test]
+    fn join_exempts_type_group() {
+        let opts = TreeBuildOptions {
+            default_registry: Some("reg".to_string()),
+            group_by_type: true,
+            separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
+        };
+        let rows = vec![
+            row("reg/a/b/foo", "skill", ArtifactState::Installed),
+            row("reg/a/b/bar", "skill", ArtifactState::NotInstalled),
+        ];
+        let t = build(&rows, &[0, 1], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("skill".to_string(), 0, true),
+                ("a/b".to_string(), 1, true),
+                ("bar".to_string(), 2, false),
+                ("foo".to_string(), 2, false),
+            ],
+            "type group must stay separate; the namespace chain below it joins"
+        );
+    }
+
+    // The joined "a/b/c" node is keyed by the deepest path ("a/b/c"), so
+    // collapsing it hides every descendant and still tracks their row indices.
+    #[test]
+    fn join_keeps_deepest_key_so_collapse_is_stable() {
+        let rows = vec![
+            skill_row("reg/a/b/c/foo", ArtifactState::Installed),
+            skill_row("reg/a/b/c/bar", ArtifactState::NotInstalled),
+        ];
+        let t = build(&rows, &[0, 1], &opts_default(Some("reg")));
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("a/b/c".to_string());
+        let flat = flatten(&t, &collapsed, &BTreeSet::new(), &rows);
+        assert_eq!(flat.len(), 1, "collapsing the joined node hides all descendants");
+        match &flat[0] {
+            DisplayRow::Group {
+                key,
+                label,
+                rows: descendant_rows,
+                collapsed,
+                ..
+            } => {
+                assert_eq!(key, "a/b/c", "joined node is keyed by the deepest path");
+                assert_eq!(label, "a/b/c", "joined node renders the full joined path");
+                assert!(*collapsed, "the joined node reports itself collapsed");
+                assert_eq!(
+                    descendant_rows.len(),
+                    2,
+                    "both leaves stay tracked under the joined key"
+                );
+            }
+            other => panic!("expected a group, got {other:?}"),
+        }
+    }
+
+    // Regression (review WARN): the exempt set is depth-qualified, so a
+    // namespace node whose cumulative key byte-equals another registry's full
+    // name is NOT mistaken for an exempt registry root. Here registries
+    // "ghcr.io" and "ghcr.io/acme" coexist; under "ghcr.io" the package lives
+    // at acme/tools/foo, so the namespace node "acme" mints key
+    // "ghcr.io/acme" — identical to the second registry's root key but a depth
+    // below it. It must still path-compress with its single child "tools".
+    #[test]
+    fn join_namespace_key_colliding_with_a_registry_still_compresses() {
+        let rows = vec![
+            row2("ghcr.io", "acme/tools/foo", "skill", ArtifactState::Installed),
+            row2("ghcr.io", "acme/tools/bar", "skill", ArtifactState::NotInstalled),
+        ];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
+        };
+        let t = build(&rows, &[0, 1], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("ghcr.io".to_string(), 0, true),
+                ("acme/tools".to_string(), 1, true),
+                ("bar".to_string(), 2, false),
+                ("foo".to_string(), 2, false),
+                // The second registry is seeded empty (D-EMPTY) and stays a
+                // distinct depth-0 root — never confused with the namespace.
+                ("ghcr.io/acme".to_string(), 0, true),
+            ],
+            "a namespace key colliding with a registry root (one depth below) must still join"
+        );
+    }
+
     // `group_by_type = true` inserts a type-group level between registry
     // root and path segments.
     #[test]
@@ -1122,8 +1398,10 @@ mod tests {
     }
 
     // `group_by_type = true` combined with `["/", "-"]` separators:
-    // `reg/acme/code-review` → type group `skill` → path group `acme` →
-    // sub-group `code` → leaf `review`.
+    // `reg/acme/code-review` → type group `skill` → path groups `acme`, `code`
+    // → leaf `review`. The type group is exempt from joining (#19), but the
+    // unbranched acme→code namespace chain below it path-compresses into one
+    // `acme/code` row. Final shape: skill → acme/code → review.
     #[test]
     fn group_by_type_with_hyphen_separator_produces_correct_nesting() {
         let opts = TreeBuildOptions {
@@ -1135,23 +1413,25 @@ mod tests {
         let rows = vec![row("reg/acme/code-review", "skill", ArtifactState::Installed)];
         let t = build(&rows, &[0], &opts);
         let s = shape(&t);
-        // Expected nesting: skill (type) → acme (org) → code (sub) → review (leaf)
-        // The registry "reg" is elided (it equals default_registry).
-        // With group_by_type: type group inserted at index 0 (registry was elided).
-        // So groups: [skill, acme, code], leaf: review
+        // The registry "reg" is elided (it equals default_registry); with
+        // group_by_type the type group is inserted at index 0. The namespace
+        // groups [acme, code] then join (#19) into "acme/code".
         assert_eq!(
             s.len(),
-            4,
-            "must produce 4 display rows (3 groups + 1 leaf); got: {s:?}"
+            3,
+            "must produce 3 display rows (type + joined namespace + leaf); got: {s:?}"
         );
-        assert_eq!(s[0], ("skill".to_string(), 0, true), "depth-0 group must be the type");
-        assert_eq!(s[1], ("acme".to_string(), 1, true), "depth-1 group must be the org");
         assert_eq!(
-            s[2],
-            ("code".to_string(), 2, true),
-            "depth-2 group must be the hyphen-split prefix"
+            s[0],
+            ("skill".to_string(), 0, true),
+            "depth-0 group must be the type (exempt from joining)"
         );
-        assert_eq!(s[3], ("review".to_string(), 3, false), "leaf must be the final segment");
+        assert_eq!(
+            s[1],
+            ("acme/code".to_string(), 1, true),
+            "depth-1 group must be the joined acme→code namespace chain"
+        );
+        assert_eq!(s[2], ("review".to_string(), 2, false), "leaf must be the final segment");
     }
 
     // ── Rollup::add / merge / worst ───────────────────────────────────────────

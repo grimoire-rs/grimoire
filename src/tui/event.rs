@@ -1814,13 +1814,15 @@ mod tree_event_tests {
     // C4: `←` on an already-collapsed group jumps to the nearest ancestor group.
     #[test]
     fn left_on_collapsed_group_jumps_to_parent_group() {
-        // Build a two-level tree: acme (group) → nested (group) → leaf.
-        let mut s = TuiState::new();
-        s.set_rows(vec![TuiRow {
+        // Build a parent→child group hierarchy: acme (group) → nested (group)
+        // → leaf. `acme` carries a second child ("sibling" leaf) so the
+        // single-child path-compression (#19) cannot fold acme into nested —
+        // the two must stay distinct groups for this navigation test.
+        let row = |repository: &str| TuiRow {
             kind: "skill".to_string(),
             registry: "reg".to_string(),
-            repository: "acme/nested/tool".to_string(),
-            repo: "reg/acme/nested/tool".to_string(),
+            repository: repository.to_string(),
+            repo: format!("reg/{repository}"),
             description: String::new(),
             summary: String::new(),
             keywords: vec![],
@@ -1832,15 +1834,17 @@ mod tree_event_tests {
             deprecated: None,
             pinned_version: None,
             state: crate::tui::state::ArtifactState::NotInstalled,
-        }]);
+        };
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("acme/nested/tool"), row("acme/sibling")]);
         s.set_default_registry(Some("reg".to_string()));
         handle(&mut s, TuiInput::ViewToggle); // → Tree
-        // Layout: acme(0) → nested(1) → tool(2)
+        // Layout (groups before leaves): acme(0) → nested(1) → tool(2), sibling(1)
         // Collapse the inner group "nested" first.
         s.selected = 1; // acme/nested
         assert!(s.selected_is_group(), "position 1 must be the nested group");
         s.collapse_selected();
-        // Now layout: acme(0), nested-collapsed(1)
+        // Now layout: acme(0), nested-collapsed(1), sibling(1)
         s.selected = 1; // still on nested (collapsed group)
         // `←` on an already-collapsed group must jump to acme (pos 0).
         assert_eq!(handle(&mut s, TuiInput::Collapse), TuiAction::None);
