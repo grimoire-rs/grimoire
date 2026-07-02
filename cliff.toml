@@ -61,6 +61,7 @@ commit_parsers = [
     { message = "^perf", group = "Changed" },
     { message = "^doc", group = "Documentation" },
     { message = "^chore", skip = true },
+    { message = "^release", skip = true },
     { message = "^ci", skip = true },
     { message = "^style", skip = true },
     { message = "^test", skip = true },
