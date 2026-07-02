@@ -118,6 +118,83 @@ impl Vendor for CopilotVendor {
         }
     }
 
+    fn mcp_entry(
+        &self,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        use crate::oci::mcp::McpTransport;
+
+        let s = &descriptor.server;
+        match scope {
+            // Project: VS Code's workspace `mcp.json` (`servers` key,
+            // `type: stdio|http|sse`, env references as `${env:VAR}`).
+            ConfigScope::Project => {
+                let mut entry = serde_json::Map::new();
+                match s.transport {
+                    McpTransport::Stdio => {
+                        entry.insert("type".into(), serde_json::json!("stdio"));
+                        entry.insert("command".into(), serde_json::json!(s.command));
+                        if !s.args.is_empty() {
+                            entry.insert("args".into(), serde_json::json!(s.args));
+                        }
+                        if !s.env.is_empty() {
+                            entry.insert("env".into(), serde_json::json!(s.env));
+                        }
+                    }
+                    McpTransport::Http | McpTransport::Sse => {
+                        entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+                        entry.insert("url".into(), serde_json::json!(s.url));
+                        if !s.headers.is_empty() {
+                            entry.insert("headers".into(), serde_json::json!(s.headers));
+                        }
+                    }
+                }
+                let mut value = serde_json::Value::Object(entry);
+                super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
+                Some((format!("/servers/{name}"), value))
+            }
+            // Global: Copilot CLI's `mcp-config.json` supports NO variable
+            // substitution — values must be literals. A descriptor that
+            // needs `${VAR}` is skipped rather than ever writing a secret
+            // value (or a broken literal reference) to disk.
+            ConfigScope::Global => {
+                if descriptor.has_env_refs() {
+                    tracing::warn!(
+                        "mcp server '{name}' skipped for copilot (global): ~/.copilot/mcp-config.json supports no \
+                         ${{VAR}} substitution and grim never inlines secret values"
+                    );
+                    return None;
+                }
+                let mut entry = serde_json::Map::new();
+                match s.transport {
+                    McpTransport::Stdio => {
+                        entry.insert("type".into(), serde_json::json!("local"));
+                        entry.insert("command".into(), serde_json::json!(s.command));
+                        if !s.args.is_empty() {
+                            entry.insert("args".into(), serde_json::json!(s.args));
+                        }
+                        if !s.env.is_empty() {
+                            entry.insert("env".into(), serde_json::json!(s.env));
+                        }
+                    }
+                    McpTransport::Http | McpTransport::Sse => {
+                        entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+                        entry.insert("url".into(), serde_json::json!(s.url));
+                        if !s.headers.is_empty() {
+                            entry.insert("headers".into(), serde_json::json!(s.headers));
+                        }
+                    }
+                }
+                // Explicit tool allowlist: everything (the user curates in
+                // Copilot itself; grim manages presence, not policy).
+                entry.insert("tools".into(), serde_json::json!(["*"]));
+                Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
+            }
+        }
+    }
+
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         let root = match scope {
             ConfigScope::Project => workspace.join(".github").join("agents"),

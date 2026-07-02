@@ -147,110 +147,19 @@ async fn install_one<M: ArtifactMaterializer>(
     use crate::install::install_state::ClientOutput;
 
     // MCP descriptors never materialize files; they register entries in
-    // client MCP configs. The registration path lands with the vendor MCP
-    // writers — until then an mcp install is an explicit error, never a
-    // silent no-op or a panic.
+    // client MCP configs on a dedicated path.
     if kind == ArtifactKind::Mcp {
-        return Err(InstallError::without_reference(InstallErrorKind::MaterializeFailed(
-            "mcp artifacts are not installable yet".to_string(),
-        ))
-        .into());
+        return install_mcp(artifact, access, target, state, roots, force).await;
     }
 
     let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.pinned.strip_advisory().to_string();
 
-    // Integrity gate: for every client output a prior record described,
-    // an on-disk content hash that drifted from what was recorded is a
-    // local modification. Refuse unless forced; if every output is intact,
-    // the pin is unchanged, AND the record already covers every client this
-    // install targets, the install is a no-op.
-    if let Some(rec) = &recorded {
-        let mut all_intact = true;
-        for out in &rec.outputs {
-            // Tolerant resolve: a recorded output whose anchor root is absent
-            // on this machine names a client out of scope here (e.g. a global
-            // client whose vendor root is unset). Skip it — it can neither be
-            // verified nor block the install. A genuine containment failure
-            // (traversal / escaped anchor) or an I/O error still surfaces.
-            let present = match out.is_present(roots) {
-                Ok(present) => present,
-                Err(AnchorError::AnchorRootAbsent { .. }) => continue,
-                Err(e) => return Err(e.into()),
-            };
-            if present {
-                let actual = out.current_hash(roots)?;
-                if actual != out.content_hash {
-                    if !force {
-                        return Ok(InstallOutcome::Refused {
-                            recorded: out.content_hash.clone(),
-                            actual,
-                        });
-                    }
-                    all_intact = false;
-                }
-            } else {
-                all_intact = false;
-            }
-        }
-        // Only short-circuit when the record already materialized every client
-        // this install targets. A target client absent from the record (an
-        // additive `--client` install, or a client re-enabled since the last
-        // install) must fall through to materialize instead of being silently
-        // skipped.
-        let covers_targets = target
-            .clients()
-            .iter()
-            .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
-        if all_intact && covers_targets && rec.pinned.eq_content(&artifact.pinned) {
-            return Ok(InstallOutcome::AlreadyInstalled);
-        }
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.pinned, target, roots, force)? {
+        return Ok(outcome);
     }
 
-    // `artifact.pinned` is the *manifest* digest. Resolve the manifest to
-    // its single layer descriptor, then fetch that layer blob (the
-    // artifact tar). An access failure (offline miss, auth, registry)
-    // propagates with its own taxonomy so the exit code is correct
-    // (81/80/69/...).
-    let repo: Identifier = artifact.pinned.as_identifier().without_tag();
-    let aref = || ArtifactRef {
-        kind,
-        name: artifact.name.clone(),
-        id: artifact.pinned.as_identifier().clone(),
-    };
-
-    let manifest = access.fetch_manifest(&artifact.pinned).await?;
-    let Some(manifest) = manifest else {
-        return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
-    };
-    let Some(layer) = manifest.single_layer() else {
-        return Err(InstallError::with_reference(
-            aref(),
-            InstallErrorKind::MaterializeFailed(format!(
-                "expected a single-layer artifact, manifest has {} layers",
-                manifest.layers.len()
-            )),
-        )
-        .into());
-    };
-    let layer_digest = layer.digest.clone();
-
-    let blob = access.fetch_blob(&repo, &layer_digest).await?;
-    let Some(blob) = blob else {
-        return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
-    };
-
-    // Defence in depth: verify blob bytes hash to the layer digest before
-    // materializing. `CachedAccess`/`RegistryClient` already verify, but
-    // the seam contract allows a mock that does not.
-    let actual_blob_digest = layer_digest.algorithm().hash(&blob);
-    if actual_blob_digest != layer_digest {
-        return Err(InstallError::without_reference(InstallErrorKind::BlobDigestMismatch {
-            expected: layer_digest.clone(),
-            actual: actual_blob_digest,
-        })
-        .into());
-    }
+    let blob = fetch_verified_layer(artifact, kind, access).await?;
 
     // Materialize the canonical tree once into a temp dir; every client
     // target then transforms/copies from that single extracted tree.
@@ -434,6 +343,291 @@ async fn install_one<M: ArtifactMaterializer>(
 
     // `outputs` is the single source of truth — no denormalized top-level
     // mirror of the primary client.
+    state.record(InstallRecord {
+        kind,
+        name: artifact.name.clone(),
+        pinned: artifact.pinned.clone(),
+        outputs,
+    });
+
+    Ok(if recorded.is_some() {
+        InstallOutcome::Updated
+    } else {
+        InstallOutcome::Installed
+    })
+}
+
+/// Integrity gate shared by every install path: for every client output a
+/// prior record described, an on-disk state that drifted from what was
+/// recorded is a local modification. Refuse unless forced; if every output
+/// is intact, the pin is unchanged, AND the record already covers every
+/// client this install targets, the install is a no-op.
+///
+/// `Ok(Some(outcome))` short-circuits the install; `Ok(None)` proceeds.
+// The sibling install functions return the same `crate::error::Error`
+// without tripping `result_large_err` because they are `async` (their
+// signature is a `Future`, which the lint does not inspect). This is the
+// one sync helper on the path, so the suppression lives here rather than
+// reshaping the shared error type.
+#[allow(clippy::result_large_err)]
+fn integrity_gate(
+    recorded: Option<&InstallRecord>,
+    pinned: &crate::oci::PinnedIdentifier,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<Option<InstallOutcome>, crate::error::Error> {
+    let Some(rec) = recorded else {
+        return Ok(None);
+    };
+    let mut all_intact = true;
+    for out in &rec.outputs {
+        // Tolerant resolve: a recorded output whose anchor root is absent
+        // on this machine names a client out of scope here (e.g. a global
+        // client whose vendor root is unset). Skip it — it can neither be
+        // verified nor block the install. A genuine containment failure
+        // (traversal / escaped anchor) or an I/O error still surfaces.
+        let present = match out.is_present(roots) {
+            Ok(present) => present,
+            Err(AnchorError::AnchorRootAbsent { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if present {
+            let actual = out.current_hash(roots)?;
+            if actual != out.content_hash {
+                if !force {
+                    return Ok(Some(InstallOutcome::Refused {
+                        recorded: out.content_hash.clone(),
+                        actual,
+                    }));
+                }
+                all_intact = false;
+            }
+        } else {
+            all_intact = false;
+        }
+    }
+    // Only short-circuit when the record already materialized every client
+    // this install targets. A target client absent from the record (an
+    // additive `--client` install, or a client re-enabled since the last
+    // install) must fall through to materialize instead of being silently
+    // skipped.
+    let covers_targets = target
+        .clients()
+        .iter()
+        .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
+    if all_intact && covers_targets && rec.pinned.eq_content(pinned) {
+        return Ok(Some(InstallOutcome::AlreadyInstalled));
+    }
+    Ok(None)
+}
+
+/// Fetch and digest-verify an artifact's single layer blob.
+///
+/// `artifact.pinned` is the *manifest* digest: resolve the manifest to its
+/// single layer descriptor, fetch that layer blob, and verify the bytes
+/// hash to the layer digest (defence in depth — `CachedAccess` /
+/// `RegistryClient` already verify, but the seam contract allows a mock
+/// that does not). An access failure (offline miss, auth, registry)
+/// propagates with its own taxonomy so the exit code is correct
+/// (81/80/69/...).
+async fn fetch_verified_layer(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    access: &Arc<dyn OciAccess>,
+) -> Result<Vec<u8>, crate::error::Error> {
+    let repo: Identifier = artifact.pinned.as_identifier().without_tag();
+    let aref = || ArtifactRef {
+        kind,
+        name: artifact.name.clone(),
+        id: artifact.pinned.as_identifier().clone(),
+    };
+
+    let manifest = access.fetch_manifest(&artifact.pinned).await?;
+    let Some(manifest) = manifest else {
+        return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
+    };
+    let Some(layer) = manifest.single_layer() else {
+        return Err(InstallError::with_reference(
+            aref(),
+            InstallErrorKind::MaterializeFailed(format!(
+                "expected a single-layer artifact, manifest has {} layers",
+                manifest.layers.len()
+            )),
+        )
+        .into());
+    };
+    let layer_digest = layer.digest.clone();
+
+    let blob = access.fetch_blob(&repo, &layer_digest).await?;
+    let Some(blob) = blob else {
+        return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
+    };
+
+    let actual_blob_digest = layer_digest.algorithm().hash(&blob);
+    if actual_blob_digest != layer_digest {
+        return Err(InstallError::without_reference(InstallErrorKind::BlobDigestMismatch {
+            expected: layer_digest.clone(),
+            actual: actual_blob_digest,
+        })
+        .into());
+    }
+    Ok(blob)
+}
+
+/// Install an MCP server descriptor: registration-only — no materialized
+/// file. The descriptor layer is fetched + parsed, then for every selected
+/// client the vendor renders its native config entry and grim splices it
+/// into the vendor's MCP config file (span-preserving: every byte outside
+/// the managed member survives). Each registration records an entry-typed
+/// [`ClientOutput`] hashed semantically over the rendered value.
+///
+/// A vendor with no writable MCP surface for this scope — or one that
+/// cannot represent the descriptor (Copilot's global config supports no
+/// `${VAR}` substitution) — is skipped with a warning. No registrable
+/// client at all is an error, not a silent no-op.
+async fn install_mcp(
+    artifact: &LockedArtifact,
+    access: &Arc<dyn OciAccess>,
+    target: &InstallTarget,
+    state: &mut InstallState,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<InstallOutcome, crate::error::Error> {
+    use crate::install::install_state::{ClientOutput, entry_value_hash};
+    use crate::install::json_splice::{Splice, split_pointer, upsert_member};
+
+    let kind = ArtifactKind::Mcp;
+    let recorded = state.get(kind, &artifact.name).cloned();
+
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.pinned, target, roots, force)? {
+        return Ok(outcome);
+    }
+
+    let blob = fetch_verified_layer(artifact, kind, access).await?;
+    let descriptor = crate::oci::mcp::McpDescriptor::from_layer_bytes(&blob).map_err(|e| {
+        InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+            "invalid MCP descriptor layer: {e}"
+        )))
+    })?;
+
+    // Registration set: the target clients plus — on a pin change — every
+    // still-resolvable recorded client, so all clients in a record move to
+    // the new pin together (the same invariant as materialized kinds).
+    let pin_changed = recorded
+        .as_ref()
+        .is_some_and(|rec| !rec.pinned.eq_content(&artifact.pinned));
+    let mut register_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
+    if pin_changed && let Some(rec) = &recorded {
+        for out in &rec.outputs {
+            let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>() else {
+                continue;
+            };
+            if out.target.anchor.root(roots).is_some() && !register_set.contains(&client) {
+                register_set.push(client);
+            }
+        }
+    }
+
+    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(register_set.len());
+    for client in &register_set {
+        let vendor = client.vendor();
+        let Some(config_path) = vendor.mcp_config_path(target.workspace(), target.scope()) else {
+            tracing::warn!(
+                "mcp server '{}' skipped for {client}: no writable MCP config surface at {} scope",
+                artifact.name,
+                target.scope()
+            );
+            continue;
+        };
+        // A vendor that cannot represent this descriptor at this scope
+        // warns with its own specific reason (e.g. Copilot global + env
+        // references) and is skipped.
+        let Some((pointer, value)) = vendor.mcp_entry(target.scope(), &artifact.name, &descriptor) else {
+            continue;
+        };
+        // Anchor BEFORE writing: an unanchorable config path (e.g. an
+        // $OPENCODE_CONFIG override outside every known root) must never
+        // leave an untracked — and therefore unremovable — registration.
+        let anchored = match crate::install::path_anchor::AnchoredPath::from_target(
+            &config_path,
+            target.scope(),
+            *client,
+            kind,
+            roots,
+        ) {
+            Ok(anchored) => anchored,
+            Err(e) => {
+                tracing::warn!(
+                    "mcp server '{}' skipped for {client}: config path '{}' is not anchorable: {e}",
+                    artifact.name,
+                    config_path.display()
+                );
+                continue;
+            }
+        };
+        let Some((container, member)) = split_pointer(&pointer) else {
+            tracing::warn!(
+                "mcp server '{}' skipped for {client}: malformed entry pointer '{pointer}'",
+                artifact.name
+            );
+            continue;
+        };
+
+        let raw = match std::fs::read_to_string(&config_path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(target_io(&config_path, e).into()),
+        };
+        match upsert_member(&raw, container, member, &value) {
+            Ok(Splice::Changed(text)) => {
+                if let Some(parent) = config_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+                }
+                crate::store::atomic_write::atomic_write(&config_path, text.as_bytes())
+                    .map_err(|e| target_io(&config_path, e))?;
+            }
+            Ok(Splice::Unchanged) => {}
+            Err(e) => return Err(target_io(&config_path, e).into()),
+        }
+
+        let content_hash = entry_value_hash(&value).map_err(|e| target_io(&config_path, e))?;
+        client_records.push(ClientOutput {
+            client: client.to_string(),
+            target: anchored,
+            content_hash,
+            support_dir: None,
+            entry: Some(pointer),
+        });
+    }
+
+    if client_records.is_empty() {
+        return Err(
+            InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+                "mcp server '{}' has no registrable MCP surface for any selected client",
+                artifact.name
+            )))
+            .into(),
+        );
+    }
+
+    // Merge with the prior record (same-pin additive `--client` installs) —
+    // identical semantics to the materialized path in `install_one`.
+    let mut outputs = client_records;
+    if !pin_changed && let Some(rec) = &recorded {
+        for out in &rec.outputs {
+            if register_set.iter().any(|c| out.client == c.as_str()) {
+                continue;
+            }
+            if out.target.anchor.root(roots).is_none() {
+                continue;
+            }
+            outputs.push(out.clone());
+        }
+    }
+
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),

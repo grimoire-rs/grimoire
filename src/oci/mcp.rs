@@ -236,6 +236,13 @@ impl McpDescriptor {
         Ok(())
     }
 
+    /// Whether any string value carries a canonical `${VAR}` reference.
+    /// Copilot CLI's global config supports no variable substitution, so
+    /// its writer skips descriptors that need one (never inlines secrets).
+    pub fn has_env_refs(&self) -> bool {
+        self.string_values().any(|v| env_ref_names(v).next().is_some())
+    }
+
     /// Every string value that may carry `${VAR}` references.
     fn string_values(&self) -> impl Iterator<Item = &str> {
         let s = &self.server;

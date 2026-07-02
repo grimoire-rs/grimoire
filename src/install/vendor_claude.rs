@@ -221,6 +221,39 @@ impl Vendor for ClaudeVendor {
         }
     }
 
+    fn mcp_entry(
+        &self,
+        _scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        use crate::oci::mcp::McpTransport;
+
+        // Claude's schema IS the canonical shape and `${VAR}` is native —
+        // no env translation, stdio needs no explicit `type`.
+        let s = &descriptor.server;
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
+    }
+
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         render::render_skill_doc(doc, self)
     }

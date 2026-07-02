@@ -136,6 +136,45 @@ impl Vendor for OpenCodeVendor {
         super::opencode_config::config_path_for_scope(workspace, scope)
     }
 
+    fn mcp_entry(
+        &self,
+        _scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        use crate::oci::mcp::McpTransport;
+
+        // OpenCode's `mcp` entry schema (opencode.ai/docs/mcp-servers):
+        // `type: local` with `command` as ONE array (cmd + args) and env
+        // under `environment`; `type: remote` with `url`/`headers`. Env
+        // references use `{env:VAR}`.
+        let s = &descriptor.server;
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            McpTransport::Stdio => {
+                let mut command: Vec<String> = Vec::with_capacity(1 + s.args.len());
+                command.extend(s.command.clone());
+                command.extend(s.args.iter().cloned());
+                entry.insert("type".into(), serde_json::json!("local"));
+                entry.insert("command".into(), serde_json::json!(command));
+                if !s.env.is_empty() {
+                    entry.insert("environment".into(), serde_json::json!(s.env));
+                }
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("type".into(), serde_json::json!("remote"));
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        entry.insert("enabled".into(), serde_json::json!(true));
+        let mut value = serde_json::Value::Object(entry);
+        super::mcp_config::translate_env_refs(&mut value, &|var| format!("{{env:{var}}}"));
+        Some((format!("/mcp/{name}"), value))
+    }
+
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         let root = match scope {
             ConfigScope::Project => workspace.join(".opencode").join("agents"),

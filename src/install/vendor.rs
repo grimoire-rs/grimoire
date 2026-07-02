@@ -132,6 +132,22 @@ pub trait Vendor {
         None
     }
 
+    /// Render the vendor-native MCP config entry for `descriptor` as a
+    /// `(pointer, value)` pair — the two-level JSON pointer of the managed
+    /// member inside [`Self::mcp_config_path`]'s file (e.g.
+    /// `/mcpServers/<name>`) plus the entry value in the vendor's own
+    /// schema and env-reference syntax. `None` when the vendor cannot
+    /// represent this descriptor at `scope` (the install skips the vendor
+    /// with a warning). Default: no surface.
+    fn mcp_entry(
+        &self,
+        _scope: ConfigScope,
+        _name: &str,
+        _descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        None
+    }
+
     /// Render the `SKILL.md` index for this vendor, or `None` when the
     /// canonical bytes should install verbatim (no tool-namespaced
     /// metadata, or not parseable as a skill).

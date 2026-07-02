@@ -354,14 +354,13 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                     unreachable!("bundles are never materialized; they expand into members")
                 }
 
-                // MCP descriptors register into client configs, not files;
-                // their config-entry anchors land with the vendor MCP
-                // writers (the installer rejects mcp installs until then).
-                (ClientTarget::Claude, ArtifactKind::Mcp)
-                | (ClientTarget::Copilot, ArtifactKind::Mcp)
-                | (ClientTarget::OpenCode, ArtifactKind::Mcp) => {
-                    unreachable!("mcp registration anchors land with the vendor MCP writers")
-                }
+                // MCP config-entry anchors: Claude's user config file dir
+                // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
+                // config dir (`opencode.json`), Copilot's native root
+                // (`mcp-config.json`).
+                (ClientTarget::Claude, ArtifactKind::Mcp) => PathAnchor::ClaudeUserDir,
+                (ClientTarget::OpenCode, ArtifactKind::Mcp) => PathAnchor::OpenCodeRoot,
+                (ClientTarget::Copilot, ArtifactKind::Mcp) => PathAnchor::CopilotRoot,
             };
             // `GrimHome` is the universal fallback; deduplicate when the
             // primary already is `GrimHome`.
