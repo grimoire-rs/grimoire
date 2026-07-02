@@ -117,29 +117,51 @@ impl ProjectConfig {
     /// Propagates parse / size / I/O failures with path context, or
     /// `NotDiscovered` when the walk finds nothing.
     pub fn discover(explicit: Option<&Path>) -> Result<DiscoveredConfig, ConfigError> {
+        Self::discover_from(explicit, None)
+    }
+
+    /// [`Self::discover`] with a seedable walk-up origin.
+    ///
+    /// `start` seeds the walk-up instead of the current directory (the
+    /// `grim mcp` per-call `workspace` parameter); an explicit `--config`
+    /// path still wins over any seed. `None` ⇒ identical to
+    /// [`Self::discover`].
+    ///
+    /// # Errors
+    ///
+    /// Same contract as [`Self::discover`].
+    pub fn discover_from(explicit: Option<&Path>, start: Option<&Path>) -> Result<DiscoveredConfig, ConfigError> {
         let config_path = match explicit {
             Some(p) => p.to_path_buf(),
-            None => walk_up_for_config()?,
+            None => walk_up_for_config(start)?,
         };
         let config = load_from_path(&config_path)?;
         Ok(DiscoveredConfig { config, config_path })
     }
 }
 
-/// Walk up from the current directory looking for `grimoire.toml`,
-/// stopping at `$HOME` (inclusive) or the filesystem root.
-fn walk_up_for_config() -> Result<PathBuf, ConfigError> {
-    let cwd = std::env::current_dir().map_err(|e| ConfigError::new(PathBuf::new(), ConfigErrorKind::Io(e)))?;
+/// Walk up from `start` (defaulting to the current directory) looking for
+/// `grimoire.toml`, stopping at `$HOME` (inclusive) or the filesystem root.
+fn walk_up_for_config(start: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    let origin = match start {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| ConfigError::new(PathBuf::new(), ConfigErrorKind::Io(e)))?,
+    };
     let ceiling = crate::env::home_dir_for_ceiling();
+    walk_up_from(&origin, ceiling.as_deref())
+}
 
-    let mut dir = cwd.as_path();
+/// The walk-up core with an explicit ceiling (split out so the ceiling is
+/// testable without mutating `$HOME`).
+fn walk_up_from(origin: &Path, ceiling: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    let mut dir = origin;
     loop {
         let candidate = dir.join("grimoire.toml");
         if candidate.is_file() {
             return Ok(candidate);
         }
         // Stop *after* checking the ceiling directory itself.
-        if let Some(home) = ceiling.as_deref()
+        if let Some(home) = ceiling
             && dir == home
         {
             break;
@@ -149,7 +171,7 @@ fn walk_up_for_config() -> Result<PathBuf, ConfigError> {
             None => break,
         }
     }
-    Err(ConfigError::new(cwd, ConfigErrorKind::NotDiscovered))
+    Err(ConfigError::new(origin.to_path_buf(), ConfigErrorKind::NotDiscovered))
 }
 
 /// Read, size-check, and parse a config file at `path`.
@@ -871,6 +893,62 @@ x = "ghcr.io/acme/x:1"
         let discovered = ProjectConfig::discover(Some(&cfg_path)).expect("discover");
         assert_eq!(discovered.config_path(), cfg_path);
         assert_eq!(discovered.lock_path(), root.path().join("grimoire.lock"));
+    }
+
+    #[test]
+    fn discover_from_seeded_walk_finds_ancestor_config() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg_path = root.path().join("grimoire.toml");
+        std::fs::write(&cfg_path, "[skills]\nx = \"ghcr.io/acme/x:1\"\n").unwrap();
+        let nested = root.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let discovered = ProjectConfig::discover_from(None, Some(&nested)).expect("seeded discover");
+        assert_eq!(discovered.config_path(), cfg_path);
+        assert_eq!(discovered.lock_path(), root.path().join("grimoire.lock"));
+    }
+
+    #[test]
+    fn discover_from_explicit_wins_over_seed() {
+        let root = tempfile::tempdir().unwrap();
+        let explicit = root.path().join("explicit.toml");
+        std::fs::write(&explicit, "[skills]\ne = \"ghcr.io/acme/e:1\"\n").unwrap();
+        let seed_dir = root.path().join("seed");
+        std::fs::create_dir_all(&seed_dir).unwrap();
+        std::fs::write(seed_dir.join("grimoire.toml"), "").unwrap();
+
+        let discovered = ProjectConfig::discover_from(Some(&explicit), Some(&seed_dir)).expect("explicit wins");
+        assert_eq!(discovered.config_path(), explicit);
+    }
+
+    #[test]
+    fn walk_up_from_respects_ceiling() {
+        let root = tempfile::tempdir().unwrap();
+        // Config sits ABOVE the ceiling: <root>/grimoire.toml with the
+        // ceiling at <root>/home — the walk from <root>/home/a must stop
+        // at the ceiling (inclusive) and never reach the config.
+        std::fs::write(root.path().join("grimoire.toml"), "").unwrap();
+        let home = root.path().join("home");
+        let nested = home.join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let err = walk_up_from(&nested, Some(&home)).expect_err("ceiling must stop the walk");
+        assert!(matches!(err.kind, ConfigErrorKind::NotDiscovered));
+
+        // The ceiling directory itself is still checked (inclusive stop).
+        std::fs::write(home.join("grimoire.toml"), "").unwrap();
+        let found = walk_up_from(&nested, Some(&home)).expect("ceiling dir itself is checked");
+        assert_eq!(found, home.join("grimoire.toml"));
+    }
+
+    #[test]
+    fn walk_up_from_not_discovered_reports_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("x/y");
+        std::fs::create_dir_all(&nested).unwrap();
+        let err = walk_up_from(&nested, Some(root.path())).expect_err("nothing to find");
+        assert!(matches!(err.kind, ConfigErrorKind::NotDiscovered));
+        assert_eq!(err.path, nested);
     }
 
     #[test]

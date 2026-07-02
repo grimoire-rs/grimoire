@@ -55,6 +55,26 @@ pub struct ResolvedScope {
 ///
 /// Propagates any [`ConfigError`] from discovery / parsing.
 pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<ResolvedScope, ConfigError> {
+    resolve_in(ctx, global, config, None)
+}
+
+/// [`resolve`] with a seedable project-config walk-up origin.
+///
+/// Precedence: `global` wins over everything; an explicit `config` path
+/// wins over `workspace`; `workspace` seeds the walk-up instead of the
+/// current directory; all `None` ⇒ cwd walk-up (identical to [`resolve`]).
+/// Re-reads scope state per call — the `grim mcp` tools resolve a fresh
+/// scope on every invocation, so concurrent calls never share state.
+///
+/// # Errors
+///
+/// Propagates any [`ConfigError`] from discovery / parsing.
+pub fn resolve_in(
+    ctx: &Context,
+    global: bool,
+    config: Option<&Path>,
+    workspace: Option<&Path>,
+) -> Result<ResolvedScope, ConfigError> {
     let paths = ctx.paths();
     if global {
         let config_path = paths.global_config();
@@ -75,7 +95,7 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
             config_path,
         })
     } else {
-        let discovered = ProjectConfig::discover(config)?;
+        let discovered = ProjectConfig::discover_from(config, workspace)?;
         let config_path = discovered.config_path().to_path_buf();
         let lock_path = discovered.lock_path();
         let workspace = config_path
@@ -188,5 +208,44 @@ mod tests {
         assert_eq!(scope.lock_path, lock_path_for(&cfg));
         assert_eq!(scope.workspace, dir.path());
         assert_eq!(scope.set.skills.len(), 1);
+    }
+
+    #[test]
+    fn workspace_seed_walks_up_to_ancestor_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[skills]\nx = \"localhost:5000/x:latest\"\n").unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let ctx = Context::new(&opts());
+        let scope = resolve_in(&ctx, false, None, Some(&nested)).expect("seeded walk-up resolves");
+        assert_eq!(scope.scope, ConfigScope::Project);
+        assert_eq!(scope.config_path, cfg);
+        assert_eq!(scope.workspace, dir.path());
+    }
+
+    #[test]
+    fn explicit_config_wins_over_workspace_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let winner_dir = dir.path().join("winner");
+        std::fs::create_dir_all(&winner_dir).unwrap();
+        let winner = winner_dir.join("grimoire.toml");
+        std::fs::write(&winner, "[skills]\nw = \"localhost:5000/w:latest\"\n").unwrap();
+        let loser_dir = dir.path().join("loser");
+        std::fs::create_dir_all(&loser_dir).unwrap();
+        std::fs::write(loser_dir.join("grimoire.toml"), "").unwrap();
+        let ctx = Context::new(&opts());
+        let scope = resolve_in(&ctx, false, Some(&winner), Some(&loser_dir)).expect("explicit config resolves");
+        assert_eq!(scope.config_path, winner);
+        assert_eq!(scope.workspace, winner_dir);
+    }
+
+    #[test]
+    fn global_wins_over_workspace_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("grimoire.toml"), "").unwrap();
+        let ctx = Context::new(&opts());
+        let scope = resolve_in(&ctx, true, None, Some(dir.path())).expect("global resolves");
+        assert_eq!(scope.scope, ConfigScope::Global);
     }
 }
