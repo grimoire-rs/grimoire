@@ -173,12 +173,12 @@ async fn install_one<M: ArtifactMaterializer>(
             // client whose vendor root is unset). Skip it — it can neither be
             // verified nor block the install. A genuine containment failure
             // (traversal / escaped anchor) or an I/O error still surfaces.
-            let resolved = match out.resolved_target(roots) {
-                Ok(resolved) => resolved,
+            let present = match out.is_present(roots) {
+                Ok(present) => present,
                 Err(AnchorError::AnchorRootAbsent { .. }) => continue,
                 Err(e) => return Err(e.into()),
             };
-            if resolved.exists() {
+            if present {
                 let actual = out.current_hash(roots)?;
                 if actual != out.content_hash {
                     if !force {
@@ -400,6 +400,7 @@ async fn install_one<M: ArtifactMaterializer>(
             target: anchored_target,
             content_hash: installed_hash,
             support_dir: anchored_support,
+            entry: None,
         });
     }
 
@@ -511,6 +512,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -1012,6 +1014,7 @@ mod tests {
                     },
                     content_hash: Digest::Sha256("b".repeat(64)),
                     support_dir: None,
+                    entry: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -1021,6 +1024,7 @@ mod tests {
                     },
                     content_hash: Digest::Sha256("c".repeat(64)),
                     support_dir: None,
+                    entry: None,
                 },
             ],
         });
@@ -1246,6 +1250,7 @@ mod tests {
             },
             content_hash: hash_a.clone(),
             support_dir: None,
+            entry: None,
         };
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,

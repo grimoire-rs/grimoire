@@ -22,6 +22,15 @@ use std::ops::Range;
 
 use super::json_config::{invalid_data, sanitize_jsonc};
 
+/// Split a two-level RFC-6901-style pointer (`/container/member`) into its
+/// `(container, member)` pair. `None` for any other shape — the splice
+/// operations manage exactly one nesting level.
+pub fn split_pointer(pointer: &str) -> Option<(&str, &str)> {
+    let rest = pointer.strip_prefix('/')?;
+    let (container, member) = rest.split_once('/')?;
+    (!container.is_empty() && !member.is_empty() && !member.contains('/')).then_some((container, member))
+}
+
 /// What a splice did to the text.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
@@ -519,6 +528,15 @@ mod tests {
         match s {
             Splice::Changed(t) => t,
             Splice::Unchanged => panic!("expected Changed"),
+        }
+    }
+
+    #[test]
+    fn split_pointer_accepts_exactly_two_levels() {
+        assert_eq!(split_pointer("/mcpServers/grim"), Some(("mcpServers", "grim")));
+        assert_eq!(split_pointer("/mcp/my-server"), Some(("mcp", "my-server")));
+        for bad in ["mcpServers/grim", "/mcpServers", "/a/b/c", "//x", "/a/", ""] {
+            assert_eq!(split_pointer(bad), None, "input: {bad}");
         }
     }
 

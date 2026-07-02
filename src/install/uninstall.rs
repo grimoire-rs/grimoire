@@ -107,6 +107,14 @@ pub fn uninstall(
             Err(AnchorError::AnchorRootAbsent { .. }) => continue,
             Err(e) => return Err(e.into()),
         };
+        // An entry output (an MCP server registered in a shared, user-owned
+        // config file): splice out only the managed member — NEVER delete
+        // the file. Tolerant like the OpenCode glob removal: an absent or
+        // unparseable config has nothing grim-managed left to remove.
+        if let Some(pointer) = &out.entry {
+            remove_entry(&target, pointer)?;
+            continue;
+        }
         // The index/target first, then a multi-file rule's sibling support
         // directory (`<parent>/<name>/`) so the whole footprint is reaped.
         remove_output(&target, &mut removed)?;
@@ -123,6 +131,35 @@ pub fn uninstall(
         outcome: UninstallOutcome::Removed,
         removed,
     })
+}
+
+/// Splice the managed member `pointer` points at out of the config file at
+/// `path`. Converges tolerantly (the OpenCode glob-removal contract): an
+/// absent file, an unparseable file, or a malformed recorded pointer has
+/// nothing grim-managed left to remove. The file itself always survives.
+fn remove_entry(path: &std::path::Path, pointer: &str) -> std::io::Result<()> {
+    use crate::install::json_splice::{Splice, remove_member, split_pointer};
+
+    let Some((container, member)) = split_pointer(pointer) else {
+        tracing::warn!(
+            "malformed recorded entry pointer '{pointer}'; leaving '{}' untouched",
+            path.display()
+        );
+        return Ok(());
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match remove_member(&text, container, member) {
+        Ok(Splice::Changed(new_text)) => crate::store::atomic_write::atomic_write(path, new_text.as_bytes()),
+        Ok(Splice::Unchanged) => Ok(()),
+        // Removal is tolerant: a config grim cannot parse has nothing
+        // grim-managed to remove (never rewrite, never fail the uninstall).
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Remove one recorded output `path` (a file or directory), pushing it onto
@@ -168,6 +205,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -181,6 +219,7 @@ mod tests {
             },
             content_hash,
             support_dir: None,
+            entry: None,
         }
     }
 
@@ -197,6 +236,7 @@ mod tests {
                 anchor: PathAnchor::Workspace,
                 relative: support_rel.to_string(),
             }),
+            entry: None,
         }
     }
 
@@ -349,6 +389,7 @@ mod tests {
                     },
                     content_hash: Digest::Sha256("a".repeat(64)),
                     support_dir: None,
+                    entry: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -358,6 +399,7 @@ mod tests {
                     },
                     content_hash: Digest::Sha256("c".repeat(64)),
                     support_dir: None,
+                    entry: None,
                 },
             ],
         });
@@ -367,6 +409,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots)
             .expect("an unresolvable client anchor must be tolerated, not error");
@@ -376,5 +419,70 @@ mod tests {
             st.get(ArtifactKind::Rule, "orphan").is_none(),
             "the record is dropped despite the unresolvable copilot output"
         );
+    }
+
+    // ── Entry outputs (MCP config registrations) ─────────────────────────
+
+    #[test]
+    fn uninstall_entry_output_removes_member_never_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"},\n    \"user-server\": {\"command\": \"x\"}\n  }\n}\n",
+        )
+        .unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = client_output_at(".mcp.json", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            pinned: pinned("mcp/grim"),
+            outputs: vec![out],
+        });
+
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert!(cfg.is_file(), "the shared config file must survive");
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("grim").is_none(), "managed entry removed");
+        assert_eq!(
+            doc["mcpServers"]["user-server"]["command"], "x",
+            "foreign entry preserved"
+        );
+        assert_eq!(doc["theme"], "dark");
+        assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
+    }
+
+    #[test]
+    fn uninstall_entry_output_tolerates_absent_and_unparseable_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+
+        let mut out = client_output_at(".mcp.json", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        let record = InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            pinned: pinned("mcp/grim"),
+            outputs: vec![out],
+        };
+
+        // Absent file: converges.
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(record.clone());
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+
+        // Unparseable file: never rewritten, never an error.
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(&cfg, "not json {{{").unwrap();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(record);
+        uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "not json {{{");
     }
 }

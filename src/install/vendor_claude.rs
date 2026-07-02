@@ -215,7 +215,9 @@ impl Vendor for ClaudeVendor {
             // SIBLING of the `~/.claude` root (inside `$CLAUDE_CONFIG_DIR`
             // when set, which relocates every Claude path). `None` without
             // a resolvable home: never a CWD-relative fallback.
-            ConfigScope::Global => Some(env_dir("CLAUDE_CONFIG_DIR").or_else(home_dir)?.join(".claude.json")),
+            ConfigScope::Global => {
+                Some(user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir())?.join(".claude.json"))
+            }
         }
     }
 
@@ -261,6 +263,14 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// [`PathAnchor`](super::path_anchor) `ClaudeRoot` anchor is rooted here.
 pub(crate) fn global_root(config_dir_override: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     config_dir_override.or_else(|| home.map(|h| h.join(".claude")))
+}
+
+/// The directory holding Claude Code's user config file `.claude.json`:
+/// `$CLAUDE_CONFIG_DIR` when set (the file relocates with it), else `$HOME`
+/// (the file is a *sibling* of `~/.claude`, not inside it). The
+/// [`PathAnchor`](super::path_anchor) `ClaudeUserDir` anchor is rooted here.
+pub(crate) fn user_config_dir(config_dir_override: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir_override.or(home)
 }
 
 #[cfg(test)]

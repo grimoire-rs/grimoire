@@ -155,7 +155,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     Ok((StatusReport::new(entries), ExitCode::Success))
 }
 
-/// Every declared artifact (skills, then rules, then agents) as a reference.
+/// Every declared artifact (skills, then rules, then agents, then mcp) as
+/// a reference.
 fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef> {
     let mut out = Vec::new();
     for (name, id) in &scope.set.skills {
@@ -175,6 +176,13 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
     for (name, id) in &scope.set.agents {
         out.push(ArtifactRef {
             kind: ArtifactKind::Agent,
+            name: name.clone(),
+            id: id.clone(),
+        });
+    }
+    for (name, id) in &scope.set.mcp {
+        out.push(ArtifactRef {
+            kind: ArtifactKind::Mcp,
             name: name.clone(),
             id: id.clone(),
         });
@@ -222,12 +230,12 @@ fn derive_state(
     // An unresolvable anchored target (corrupt/tampered `relative`, or an
     // anchor root absent on this machine) is degraded to `Missing` for a
     // read-only report — never `?`-propagated (state is data; status exits 0).
-    // A present (active) client whose file is missing still flags `missing`.
+    // A present (active) client whose file — or managed config entry — is
+    // missing still flags `missing`.
     for out in &outputs {
-        match out.resolved_target(roots) {
-            Ok(resolved) if !resolved.exists() => return ArtifactStatus::Missing,
-            Ok(_) => {}
-            Err(_) => return ArtifactStatus::Missing,
+        match out.is_present(roots) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return ArtifactStatus::Missing,
         }
     }
     // Any drifted client output (canonical OR generated — the recorded
@@ -275,6 +283,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -348,6 +357,7 @@ mod tests {
                 },
                 content_hash: hash.clone(),
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -419,6 +429,7 @@ mod tests {
                 },
                 content_hash: Digest::Sha256("a".repeat(64)),
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -470,6 +481,7 @@ mod tests {
                     },
                     content_hash: claude_hash,
                     support_dir: None,
+                    entry: None,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -479,6 +491,7 @@ mod tests {
                     },
                     content_hash: Digest::Sha256("d".repeat(64)),
                     support_dir: None,
+                    entry: None,
                 },
             ],
         });
@@ -546,6 +559,7 @@ mod tests {
                 },
                 content_hash: opencode_hash,
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -591,6 +605,7 @@ mod tests {
                 },
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
+                entry: None,
             }],
         });
 

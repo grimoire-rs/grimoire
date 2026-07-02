@@ -30,6 +30,7 @@
 //! on load.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
@@ -80,6 +81,17 @@ pub struct ClientOutput {
     /// Absent for skills and single-file rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub support_dir: Option<AnchoredPath>,
+    /// For a config-registration output (an MCP server entry), the
+    /// two-level JSON pointer of the managed member inside the `target`
+    /// config file (e.g. `/mcpServers/grim`). Present ⇒ `target` is a
+    /// shared, user-owned config file: integrity is judged **semantically**
+    /// on the pointed-at value (key order and formatting in the file are
+    /// invisible), and uninstall removes the entry, never the file.
+    /// Absent for every file/dir output — state files without MCP
+    /// artifacts stay byte-identical (the `support_dir` precedent; an
+    /// older grim cannot parse a state file that carries this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 impl ClientOutput {
@@ -93,8 +105,33 @@ impl ClientOutput {
     /// support dir, or an I/O error from walking the footprint.
     pub fn current_hash(&self, roots: &AnchorRoots) -> Result<Digest, AnchorError> {
         let target = self.resolved_target(roots)?;
+        if let Some(pointer) = &self.entry {
+            return current_entry_hash(&target, pointer).map_err(|source| AnchorError::Io { path: target, source });
+        }
         let support = self.resolved_support_dir(roots)?;
         footprint_hash(&target, support.as_deref()).map_err(|source| AnchorError::Io { path: target, source })
+    }
+
+    /// Whether this output is present on disk: the target path exists, and —
+    /// for an entry output — the managed member resolves inside the (parseable)
+    /// config file. Read-side derivations use this instead of a bare
+    /// `exists()` so an entry deleted from a still-present config file reads
+    /// as missing.
+    ///
+    /// # Errors
+    ///
+    /// [`AnchorError`] from the two-layer containment guard (an unparseable
+    /// config file is `Ok(false)`, not an error — absence, not corruption of
+    /// grim's own state).
+    pub fn is_present(&self, roots: &AnchorRoots) -> Result<bool, AnchorError> {
+        let target = self.resolved_target(roots)?;
+        if !target.exists() {
+            return Ok(false);
+        }
+        match &self.entry {
+            None => Ok(true),
+            Some(pointer) => Ok(read_entry_value(&target, pointer).is_ok_and(|v| v.is_some())),
+        }
     }
 
     /// Resolve + validate this output's anchored target into an absolute
@@ -115,6 +152,41 @@ impl ClientOutput {
     pub fn resolved_support_dir(&self, roots: &AnchorRoots) -> Result<Option<PathBuf>, AnchorError> {
         self.support_dir.as_ref().map(|dir| dir.resolve(roots)).transpose()
     }
+}
+
+/// The canonical semantic hash of a managed config-entry value: SHA-256
+/// over the compact `serde_json` serialization. `serde_json::Map` is a
+/// `BTreeMap` (no `preserve_order` feature), so the serialization is
+/// sorted-key and whitespace-free — both the recording side (the rendered
+/// entry) and the checking side (the value read back from the user's
+/// file) go through this one function, making key order and formatting
+/// in the file invisible to the drift check.
+pub fn entry_value_hash(value: &serde_json::Value) -> Result<Digest, io::Error> {
+    let canonical = serde_json::to_string(value).map_err(io::Error::other)?;
+    Ok(crate::oci::Algorithm::Sha256.hash(canonical.as_bytes()))
+}
+
+/// Read the managed member `pointer` points at inside the config file at
+/// `target` (JSONC-tolerant). `Ok(None)` when the member (or the
+/// `instructions`-style container) is absent; `Err` on I/O or an
+/// unparseable file.
+fn read_entry_value(target: &Path, pointer: &str) -> io::Result<Option<serde_json::Value>> {
+    let raw = std::fs::read_to_string(target)?;
+    let (doc, _) = crate::install::json_config::parse_object(&raw, target)?;
+    Ok(serde_json::Value::Object(doc).pointer(pointer).cloned())
+}
+
+/// The current semantic hash of the entry at `pointer` in `target`. An
+/// absent file/member surfaces as `NotFound` so the caller's
+/// missing-vs-modified precedence holds.
+fn current_entry_hash(target: &Path, pointer: &str) -> io::Result<Digest> {
+    let value = read_entry_value(target, pointer)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("managed entry '{pointer}' not present in '{}'", target.display()),
+        )
+    })?;
+    entry_value_hash(&value)
 }
 
 /// Filter `outputs` to those whose client is in the currently-active set.
@@ -533,6 +605,7 @@ impl InstallState {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let convert = (ConfigScope::Project, &roots);
 
@@ -794,6 +867,7 @@ fn convert_v1_records(
                 target,
                 content_hash: out.content_hash,
                 support_dir,
+                entry: None,
             });
         }
 
@@ -850,6 +924,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -863,6 +938,7 @@ mod tests {
             },
             content_hash: Algorithm::Sha256.hash(name.as_bytes()),
             support_dir: None,
+            entry: None,
         }
     }
 
@@ -876,6 +952,7 @@ mod tests {
             },
             content_hash: Algorithm::Sha256.hash(relative.as_bytes()),
             support_dir: None,
+            entry: None,
         }
     }
 
@@ -1009,6 +1086,7 @@ mod tests {
                 },
                 content_hash: Algorithm::Sha256.hash(b"v2test"),
                 support_dir: None,
+                entry: None,
             }],
         });
         st.save().unwrap();
@@ -1695,6 +1773,7 @@ mod tests {
             claude_root: Some(claude_root.clone()),
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
 
         let st = InstallState::load_global(&global_path, &roots).unwrap();
@@ -1777,6 +1856,7 @@ mod tests {
                     anchor: PathAnchor::Workspace,
                     relative: ".claude/rules/multi-file-rule".to_string(),
                 }),
+                entry: None,
             }],
         });
         st.save().unwrap();
@@ -2149,6 +2229,7 @@ mod tests {
                     },
                     content_hash: Algorithm::Sha256.hash(b"claude-bytes"),
                     support_dir: None,
+                    entry: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -2158,6 +2239,7 @@ mod tests {
                     },
                     content_hash: Algorithm::Sha256.hash(b"copilot-bytes"),
                     support_dir: None,
+                    entry: None,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -2167,6 +2249,7 @@ mod tests {
                     },
                     content_hash: Algorithm::Sha256.hash(b"opencode-bytes"),
                     support_dir: None,
+                    entry: None,
                 },
             ],
         });
@@ -2202,5 +2285,111 @@ mod tests {
             !record_value.contains_key("content_hash"),
             "the serialized record must NOT carry a top-level `content_hash` key (denorm gone)"
         );
+    }
+
+    // ── Entry-typed outputs (MCP config registrations) ───────────────────
+
+    /// A `ClientOutput` pointing at a managed entry inside `cfg`, hashed
+    /// over `value`'s canonical serialization.
+    fn entry_output(tmp: &std::path::Path, pointer: &str, value: &serde_json::Value) -> (ClientOutput, AnchorRoots) {
+        let roots = AnchorRoots {
+            workspace: tmp.to_path_buf(),
+            grim_home: tmp.join("grim-home"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+        };
+        let out = ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: ".mcp.json".to_string(),
+            },
+            content_hash: entry_value_hash(value).unwrap(),
+            support_dir: None,
+            entry: Some(pointer.to_string()),
+        };
+        (out, roots)
+    }
+
+    #[test]
+    fn entry_hash_ignores_formatting_and_key_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim", "args": ["mcp"]});
+        let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
+
+        // Reordered keys, exotic whitespace, extra foreign keys: same hash.
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            "{\n  \"other\": 1,\n  \"mcpServers\": {\n    \"grim\": {\n\t\"args\":   [\"mcp\"],\n      \"command\": \"grim\"\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        assert!(out.is_present(&roots).unwrap());
+        assert_eq!(out.current_hash(&roots).unwrap(), out.content_hash);
+
+        // A real value change flips the hash.
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            "{\"mcpServers\": {\"grim\": {\"command\": \"evil\", \"args\": [\"mcp\"]}}}",
+        )
+        .unwrap();
+        assert!(out.is_present(&roots).unwrap());
+        assert_ne!(out.current_hash(&roots).unwrap(), out.content_hash);
+    }
+
+    #[test]
+    fn entry_presence_tracks_the_member_not_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
+
+        // No file at all.
+        assert!(!out.is_present(&roots).unwrap());
+        // File present, member absent.
+        std::fs::write(tmp.path().join(".mcp.json"), "{\"mcpServers\": {\"other\": {}}}").unwrap();
+        assert!(!out.is_present(&roots).unwrap());
+        assert!(out.current_hash(&roots).is_err(), "absent entry has no current hash");
+        // Unparseable file: absent, not an error (read-side degradation).
+        std::fs::write(tmp.path().join(".mcp.json"), "not json {{{").unwrap();
+        assert!(!out.is_present(&roots).unwrap());
+        // Member present.
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            "{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}",
+        )
+        .unwrap();
+        assert!(out.is_present(&roots).unwrap());
+    }
+
+    #[test]
+    fn entry_value_hash_is_sorted_key_canonical() {
+        // Guard: serde_json without `preserve_order` serializes maps
+        // sorted-key, which the semantic drift check depends on. A future
+        // `preserve_order` feature flip must fail here loudly.
+        let a: serde_json::Value = serde_json::from_str("{\"z\": 1, \"a\": {\"y\": 2, \"b\": 3}}").unwrap();
+        assert_eq!(serde_json::to_string(&a).unwrap(), "{\"a\":{\"b\":3,\"y\":2},\"z\":1}");
+        let b: serde_json::Value = serde_json::from_str("{\"a\": {\"b\": 3, \"y\": 2}, \"z\": 1}").unwrap();
+        assert_eq!(entry_value_hash(&a).unwrap(), entry_value_hash(&b).unwrap());
+    }
+
+    #[test]
+    fn entry_field_stays_off_the_wire_when_absent() {
+        // A state file without MCP artifacts must stay byte-identical to
+        // pre-entry grim: `entry` is skip_serializing_if.
+        let out = ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: ".claude/rules/r.md".to_string(),
+            },
+            content_hash: Algorithm::Sha256.hash(b"x"),
+            support_dir: None,
+            entry: None,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("entry"), "absent entry must not serialize: {json}");
+        let round: ClientOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, out);
     }
 }

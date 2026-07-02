@@ -1284,11 +1284,12 @@ fn derive_artifact_state(
     // A read-only derivation never `?`-propagates an `AnchorError`: an
     // unresolvable anchored output (corrupt `relative`, anchor root absent
     // here) surfaces as IntegrityMissing, distinct from never-installed.
+    // Entry outputs (MCP config registrations) count as present only when
+    // the managed entry resolves inside the config file.
     for out in &outputs {
-        match out.resolved_target(roots) {
-            Ok(resolved) if !resolved.exists() => return ArtifactState::IntegrityMissing,
-            Ok(_) => {}
-            Err(_) => return ArtifactState::IntegrityMissing,
+        match out.is_present(roots) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return ArtifactState::IntegrityMissing,
         }
     }
     for out in &outputs {
@@ -2909,6 +2910,7 @@ mod tests {
                 claude_root: None,
                 copilot_root: None,
                 opencode_skills: None,
+                claude_user_dir: None,
             },
             clients_default: Vec::new(),
             clients_selected: Vec::new(),
@@ -3124,6 +3126,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -4043,6 +4046,7 @@ mod tests {
                 claude_root: None,
                 copilot_root: None,
                 opencode_skills: None,
+                claude_user_dir: None,
             },
             clients_default: vec![],
             clients_selected: Vec::new(),
@@ -4450,6 +4454,7 @@ mod p2_app_member_node_tests {
                 claude_root: None,
                 copilot_root: None,
                 opencode_skills: None,
+                claude_user_dir: None,
             },
             clients_default: vec!["claude".to_string()],
             clients_selected: Vec::new(),

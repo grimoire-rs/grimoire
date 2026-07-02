@@ -79,12 +79,12 @@ pub fn derive_badge(
 
     // An unresolvable anchored target (corrupt `relative`, anchor root
     // absent on this machine) absorbs to NotInstalled — a read-only badge
-    // never `?`-propagates an `AnchorError`.
+    // never `?`-propagates an `AnchorError`. Entry outputs (MCP config
+    // registrations) count as present only when the managed entry resolves.
     for out in &outputs {
-        match out.resolved_target(roots) {
-            Ok(resolved) if !resolved.exists() => return StatusBadge::NotInstalled,
-            Ok(_) => {}
-            Err(_) => return StatusBadge::NotInstalled,
+        match out.is_present(roots) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return StatusBadge::NotInstalled,
         }
     }
     for out in &outputs {
@@ -139,6 +139,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -181,6 +182,7 @@ mod tests {
                 },
                 content_hash: content_hash(&abs).unwrap(),
                 support_dir: None,
+                entry: None,
             }],
         });
         st
@@ -300,6 +302,7 @@ mod tests {
                 },
                 content_hash: hash,
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -361,6 +364,7 @@ mod tests {
                 },
                 content_hash: Digest::Sha256("a".repeat(64)),
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -371,6 +375,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
 
         let lk = lock_with("acme/x", 'a');

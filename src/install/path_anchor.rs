@@ -50,6 +50,12 @@ pub enum PathAnchor {
     /// `$GRIM_HOME`: the global OpenCode rules dir and the inert global
     /// Copilot rules path.
     GrimHome,
+    /// The directory holding Claude Code's user config file `.claude.json`
+    /// (global-scope MCP registrations): `$CLAUDE_CONFIG_DIR` else `$HOME`.
+    /// NOT derivable from [`Self::ClaudeRoot`] — with the override set the
+    /// file lives *inside* that dir, without it the file is a *sibling* of
+    /// `~/.claude`.
+    ClaudeUserDir,
 }
 
 impl std::fmt::Display for PathAnchor {
@@ -61,6 +67,7 @@ impl std::fmt::Display for PathAnchor {
             Self::OpenCodeSkills => "opencode-skills",
             Self::OpenCodeRoot => "opencode-root",
             Self::GrimHome => "grim-home",
+            Self::ClaudeUserDir => "claude-user-dir",
         })
     }
 }
@@ -92,6 +99,10 @@ pub struct AnchorRoots {
     /// root ([`PathAnchor::OpenCodeRoot`]) is derived as the parent of this
     /// path — no separate field is needed.
     pub opencode_skills: Option<PathBuf>,
+    /// The dir holding Claude Code's user config file (`.claude.json`),
+    /// when resolvable: `$CLAUDE_CONFIG_DIR` else `$HOME`. Not derivable
+    /// from [`Self::claude_root`] (see [`PathAnchor::ClaudeUserDir`]).
+    pub claude_user_dir: Option<PathBuf>,
 }
 
 impl AnchorRoots {
@@ -105,6 +116,7 @@ impl AnchorRoots {
             claude_root: vendor_claude::global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
             copilot_root: vendor_copilot::global_native_root(env_dir("COPILOT_HOME"), home_dir()),
             opencode_skills: vendor_opencode::global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()),
+            claude_user_dir: vendor_claude::user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
         }
     }
 }
@@ -127,6 +139,7 @@ impl PathAnchor {
                 .as_ref()
                 .and_then(|s| s.parent())
                 .map(std::path::Path::to_path_buf),
+            Self::ClaudeUserDir => roots.claude_user_dir.clone(),
         }
     }
 }
@@ -530,6 +543,7 @@ mod tests {
             claude_root: Some(PathBuf::from("/claude")),
             copilot_root: Some(PathBuf::from("/copilot")),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
+            claude_user_dir: None,
         }
     }
 
@@ -584,6 +598,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         assert!(PathAnchor::ClaudeRoot.root(&roots).is_none());
         assert!(PathAnchor::CopilotRoot.root(&roots).is_none());
@@ -601,6 +616,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         assert!(
             PathAnchor::OpenCodeRoot.root(&roots).is_none(),
@@ -711,6 +727,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::ClaudeRoot,
@@ -995,6 +1012,7 @@ mod tests {
             claude_root: Some(PathBuf::from("/a/claude")),
             copilot_root: Some(PathBuf::from("/a/copilot")),
             opencode_skills: Some(PathBuf::from("/a/skills")),
+            claude_user_dir: None,
         };
         let abs = PathBuf::from("/a/skills/my-skill");
         let ap = AnchoredPath::from_target(
@@ -1044,6 +1062,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         // When there is no opencode_skills root, the vendor falls back to
         // the workspace layout under grim_home.
@@ -1090,6 +1109,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1128,6 +1148,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1158,6 +1179,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         let abs = PathBuf::from("/definitely/not/on/disk/ws/.claude/rules/gone.md");
         let ap = AnchoredPath::from_target(
@@ -1217,6 +1239,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         // Build /ws/<non-utf8> by appending a non-UTF-8 component.
         let mut abs = PathBuf::from("/ws");
@@ -1246,6 +1269,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         // abs equals the workspace root exactly.
         let abs = PathBuf::from("/ws");
@@ -1417,6 +1441,7 @@ mod tests {
             claude_root: Some(PathBuf::from("/claude")),
             copilot_root: Some(PathBuf::from("/copilot")),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
+            claude_user_dir: None,
         };
 
         let name = "test-artifact";

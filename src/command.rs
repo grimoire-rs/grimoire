@@ -389,6 +389,7 @@ mod tests {
                 claude_root: None,
                 copilot_root: None,
                 opencode_skills: None,
+                claude_user_dir: None,
             },
         }
     }

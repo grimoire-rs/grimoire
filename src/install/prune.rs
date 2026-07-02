@@ -335,6 +335,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         }
     }
 
@@ -357,6 +358,7 @@ mod tests {
                 },
                 content_hash: hash,
                 support_dir: None,
+                entry: None,
             }],
         });
         file
@@ -380,6 +382,7 @@ mod tests {
                 },
                 content_hash: hash,
                 support_dir: None,
+                entry: None,
             }],
         });
         dir
@@ -571,6 +574,7 @@ mod tests {
                 },
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
+                entry: None,
             }],
         });
 
@@ -623,6 +627,7 @@ mod tests {
                 },
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
+                entry: None,
             }],
         });
 
