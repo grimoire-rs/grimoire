@@ -23,15 +23,16 @@ use crate::api::release_report::ReleaseReport;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::access::{OciAccess, Operation};
-use crate::oci::annotations::annotations_for_bundle;
+use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
 use crate::oci::manifest::{Descriptor, OciManifest};
+use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags};
 use crate::oci::{Algorithm, ArtifactKind, Identifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
-use super::build::{derive_git_provenance, detect_kind, read_bundle_members, validate_and_pack};
+use super::build::{derive_git_provenance, detect_kind, read_bundle_members, read_mcp_descriptor, validate_and_pack};
 
 /// `grim release` arguments.
 #[derive(Debug, Args)]
@@ -43,7 +44,7 @@ pub struct ReleaseArgs {
     pub reference: String,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.
@@ -102,6 +103,9 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     if kind == ArtifactKind::Bundle {
         return release_bundle(ctx, args, &id, &repo, &version, &tags, &source).await;
+    }
+    if kind == ArtifactKind::Mcp {
+        return release_mcp(ctx, args, &id, &repo, &version, &tags, &source).await;
     }
 
     // `--git` (opt-in): derive provenance once before packing; a non-git path
@@ -232,6 +236,72 @@ async fn release_bundle(
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
             media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+            size: layer.len() as u64,
+        }],
+        annotations,
+    };
+
+    if args.dry_run {
+        let preview = preview_manifest_digest(&oci_manifest);
+        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false);
+        return Ok((report, ExitCode::Success));
+    }
+
+    super::grim(access.push_blob(repo, &layer).await)?;
+    let manifest_digest = super::grim(access.push_manifest(repo, &oci_manifest).await)?;
+
+    if !args.force {
+        super::grim(guard_existing_version(&access, repo, version, &manifest_digest).await)?;
+    }
+    super::grim(move_tags(&access, repo, tags, version, &manifest_digest).await)?;
+
+    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true);
+    Ok((report, ExitCode::Success))
+}
+
+/// Release an MCP server descriptor: parse + validate the TOML source,
+/// serialize the canonical JSON layer, then push blob + manifest +
+/// cascade tags exactly like every other release (same
+/// skip-existing/dry-run/guard/tag-cascade semantics as
+/// [`release_bundle`]).
+#[allow(clippy::too_many_arguments)]
+async fn release_mcp(
+    ctx: &Context,
+    args: &ReleaseArgs,
+    id: &Identifier,
+    repo: &Identifier,
+    version: &str,
+    tags: &[String],
+    source: &str,
+) -> anyhow::Result<(ReleaseReport, ExitCode)> {
+    let (name, descriptor) = read_mcp_descriptor(&args.path)?;
+
+    // `--git` first: a non-git path fails (65) before any registry work —
+    // same ordering rationale as `release_bundle`.
+    let git = derive_git_provenance(&args.path, args.git).await?;
+
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+
+    if args.skip_existing
+        && let Some(existing) = resolve_existing_version(&access, repo, version).await
+    {
+        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        return Ok((report, ExitCode::Success));
+    }
+
+    let layer = descriptor
+        .to_layer_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to serialize MCP layer: {e}"))?;
+    let layer_digest = Algorithm::Sha256.hash(&layer);
+    let annotations = annotations_for_mcp(&name, &descriptor, version, Some(source), git.as_ref());
+    let oci_manifest = OciManifest {
+        media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
+        artifact_type: None,
+        config_media_type: None,
+        layers: vec![Descriptor {
+            digest: layer_digest.clone(),
+            media_type: MCP_LAYER_MEDIA_TYPE.to_string(),
             size: layer.len() as u64,
         }],
         annotations,

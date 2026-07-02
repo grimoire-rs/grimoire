@@ -208,6 +208,16 @@ def fetch_manifest(repo: str, tag: str) -> dict:
         return json.loads(resp.read())
 
 
+def fetch_blob(repo: str, digest: str) -> bytes:
+    """Fetch a raw layer blob by digest.
+
+    Lets a test assert the exact layer content grim pushed (e.g. the
+    canonical-JSON MCP descriptor document).
+    """
+    with urllib.request.urlopen(f"{REGISTRY_BASE}/v2/{repo}/blobs/{digest}") as resp:
+        return resp.read()
+
+
 def retag(repo: str, tag: str, target_digest: str) -> PublishedArtifact:
     """Re-point ``tag`` at an existing manifest ``target_digest``.
 

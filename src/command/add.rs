@@ -422,6 +422,12 @@ pub(crate) fn write_config(
             let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
         }
     }
+    if !set.mcp.is_empty() {
+        out.push_str("\n[mcp]\n");
+        for (name, id) in &set.mcp {
+            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+        }
+    }
 
     crate::store::atomic_write::atomic_write(path, out.as_bytes()).map_err(|e| {
         crate::config::config_error::ConfigError::new(path, crate::config::config_error::ConfigErrorKind::Io(e))
