@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
@@ -25,12 +26,30 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::mcp::McpArgs;
 use crate::context::Context;
 use crate::mcp::state::McpState;
-use crate::mcp::tool_args::{FetchToolArgs, SearchToolArgs, StatusToolArgs};
+use crate::mcp::tool_args::{FetchToolArgs, RenderToolArgs, SearchToolArgs, StatusToolArgs};
 
-/// The MCP server handler. Cloned per request by rmcp (a cheap `Arc` bump).
+/// The MCP server handler. Cloned per request by rmcp (a cheap `Arc` bump
+/// plus the router's shared map).
 #[derive(Clone)]
 pub struct GrimMcpServer {
     inner: Arc<McpState>,
+    /// The instance router `#[tool_handler]` dispatches through — built
+    /// once in [`serve`] via [`build_router`] so write-tool gating is a
+    /// single decision (hidden from `tools/list` AND rejected at
+    /// `tools/call`), never re-evaluated per call.
+    tool_router: ToolRouter<Self>,
+}
+
+/// Build the tool router for the given write gate. `--allow-writes` off
+/// disables `grim_render` — rmcp's `disable_route` both hides the tool
+/// from `tools/list` and rejects `tools/call` (`invalid_params`), so
+/// advertising and enforcement cannot drift.
+fn build_router(allow_writes: bool) -> ToolRouter<GrimMcpServer> {
+    let mut router = GrimMcpServer::tool_router();
+    if !allow_writes {
+        router.disable_route("grim_render");
+    }
+    router
 }
 
 #[tool_router]
@@ -87,9 +106,22 @@ impl GrimMcpServer {
             Err(e) => Err(tool_error("fetch", &e)),
         }
     }
+
+    /// Write an artifact's vendor-native files to a destination directory.
+    /// Write tool — registered only when the server was launched with
+    /// `--allow-writes` (see [`build_router`]).
+    #[tool(
+        description = "Write a Grimoire artifact's vendor-native files (claude/opencode/copilot projection) into an arbitrary destination directory — no install state, no client config edits. A skill lands at <dest_dir>/<name>/, a rule/agent at <dest_dir>/<name>.md. Requires the server to run with --allow-writes."
+    )]
+    async fn grim_render(&self, Parameters(args): Parameters<RenderToolArgs>) -> Result<String, ErrorData> {
+        match crate::mcp::render::render(&self.inner.ctx, &args).await {
+            Ok(report) => to_json(&report),
+            Err(e) => Err(tool_error("render", &e)),
+        }
+    }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for GrimMcpServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         // `ServerInfo` / `Implementation` are `#[non_exhaustive]` (cannot be
@@ -132,10 +164,43 @@ pub async fn serve(ctx: &Context, args: &McpArgs) -> anyhow::Result<ExitCode> {
         ctx: ctx.clone(),
         allow_writes: args.allow_writes,
     };
-    let server = GrimMcpServer { inner: Arc::new(state) };
+    let server = GrimMcpServer {
+        inner: Arc::new(state),
+        tool_router: build_router(args.allow_writes),
+    };
     tracing::info!(allow_writes = args.allow_writes, "grim mcp server starting on stdio");
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     tracing::info!("grim mcp server stopped (client disconnected)");
     Ok(ExitCode::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_tools_always_routed() {
+        for allow_writes in [false, true] {
+            let router = build_router(allow_writes);
+            for tool in ["grim_search", "grim_status", "grim_fetch"] {
+                assert!(
+                    router.has_route(tool),
+                    "{tool} must be routed (allow_writes={allow_writes})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grim_render_gated_behind_allow_writes() {
+        assert!(
+            !build_router(false).has_route("grim_render"),
+            "hidden + rejected without --allow-writes"
+        );
+        assert!(
+            build_router(true).has_route("grim_render"),
+            "routed with --allow-writes"
+        );
+    }
 }

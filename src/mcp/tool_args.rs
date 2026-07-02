@@ -100,6 +100,28 @@ pub struct FetchToolArgs {
     // resolved scope's configured registries are the boundary (CWE-918).
 }
 
+/// Arguments for the `grim_render` tool (write tool, `--allow-writes`).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RenderToolArgs {
+    /// The artifact reference to render (same forms as `grim_fetch`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+
+    /// The client whose native files to write: `claude` / `opencode` /
+    /// `copilot`.
+    pub vendor: String,
+
+    /// Directory to write the files under (created if absent). A skill
+    /// lands at `<dest_dir>/<name>/…`, a rule/agent at
+    /// `<dest_dir>/<name>.md` (+ an optional rule support dir beside it).
+    pub dest_dir: PathBuf,
+
+    /// Per-call scope selection (registry-set derivation only — render
+    /// never touches install state).
+    #[serde(flatten, default)]
+    pub scope: ScopeToolArgs,
+}
+
 /// Arguments for the `grim_status` tool.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct StatusToolArgs {

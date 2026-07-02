@@ -11,6 +11,7 @@
 //! see `adr_mcp_percall_scope_fetch_render.md`.
 
 pub mod fetch;
+pub mod render;
 pub mod server;
 pub mod state;
 pub mod tool_args;

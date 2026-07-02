@@ -188,19 +188,16 @@ def test_mcp_status_tool_returns_payload(
     )
 
 
-def test_mcp_allow_writes_tool_surface_unchanged(
+def test_mcp_allow_writes_gates_grim_render(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path
 ) -> None:
-    """``grim mcp --allow-writes`` advertises no additional tools beyond read-only mode.
+    """Tool-surface change-detector: ``--allow-writes`` adds exactly ``grim_render``.
 
-    Write tools (grim_add, grim_install, grim_update, grim_uninstall) are
-    gated behind ``--allow-writes`` in the design, but are NOT YET IMPLEMENTED
-    (v1 ships only the two read tools ``grim_search`` and ``grim_status``).
-
-    This test documents and locks the current shipped state: the tool set
-    is identical whether or not ``--allow-writes`` is passed. When write
-    tools are implemented, this test MUST be updated deliberately to reflect
-    the new advertised tool surface — it serves as a change-detector.
+    Read-only mode advertises the three read tools; ``--allow-writes`` adds
+    the one write tool. Calling ``grim_render`` without the flag must be a
+    JSON-RPC error (rmcp ``disable_route`` hides AND rejects — advertising
+    and enforcement cannot drift). When the tool surface changes again,
+    update these sets deliberately.
     """
     (project_dir / "grimoire.toml").write_text("[skills]\n")
     runner = grim_at(project_dir)
@@ -211,28 +208,41 @@ def test_mcp_allow_writes_tool_surface_unchanged(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
 
-    # Read-only mode (default).
+    read_only = {"grim_search", "grim_status", "grim_fetch"}
+
     read_only_responses = _drive(runner, project_dir, list_request, allow_writes=False)
     read_only_names = {t["name"] for t in read_only_responses[2]["result"]["tools"]}
+    assert read_only_names == read_only, (
+        f"read-only surface must be exactly {sorted(read_only)}, got {sorted(read_only_names)}"
+    )
 
-    # --allow-writes mode.
     allow_writes_responses = _drive(runner, project_dir, list_request, allow_writes=True)
     allow_writes_names = {t["name"] for t in allow_writes_responses[2]["result"]["tools"]}
-
-    # Both modes must expose the two read tools.
-    assert "grim_search" in read_only_names
-    assert "grim_status" in read_only_names
-    assert "grim_search" in allow_writes_names
-    assert "grim_status" in allow_writes_names
-
-    # Write tools are NOT YET IMPLEMENTED: the tool surface must be identical
-    # in both modes. When write tools land, update this assertion to describe
-    # the new set.
-    assert read_only_names == allow_writes_names, (
-        f"--allow-writes must not add or remove tools until write tools are "
-        f"implemented; read-only: {sorted(read_only_names)}, "
-        f"allow-writes: {sorted(allow_writes_names)}"
+    assert allow_writes_names == read_only | {"grim_render"}, (
+        f"--allow-writes must add exactly grim_render, got {sorted(allow_writes_names)}"
     )
+
+    # Calling the gated tool without the flag is a JSON-RPC error, not a
+    # silent success.
+    call_request = [
+        _initialize(1),
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "grim_render",
+                "arguments": {"ref": "skills/x", "vendor": "claude", "dest_dir": str(project_dir / "out")},
+            },
+        },
+    ]
+    responses = _drive(runner, project_dir, call_request, allow_writes=False)
+    msg = responses[2]
+    assert "error" in msg or msg["result"].get("isError") is True, (
+        f"grim_render without --allow-writes must be rejected, got: {msg!r}"
+    )
+    assert not (project_dir / "out").exists(), "the gated call must not touch the filesystem"
 
 
 def test_mcp_search_ignores_agent_supplied_registry(
