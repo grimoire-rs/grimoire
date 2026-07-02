@@ -313,18 +313,21 @@ actions go through the same seams as `grim add`/`install`/`uninstall`. Press
 
 `grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
 STDIO. An AI agent host such as [Claude Code][claude-code] connects to it
-and can call two read tools:
+and can call these tools:
 
-| Tool | What it returns |
-|------|-----------------|
-| `grim_search` | Same JSON as `grim search --format json`, over the configured registries (no registry override). Args: `query?`, `refresh?` |
-| `grim_status` | Same JSON as `grim status --format json` for the fixed scope |
+| Tool | What it returns | Gate |
+|------|-----------------|------|
+| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override). Args: `query?`, `refresh?`, scope | always |
+| `grim_status` | Same JSON as `grim status --format json` for the requested scope. Args: scope | always |
+| `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path`; a `files` listing is always included. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, scope | always |
+| `grim_render` | Writes an artifact's vendor-native files into `dest_dir` (created if absent) — no install state. Args: `ref`, `vendor`, `dest_dir`, scope | `--allow-writes` |
 
-The server is read-only by default; `--allow-writes` enables the mutating
-tools (`add` / `install` / `update` / `uninstall`) against the server's
-fixed scope — leave it off for a browse-only server. Confirm the current
-tool set with `grim mcp --help`. The scope (`--global` or
-`--config <path>`) is fixed at startup — tool calls cannot redirect it.
+The install scope is chosen **per tool call**: optional `global` /
+`config` / `workspace` arguments on each tool (precedence in that order;
+all omitted = project walk-up from the server's working directory).
+`grim mcp` takes no scope flags — `--global`/`--config` at launch exit 64.
+The server is read-only by default; `--allow-writes` (the only flag)
+enables `grim_render` — leave it off for a browse-only server.
 Diagnostics go to stderr; stdout is the JSON-RPC channel. Register it
 in a project `.mcp.json`:
 

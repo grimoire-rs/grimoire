@@ -553,13 +553,19 @@ or any [MCP][mcp-spec]-compatible client — connects to it over stdin/stdout
 and gains structured access to Grimoire's catalog and install state without
 running shell commands.
 
-The server is **read-only by default**. Mutating tools (add, install,
-update, uninstall) are gated behind `--allow-writes` and are not yet
-registered; the flag reserves the gate for a later release.
+The server is **read-only by default**. The one mutating tool
+(`grim_render`) is gated behind `--allow-writes`: without the flag it is
+neither advertised nor callable.
 
-The install **scope is fixed at server start**: `--global` operates on the
-global scope; `--config <path>` points at a specific project config.
-Individual tool calls cannot redirect the scope.
+The install **scope is chosen per tool call**, not at launch: every
+scope-sensitive tool takes optional `global` / `config` / `workspace`
+arguments (precedence in that order; all omitted means the project
+discovered from the server's working directory — exactly the CLI default).
+One server instance can answer questions about any scope.
+
+> **Breaking change (v2):** `grim mcp --global` and `grim mcp --config`
+> were removed and now exit `64` with a migration hint. Move the scope
+> selection into the tool-call arguments instead.
 
 Because stdout carries the [JSON-RPC][json-rpc] channel, the server writes
 no diagnostic output there — all tracing goes to stderr. The server shuts
@@ -567,20 +573,21 @@ down when the client closes stdin (EOF).
 
 | Flag | Effect |
 |------|--------|
-| `--allow-writes` | Enable mutating tools when they land (currently no-op — server is read-only). |
-| `--global` | Fix the scope to the global config for the server's lifetime. |
-| `--config <path>` | Use an explicit project config (scope resolution for status tools). |
+| `--allow-writes` | Register the write tool `grim_render`. Launch-pinned deliberately: enabling writes is a decision of whoever wires the server into a harness, never of the model calling the tools. |
 
-**Tools exposed today:**
+**Tools exposed:**
 
-| Tool | Description | Equivalent CLI |
-|------|-------------|----------------|
-| `grim_search` | Browse/search the configured registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`. | `grim search --format json` |
-| `grim_status` | Install status of every declared artifact in the fixed scope. | `grim status --format json` |
+| Tool | Description | Gate |
+|------|-------------|------|
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Payload equals `grim search --format json`. | always |
+| `grim_status` | Install status of every declared artifact in the requested scope. Args: scope. Payload equals `grim status --format json`. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file; a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download. Args: `ref`, `vendor?`, `path?`, scope. | always |
+| `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
-The JSON payload each tool returns is identical to the `--format json`
-output of the corresponding command — one source of truth for both the CLI
-and the MCP surface.
+The scope arguments on each tool are `global` (boolean), `config` (explicit
+`grimoire.toml` path), and `workspace` (directory to start the config
+walk-up from). `grim_fetch` and `grim_render` use them only to decide which
+registries resolve the reference — neither touches install state.
 
 **Registering with Claude Code** — add to `.mcp.json` in the project root
 (or register globally via `claude mcp add`):
@@ -596,15 +603,14 @@ and the MCP surface.
 }
 ```
 
-Pass `--global` to the `args` array when you want the server to operate on
-the global scope rather than the discovered project:
+Add `--allow-writes` to the `args` array to enable `grim_render`:
 
 ```json
 {
   "mcpServers": {
     "grimoire": {
       "command": "grim",
-      "args": ["mcp", "--global"]
+      "args": ["mcp", "--allow-writes"]
     }
   }
 }

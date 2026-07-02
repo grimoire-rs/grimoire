@@ -14,9 +14,16 @@
    adds with a registry-less ref; now falls back through the documented default
    chain) and 8b12470 (TUI tree roots index-sourced rows at their source locator;
    host/namespace chains fold into one node).
- - mcp artifact kind follow-ups (deferred v1, see catalog/mcp/grim.toml):
-   reconsider global vs project launch semantics for grim's own MCP descriptor
-   (a scope flag baked into the descriptor pins every consumer; better: the
-   server emits rendered artifacts for a requested vendor/scope). Also
-   deferred: mcp bundle membership, `${VAR:-default}` support, per-vendor
-   override keys in the descriptor, VS Code user-profile mcp.json surface.
+ - [x] mcp launch-scope semantics: RESOLVED by grim mcp v2
+   (adr_mcp_percall_scope_fetch_render.md) — scope is a per-tool-call
+   parameter (global/config/workspace), `grim mcp --global/--config`
+   removed (exit 64); grim_fetch returns artifact content in-context
+   (canonical or vendor projection), grim_render (behind --allow-writes)
+   writes vendor-native files to an arbitrary dest_dir.
+ - mcp v2 follow-ups (deferred, see adr_mcp_percall_scope_fetch_render.md):
+   MCP roots as scope defaults (client support varies), hosted/remote MCP
+   facade on the index server, MCP resources, manifest cache for true
+   offline fetch (GRIM_OFFLINE fetch fails at fetch_manifest even with
+   warm blobs). Still open from the mcp kind v1: mcp bundle membership,
+   `${VAR:-default}` support, per-vendor override keys in the descriptor,
+   VS Code user-profile mcp.json surface.

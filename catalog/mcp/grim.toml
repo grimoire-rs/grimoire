@@ -1,15 +1,13 @@
-# grim's own MCP server: `grim mcp` exposes the catalog (grim_search) and
-# install state (grim_status) to AI agents over stdio. Read-only by
-# default; the scope is fixed at launch.
-#
-# TODO: reconsider global vs project launch semantics — `grim mcp` takes
-# `--global`, but baking a scope flag into this descriptor would pin every
-# consumer to one scope. v1 ships the default (project-scope) launch; a
-# scope-aware story (e.g. the server emitting rendered artifacts for a
-# requested vendor/scope) is a follow-up.
-description = "Grimoire catalog search and install status over the Model Context Protocol."
-summary = "grim as an MCP server (read-only catalog + status)"
-keywords = "grimoire,mcp,catalog,search,status"
+# grim's own MCP server: `grim mcp` exposes the catalog (grim_search),
+# install state (grim_status), and artifact content (grim_fetch — canonical
+# or per-vendor projections, no install needed) to AI agents over stdio;
+# grim_render (write files to a directory) is gated behind --allow-writes.
+# Scope is chosen per tool call (global / config / workspace arguments), so
+# this one descriptor serves every consumer and scope — the v1 launch-scope
+# question is resolved by adr_mcp_percall_scope_fetch_render.md.
+description = "Grimoire catalog, install status, and artifact content over the Model Context Protocol."
+summary = "grim as an MCP server (search, status, fetch; render behind --allow-writes)"
+keywords = "grimoire,mcp,catalog,search,status,fetch,render"
 repository = "https://github.com/grimoire-rs/grimoire"
 
 [server]

@@ -32,9 +32,9 @@ the only required parts:
 
 ```toml
 # mcp/grim.toml
-description = "Grimoire catalog search and install status over the Model Context Protocol."
-summary = "grim as an MCP server (read-only catalog + status)"
-keywords = "grimoire,mcp,catalog,search,status"
+description = "Grimoire catalog, install status, and artifact content over the Model Context Protocol."
+summary = "grim as an MCP server (search, status, fetch; render behind --allow-writes)"
+keywords = "grimoire,mcp,catalog,search,status,fetch,render"
 repository = "https://github.com/grimoire-rs/grimoire"
 
 [server]
@@ -271,8 +271,10 @@ than leaving a `"mcpServers": {}` husk behind.
 grim's own server is published at `ghcr.io/grimoire-rs/mcp/grim` from
 the source descriptor [`catalog/mcp/grim.toml`][catalog-mcp-grim] shown
 [above](#format), installable the same way as any third-party
-descriptor — see [`grim mcp`](./commands.md#mcp) for what the server
-itself exposes once registered.
+descriptor. Once registered it exposes four tools — `grim_search`,
+`grim_status`, `grim_fetch`, and (behind `--allow-writes`) `grim_render`
+— each taking the install scope as optional per-call arguments; the full
+tool table lives at [`grim mcp`](./commands.md#mcp).
 
 ## Limitations {#limitations}
 
@@ -291,6 +293,11 @@ itself exposes once registered.
 - **Copilot CLI's global config skips descriptors with `${VAR}`
   references** — see [Environment references](#env-references). Every
   other client and scope still installs normally.
+- **`grim_fetch` / `grim_render` need the network even with warm blobs.**
+  grim's cache stores blobs but not manifests, so under `GRIM_OFFLINE=1`
+  (or `--offline`) a fetch fails cleanly at the manifest lookup instead of
+  serving from cache. A manifest cache for true offline fetch is a tracked
+  follow-up.
 - **A custom `$OPENCODE_CONFIG` outside every known root cannot be
   recorded portably.** grim stores each install record relative to a
   known root (the workspace, or a client's own config directory) so the
