@@ -14,11 +14,11 @@
 //! When the requested scope has no `grimoire.toml` yet (project discovery
 //! misses, or the global config file is absent), the command offers to
 //! initialize one before the session starts via the popup-style
-//! [`crate::tui::init_dialog`]: a confirm popup plus a registry input
-//! pre-filled with the effective default registry (flag > env > config >
-//! the built-in fallback), so plain Enter accepts — and persists as a
-//! `[[registries]]` entry with `default = true`. Cancelling closes the
-//! TUI cleanly with exit 0.
+//! [`crate::tui::init_dialog`]: a confirm popup, a source-type selector
+//! (package **index** — the default — or plain **oci** registry), then a
+//! locator input pre-filled with the selected type's effective default,
+//! so plain Enter accepts — and persists as a `[[registries]]` entry with
+//! `default = true`. Cancelling closes the TUI cleanly with exit 0.
 
 use std::io::IsTerminal;
 
@@ -30,7 +30,7 @@ use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::tui::app::{self, ScopeSwap, TuiContext};
-use crate::tui::init_dialog::{InitDialog, InitDialogOutcome};
+use crate::tui::init_dialog::{InitDialog, InitDialogOutcome, RegistryKindChoice};
 
 use super::scope_resolution;
 
@@ -176,14 +176,19 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 }
 
 /// Interactive missing-config prompt, run as a popup-style modal TUI
-/// session ([`crate::tui::init_dialog`]): confirm initialization, edit
-/// the default browse source — pre-filled with the **effective** browse
-/// primary (`--registry` flag > `[[registries]]` primary > legacy
+/// session ([`crate::tui::init_dialog`]): confirm initialization, pick
+/// the browse source type (**index** — the default — or **oci**), edit
+/// the type's pre-filled locator, and create the scope's `grimoire.toml`
+/// via `grim init` (which keys the entry `index` vs `oci` by the
+/// locator's shape — the type choice only picks the prefill, so an
+/// edited value can never contradict its stored key).
+///
+/// The pre-selected type and its prefill come from the **effective**
+/// browse primary (`--registry` flag > `[[registries]]` primary > legacy
 /// `default_registry` chain > the built-in fallback **index**,
-/// [`crate::command::FALLBACK_INDEX`]), so plain Enter persists a browse
-/// source that actually lists packages — and create the scope's
-/// `grimoire.toml` via `grim init` (which keys the entry `index` vs `oci`
-/// by the locator's shape).
+/// [`crate::command::FALLBACK_INDEX`]); the non-default type prefills its
+/// built-in fallback, so plain Enter persists a browse source that
+/// actually lists packages either way.
 ///
 /// Accepting the pre-filled value deliberately snapshots it as a
 /// `[[registries]]` entry with `default = true` in the new config: the
@@ -213,9 +218,25 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
 
     // The same precedence the session itself browses with — including the
     // built-in fallback — so the dialog's default and the browsed source
-    // can never diverge.
-    let default_registry = resolve_browse_default(ctx, args);
-    let mut dialog = InitDialog::new(&label, scope_label(scope), default_registry);
+    // can never diverge. The browse default's shape pre-selects the type
+    // (index for an unconfigured user); the other type falls back to its
+    // built-in so switching always offers a working prefill.
+    let browse_default = resolve_browse_default(ctx, args);
+    let (index_prefill, oci_prefill, kind) =
+        if crate::config::registry_resolve::classify_index(&browse_default).is_some() {
+            (
+                browse_default,
+                crate::command::FALLBACK_REGISTRY.to_string(),
+                RegistryKindChoice::Index,
+            )
+        } else {
+            (
+                crate::command::FALLBACK_INDEX.to_string(),
+                browse_default,
+                RegistryKindChoice::Oci,
+            )
+        };
+    let mut dialog = InitDialog::new(&label, scope_label(scope), index_prefill, oci_prefill, kind);
     let registry = match crate::tui::init_dialog::run(&mut dialog)? {
         InitDialogOutcome::Cancelled => return Ok(InitPrompt::Cancelled),
         InitDialogOutcome::Confirmed { registry } => registry,

@@ -358,13 +358,17 @@ short-id resolution default — it does not collapse the browse set when
 browse all declared registries regardless of whether the env var is set.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
-one before starting, as popup dialogs: confirm the init, then accept or
-edit the browse source. The input is pre-filled with the effective browse
-primary — the `--registry` flag, then the configured `[[registries]]`
-primary / legacy default chain, then the built-in fallback **index**
-`https://index.grimoire.rs` — and the accepted value is persisted as a
-`[[registries]]` entry with `default = true` in the new config, keyed
-`index` or `oci` by the locator's shape (clearing the input seeds
+one before starting, as popup dialogs: confirm the init, pick the browse
+source type — **index** (a [package index](./package-index.md), the
+default) or **oci** (a plain registry listing via `_catalog`) — then
+accept or edit the type's pre-filled locator. The pre-selected type and
+its prefill come from the effective browse primary — the `--registry`
+flag, then the configured `[[registries]]` primary / legacy default
+chain, then the built-in fallback **index** `https://index.grimoire.rs`;
+the other type prefills its built-in fallback. The accepted value is
+persisted as a `[[registries]]` entry with `default = true` in the new
+config, keyed `index` or `oci` by the locator's shape — the type choice
+picks the prefill, the shape keys the entry (clearing the input seeds
 nothing). Cancelling closes the TUI.
 
 `enter` opens the detail pane for the selected row: the centered artifact

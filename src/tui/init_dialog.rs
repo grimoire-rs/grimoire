@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The missing-config init dialog: popup-style confirm + registry input.
+//! The missing-config init dialog: confirm + source-type select + input.
 //!
 //! When `grim tui` starts and the requested scope has no `grimoire.toml`
-//! yet, this two-step modal session runs *before* the catalog browser:
-//! a confirm popup ("initialize?"), then a registry input pre-filled with
-//! the effective default registry (flag > env > config > the built-in
-//! fallback) so plain Enter accepts — and persists — a working registry.
+//! yet, this three-step modal session runs *before* the catalog browser:
+//! a confirm popup ("initialize?"), a source-type selector (package
+//! **index** — the default — or plain **oci** registry), then a locator
+//! input pre-filled with the type's effective default so plain Enter
+//! accepts — and persists — a working browse source.
 //!
 //! Mirrors the module split of the main TUI: [`InitDialog`] and its
 //! [`InitDialog::handle`] transition are pure (no terminal imports,
@@ -35,8 +36,36 @@ use super::terminal_guard::TerminalGuard;
 pub enum InitDialogStep {
     /// The "initialize <config>?" confirm popup.
     Confirm,
+    /// The source-type selector popup (package index vs plain OCI).
+    Kind,
     /// The default-registry input popup.
     Registry,
+}
+
+/// The browse-source type offered by the [`InitDialogStep::Kind`] step.
+///
+/// Selecting a type only picks which prefill lands in the locator input —
+/// the persisted `[[registries]]` key is still derived from the accepted
+/// locator's *shape* (see `command/init.rs`), so an edited value can never
+/// contradict its stored key.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryKindChoice {
+    /// A package index (static files or git) — the default.
+    Index,
+    /// A plain OCI registry listing via `_catalog`.
+    Oci,
+}
+
+impl RegistryKindChoice {
+    /// The other choice (for toggle keys).
+    fn toggled(self) -> Self {
+        match self {
+            Self::Index => Self::Oci,
+            Self::Oci => Self::Index,
+        }
+    }
 }
 
 /// The terminal-independent input alphabet for the dialog.
@@ -52,6 +81,8 @@ pub enum InitDialogInput {
     Enter,
     /// Cancel the dialog (closes the TUI cleanly).
     Esc,
+    /// Flip the source-type selection (tab / arrow keys).
+    Toggle,
 }
 
 /// How the dialog ended.
@@ -62,16 +93,17 @@ pub enum InitDialogOutcome {
     /// The user declined — close the TUI without initializing.
     Cancelled,
     /// Initialize the scope's config, seeding a `[[registries]]` entry with
-    /// `default = true` and `registry` as the url when present (a blanked-out
-    /// input seeds nothing).
+    /// `default = true` and `registry` as the locator when present — keyed
+    /// `index` vs `oci` by its shape (a blanked-out input seeds nothing).
     Confirmed {
         /// The accepted registry input (trimmed; `None` when emptied).
         registry: Option<String>,
     },
 }
 
-/// The pure dialog state: the labels to display, the current step, and
-/// the live registry input buffer.
+/// The pure dialog state: the labels to display, the current step, the
+/// source-type selection with its per-type prefills, and the live locator
+/// input buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitDialog {
     /// The config path label shown in the confirm popup (e.g.
@@ -79,26 +111,46 @@ pub struct InitDialog {
     pub config_label: String,
     /// The scope label (`project` / `global`) shown in the confirm popup.
     pub scope_label: String,
-    /// The live registry input, pre-filled with the effective default.
+    /// The locator pre-filled when `Index` is selected.
+    pub index_prefill: String,
+    /// The locator pre-filled when `Oci` is selected.
+    pub oci_prefill: String,
+    /// The selected source type (drives which prefill lands in `input`).
+    pub kind: RegistryKindChoice,
+    /// The live locator input (filled on the kind → registry transition).
     pub input: String,
     /// The current step.
     pub step: InitDialogStep,
 }
 
 impl InitDialog {
-    /// A fresh dialog on the confirm step, its registry input pre-filled
-    /// with `default_registry` (the effective default including the
-    /// built-in fallback — plain Enter accepts and persists it).
+    /// A fresh dialog on the confirm step. `kind` pre-selects the source
+    /// type (the effective browse default's shape — index for an
+    /// unconfigured user); each type carries its own prefill so plain
+    /// Enter persists a working locator either way.
     pub fn new(
         config_label: impl Into<String>,
         scope_label: impl Into<String>,
-        default_registry: impl Into<String>,
+        index_prefill: impl Into<String>,
+        oci_prefill: impl Into<String>,
+        kind: RegistryKindChoice,
     ) -> Self {
         Self {
             config_label: config_label.into(),
             scope_label: scope_label.into(),
-            input: default_registry.into(),
+            index_prefill: index_prefill.into(),
+            oci_prefill: oci_prefill.into(),
+            kind,
+            input: String::new(),
             step: InitDialogStep::Confirm,
+        }
+    }
+
+    /// The prefill matching the current `kind` selection.
+    fn selected_prefill(&self) -> &str {
+        match self.kind {
+            RegistryKindChoice::Index => &self.index_prefill,
+            RegistryKindChoice::Oci => &self.oci_prefill,
         }
     }
 
@@ -108,10 +160,31 @@ impl InitDialog {
         match self.step {
             InitDialogStep::Confirm => match input {
                 InitDialogInput::Enter | InitDialogInput::Char('y' | 'Y') => {
-                    self.step = InitDialogStep::Registry;
+                    self.step = InitDialogStep::Kind;
                     None
                 }
                 InitDialogInput::Esc | InitDialogInput::Char('n' | 'N' | 'q') => Some(InitDialogOutcome::Cancelled),
+                _ => None,
+            },
+            InitDialogStep::Kind => match input {
+                InitDialogInput::Toggle => {
+                    self.kind = self.kind.toggled();
+                    None
+                }
+                InitDialogInput::Char('i' | 'I') => {
+                    self.kind = RegistryKindChoice::Index;
+                    None
+                }
+                InitDialogInput::Char('o' | 'O') => {
+                    self.kind = RegistryKindChoice::Oci;
+                    None
+                }
+                InitDialogInput::Enter => {
+                    self.input = self.selected_prefill().to_string();
+                    self.step = InitDialogStep::Registry;
+                    None
+                }
+                InitDialogInput::Esc | InitDialogInput::Char('q') => Some(InitDialogOutcome::Cancelled),
                 _ => None,
             },
             InitDialogStep::Registry => match input {
@@ -130,6 +203,7 @@ impl InitDialog {
                     })
                 }
                 InitDialogInput::Esc => Some(InitDialogOutcome::Cancelled),
+                InitDialogInput::Toggle => None,
             },
         }
     }
@@ -185,6 +259,9 @@ fn map_key(key: KeyEvent) -> Option<InitDialogInput> {
         KeyCode::Esc => InitDialogInput::Esc,
         KeyCode::Backspace => InitDialogInput::Backspace,
         KeyCode::Char(c) => InitDialogInput::Char(c),
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+            InitDialogInput::Toggle
+        }
         _ => return None,
     })
 }
@@ -212,6 +289,37 @@ fn draw_dialog(f: &mut Frame, dialog: &InitDialog) {
             ],
             "enter/y initialize · esc/n quit",
         ),
+        InitDialogStep::Kind => {
+            let option_line = |selected: bool, name: &str, desc: &str| {
+                let (marker, style) = if selected {
+                    ("› ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    ("  ", Style::default().fg(Color::White))
+                };
+                Line::from(vec![
+                    Span::styled(marker.to_string(), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{name:<7}"), style),
+                    Span::styled(desc.to_string(), Style::default().fg(Color::DarkGray)),
+                ])
+            };
+            draw_popup(
+                f,
+                " browse source type ",
+                &[
+                    option_line(
+                        dialog.kind == RegistryKindChoice::Index,
+                        "index",
+                        "package index (recommended)",
+                    ),
+                    option_line(
+                        dialog.kind == RegistryKindChoice::Oci,
+                        "oci",
+                        "plain OCI registry (_catalog)",
+                    ),
+                ],
+                "tab/↑↓ switch · i/o select · enter continue · esc quit",
+            );
+        }
         InitDialogStep::Registry => draw_popup(
             f,
             " default registry ",
@@ -297,36 +405,88 @@ mod tests {
     use super::*;
 
     fn dialog() -> InitDialog {
-        InitDialog::new("./grimoire.toml", "project", "registry.example")
+        InitDialog::new(
+            "./grimoire.toml",
+            "project",
+            "index.example",
+            "registry.example",
+            RegistryKindChoice::Index,
+        )
+    }
+
+    /// Advance a fresh dialog to the registry step with the given kind.
+    fn to_registry(kind: RegistryKindChoice) -> InitDialog {
+        let mut d = dialog();
+        d.handle(InitDialogInput::Enter);
+        if kind == RegistryKindChoice::Oci {
+            d.handle(InitDialogInput::Char('o'));
+        }
+        d.handle(InitDialogInput::Enter);
+        d
     }
 
     #[test]
-    fn new_prefills_input_with_default_registry_on_confirm_step() {
+    fn new_starts_on_confirm_with_index_selected_and_empty_input() {
         let d = dialog();
         assert_eq!(d.step, InitDialogStep::Confirm);
-        assert_eq!(d.input, "registry.example", "the effective default pre-fills the input");
+        assert_eq!(d.kind, RegistryKindChoice::Index, "index is the default type");
+        assert_eq!(d.input, "", "input fills on the kind → registry transition");
     }
 
     #[test]
-    fn confirm_enter_advances_to_registry_then_enter_accepts_default() {
+    fn confirm_enter_advances_through_kind_then_enter_accepts_index_default() {
         let mut d = dialog();
         assert_eq!(d.handle(InitDialogInput::Enter), None);
+        assert_eq!(d.step, InitDialogStep::Kind);
+        assert_eq!(d.handle(InitDialogInput::Enter), None);
         assert_eq!(d.step, InitDialogStep::Registry);
+        assert_eq!(d.input, "index.example", "index prefill lands by default");
         // Plain Enter accepts — and therefore persists — the pre-filled
-        // fallback registry.
+        // fallback index.
         assert_eq!(
             d.handle(InitDialogInput::Enter),
             Some(InitDialogOutcome::Confirmed {
-                registry: Some("registry.example".to_string()),
+                registry: Some("index.example".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn kind_step_toggle_and_hotkeys_switch_the_prefill() {
+        let mut d = dialog();
+        d.handle(InitDialogInput::Enter);
+        assert_eq!(d.handle(InitDialogInput::Toggle), None);
+        assert_eq!(d.kind, RegistryKindChoice::Oci);
+        assert_eq!(d.handle(InitDialogInput::Toggle), None);
+        assert_eq!(d.kind, RegistryKindChoice::Index, "toggle flips back");
+        d.handle(InitDialogInput::Char('o'));
+        assert_eq!(d.kind, RegistryKindChoice::Oci, "'o' selects oci");
+        d.handle(InitDialogInput::Char('i'));
+        assert_eq!(d.kind, RegistryKindChoice::Index, "'i' selects index");
+        d.handle(InitDialogInput::Char('o'));
+        d.handle(InitDialogInput::Enter);
+        assert_eq!(d.step, InitDialogStep::Registry);
+        assert_eq!(d.input, "registry.example", "oci prefill lands when oci selected");
+    }
+
+    #[test]
+    fn kind_step_esc_or_q_cancels_and_stray_keys_are_ignored() {
+        let mut d = dialog();
+        d.handle(InitDialogInput::Enter);
+        assert_eq!(d.handle(InitDialogInput::Char('x')), None);
+        assert_eq!(d.step, InitDialogStep::Kind, "stray keys do not advance");
+        for cancel in [InitDialogInput::Esc, InitDialogInput::Char('q')] {
+            let mut d = dialog();
+            d.handle(InitDialogInput::Enter);
+            assert_eq!(d.handle(cancel), Some(InitDialogOutcome::Cancelled), "{cancel:?}");
+        }
     }
 
     #[test]
     fn confirm_y_advances_and_n_or_esc_or_q_cancels() {
         let mut d = dialog();
         assert_eq!(d.handle(InitDialogInput::Char('y')), None);
-        assert_eq!(d.step, InitDialogStep::Registry);
+        assert_eq!(d.step, InitDialogStep::Kind);
 
         for cancel in [
             InitDialogInput::Char('n'),
@@ -345,21 +505,26 @@ mod tests {
         assert_eq!(d.handle(InitDialogInput::Char('x')), None);
         assert_eq!(d.step, InitDialogStep::Confirm, "stray keys do not advance");
         assert_eq!(d.handle(InitDialogInput::Backspace), None);
-        assert_eq!(d.input, "registry.example", "backspace edits only the registry step");
+        assert_eq!(
+            d.step,
+            InitDialogStep::Confirm,
+            "backspace edits only the registry step"
+        );
     }
 
     #[test]
-    fn registry_step_edits_the_input() {
-        let mut d = dialog();
-        d.handle(InitDialogInput::Enter);
+    fn registry_step_edits_the_input_and_ignores_toggle() {
+        let mut d = to_registry(RegistryKindChoice::Index);
         // Clear the pre-fill, then type a custom registry.
-        for _ in 0.."registry.example".len() {
+        for _ in 0.."index.example".len() {
             d.handle(InitDialogInput::Backspace);
         }
         assert_eq!(d.input, "");
         for c in "ghcr.io".chars() {
             d.handle(InitDialogInput::Char(c));
         }
+        assert_eq!(d.handle(InitDialogInput::Toggle), None);
+        assert_eq!(d.input, "ghcr.io", "toggle is inert on the registry step");
         assert_eq!(
             d.handle(InitDialogInput::Enter),
             Some(InitDialogOutcome::Confirmed {
@@ -370,7 +535,8 @@ mod tests {
 
     #[test]
     fn registry_step_blanked_input_seeds_nothing() {
-        let mut d = InitDialog::new("./grimoire.toml", "project", "");
+        let mut d = InitDialog::new("./grimoire.toml", "project", "", "", RegistryKindChoice::Index);
+        d.handle(InitDialogInput::Enter);
         d.handle(InitDialogInput::Enter);
         assert_eq!(
             d.handle(InitDialogInput::Enter),
@@ -378,7 +544,8 @@ mod tests {
             "an emptied input seeds no default_registry"
         );
         // Whitespace-only input is also nothing.
-        let mut d = InitDialog::new("./grimoire.toml", "project", "  ");
+        let mut d = InitDialog::new("./grimoire.toml", "project", "  ", "  ", RegistryKindChoice::Index);
+        d.handle(InitDialogInput::Enter);
         d.handle(InitDialogInput::Enter);
         assert_eq!(
             d.handle(InitDialogInput::Enter),
@@ -388,8 +555,7 @@ mod tests {
 
     #[test]
     fn registry_step_esc_cancels() {
-        let mut d = dialog();
-        d.handle(InitDialogInput::Enter);
+        let mut d = to_registry(RegistryKindChoice::Index);
         assert_eq!(d.handle(InitDialogInput::Esc), Some(InitDialogOutcome::Cancelled));
     }
 
