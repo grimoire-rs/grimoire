@@ -16,6 +16,7 @@ pub mod install_error;
 pub mod install_state;
 pub mod installer;
 pub mod json_config;
+pub mod json_splice;
 pub mod materializer;
 pub mod opencode_config;
 pub mod path_anchor;
