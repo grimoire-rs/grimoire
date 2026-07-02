@@ -336,6 +336,16 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
         kind: IdentifierErrorKind::InvalidFormat,
     })?;
 
+    // A short id qualified by an EMPTY default registry would otherwise
+    // yield a registry-less identifier (`/name`) that later corrupts the
+    // config/lock — reject it at the source instead.
+    if registry.is_empty() {
+        return Err(IdentifierError {
+            input: input.to_string(),
+            kind: IdentifierErrorKind::MissingRegistry,
+        });
+    }
+
     if repository.chars().any(|c| c.is_ascii_uppercase()) {
         return Err(IdentifierError {
             input: input.to_string(),

@@ -86,7 +86,19 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // built-in fallback). The expanded identifier is always fully-qualified,
     // so the config and lock persist the registry host explicitly.
     let registries = super::registries_for_scope(ctx, &scope);
-    let id = super::grim(crate::config::resolve_reference(&args.reference, &registries))?;
+    // Index sources cannot expand short ids (their locator is not a
+    // registry host), so the documented short-id chain supplies the
+    // registry when the browse set has no OCI primary.
+    let short_id_default = super::resolve_default_registry(
+        ctx,
+        scope.options.default_registry.as_deref(),
+        super::global_config_default(ctx, scope.scope).as_deref(),
+    );
+    let id = super::grim(crate::config::resolve_reference(
+        &args.reference,
+        &registries,
+        &short_id_default,
+    ))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {

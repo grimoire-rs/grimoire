@@ -210,11 +210,21 @@ pub fn primary_registry(registries: &[ResolvedRegistry]) -> &str {
 ///   single-registry `add` does today: an explicit registry parses
 ///   strictly, a bare short id gets the primary registry injected.
 ///
+/// `fallback_primary` supplies the short-id registry when the set has no
+/// registry-kind entry at all (an index-only `[[registries]]` — index
+/// locators are not registry hosts). Callers pass the documented short-id
+/// default chain (`--registry` > `$GRIM_DEFAULT_REGISTRY` > config
+/// `default_registry` > the built-in fallback).
+///
 /// # Errors
 ///
 /// Propagates [`IdentifierError`] for malformed input (invalid characters,
 /// bad digest, uppercase repo, traversal segments).
-pub fn resolve_reference(input: &str, registries: &[ResolvedRegistry]) -> Result<Identifier, IdentifierError> {
+pub fn resolve_reference(
+    input: &str,
+    registries: &[ResolvedRegistry],
+    fallback_primary: &str,
+) -> Result<Identifier, IdentifierError> {
     if let Some((first, rest)) = input.split_once('/')
         && !rest.is_empty()
         && let Some(reg) = registries.iter().find(|r| r.alias.as_deref() == Some(first))
@@ -224,7 +234,11 @@ pub fn resolve_reference(input: &str, registries: &[ResolvedRegistry]) -> Result
         let substituted = format!("{}/{}", reg.url, rest);
         return Identifier::parse(&substituted);
     }
-    Identifier::parse_with_default_registry(input, primary_registry(registries))
+    let primary = match primary_registry(registries) {
+        "" => fallback_primary,
+        p => p,
+    };
+    Identifier::parse_with_default_registry(input, primary)
 }
 
 #[cfg(test)]
@@ -462,7 +476,7 @@ mod tests {
     #[test]
     fn reference_explicit_registry_parses_as_is() {
         let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "registry.example", None);
-        let id = resolve_reference("ghcr.io/other/x:1", &set).expect("explicit parses");
+        let id = resolve_reference("ghcr.io/other/x:1", &set, "unused.example").expect("explicit parses");
         assert_eq!(id.registry(), "ghcr.io");
         assert_eq!(id.to_string(), "ghcr.io/other/x:1");
     }
@@ -470,7 +484,7 @@ mod tests {
     #[test]
     fn reference_short_id_expands_against_primary() {
         let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "registry.example", None);
-        let id = resolve_reference("code-review:stable", &set).expect("short id expands");
+        let id = resolve_reference("code-review:stable", &set, "unused.example").expect("short id expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/code-review:stable");
     }
 
@@ -485,7 +499,7 @@ mod tests {
             "registry.example",
             None,
         );
-        let id = resolve_reference("corp/internal-tool:1", &set).expect("alias substitutes");
+        let id = resolve_reference("corp/internal-tool:1", &set, "unused.example").expect("alias substitutes");
         assert_eq!(id.registry(), "registry.corp");
         assert_eq!(id.to_string(), "registry.corp/team/internal-tool:1");
     }
@@ -509,7 +523,8 @@ mod tests {
             "registry.example",
             None,
         );
-        let id = resolve_reference("code-review:stable", &set).expect("repo:tag expands against primary");
+        let id =
+            resolve_reference("code-review:stable", &set, "unused.example").expect("repo:tag expands against primary");
         assert_eq!(id.to_string(), "ghcr.io/acme/code-review:stable");
     }
 
@@ -518,8 +533,43 @@ mod tests {
         // `acme/x` where `acme` is not a configured alias is a multi-segment
         // repository path under the primary registry, exactly as today.
         let set = resolve_registries(&[], &[], Some("ghcr.io"), &[], None, "registry.example", None);
-        let id = resolve_reference("acme/x:1", &set).expect("repo path expands");
+        let id = resolve_reference("acme/x:1", &set, "unused.example").expect("repo path expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/x:1");
+    }
+
+    #[test]
+    fn reference_short_id_with_index_only_set_uses_fallback_primary() {
+        // Regression: an index-only `[[registries]]` has no OCI primary, so a
+        // short id must expand against the caller's fallback chain instead of
+        // producing a registry-less `/name` identifier.
+        let set = resolve_registries(
+            &[],
+            &[rc_index(Some("hub"), "https://index.example", true)],
+            None,
+            &[],
+            None,
+            "https://index.example",
+            None,
+        );
+        let id = resolve_reference("grim-essentials", &set, "ghcr.io/grimoire-rs").expect("fallback expands");
+        assert_eq!(id.to_string(), "ghcr.io/grimoire-rs/grim-essentials");
+    }
+
+    #[test]
+    fn reference_short_id_with_empty_fallback_errors_instead_of_corrupting() {
+        // Defense-in-depth: even a caller passing an empty fallback must get
+        // a MissingRegistry error, never an identifier with an empty registry.
+        let set = resolve_registries(
+            &[],
+            &[rc_index(Some("hub"), "https://index.example", true)],
+            None,
+            &[],
+            None,
+            "https://index.example",
+            None,
+        );
+        let err = resolve_reference("grim-essentials", &set, "").expect_err("empty fallback must error");
+        assert!(err.to_string().contains("registry"), "unexpected error: {err}");
     }
 
     // ── New tests for env_default semantics ────────────────────────────────

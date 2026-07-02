@@ -159,3 +159,40 @@ def test_add_config_default_registry_persists_fq_name(
         f"grimoire.lock must contain the registry host '{REGISTRY_HOST}/', "
         f"got:\n{lock_text}"
     )
+
+
+def test_add_short_id_in_index_only_project_uses_default_chain(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression: an index-only ``[[registries]]`` set has no OCI primary,
+    so a short reference must expand against the documented short-id chain
+    (here ``GRIM_DEFAULT_REGISTRY``) — never persist a registry-less
+    ``/name`` reference into ``grimoire.toml``."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\n'
+        'alias = "hub"\n'
+        'index = "http://127.0.0.1:1/absent"\n'
+        'default = true\n'
+        '\n[skills]\n\n[rules]\n'
+    )
+    runner = grim_at(project_dir)
+    runner.env["GRIM_DEFAULT_REGISTRY"] = REGISTRY_HOST
+
+    short_ref = f"{unique_repo}/code-review:stable"
+    out = runner.json("add", short_ref)
+    assert out["status"] == "added"
+
+    cfg_text = (project_dir / "grimoire.toml").read_text()
+    assert f"{REGISTRY_HOST}/{unique_repo}/code-review" in cfg_text, (
+        f"the binding must be fully qualified against the short-id default "
+        f"chain, got:\n{cfg_text}"
+    )
+    assert '"/' not in cfg_text, (
+        f"a registry-less reference must never be persisted, got:\n{cfg_text}"
+    )
