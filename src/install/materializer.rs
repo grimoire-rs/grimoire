@@ -110,6 +110,83 @@ impl ArtifactMaterializer for DefaultMaterializer {
     }
 }
 
+/// One tar entry read into memory — the fetch path's in-memory sibling of
+/// the on-disk materialization (`grim mcp`'s `grim_fetch` returns artifact
+/// content in the tool result instead of writing files).
+#[derive(Debug, Clone)]
+pub struct TarEntryData {
+    /// The cleaned relative path inside the artifact tree.
+    pub path: PathBuf,
+    /// The header-reported entry size in bytes (may exceed `bytes.len()`
+    /// when the entry was truncated at the per-file limit).
+    pub size: u64,
+    /// The entry bytes, up to the per-file limit.
+    pub bytes: Vec<u8>,
+    /// Whether `bytes` was cut off at the per-file limit.
+    pub truncated: bool,
+}
+
+/// Unpack an artifact tar blob into memory, capping each entry at
+/// `per_file_limit` bytes (`truncated` flags a cut). Same trust posture as
+/// [`DefaultMaterializer::materialize`]: registry data is untrusted, so
+/// every entry path runs through the same `safe_relative_path` guard and
+/// non-file entry types are rejected. Directory entries are validated and
+/// skipped. Entries are returned sorted by path.
+///
+/// # Errors
+///
+/// [`InstallErrorKind::MaterializeFailed`] for a corrupt or unsafe archive
+/// (unreadable entries, traversal paths, non-file types, or no files).
+pub fn unpack_tar_in_memory(blob: &[u8], per_file_limit: u64) -> Result<Vec<TarEntryData>, InstallError> {
+    let mut archive = tar::Archive::new(blob);
+    let entries = archive
+        .entries()
+        .map_err(|e| materialize_failed(format!("cannot read tar entries: {e}")))?;
+
+    let mut out: Vec<TarEntryData> = Vec::new();
+    for entry in entries {
+        let mut entry = entry.map_err(|e| materialize_failed(format!("cannot read tar entry: {e}")))?;
+        let entry_type = entry.header().entry_type();
+
+        let raw_path = entry
+            .path()
+            .map_err(|e| materialize_failed(format!("tar entry has an invalid path: {e}")))?
+            .into_owned();
+        let safe_rel = safe_relative_path(&raw_path)?;
+
+        // Directories carry no content; validate the path and move on.
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(materialize_failed(format!(
+                "tar entry '{}' is not a regular file or directory",
+                safe_rel.display()
+            )));
+        }
+
+        let size = entry.size();
+        let mut bytes = Vec::with_capacity(size.min(per_file_limit) as usize);
+        entry
+            .by_ref()
+            .take(per_file_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|e| materialize_failed(format!("cannot read tar entry body: {e}")))?;
+        out.push(TarEntryData {
+            path: safe_rel,
+            size,
+            bytes,
+            truncated: size > per_file_limit,
+        });
+    }
+
+    if out.is_empty() {
+        return Err(materialize_failed("artifact archive contains no files".to_string()));
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
 /// Reject absolute paths and any `..` / root component so a crafted tar
 /// cannot escape `dest_dir`. Returns the cleaned relative path.
 fn safe_relative_path(path: &Path) -> Result<PathBuf, InstallError> {
@@ -288,6 +365,49 @@ mod tests {
         let err = m
             .materialize(ArtifactKind::Rule, "x", &blob, &dest)
             .expect_err("empty archive must reject");
+        assert!(matches!(err.kind, InstallErrorKind::MaterializeFailed(_)));
+    }
+
+    #[test]
+    fn in_memory_walk_reads_entries_sorted_with_sizes() {
+        let blob = tar_of(&[
+            ("skill/scripts/run.sh", b"echo hi\n"),
+            ("skill/SKILL.md", b"---\nname: skill\n---\n"),
+        ]);
+        let entries = unpack_tar_in_memory(&blob, 1024).expect("walk");
+        assert_eq!(
+            entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
+            vec![PathBuf::from("skill/SKILL.md"), PathBuf::from("skill/scripts/run.sh")]
+        );
+        let index = &entries[0];
+        assert_eq!(index.bytes, b"---\nname: skill\n---\n");
+        assert_eq!(index.size, index.bytes.len() as u64);
+        assert!(!index.truncated);
+    }
+
+    #[test]
+    fn in_memory_walk_truncates_at_per_file_limit() {
+        let big = vec![b'a'; 100];
+        let blob = tar_of(&[("skill/SKILL.md", big.as_slice())]);
+        let entries = unpack_tar_in_memory(&blob, 16).expect("walk");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].bytes.len(), 16);
+        // The header-reported size survives so callers can report the full size.
+        assert_eq!(entries[0].size, 100);
+        assert!(entries[0].truncated);
+    }
+
+    #[test]
+    fn in_memory_walk_rejects_traversal() {
+        let blob = tar_with_raw_name("../escape.md", b"evil\n");
+        let err = unpack_tar_in_memory(&blob, 1024).expect_err("traversal must reject");
+        assert!(matches!(err.kind, InstallErrorKind::MaterializeFailed(_)));
+    }
+
+    #[test]
+    fn in_memory_walk_rejects_empty_archive() {
+        let blob = tar_of(&[]);
+        let err = unpack_tar_in_memory(&blob, 1024).expect_err("empty archive must reject");
         assert!(matches!(err.kind, InstallErrorKind::MaterializeFailed(_)));
     }
 }

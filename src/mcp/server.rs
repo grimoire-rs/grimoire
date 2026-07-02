@@ -25,7 +25,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::mcp::McpArgs;
 use crate::context::Context;
 use crate::mcp::state::McpState;
-use crate::mcp::tool_args::{SearchToolArgs, StatusToolArgs};
+use crate::mcp::tool_args::{FetchToolArgs, SearchToolArgs, StatusToolArgs};
 
 /// The MCP server handler. Cloned per request by rmcp (a cheap `Arc` bump).
 #[derive(Clone)]
@@ -72,6 +72,19 @@ impl GrimMcpServer {
         match crate::command::status::run(&self.inner.ctx, &status_args).await {
             Ok((report, _)) => to_json(&report),
             Err(e) => Err(tool_error("status", &e)),
+        }
+    }
+
+    /// Fetch an artifact's content into the tool result — no install, no
+    /// state, no harness reload (use ≠ install, see
+    /// `adr_mcp_percall_scope_fetch_render.md`).
+    #[tool(
+        description = "Fetch a Grimoire artifact's content directly into the tool result — no install needed. Returns the canonical as-authored document unless `vendor` (claude/opencode/copilot) selects a client projection; `path` fetches one support file; a `files` listing is always included. Requires network access; content is capped at 256 KiB (truncated content is marked). Scope params (`global`/`config`/`workspace`) only select which registries are consulted."
+    )]
+    async fn grim_fetch(&self, Parameters(args): Parameters<FetchToolArgs>) -> Result<String, ErrorData> {
+        match crate::mcp::fetch::fetch(&self.inner.ctx, &args).await {
+            Ok(report) => to_json(&report),
+            Err(e) => Err(tool_error("fetch", &e)),
         }
     }
 }

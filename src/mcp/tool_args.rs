@@ -72,6 +72,34 @@ pub struct SearchToolArgs {
     // registries by default").
 }
 
+/// Arguments for the `grim_fetch` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FetchToolArgs {
+    /// The artifact reference to fetch: a short id (`skills/code-review`),
+    /// an alias-qualified ref (`myreg/skills/code-review`), or a fully
+    /// qualified one (`ghcr.io/acme/skills/code-review:1`). Defaults to
+    /// `latest` when no tag/digest is given.
+    #[serde(rename = "ref")]
+    pub reference: String,
+
+    /// Return this client's projection (`claude` / `opencode` / `copilot`)
+    /// instead of the canonical as-authored document.
+    #[serde(default)]
+    pub vendor: Option<String>,
+
+    /// Fetch one support file by its tree path (see the `files` listing)
+    /// instead of the index document. UTF-8 text only.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Per-call scope selection (registry-set derivation only — fetch
+    /// never touches install state).
+    #[serde(flatten, default)]
+    pub scope: ScopeToolArgs,
+    // No `registry` override — same SSRF stance as `SearchToolArgs`: the
+    // resolved scope's configured registries are the boundary (CWE-918).
+}
+
 /// Arguments for the `grim_status` tool.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct StatusToolArgs {
