@@ -9,11 +9,9 @@ Auto-loads on every Rust file edit. Provides stable architectural context —
 the "why" behind design. For dynamic discovery of current code state,
 launch `worker-architecture-explorer`.
 
-> **Status: provisional.** Grimoire is early scaffolding — a single binary
-> crate at `src/` with `src/main.rs` as the only source file today. The
-> guidance below is the intended shape, not a description of code that
-> exists. Update this file as real structure lands; do not treat the
-> module/type names below as already implemented.
+The principles below describe shipped structure — the command pattern,
+subsystem modules, and ADR-recorded decisions are real code. Update this
+file as the architecture evolves.
 
 ## Crate Layout
 

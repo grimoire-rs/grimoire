@@ -8,12 +8,7 @@ paths:
 How Grimoire lays out its on-disk data: where downloaded artifacts, the
 local index, and install links live under the data root.
 
-> **Status: provisional.** The storage layer is not implemented yet (only
-> `src/main.rs` exists). This file records intent and design constraints,
-> not shipped behavior. Do not invent concrete storage internals — fill
-> this in as the real design lands.
-
-## Design Rationale (intended)
+## Design Rationale
 
 - **Single data root.** All Grimoire state lives under one directory
   (default `~/.grimoire`, overridable via `GRIM_HOME`). Keeping everything

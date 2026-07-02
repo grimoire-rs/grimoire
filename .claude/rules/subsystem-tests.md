@@ -5,73 +5,70 @@ paths:
 
 # Test Subsystem
 
-Pytest acceptance tests with Docker Compose registry at `test/`.
+Pytest acceptance tests run the compiled `grim` binary against a real OCI registry, at `test/`.
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide isolation on shared registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catches issues mocked unit tests miss. The registry host is resolved once per session in `pytest_configure` (before any test module imports `src.registry`), and a `registry:2` container is started via `docker run -d --rm` when nothing already answers on `localhost:5000`. UUID-prefixed repo names (`unique_repo`) give per-test isolation on the shared registry — no per-test cleanup needed. See `arch-principles.md` for the full pattern catalog.
 
 ## Structure
 
 | Path | Purpose |
 |------|---------|
-| `test/tests/conftest.py` | Function-scoped fixtures (grimoire, published_package, etc.) |
-| `test/conftest.py` | Session-scoped fixtures (registry, grim_binary) + `pytest_sessionstart` |
-| `test/src/runner.py` | `GrimRunner`: subprocess wrapper with test isolation |
-| `test/src/assertions.py` | Cross-platform assertion helpers |
-| `test/src/helpers.py` | `make_package()`: build + push test packages |
-| `test/src/registry.py` | OCI registry helpers (fetch manifest, extract platforms) |
-| `test/taskfile.yml` | Task runner (default, quick, parallel) |
+| `test/conftest.py` | Session fixtures (`grim_binary`, `registry`) + `pytest_configure`/`pytest_unconfigure` registry lifecycle; function fixtures `grim_home`, `grim`, `unique_repo` |
+| `test/tests/conftest.py` | Function fixtures local to `tests/`: `project_dir`, `grim_at` |
+| `test/src/runner.py` | `GrimRunner` — subprocess wrapper with per-instance env isolation |
+| `test/src/helpers.py` | `write_config()`, `make_bundle()`, `make_artifact()` — build + push test fixtures |
+| `test/src/assertions.py` | Cross-platform path assertion helpers |
+| `test/src/registry.py` | `PublishedArtifact` + minimal stdlib OCI client (push/fetch/retag) |
+| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel` |
 
 ## Key Fixtures
 
-| Fixture | Scope | Purpose |
-|---------|-------|---------|
-| `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose) |
-| `grim_binary` | session | Path to compiled `grimoire` binary |
-| `grim_home` | function | Isolated temp dir for `GRIM_HOME` |
-| `grimoire` | function | `GrimRunner` instance with test isolation |
-| `unique_repo` | function | UUID-prefixed repo name (e.g., `t_a1b2c3d4_test`) |
-| `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
-| `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
+| Fixture | Scope | Defined in | Purpose |
+|---------|-------|-----------|---------|
+| `grim_binary` | session | `conftest.py` | Path to the `grim` binary — `$GRIM_COMMAND` env if set, else `test/bin/grim(.exe)` |
+| `registry` | session | `conftest.py` | Registry host string (e.g. `"localhost:5000"`); skips the test if unreachable |
+| `grim_home` | function | `conftest.py` | Isolated `tmp_path/grim-home` dir used as `GRIM_HOME` |
+| `grim` | function | `conftest.py` | `GrimRunner(grim_binary, grim_home)` — no cwd set |
+| `unique_repo` | function | `conftest.py` | UUID-prefixed repo name: `f"grim-test/{uuid4().hex[:12]}"` |
+| `project_dir` | function | `tests/conftest.py` | Empty workspace dir (`tmp_path/project`) a project-scope `grim` runs inside |
+| `grim_at` | function | `tests/conftest.py` | Factory `(cwd: Path) -> GrimRunner` — project-scope commands (`init`, `lock`, `install`) discover config by walking up from cwd |
 
 ## GrimRunner API
 
 ```python
-runner = GrimRunner(binary, grim_home, registry)
-runner.run(*args, format="json", check=True)  # Run command, assert success
-runner.json(*args)                             # Run + parse JSON stdout
-runner.plain(*args)                            # Run without --format flag
+runner = GrimRunner(binary, grim_home, cwd=None)
+runner.run(*args, format=None, check=True, log_level=None)  # -> CompletedProcess
+runner.json(*args, **kwargs)                                 # run with format="json", parse stdout
+runner.plain(*args, **kwargs)                                # run without --format
+runner.home                                                   # isolated $HOME (sibling of grim_home)
 ```
 
-Env: `GRIM_HOME`, `GRIM_DEFAULT_REGISTRY`, `GRIM_INSECURE_REGISTRIES` set per instance.
+Per-instance `env` dict: `GRIM_HOME`, `PATH`, `HOME` (isolated, sibling of `grim_home`), `XDG_CONFIG_HOME` (`<home>/.config`), plus Windows spawn vars (`SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`) when present. `GRIM_INSECURE_REGISTRIES` is set to the test registry host whenever it differs from grim's built-in HTTP allowlist (`localhost[:5000]`, `127.0.0.1[:5000]`).
 
-## PackageInfo
+## Test Data Helpers
 
-Returned by `published_package` / `published_two_versions`:
+`test/src/helpers.py` — no `make_package()`; the real helpers are:
 
-| Field | Example |
+- `write_config(project_dir, skills=None, rules=None, bundles=None, agents=None) -> Path` — writes `grimoire.toml` from `{name: fq_ref}` dicts
+- `make_artifact(repo, kind, files, tag="latest", annotations=None) -> PublishedArtifact` — tars `{path: content}` and pushes a single-layer skill/rule artifact
+- `make_bundle(repo, members, tag="latest") -> PublishedArtifact` — pushes a bundle whose layer lists `(kind, name, id)` member tuples
+
+`test/src/registry.py` provides the lower-level push/fetch primitives these call: `push_artifact()`, `fetch_manifest()`, `fetch_blob()`, `retag()`, `tag_digest()`, `registry_reachable()`.
+
+### PublishedArtifact
+
+Returned by `make_artifact()`, `make_bundle()`, and the `registry.py` primitives:
+
+| Field / property | Example |
 |-------|---------|
-| `repo` | `"cmake"` |
-| `tag` | `"1.0.0"` |
-| `short` | `"cmake:1.0.0"` |
-| `fq` | `"localhost:5000/cmake:1.0.0"` |
-| `marker` | UUID-based unique string |
-
-## make_package()
-
-Creates, bundles, pushes, indexes test package:
-
-```python
-pkg = make_package(grimoire, repo, tag, tmp_path,
-    bins=["hello"],          # Binary names (default)
-    env=[...],               # Custom metadata env entries
-    cascade=True,            # Auto-tag latest/major/minor/patch
-    size_mb=0,               # Random padding for progress bar tests
-)
-```
-
-**Default env visibility in tests**: `make_package()` defaults env entries to `"visibility": "public"` (see `test/src/helpers.py` lines 160–165). This matches the convention used by in-tree mirrors and acceptance tests that verify env resolution. Tests asserting on env output in `consumer` mode rely on this default. When writing tests for `private` or `interface` entries, pass explicit `visibility` in the `env` list.
+| `repo` | `"grim-test/ab12cd34ef56/code-review"` |
+| `tag` | `"stable"` |
+| `digest` | `"sha256:…"` (manifest digest) |
+| `kind` | `"skill"` |
+| `.fq` | `"localhost:5000/grim-test/…/code-review:stable"` |
+| `.pinned` | `"localhost:5000/grim-test/…/code-review@sha256:…"` |
 
 ## Assertion Helpers
 
@@ -84,49 +81,37 @@ pkg = make_package(grimoire, repo, tag, tmp_path,
 
 ## Test Isolation
 
-- **Per-test GRIM_HOME**: each test gets isolated `tmp_path` as `GRIM_HOME`
-- **UUID repo names**: `unique_repo` fixture prevents collisions in shared registry
-- **Shared registry**: session-scoped; all tests push/pull same instance
-- **Minimal env**: GrimRunner strips ambient env; only PATH, HOME, Grimoire vars
+- **Per-test `GRIM_HOME`**: `grim_home` fixture gives each test an isolated `tmp_path` dir
+- **Per-test `HOME`**: `GrimRunner` isolates `$HOME` too (sibling of `grim_home`), so global-scope installs never touch the developer's real home
+- **UUID repo names**: `unique_repo` fixture prevents collisions on the shared registry
+- **Shared registry**: session-scoped; all tests push/pull the same container (or a fresh throwaway one if the default is polluted with >500 repos — see `conftest.py`)
+- **Minimal env**: `GrimRunner` strips ambient env; only `PATH`, `HOME`, `GRIM_*`, `XDG_CONFIG_HOME` (+ Windows spawn vars)
 
 ## Running Tests
 
 ```bash
-task test              # Build + registry + all tests
-task test:quick        # Skip rebuild
-task test:parallel     # pytest-xdist (-n auto)
+task test              # build grim, copy to test/bin/grim, run full pytest suite
+task test:quick        # skip rebuild (SKIP_BUILD=true), pytest -n auto
+task test:parallel     # rebuild-aware (sources track src/tests), pytest -n auto
 
-# Single test:
-cd test && uv run pytest tests/test_install.py::test_name -v --no-build
+# Single test (binary must already exist at test/bin/grim, or set GRIM_COMMAND):
+cd test && uv run pytest tests/test_install.py::test_lock_then_install_materializes_files -v
 ```
+
+There is no `--no-build` pytest flag — build/rebuild is controlled entirely by the `task` layer (`SKIP_BUILD` var / `CI` env), not by a pytest CLI option.
 
 ## Adding a New Test
 
-1. Create function in appropriate `test/tests/test_*.py` (or new file)
-2. Use `grimoire: GrimRunner` and `published_package: PackageInfo` fixtures
-3. Call `grimoire.json("command", pkg.short)` and assert results
-4. Custom packages: use `make_package()` with `unique_repo` and `tmp_path`
-5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
-
-For shell-friendly assertions (exec output, file existence, exit-code branches), prefer `test/scenarios/` — see Platform Split below.
+1. Add a function to the appropriate `test/tests/test_*.py` (or create a new file)
+2. Use `grim_at`/`project_dir` for project-scope commands, or `grim`/`grim_home` for global-scope
+3. Build fixture data with `write_config()` + `make_artifact()`/`make_bundle()` and `unique_repo`
+4. Assert via `runner.json(...)`/`runner.run(...)` return values and `src/assertions.py` helpers
+5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v`
 
 ## Test Files
 
-19 test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
-
-## Platform Split
-
-Two complementary harnesses with different platform reach:
-
-| Harness | Platforms | Use for |
-|---------|-----------|---------|
-| Pytest (`test/tests/test_*.py`) | Linux + macOS + Windows (per `.github/workflows/verify-deep.yml`) | JSON-output assertions, structured fixtures, Windows junction / `.exe` resolution, anything where Python expressivity beats shell |
-| Shell scenarios (`test/scenarios/*.sh`) | Linux + macOS only (Windows skipped via `pytestmark` in `test_scenarios_smoke.py`) | Exec output, marker grep, file/dir existence, exit-code branches — bash is the natural language |
-
-When extending shell scenarios, reuse the harness in `test/src/scenarios/__init__.py` (`Scenario` base class, `# scenario: <Name>` header, registered subclasses for pre-publish state). Do not duplicate setup logic — extend the existing `Scenario` API.
-
-A behaviour assertion belongs in **one** harness, not both. If a pytest case can be expressed verbatim as a shell scenario, prefer the scenario; if it needs structured output parsing or Windows-specific paths, keep it in pytest.
+`test/tests/*.py` cover: install/uninstall/update/lock, config + registry management (incl. TUI options, default registry), add/remove (+ infer), init, release (+ non-version tags) and publish (+ announce), login, search (+ namespaced), status, targets, integrity, deprecation, metadata, multifile rules, bundles, agents, mcp (core, artifact, fetch), client rendering + desync + TUI multi-registry, global scope, git provenance, state portability, index source, docs, build, smoke, and cross-cutting workflows.
 
 ## Quality Gate
 
-During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.
+During review-fix loops, run `task test:parallel` (or `task test:quick` if the binary is already fresh) — not full `task verify`. Acceptance tests only; no need to re-run the Rust unit-test/lint gates.

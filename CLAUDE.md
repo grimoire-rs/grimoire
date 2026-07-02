@@ -9,15 +9,15 @@ to install, maintain, and publish AI-agent configuration (skills, rules,
 prompts) distributed through standard OCI registries. The binary is named
 `grim`; the Rust crate/package is `grimoire`.
 
-> **Status: provisional.** This is early scaffolding. The product vision
-> will be fleshed out by the maintainer. Treat product/architecture docs
-> as a sensible placeholder, not a finalized contract.
+> **Status: pre-1.0** (shipping since 0.x). Surfaces may still move before
+> 1.0, but the CLI, OCI pipeline, and catalog publishing are real, released
+> behavior — treat docs as contracts, flag drift when you find it.
 
 ## Current State
 
-Early stage: a single binary crate with `src/main.rs` as the only source
-file today. No stable API, CLI, or config yet — for refactors, expect to
-delete and start over.
+Shipping: full CLI (18 subcommands), OCI registry pipeline, catalog
+publishing, MCP server, TUI. One binary crate, subsystem modules under
+`src/`. No stable *library* API — the binary is the only consumer.
 
 ## Project Identity
 

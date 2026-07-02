@@ -8,8 +8,8 @@ paths:
 Conventions for writing documentation pages. Apply to new doc pages under
 `docs/`.
 
-> **Status: provisional.** Grimoire has no docs site yet — docs are plain
-> Markdown. These are general writing conventions, not tool-specific.
+Docs are an mdBook site: source under `docs/src/`, rendered to
+`docs/book/` (generated — never edit by hand).
 
 ---
 

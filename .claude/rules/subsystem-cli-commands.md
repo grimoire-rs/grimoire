@@ -9,31 +9,37 @@ Concise index of `grim` CLI commands. Implementation lives under
 `src/command/` — read the source for return types, call sites, and report
 column formats.
 
-> **Status: provisional.** The CLI is not implemented yet (only
-> `src/main.rs` exists). The command surface below is illustrative of the
-> intended shape, not a description of shipped behavior. Update this file
-> as commands land — keep it a faithful index, never speculative.
+Index of shipped `grim` subcommands — keep in sync with `src/command/`
+(one file per subcommand) and `docs/src/commands.md`.
 
-## Command Surface (illustrative)
+## Command Surface
 
 | Command | Purpose |
 |---------|---------|
+| `grim init` | Write a fresh `grimoire.toml` in the current directory; `--registry <ref>` seeds the default `[[registries]]` entry |
+| `grim add [--kind …] [--name …] <ref>` | Declare a skill/rule/agent/mcp/bundle in `grimoire.toml` and pin it in the lock immediately |
+| `grim lock` | Resolve floating tags in `grimoire.toml` to digests and write `grimoire.lock` (after hand-edits; `add` locks what it declares) |
 | `grim config get\|set\|unset\|list <key>` | Read and write `grimoire.toml` settings (`[options]`, `[options.tui]`) and registry fields via dotted keys; `list [--show-origin]` dumps explicitly-set values for the active scope (never merged across scopes). Exit codes: unset `get` → 1, unknown key → 64, bad value → 65. |
 | `grim config registry add\|rm\|use\|show\|list` | Registry lifecycle for `[[registries]]` entries: `add <alias> --url <url> [--default]`, `rm <alias>`, `use <alias>` (at-most-one-default, clears prior), `show <alias>`, `list`. Alias not found or dup on `add` → 64. |
 | `grim install <ref>` | Fetch and install an AI-config artifact (skill/rule set) |
-| `grim list` | List installed artifacts |
+| `grim status` | Report each declared artifact's state (installed, outdated, modified, …) with bundle provenance |
+| `grim search [query]` | Substring search over the registry catalog (repo, summary, description, keywords); empty query lists all |
+| `grim tui` | Interactive catalog browser with live install state (flat list / tree toggle) |
 | `grim update [<ref>]` | Pull newer versions |
 | `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |
 | `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action. **Exception:** an artifact a declared bundle still provides keeps its files (a directly-declared one degrades to `remove`; a bundle-only member is a no-op — remove the bundle to remove it) |
+| `grim build <path>` | Validate and pack a local skill/rule/agent/mcp/bundle without pushing (release dry run) |
 | `grim release <path> <ref>` | Push a single artifact to a registry (validate, pack, push with cascade tags) |
 | `grim publish` | Batch-release all packages declared in a `publish.toml` manifest; validates whole manifest before any push; fixed kind order (skills → rules → agents → mcp → bundles), skip-existing by default |
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |
 | `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
 | `grim schema --kind <config\|publish>` | Print the JSON Schema for `grimoire.toml` or `publish.toml` to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
 | `grim mcp [--allow-writes]` | Run a local STDIO Model Context Protocol server (rmcp SDK). Long-running, `Printable`-exempt (returns `ExitCode` directly, like `tui`/`schema`); stdout is the JSON-RPC channel. Read tools (`grim_search`, `grim_status`, `grim_fetch`) always on; the write tool `grim_render` gated behind `--allow-writes` (rmcp `disable_route`: hidden + rejected). Scope per tool call (`global`/`config`/`workspace` args; precedence in that order, default cwd walk-up) — launch scope flags removed, `--global`/`--config` exit 64 |
-| `grim version` | Print the compiled version |
+| `grim --version` | Print the compiled version (clap built-in; no subcommand) |
 
-Global flags (illustrative): `--offline`, `--remote`, `--format json`.
+Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
+`--offline`, `--log-level`, `--config <path>`, `--global`,
+`--registry <ref>` (repeatable / comma-separated).
 
 `login`/`logout` resolve the registry from the positional argument, else
 `--registry` / the `default_registry` option / `GRIM_DEFAULT_REGISTRY`.

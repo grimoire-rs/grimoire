@@ -88,7 +88,7 @@ Global flags: `--offline`, `--remote`, `--format json` (illustrative).
   is `grim`, the crate/package is `grimoire`. No lib/CLI split, no workspace.
 - **Default registry**: configurable via `GRIM_DEFAULT_REGISTRY`
 - **Testing**: pytest acceptance tests under `test/` against a real OCI
-  registry (provisional)
+  registry
 
 ## Update Protocol
 

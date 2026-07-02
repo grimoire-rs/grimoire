@@ -9,9 +9,6 @@ Thin CLI shell built on clap. One file per subcommand under
 `src/command/`. Structured output goes through a shared output trait so
 plain-text and `--format json` render from one source.
 
-> **Status: provisional.** Only `src/main.rs` exists today. This file
-> records the intended structure and conventions, not shipped behavior.
-
 ## Design Rationale
 
 Keep the CLI thin: argument parsing, a per-invocation context, and
