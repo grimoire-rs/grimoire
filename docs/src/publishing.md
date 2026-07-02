@@ -10,12 +10,19 @@ A **skill** is a directory containing a `SKILL.md` and any supporting files; a
 **rule** is a Markdown file, optionally with a
 [sibling support directory](#rule-support-dir); an
 [**agent**](./agents.md) is a Markdown file defining a delegatable assistant;
-a [**bundle**](./concepts.md#bundles) is a `.toml` file listing members.
+an [**MCP server**](./mcp-servers.md) is a `mcp/<name>.toml` file describing
+how to launch or reach a Model Context Protocol server; a
+[**bundle**](./concepts.md#bundles) is a `.toml` file listing members.
 Grimoire detects which one you mean from the path — a directory packs as a
 skill, a `.md` file as a rule, a `.toml` file as a bundle — and `--kind`
-overrides the guess when you need to. An agent **requires** `--kind agent`:
-its `.md` shape is indistinguishable from a rule, and grim never guesses from
-content (see [Agent Artifacts](./agents.md#publishing)).
+overrides the guess when you need to. Two kinds **require** the flag because
+their shape collides with another kind's: an agent needs `--kind agent`
+(its `.md` shape is indistinguishable from a rule; see
+[Agent Artifacts](./agents.md#publishing)), and an MCP server needs
+`--kind mcp` (its `.toml` shape is indistinguishable from a bundle; see
+[MCP Server Artifacts](./mcp-servers.md#publishing)). grim never guesses
+either from content — it only nudges with a hint once the file's shape
+(a `[server]` table, a `name`+`description` pair) makes the mismatch obvious.
 
 ### Rules with a support directory {#rule-support-dir}
 
@@ -123,6 +130,32 @@ metadata:
 ---
 ```
 
+### In an MCP server descriptor {#metadata-mcp-server}
+
+An [MCP server descriptor](./mcp-servers.md) authors every metadata field —
+including `description` — as **top-level** TOML keys, the same shape as a
+bundle rather than a skill or agent: there is no nested `metadata` map:
+
+```toml
+# mcp/acme-search.toml
+description = "Acme's internal search index over MCP."
+summary = "Acme search MCP server"
+keywords = "acme,search,mcp"
+repository = "https://github.com/acme/mcp-search"
+
+[server]
+transport = "http"
+url = "https://mcp.acme.internal/search"
+```
+
+[`grim build`](./commands.md#build) and [`grim release`](./commands.md#release)
+require `--kind mcp` for an MCP descriptor: its `.toml` shape is
+bundle-shaped by default, and grim only nudges toward `--kind mcp` once it
+notices a `[server]` table (`grim publish` needs no flag — a manifest
+entry's kind is fixed by which table it sits in). See
+[MCP Server Artifacts](./mcp-servers.md#publishing) for the full field
+reference and validation rules.
+
 ### In a bundle {#metadata-bundle}
 
 A [bundle](#bundles) sets the same keys at the top level of its `.toml`, above
@@ -191,6 +224,11 @@ deprecated: superseded by rust-style-2
 deprecated = "migrate to python-stack-2"
 ```
 
+```toml
+# mcp/acme-search.toml (MCP server: top-level, like bundle)
+deprecated = "migrate to mcp/acme-search-v2"
+```
+
 Because the notice rides the `com.grimoire.deprecated` annotation on the
 manifest, every surface reads it back without unpacking the artifact:
 
@@ -216,6 +254,7 @@ else sees it:
 grim build ./code-review
 grim build ./rust-style.md --kind rule
 grim build ./code-reviewer.md --kind agent
+grim build ./mcp/acme-search.toml --kind mcp
 ```
 
 ## Release
@@ -358,7 +397,7 @@ releases each entry in a fixed order.
 
 ### The publish.toml format {#batch-publish-manifest}
 
-A manifest has one required top-level field — `registry` — and up to four
+A manifest has one required top-level field — `registry` — and up to five
 kind tables. Each table entry is a sub-table keyed by name with a required
 `version` field:
 
@@ -375,6 +414,9 @@ path = "shared/custom-rule.md"     # optional — overrides the conventional pat
 
 [agents.helper]
 version = "0.1.0"
+
+[mcp.acme-search]
+version = "1.0.0"
 
 [bundles.grim-essentials]
 version = "0.1.0"
@@ -473,6 +515,7 @@ kind, relative to the manifest's directory:
 | skill | `skills/{name}/` |
 | rule | `rules/{name}.md` |
 | agent | `agents/{name}.md` |
+| mcp | `mcp/{name}.toml` |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -480,11 +523,12 @@ elsewhere.
 
 ### Kind ordering {#batch-publish-ordering}
 
-Entries publish in a fixed kind order — skills, then rules, then agents, then
-bundles — alphabetical within each kind. Bundle entries land last by design:
-a bundle holds references to already-published members, and consumers resolve
-those members at lock time. Publishing a bundle before its members would
-produce a bundle that references artifacts that do not yet exist.
+Entries publish in a fixed kind order — skills, then rules, then agents,
+then [MCP servers](./mcp-servers.md), then bundles — alphabetical within
+each kind. Bundle entries land last by design: a bundle holds references
+to already-published members, and consumers resolve those members at lock
+time. Publishing a bundle before its members would produce a bundle that
+references artifacts that do not yet exist.
 
 ### Skip-existing default and --force {#batch-publish-skip-existing}
 

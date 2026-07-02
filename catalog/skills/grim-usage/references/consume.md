@@ -56,7 +56,7 @@ grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2
 grim add --kind bundle ghcr.io/acme/python-stack:1
 ```
 
-- `--kind` (skill, rule, agent, bundle) is normally inferred from the
+- `--kind` (skill, rule, agent, bundle, mcp) is normally inferred from the
   artifact's OCI `artifactType`, set at release time. If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
 - `--name` defaults to the reference's last path segment.

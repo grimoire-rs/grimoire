@@ -190,7 +190,10 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 | `claude.initial-prompt` | `initialPrompt` | string | |
 
 `mcpServers` and `hooks` are not in this registry — both are object-valued
-fields that cannot be expressed as a single string metadata value.
+fields that cannot be expressed as a single string metadata value. This
+exclusion is unchanged; an MCP server is registered as its own
+distributable artifact kind instead — see
+[MCP Server Artifacts](./mcp-servers.md).
 
 ## The opencode.* agent registry {#opencode-agent-registry}
 
@@ -223,7 +226,9 @@ projectable vendor key, mapped from `COPILOT_AGENT_FIELDS` in
 |---|---|---|---|
 | `copilot.tools` | `tools` | comma list | **Overrides** the common `tools` field for Copilot; comma-separated string → YAML list |
 
-`mcp-servers` (an object) is not in this registry.
+`mcp-servers` (an object) is not in this registry, for the same reason as
+Claude's `mcpServers` above — see
+[MCP Server Artifacts](./mcp-servers.md).
 
 ## Empty registries for OpenCode and Copilot skills {#empty-registries}
 

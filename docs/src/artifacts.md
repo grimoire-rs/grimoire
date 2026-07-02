@@ -1,18 +1,20 @@
 # Artifact Reference
 
-Grimoire ships four artifact kinds — skills, rules, agents, and bundles.
-Each has its own source shape, frontmatter schema, and validation rules,
-and until now those details lived scattered across the publishing,
-agents, and vendor-metadata chapters.
+Grimoire ships five artifact kinds — skills, rules, agents, MCP servers,
+and bundles. Each has its own source shape, frontmatter schema, and
+validation rules, and until now those details lived scattered across the
+publishing, agents, and vendor-metadata chapters.
 
 When you author an artifact you need one page that answers: which fields
 exist, which are required, what values are valid, and what a correct file
 looks like. This page is that reference. Narrative background stays in
 [Concepts](./concepts.md); publishing mechanics stay in
 [Publishing](./publishing.md); vendor projection semantics stay in
-[Vendor-Specific Metadata](./vendor-metadata.md).
+[Vendor-Specific Metadata](./vendor-metadata.md); the full MCP server
+reference lives in its own chapter,
+[MCP Server Artifacts](./mcp-servers.md).
 
-## The four kinds {#kinds}
+## The five kinds {#kinds}
 
 Every artifact carries its kind in a `com.grimoire.kind` manifest
 annotation, so registries and tooling can distinguish kinds without
@@ -23,6 +25,7 @@ downloading layers.
 | **Skill** | Directory with a `SKILL.md` index | `skill` | Directory tree under the client's `skills/` dir |
 | **Rule** | Single `.md` file (+ optional sibling support directory) | `rule` | `rules/<name>.md` (+ `rules/<name>/…`), per-client transform |
 | **Agent** | Single `.md` file | `agent` | One agent file per client, per-client rendering |
+| **MCP server** | `mcp/<name>.toml` | `mcp` | Entry registered in each client's own MCP config file — never a materialized file |
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
 
 The manifest's config descriptor is the OCI empty config
@@ -35,9 +38,12 @@ grim still reads those when present, so artifacts published before this
 change resolve their kind unchanged.
 
 `grim build` and `grim release` infer the kind from the path — a directory
-is a skill, a `.md` file is a rule, a `.toml` file is a bundle. Agents are
-the exception: an agent `.md` is indistinguishable from a rule by shape, so
-`--kind agent` is required (see [Agent Artifacts](./agents.md#publishing)).
+is a skill, a `.md` file is a rule, a `.toml` file is a bundle. Two kinds
+are the exception, because their shape collides with another kind's:
+an agent `.md` is indistinguishable from a rule, so `--kind agent` is
+required (see [Agent Artifacts](./agents.md#publishing)); an MCP
+descriptor `.toml` is indistinguishable from a bundle, so `--kind mcp`
+is required (see [MCP Server Artifacts](./mcp-servers.md#publishing)).
 
 ## Names {#names}
 
@@ -269,6 +275,50 @@ Claude Code receives `model: sonnet` plus `permissionMode: plan` and
 Copilot receives a `tools:` list of `read, grep`. The full emit matrix is
 in [Agent Artifacts](./agents.md#emit-matrix).
 
+## MCP Servers {#mcp-servers}
+
+An MCP server describes one [Model Context Protocol][mcp-spec] server —
+how to launch it or how to reach it — not a file to install. Its source
+is a single `mcp/<name>.toml`; the descriptor name is the file stem,
+like a rule or agent. There is no forward-compatible `extra` bucket
+here: any field outside the tables below is a hard parse error.
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `description` | yes | string | Must be non-empty; becomes the OCI description annotation |
+| `summary` | no | string | Catalog blurb (`com.grimoire.summary`) |
+| `keywords` | no | string | Comma-separated tags (`com.grimoire.keywords`) |
+| `repository` | no | string | HTTPS source URL (`org.opencontainers.image.source`) |
+| `deprecated` | no | string | Deprecation notice (`com.grimoire.deprecated`) |
+| `server` | yes | table | Transport plus launch/connection fields, see below |
+
+The `[server]` table's required fields depend on `transport`:
+
+| Field | Required for | Notes |
+|-------|--------------|-------|
+| `transport` | always | `stdio`, `http`, or `sse` |
+| `command` | `stdio` | Executable to launch |
+| `args` | `stdio`, optional | Arguments appended to `command` |
+| `env` | `stdio`, optional | String→string map; values may reference `${VAR}` |
+| `url` | `http`/`sse` | Must start with `http://` or `https://` |
+| `headers` | `http`/`sse`, optional | String→string map, same `${VAR}` referencing |
+
+### Example — a local server {#mcp-example-stdio}
+
+```toml
+# mcp/grim.toml
+description = "Grimoire catalog search and install status over MCP."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+```
+
+Full field reference, the per-client emit matrix, publishing, and the
+semantic modification-detection model live in
+[MCP Server Artifacts](./mcp-servers.md).
+
 ## Bundles {#bundles}
 
 A bundle is a curated set of references to other artifacts. Its source is
@@ -360,9 +410,9 @@ Grimoire-specific ones, sourced per kind as follows:
 | `org.opencontainers.image.description` | `description` field, or derived from the rule body | always |
 | `org.opencontainers.image.version` | release version | always |
 | `org.opencontainers.image.licenses` | skill `license` field | when present |
-| `org.opencontainers.image.source` | authored `repository` HTTPS URL (skill/agent `metadata.repository`; rule top-level `repository`; bundle `repository`); falls back to the tagless release ref | always on release |
-| `com.grimoire.summary` | skill/agent `metadata.summary`; rule top-level `summary`; bundle `summary` | when present |
-| `com.grimoire.keywords` | skill/agent `metadata.keywords`; rule top-level `keywords`; bundle `keywords` | when present |
+| `org.opencontainers.image.source` | authored `repository` HTTPS URL (skill/agent `metadata.repository`; rule top-level `repository`; bundle `repository`; mcp top-level `repository`); falls back to the tagless release ref | always on release |
+| `com.grimoire.summary` | skill/agent `metadata.summary`; rule top-level `summary`; bundle `summary`; mcp top-level `summary` | when present |
+| `com.grimoire.keywords` | skill/agent `metadata.keywords`; rule top-level `keywords`; bundle `keywords`; mcp top-level `keywords` | when present |
 
 An authored `repository` must be an `https://` URL — anything else fails
 the publish (exit 65). Readers distinguish a real repository URL from the
@@ -377,3 +427,4 @@ identical content stays byte-identical (idempotent re-release).
 [agentskills-spec]: https://agentskills.io/specification
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source-label]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+[mcp-spec]: https://spec.modelcontextprotocol.io/

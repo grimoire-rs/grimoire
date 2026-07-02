@@ -18,6 +18,13 @@ differences are shape on disk (a folder versus a file) and the `kind` argument
 (`skill`, `rule`, or `agent`) you pass to commands like
 [`grim add`](./commands.md#add).
 
+A fourth kind, the **MCP server**, follows the same declare-and-lock
+pipeline but installs differently: instead of a file, it describes a
+[Model Context Protocol](./mcp-servers.md) server, and `grim install`
+registers it as an entry in each client's own MCP config file rather than
+writing anything of its own. See [MCP Server Artifacts](./mcp-servers.md)
+for the full format and per-client behavior.
+
 ### Rules with a support directory {#rule-support-dir}
 
 A rule is often an *index* that points at extra context — a worked example, a
@@ -49,7 +56,7 @@ content is stored once and is immutable: a `sha256:…` digest always names the
 same bytes.
 
 Each artifact declares its kind through a `com.grimoire.kind` manifest
-annotation — `skill`, `rule`, `agent`, or `bundle` — so `grim` (or any
+annotation — `skill`, `rule`, `agent`, `mcp`, or `bundle` — so `grim` (or any
 OCI-aware tool that reads manifest annotations) can tell a Grimoire artifact
 apart without unpacking it. The manifest's config descriptor is the OCI empty
 config, which keeps the wire format acceptable to every registry, including

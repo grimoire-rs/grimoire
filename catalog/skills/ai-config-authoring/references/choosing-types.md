@@ -71,7 +71,11 @@ Ask in order; the first decisive answer picks the type.
    far cheaper.
 6. **Knowledge or capability?** Prose someone must read → rule or skill.
    Logic a machine can run → hook, or a script bundled inside a skill
-   (executable code never enters context).
+   (executable code never enters context). Live *tool access* (query a
+   service, call an API mid-conversation) → an MCP server — not a config
+   content type at all, but wiring for one; grim distributes the server
+   *registration* as its own artifact kind (`mcp` descriptors) so a
+   skill that assumes a server can ship next to it.
 7. **Must it work across vendors?** → AGENTS.md for the baseline + skills
    for workflows; vendor-native rules and hooks are lock-in surfaces.
 8. **Would removing it cause mistakes?** The deletion test, applied to

@@ -85,7 +85,10 @@ Kind is inferred from shape — and agents break the pattern:
   `.toml` as a bundle. A bare `.md` is **always a rule** by shape — an
   agent requires `--kind agent` explicitly. Forgetting it is not an
   error: the file silently publishes as a rule (grim warns when a rule
-  carries both `name` and `description` — heed that warning).
+  carries both `name` and `description` — heed that warning). Likewise a
+  `.toml` is **always a bundle** by shape — an MCP server descriptor
+  requires `--kind mcp` (grim errors with a `--kind mcp` hint when the
+  TOML carries a `[server]` table).
 - At `add`: kind is read from the published artifact's OCI
   `artifactType`. A non-Grimoire image cannot be inferred — `add`
   errors and asks for `--kind`.

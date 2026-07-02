@@ -13,5 +13,6 @@
 - [Publishing from CI](./ci.md)
 - [Self-Hosted GitLab Setup](./self-hosted-gitlab.md)
 - [Agent Artifacts](./agents.md)
+- [MCP Server Artifacts](./mcp-servers.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)

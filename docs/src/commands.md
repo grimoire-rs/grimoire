@@ -26,7 +26,7 @@ These apply to every subcommand:
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
 | [`grim config`](#config) | Read and write `grimoire.toml` settings and registries. |
-| [`grim add`](#add) | Declare a skill/rule/agent and lock it. |
+| [`grim add`](#add) | Declare a skill/rule/agent/mcp server and lock it. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
@@ -156,10 +156,10 @@ The `action` field in write confirmations takes one of: `set`, `unset`, `registr
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle>] [--name <name>] <reference>`
-declares a skill, rule, [agent](./agents.md), or bundle and immediately pins it
-in the lock. `<reference>` is the only required argument —
-`registry/repo:tag` or `registry/repo@sha256:…`.
+`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] <reference>`
+declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
+or bundle and immediately pins it in the lock. `<reference>` is the only
+required argument — `registry/repo:tag` or `registry/repo@sha256:…`.
 
 When `--kind` is omitted, the kind is inferred from the artifact's
 `com.grimoire.kind` manifest annotation set at release time (artifacts
@@ -172,6 +172,7 @@ segment. If the kind cannot be inferred (for example, a non-Grimoire image),
 grim add ghcr.io/acme/code-review:1
 grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2
 grim add --kind bundle ghcr.io/acme/python-stack:1
+grim add ghcr.io/grimoire-rs/mcp/grim:1
 ```
 
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
@@ -236,9 +237,11 @@ with `--format json` to drive automation.
 
 ## grim remove {#remove}
 
-`grim remove <kind> <name>` undeclares an artifact from `grimoire.toml` and the
-lock. It leaves already-installed files on disk — use
-[`grim uninstall`](#uninstall) to remove those too.
+`grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,
+or `mcp`) undeclares an artifact from `grimoire.toml` and the lock. It
+leaves already-installed files (or, for an [MCP server](./mcp-servers.md),
+the registered config entry) in place — use [`grim uninstall`](#uninstall)
+to remove those too.
 
 Removal acts on the **effective** declaration, fully offline: the lock entry
 is dropped only when no remaining declaration holds the artifact. Removing a
@@ -250,9 +253,14 @@ you to run [`grim lock`](#lock) — never a silently incomplete fresh lock.
 
 ## grim uninstall {#uninstall}
 
-`grim uninstall <kind> <name>` is the full inverse of install: it deletes the
-materialized files, drops the install record, and undeclares the artifact from
-the config and lock. The interactive TUI's delete action reuses the same seam.
+`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, or
+`mcp`) is the full inverse of install: it deletes the materialized files,
+drops the install record, and undeclares the artifact from the config and
+lock. The interactive TUI's delete action reuses the same seam. For an
+[MCP server](./mcp-servers.md#modification-detection), there is no
+materialized file to delete — grim splices only the managed entry back out
+of each client's config file, leaving the file itself and every other
+entry untouched.
 
 The lock follows the same effective-declaration rule as
 [`grim remove`](#remove): when a declared bundle still names the artifact at
@@ -408,10 +416,12 @@ grim tui --registry ghcr.io/acme
 ## grim build {#build}
 
 `grim build <path>` validates and packs a local skill directory, rule `.md`
-file, [agent](./agents.md) `.md` file, or bundle `.toml` file without pushing
-it — a dry run for authors. `--kind <skill|rule|agent|bundle>` forces the
-artifact kind instead of auto-detecting it from the path. An agent always
-needs `--kind agent` — a bare `.md` packs as a rule. `--git` embeds
+file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
+`.toml` file, or bundle `.toml` file without pushing it — a dry run for
+authors. `--kind <skill|rule|agent|bundle|mcp>` forces the artifact kind
+instead of auto-detecting it from the path. An agent always needs `--kind
+agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
+mcp` — a bare `.toml` packs as a bundle. `--git` embeds
 [git provenance](./publishing.md#git-provenance) (commit revision, commit
 date, and the `origin` remote) so the preflight reflects what a release would
 stamp.
@@ -428,16 +438,21 @@ moves an existing exact-version tag that points at a different digest;
 exact-version tag already exists into a success no-op that pushes nothing —
 for manifest-driven publishers that re-run blanket releases and only want
 bumped versions pushed. A `.toml` path publishes a
-[bundle](./concepts.md#bundles); `--pin` then freezes its floating members to
-digests. `--git` embeds [git provenance](./publishing.md#git-provenance)
-(commit revision, date, and `origin` remote) as OCI annotations; it is
-off by default so an ordinary re-release stays idempotent. See
-[Publishing](./publishing.md) for the full workflow.
+[bundle](./concepts.md#bundles) by default, or an
+[MCP server](./mcp-servers.md) with `--kind mcp`; `--pin` (bundles only)
+freezes floating members to digests. `--git` embeds
+[git provenance](./publishing.md#git-provenance) (commit revision, date,
+and `origin` remote) as OCI annotations; it is off by default so an
+ordinary re-release stays idempotent. See [Publishing](./publishing.md)
+for the full workflow.
 
 Pointing `grim release` at a `publish.toml` (a file with a top-level
 `registry` key) produces a hint to use `grim publish` instead. The mirror
 also holds: pointing `grim publish` at a bundle TOML (flat `name = "reference"`
-entries) produces a hint to use `grim release --kind bundle`.
+entries) produces a hint to use `grim release --kind bundle`. A `.toml`
+carrying a `[server]` table gets the equivalent nudge toward
+`grim release --kind mcp` — see
+[MCP Server Artifacts](./mcp-servers.md#publishing).
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
@@ -447,9 +462,10 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 ## grim publish {#publish}
 
 `grim publish` reads a `publish.toml` manifest and releases every declared
-package in kind order (skills → rules → agents → bundles, alphabetical
-within kind). It validates the whole manifest before any push, then
-composes [`grim release`](#release) per entry.
+package in kind order (skills → rules → agents →
+[mcp servers](./mcp-servers.md) → bundles, alphabetical within kind). It
+validates the whole manifest before any push, then composes
+[`grim release`](#release) per entry.
 
 The default behavior skips entries whose exact-version tag already exists,
 making the command idempotent: re-running after a partial failure pushes only
@@ -593,6 +609,12 @@ the global scope rather than the discovered project:
   }
 }
 ```
+
+Hand-authoring either block above is optional: grim's own server is also
+published as the [MCP server artifact](./mcp-servers.md) `mcp/grim`, so
+`grim add ghcr.io/grimoire-rs/mcp/grim:1` followed by `grim install`
+registers the same entry — in every detected client, not just Claude Code
+— without hand-editing any config file.
 
 <!-- internal -->
 [global-options]: #global-options

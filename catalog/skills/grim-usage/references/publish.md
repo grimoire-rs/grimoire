@@ -84,8 +84,8 @@ bundle members before the bundle that references them.
 reads a `publish.toml` manifest that declares every package with a `registry`
 and per-entry `version`, validates the whole set before any push, then
 releases each entry in a fixed kind order: skills first, then rules, then
-agents, then bundles — alphabetical within each kind. Bundle members always
-land before the bundles that reference them.
+agents, then MCP servers, then bundles — alphabetical within each kind.
+Bundle members always land before the bundles that reference them.
 
 The manifest format uses per-entry sub-tables keyed by name. A minimal
 example:

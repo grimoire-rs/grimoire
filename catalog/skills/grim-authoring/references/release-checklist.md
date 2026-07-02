@@ -15,14 +15,15 @@ reaches a registry:
    instead of the description), `keywords` is one comma-separated string
    (never a YAML/TOML list), `repository` is an `https://` URL. Check
    the per-kind location: skill/agent → `metadata` map; rule → top-level
-   frontmatter; bundle → top-level TOML. If this release retires a
+   frontmatter; mcp/bundle → top-level TOML. If this release retires a
    package, set the `deprecated` notice in the same location (a re-release
    without it clears the flag).
 2. **`grim build <path>` exits 0** — and read the *warnings* too:
    warn-and-drop vendor keys and migration nudges are silent data loss
    if shipped.
 3. **Agents: `--kind agent` on both build and release** — a forgotten
-   flag publishes a rule, with only a warning.
+   flag publishes a rule, with only a warning. **MCP servers: `--kind
+   mcp` likewise** — though there a forgotten flag errors with a hint.
 4. **Bundles: members published first** — a bundle referencing unpushed
    members breaks the consumer's `grim lock`, not your release.
 5. **`grim release … --dry-run`** — prints the exact push plan: every

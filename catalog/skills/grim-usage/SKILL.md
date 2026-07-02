@@ -12,10 +12,13 @@ metadata:
 # Grim Usage
 
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
-It distributes four artifact kinds — **skills**, **rules**, **agents**, and
-**bundles** — through any standard OCI registry (GHCR, Docker Hub, a private
-Distribution), with lockfile-pinned installs into AI clients such as Claude
-Code, OpenCode, and GitHub Copilot.
+It distributes five artifact kinds — **skills**, **rules**, **agents**,
+**MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
+Docker Hub, a private Distribution), with lockfile-pinned installs into AI
+clients such as Claude Code, OpenCode, and GitHub Copilot. An MCP server
+artifact installs by registering an entry in each client's native MCP
+config file (never as a file of its own); uninstall removes only that
+entry, never the file.
 
 ## Verify Before Acting
 
