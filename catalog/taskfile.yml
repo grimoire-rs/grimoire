@@ -25,6 +25,7 @@ tasks:
       - 'skills/**/*'
       - 'rules/**/*'
       - 'agents/**/*'
+      - 'mcp/*.toml'
       - 'bundles/*.toml'
       - '{{.ROOT_DIR}}/target/release/grim{{exeExt}}'
     cmds:
@@ -47,6 +48,12 @@ tasks:
           [ -e "$a" ] || continue
           echo "==> grim build ${a}"
           "{{.GRIM_BINARY}}" build "$a" --kind agent
+          found=1
+        done
+        for m in mcp/*.toml; do
+          [ -e "$m" ] || continue
+          echo "==> grim build ${m}"
+          "{{.GRIM_BINARY}}" build "$m" --kind mcp
           found=1
         done
         for b in bundles/*.toml; do

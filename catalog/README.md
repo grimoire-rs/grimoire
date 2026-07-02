@@ -13,6 +13,7 @@ catalog/
 ├── taskfile.yml        # catalog: subsystem tasks (verify, release)
 ├── skills/<name>/      # one dir per skill package (SKILL.md + references/)
 ├── bundles/<name>.toml # one file per bundle package
+├── mcp/<name>.toml     # one file per MCP server descriptor package
 ├── rules/<name>.md     # (when the first rule package lands)
 └── agents/<name>.md    # (when the first agent package lands)
 ```

@@ -30,6 +30,10 @@ repository = "grimoire-rs/skills/ai-config-authoring"
 version = "0.2.1"
 repository = "grimoire-rs/skills/grim-authoring"
 
+[mcp.grim]
+version = "0.1.0"
+repository = "grimoire-rs/mcp/grim"
+
 [bundles.grim-essentials]
 version = "0.1.1"
 repository = "grimoire-rs/bundles/grim-essentials"

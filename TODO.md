@@ -1,19 +1,22 @@
- - bundle expansion "wrong registry": ROOT-CAUSED, not a grim defect. The four
-   ghcr.io/grimoire-rs packages were NEVER PUBLISHED — the last successful
-   publish-catalog run (June 12) still targeted grim.ocx.sh; after the GHCR
-   port the workflow was never re-run, and the index refs were repointed via a
-   direct push (no ref_reachable gate). Re-dispatch (run 28614540347) FAILED:
-   the workflow publishes with the latest *released* grim (0.6.x), which
-   rejects the `[announce]` key now in main's catalog/publish.toml
-   ("unknown field `announce`"). Blocked on releasing 0.7.0 — its post-release
-   workflow_call re-runs publish-catalog with the new binary. AFTER that lands:
-   packages are created PRIVATE — flip each to public (container packages with
-   '/' in the name may not list in the Packages tab; use direct settings URLs,
-   e.g. github.com/orgs/grimoire-rs/packages/container/skills%2Fgrim-usage/settings,
+ - bundle expansion "wrong registry": ROOT-CAUSED, not a grim defect — the four
+   ghcr.io/grimoire-rs packages had never been published (last green
+   publish-catalog run, June 12, still targeted grim.ocx.sh). RESOLVED by the
+   v0.7.0 release: post-announce publish-catalog pushed all four to GHCR and
+   announced them (index PR #1, auto-merged). REMAINING (human, UI-only —
+   no API for package visibility): flip each package public via direct
+   settings URLs (sub-namespaced packages may not list in the Packages tab):
+   github.com/orgs/grimoire-rs/packages/container/skills%2Fgrim-usage/settings,
    …/skills%2Fai-config-authoring/settings, …/skills%2Fgrim-authoring/settings,
-   …/bundles%2Fgrim-essentials/settings). Then re-test TUI bundle expansion.
+   …/bundles%2Fgrim-essentials/settings. Then re-test TUI bundle expansion
+   (anonymous pulls 403 until public).
  - [x] registry longest-prefix / "ghcr.io/grimoire-rs splitted into ghcr.io and
    grimoire-rs": fixed in two commits — 7f7e609 (index-only sets corrupted short-id
    adds with a registry-less ref; now falls back through the documented default
    chain) and 8b12470 (TUI tree roots index-sourced rows at their source locator;
    host/namespace chains fold into one node).
+ - mcp artifact kind follow-ups (deferred v1, see catalog/mcp/grim.toml):
+   reconsider global vs project launch semantics for grim's own MCP descriptor
+   (a scope flag baked into the descriptor pins every consumer; better: the
+   server emits rendered artifacts for a requested vendor/scope). Also
+   deferred: mcp bundle membership, `${VAR:-default}` support, per-vendor
+   override keys in the descriptor, VS Code user-profile mcp.json surface.
