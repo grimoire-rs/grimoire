@@ -75,6 +75,22 @@ Per-client rule transforms:
 Support directory files are copied verbatim for all three clients. Only
 the index is ever transformed.
 
+### MCP servers {#install-layout-mcp}
+
+An **mcp** artifact never materializes a file. Install registers a
+vendor-native entry in each client's own MCP config file via a
+span-preserving JSON splice (every byte outside the managed member —
+key order, formatting, JSONC comments — survives); uninstall removes
+only that entry, never the file. Integrity is judged **semantically**
+on the entry value (canonical sorted-key JSON hash), so reformatting
+the config is not a modification. Per-client config files:
+
+| Client | Project | Global |
+|--------|---------|--------|
+| **Claude** | `<workspace>/.mcp.json` (`mcpServers`) | `~/.claude.json` — `$CLAUDE_CONFIG_DIR/.claude.json` when set (`mcpServers`) |
+| **OpenCode** | `<workspace>/opencode.json`/`.jsonc` (`mcp`) | `$OPENCODE_CONFIG` else XDG `opencode.json` (`mcp`) |
+| **Copilot** | `<workspace>/.vscode/mcp.json` (`servers`) | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); env-ref descriptors are skipped (no substitution support) |
+
 ### Agents {#install-layout-agents}
 
 An **agent** materializes as a single Markdown file in the client's agents
@@ -199,6 +215,7 @@ devcontainer portability). Every stored path carries an `anchor` tag and a
 | `OpenCodeSkills` | `$OPENCODE_CONFIG_DIR/skills` else `$XDG_CONFIG_HOME/opencode/skills` |
 | `OpenCodeRoot` | Parent of the `OpenCodeSkills` root (the directory one level above `skills/`) |
 | `GrimHome` | `$GRIM_HOME` |
+| `ClaudeUserDir` | `$CLAUDE_CONFIG_DIR` else `$HOME` — the dir holding Claude's user config file `.claude.json` (not derivable from `ClaudeRoot`: with the override set the file lives *inside* it, without it the file is a *sibling* of `~/.claude`) |
 
 All roots are resolved once at scope-resolution time and passed as an
 `AnchorRoots` struct so every downstream operation is a pure table-lookup
@@ -220,6 +237,10 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 | global · opencode · agent | `OpenCodeRoot` | `agents/<name>.md` |
 | global · opencode · rule | `GrimHome` | `.opencode/rules/<name>.md` |
 | global · copilot · rule | `GrimHome` | `.github/instructions/<name>…` (inert) |
+| project · any · mcp | `Workspace` | `.mcp.json` / `opencode.json` / `.vscode/mcp.json` (entry-typed output: `entry` carries the managed member's JSON pointer) |
+| global · claude · mcp | `ClaudeUserDir` | `.claude.json` |
+| global · opencode · mcp | `OpenCodeRoot` | `opencode.json` |
+| global · copilot · mcp | `CopilotRoot` | `mcp-config.json` |
 
 ### Path containment guard {#path-containment-guard}
 

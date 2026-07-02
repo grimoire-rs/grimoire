@@ -89,12 +89,12 @@ under `test/`. Rust edition 2024.
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for `grim publish --announce` (PR/MR creation, owner-id lookup); always wins over CI-conventional tokens (`GH_TOKEN`/`GITHUB_TOKEN`, `GITLAB_TOKEN`), which apply only when the CI server host matches the announce target host. Never logged | (unset) |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
 | `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill/agent paths | (unset) |
-| `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills, rules, and agents), `COPILOT_HOME` replaces `~/.copilot` (skills and agents), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills and agents (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |
+| `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills, rules, agents) and relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`, `COPILOT_HOME` replaces `~/.copilot` (skills and agents), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills and agents (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |
 
 ## First-Party Catalog
 
 `catalog/` holds grim-publishable packages (skills `grim-usage`,
-`ai-config-authoring`, `grim-authoring` + the `grim-essentials` bundle).
+`ai-config-authoring`, `grim-authoring`, bundle `grim-essentials`, mcp `grim`).
 **CLI (`src/command/**`) or docs-page changes require a drift review of
 these skills** — duty + procedure: [catalog/README.md](./catalog/README.md).
 Hooks remind on matching edits; `task catalog:verify` gates CI.
