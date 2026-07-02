@@ -65,6 +65,12 @@ pub struct SearchArgs {
     /// Explicit project config path (for scope badge derivation).
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Walk-up seed for project-config discovery (no CLI surface — set by
+    /// the `grim mcp` per-call `workspace` parameter; the CLI default is
+    /// the process cwd).
+    #[arg(skip)]
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 /// Run `grim search`.
@@ -185,7 +191,8 @@ fn resolve_scope(
         return (registries, lock, state, roots, active);
     }
 
-    let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
+    let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
+    else {
         // No scope resolves: browse the flag/env/fallback registry (no
         // config tiers) with empty badge inputs. With no scope to detect
         // against, treat every client as active (no output is filtered).
@@ -222,7 +229,8 @@ fn load_badges_best_effort(
     ctx: &Context,
     args: &SearchArgs,
 ) -> (Option<GrimoireLock>, InstallState, AnchorRoots, Vec<ClientTarget>) {
-    let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
+    let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
+    else {
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
         return (
             None,
@@ -260,6 +268,7 @@ mod tests {
             registry: Vec::new(),
             global: false,
             config: None,
+            workspace: None,
         }
     }
 

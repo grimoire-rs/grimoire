@@ -8,7 +8,9 @@
 //! Process") it is exempt from the `Printable` / `api/` path and returns an
 //! [`ExitCode`] directly — the same exemption `tui` and `schema` use. The
 //! server exposes Grimoire's catalog/status as MCP tools; mutating tools are
-//! gated behind `--allow-writes` (read-only by default).
+//! gated behind `--allow-writes` (read-only by default). The install scope is
+//! a per-tool-call parameter (`global` / `config` / `workspace`), not a launch
+//! flag — see `adr_mcp_percall_scope_fetch_render.md`.
 
 use clap::Args;
 
@@ -18,19 +20,12 @@ use crate::context::Context;
 /// `grim mcp` arguments.
 #[derive(Debug, Args)]
 pub struct McpArgs {
-    /// Enable mutating tools (add / install / update / uninstall). Off by
-    /// default: the server is read-only unless this is set.
+    /// Enable mutating tools (currently `grim_render`). Off by default: the
+    /// server is read-only unless this is set. Launch-pinned deliberately —
+    /// enabling writes is a trust decision of whoever wires the server into
+    /// a harness, never of the model calling the tools.
     #[arg(long)]
     pub allow_writes: bool,
-
-    /// Operate on the global scope instead of the discovered project. The
-    /// scope is fixed for the server's lifetime — tools cannot redirect it.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path (scope resolution for status/write tools).
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
 }
 
 /// Run `grim mcp`. Returns when the client closes stdin (EOF).

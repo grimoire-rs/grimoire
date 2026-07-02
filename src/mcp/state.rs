@@ -4,12 +4,13 @@
 //! Shared state for the `grim mcp` server.
 //!
 //! Built once at server start and shared (behind an `Arc`) across every
-//! concurrent tool call. The install **scope** is fixed here at start
-//! (`--global` / `--config`) rather than read per call, so an agent cannot
-//! redirect a project-scoped session into global (`~/.claude`) writes — every
-//! tool operates within the one scope the server was launched in.
-
-use std::path::PathBuf;
+//! concurrent tool call. The install **scope** is *not* part of this state:
+//! each tool call carries its own optional scope parameters (`global` /
+//! `config` / `workspace`) and resolves a fresh scope per call, so one
+//! server instance can answer questions about any scope. Only
+//! `--allow-writes` stays launch-pinned — enabling mutation is a trust
+//! decision of whoever wires the server, not of the model. See
+//! `adr_mcp_percall_scope_fetch_render.md`.
 
 use crate::context::Context;
 
@@ -18,13 +19,7 @@ pub struct McpState {
     /// The per-invocation context (env-derived paths, registry flag/env,
     /// offline). Cheap to clone; the tools reuse it for every command.
     pub ctx: Context,
-    /// Whether mutating tools are enabled. When `false` the write tools are
-    /// neither advertised nor callable. No write tools are registered yet —
-    /// this is the gate they will check once they land (Phase 2); until then
-    /// the read-only surface is identical with or without `--allow-writes`.
+    /// Whether mutating tools are enabled. When `false` the write tools
+    /// (`grim_render`) are neither advertised nor callable.
     pub allow_writes: bool,
-    /// The fixed scope: `--global` selects the global scope.
-    pub global: bool,
-    /// The fixed explicit project config path, if one was given.
-    pub config: Option<PathBuf>,
 }

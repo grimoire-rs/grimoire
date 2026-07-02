@@ -7,8 +7,10 @@
 //! Read tools (`grim_search`, `grim_status`) are always available; they wrap
 //! the existing `command::*::run` seams and serialize the same report the CLI
 //! emits under `--format json`, so the MCP payload and the CLI JSON are one
-//! source of truth. Mutating tools are gated behind `--allow-writes` and land
-//! in a later change.
+//! source of truth. The install scope is a per-tool-call parameter (flattened
+//! `ScopeToolArgs`), resolved fresh on every call — see
+//! `adr_mcp_percall_scope_fetch_render.md`. Mutating tools are gated behind
+//! `--allow-writes`.
 //!
 //! The server runs over stdio: stdout is the JSON-RPC channel, so the handlers
 //! never print to it — all diagnostics go through `tracing` (stderr). The
@@ -23,7 +25,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::mcp::McpArgs;
 use crate::context::Context;
 use crate::mcp::state::McpState;
-use crate::mcp::tool_args::SearchToolArgs;
+use crate::mcp::tool_args::{SearchToolArgs, StatusToolArgs};
 
 /// The MCP server handler. Cloned per request by rmcp (a cheap `Arc` bump).
 #[derive(Clone)]
@@ -43,11 +45,12 @@ impl GrimMcpServer {
         let search_args = crate::command::search::SearchArgs {
             query: args.query,
             refresh: args.refresh.unwrap_or(false),
-            // Locked to the server's configured registry set — the tool exposes
-            // no registry override (SSRF / CWE-918; see `SearchToolArgs`).
+            // Locked to the resolved scope's configured registry set — the tool
+            // exposes no registry override (SSRF / CWE-918; see `SearchToolArgs`).
             registry: Vec::new(),
-            global: self.inner.global,
-            config: self.inner.config.clone(),
+            global: args.scope.global(),
+            config: args.scope.config,
+            workspace: args.scope.workspace,
         };
         match crate::command::search::run(&self.inner.ctx, &search_args).await {
             Ok((report, _)) => to_json(&report),
@@ -55,15 +58,16 @@ impl GrimMcpServer {
         }
     }
 
-    /// Report the install status of every declared artifact in the fixed
+    /// Report the install status of every declared artifact in the requested
     /// scope. Returns the same JSON payload as `grim status --format json`.
     #[tool(
-        description = "Show the install status of every artifact declared in the active Grimoire scope (installed / outdated / modified / not-installed). Returns a JSON array."
+        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Returns a JSON array."
     )]
-    async fn grim_status(&self) -> Result<String, ErrorData> {
+    async fn grim_status(&self, Parameters(args): Parameters<StatusToolArgs>) -> Result<String, ErrorData> {
         let status_args = crate::command::status::StatusArgs {
-            global: self.inner.global,
-            config: self.inner.config.clone(),
+            global: args.scope.global(),
+            config: args.scope.config,
+            workspace: args.scope.workspace,
         };
         match crate::command::status::run(&self.inner.ctx, &status_args).await {
             Ok((report, _)) => to_json(&report),
@@ -83,7 +87,9 @@ impl ServerHandler for GrimMcpServer {
         info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.instructions = Some(
             "Grimoire MCP server: browse and inspect OCI-distributed AI-agent configuration \
-             (skills, rules, agents, bundles). Read-only unless started with --allow-writes."
+             (skills, rules, agents, bundles). Scope is chosen per tool call via the optional \
+             `global` / `config` / `workspace` parameters (default: the project discovered \
+             from the server's working directory). Read-only unless started with --allow-writes."
                 .to_string(),
         );
         info
@@ -112,8 +118,6 @@ pub async fn serve(ctx: &Context, args: &McpArgs) -> anyhow::Result<ExitCode> {
     let state = McpState {
         ctx: ctx.clone(),
         allow_writes: args.allow_writes,
-        global: args.global,
-        config: args.config.clone(),
     };
     let server = GrimMcpServer { inner: Arc::new(state) };
     tracing::info!(allow_writes = args.allow_writes, "grim mcp server starting on stdio");

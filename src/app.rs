@@ -123,7 +123,18 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Tui(args) => crate::command::tui::run(&ctx, &args).await?,
         // `mcp` runs a long-lived STDIO server (stdout is the JSON-RPC
         // channel); it emits no structured report (exempt from `Printable`).
-        Command::Mcp(args) => crate::command::mcp::run(&ctx, &args).await?,
+        // Scope is per tool call (adr_mcp_percall_scope_fetch_render.md):
+        // reject the root-level scope flags loudly (64) instead of letting
+        // them bind silently to a launch scope that no longer exists.
+        Command::Mcp(args) => {
+            if cli.global.global || cli.global.config.is_some() {
+                return Err(crate::command::config_usage(
+                    "grim mcp does not take --global/--config; pass scope per tool call \
+                     (global / config / workspace arguments)",
+                ));
+            }
+            crate::command::mcp::run(&ctx, &args).await?
+        }
     };
 
     Ok(code)

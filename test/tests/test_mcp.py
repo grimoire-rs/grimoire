@@ -280,6 +280,124 @@ def test_mcp_search_ignores_agent_supplied_registry(
     )
 
 
+def _call_status(runner: GrimRunner, cwd: Path, arguments: dict) -> list:
+    """Drive one offline ``grim_status`` tool call, return the parsed payload."""
+    responses = _drive(
+        runner,
+        cwd,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_status", "arguments": arguments},
+            },
+        ],
+    )
+    call = responses[2]["result"]
+    assert call["isError"] is False, f"grim_status must not error, got: {call!r}"
+    payload = json.loads(call["content"][0]["text"])
+    assert isinstance(payload, list), f"grim_status payload must be a JSON array, got {payload!r}"
+    return payload
+
+
+def test_mcp_status_config_param_redirects_scope(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, tmp_path: Path
+) -> None:
+    """A per-call ``config`` redirects the tool to another project's scope.
+
+    The server runs in project A (empty declaration); the tool call names
+    project B's config, which declares a skill. The payload must equal the
+    CLI's ``grim status --config B/grimoire.toml`` output — B's declared
+    skill, not A's empty set.
+    """
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    other = tmp_path / "other-project"
+    other.mkdir()
+    other_cfg = other / "grimoire.toml"
+    other_cfg.write_text(f'[skills]\nredirected = "{REGISTRY_HOST}/grim-test/redirected:latest"\n')
+    runner = grim_at(project_dir)
+
+    payload = _call_status(runner, project_dir, {"config": str(other_cfg)})
+
+    cli_payload = runner.json("status", "--config", str(other_cfg))
+    assert payload == cli_payload, (
+        f"MCP grim_status with config param must equal CLI --config output;\n"
+        f"  MCP: {payload!r}\n  CLI: {cli_payload!r}"
+    )
+    names = {row.get("name") for row in payload}
+    assert "redirected" in names, f"expected project B's declared skill, got: {payload!r}"
+
+
+def test_mcp_status_workspace_param_walks_up(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, tmp_path: Path
+) -> None:
+    """A per-call ``workspace`` seeds the project-config walk-up.
+
+    The seed points at a nested directory of project B; the walk-up must
+    find B's config at the ancestor — while the server's own cwd (project A)
+    declares nothing.
+    """
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    other = tmp_path / "other-project"
+    nested = other / "src" / "deep"
+    nested.mkdir(parents=True)
+    (other / "grimoire.toml").write_text(
+        f'[skills]\nwalked-up = "{REGISTRY_HOST}/grim-test/walked-up:latest"\n'
+    )
+    runner = grim_at(project_dir)
+
+    payload = _call_status(runner, project_dir, {"workspace": str(nested)})
+
+    names = {row.get("name") for row in payload}
+    assert "walked-up" in names, (
+        f"workspace seed must walk up to project B's config, got: {payload!r}"
+    )
+
+
+def test_mcp_status_global_param_selects_global_scope(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, grim_home: Path
+) -> None:
+    """``{"global": true}`` selects the global scope, matching the CLI's ``--global``."""
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\nglobal-skill = "{REGISTRY_HOST}/grim-test/global-skill:latest"\n'
+    )
+    runner = grim_at(project_dir)
+
+    payload = _call_status(runner, project_dir, {"global": True})
+
+    cli_payload = runner.json("status", "--global")
+    assert payload == cli_payload, (
+        f"MCP grim_status with global param must equal CLI --global output;\n"
+        f"  MCP: {payload!r}\n  CLI: {cli_payload!r}"
+    )
+    names = {row.get("name") for row in payload}
+    assert "global-skill" in names, f"expected the global declaration, got: {payload!r}"
+
+
+def test_mcp_launch_scope_flags_removed(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path
+) -> None:
+    """``grim mcp --global`` / ``--config`` are gone: unknown flag ⇒ exit 64.
+
+    Scope moved into the per-tool-call parameters (v2, breaking); the launch
+    flags must fail parse so stale harness configs surface loudly instead of
+    silently pinning a scope that no longer exists.
+    """
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    for flag in (["--global"], ["--config", str(project_dir / "grimoire.toml")]):
+        result = runner.plain("mcp", *flag, check=False)
+        assert result.returncode == 64, (
+            f"grim mcp {' '.join(flag)} must exit 64 (usage error), "
+            f"got {result.returncode}: {result.stderr}"
+        )
+
+
 def _two_registry_config(project_dir: Path, ns1: str, ns2: str) -> None:
     """Write a grimoire.toml declaring two ``[[registries]]`` (two namespaces).
 

@@ -39,6 +39,12 @@ pub struct StatusArgs {
     /// Explicit project config path.
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Walk-up seed for project-config discovery (no CLI surface — set by
+    /// the `grim mcp` per-call `workspace` parameter; the CLI default is
+    /// the process cwd).
+    #[arg(skip)]
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 /// Run `grim status`.
@@ -48,7 +54,12 @@ pub struct StatusArgs {
 /// Only a config (78/79) or lock-parse (78) load failure; artifact state
 /// is data and never fails the command.
 pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve_in(
+        ctx,
+        args.global,
+        args.config.as_deref(),
+        args.workspace.as_deref(),
+    ))?;
 
     // A missing lock is not a hard failure for `status` — it just means
     // every declared artifact is `missing`/`stale`. A *corrupt* lock is a
