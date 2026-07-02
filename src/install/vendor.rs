@@ -124,6 +124,14 @@ pub trait Vendor {
     /// there is no default — each vendor owns its layout.
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf;
 
+    /// The vendor's native MCP config file for `scope`, or `None` when the
+    /// vendor has no writable MCP registration surface there (an MCP
+    /// install then skips this vendor with a warning, mirroring the
+    /// Copilot global-rule degradation). Default: no surface.
+    fn mcp_config_path(&self, _workspace: &Path, _scope: ConfigScope) -> Option<PathBuf> {
+        None
+    }
+
     /// Render the `SKILL.md` index for this vendor, or `None` when the
     /// canonical bytes should install verbatim (no tool-namespaced
     /// metadata, or not parseable as a skill).

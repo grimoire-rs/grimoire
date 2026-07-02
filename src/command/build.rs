@@ -32,7 +32,7 @@ pub struct BuildArgs {
     pub path: std::path::PathBuf,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: Option<String>,
 
     /// Embed git provenance (commit revision, commit date, and the `origin`
@@ -97,6 +97,9 @@ pub fn validate_and_pack(
         // Bundles are packed on a dedicated path (`pack_bundle`); the
         // skill/rule validator never receives one.
         ArtifactKind::Bundle => unreachable!("bundles are packed via the bundle path, not validate_and_pack"),
+        // MCP descriptors ship as a JSON layer (`read_mcp_descriptor`), not
+        // a tar layer; they never reach the skill/rule validator either.
+        ArtifactKind::Mcp => unreachable!("mcp descriptors are packed via the mcp path, not validate_and_pack"),
         ArtifactKind::Skill => {
             let fm = super::grim(validate_skill_dir(path))?;
             // Publish-time gate for the per-client projection: a known
@@ -260,6 +263,19 @@ pub fn read_bundle_members(
             crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(inner)),
         )));
     }
+    // Same guard for the other `.toml`-shaped artifact: a `[server]` table
+    // marks an MCP descriptor, which needs `--kind mcp` (mirrors the
+    // agent-shaped-rule nudge — `.toml` stays bundle by shape).
+    if toml::from_str::<toml::Value>(&content).is_ok_and(|v| v.get("server").is_some()) {
+        let inner: Box<dyn std::error::Error + Send + Sync> =
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "'{}' looks like an MCP server descriptor (has a [server] table); pass --kind mcp to publish it as one",
+                path.display()
+            ));
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(inner)),
+        )));
+    }
     let source = super::grim(crate::config::project_config::BundleSource::from_toml_str(&content))?;
     // Same publish-time gate as skills/rules/agents: a non-HTTPS authored
     // repository hard-fails before anything can reach a registry.
@@ -295,6 +311,26 @@ pub fn read_bundle_members(
     Ok((name, members, source.metadata))
 }
 
+/// Parse + validate an MCP descriptor source file (`mcp/<name>.toml`).
+/// The descriptor name is the file stem.
+///
+/// # Errors
+///
+/// A parse/validation failure as a path-attributed `SkillError`
+/// (`MetadataInvalid` ⇒ DataError 65) or an I/O error.
+pub fn read_mcp_descriptor(path: &Path) -> anyhow::Result<(String, crate::oci::mcp::McpDescriptor)> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
+    })?;
+    let descriptor =
+        super::grim(crate::oci::mcp::McpDescriptor::from_toml_str(&content).map_err(metadata_invalid(path)))?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mcp".to_string());
+    Ok((name, descriptor))
+}
+
 /// Run `grim build`.
 ///
 /// # Errors
@@ -316,6 +352,19 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
         let layer_digest = crate::oci::Algorithm::Sha256.hash(&layer).to_string();
         // Member count stands in for the annotation count in the report.
         let report = BuildReport::new(kind, name, args.path.clone(), layer_digest, manifest.members.len());
+        return Ok((report, ExitCode::Success));
+    }
+
+    if kind == ArtifactKind::Mcp {
+        let git = derive_git_provenance(&args.path, args.git).await?;
+        let (name, descriptor) = read_mcp_descriptor(&args.path)?;
+        let layer = super::grim(descriptor.to_layer_bytes().map_err(|e| {
+            crate::skill::SkillError::new(&args.path, crate::skill::SkillErrorKind::MetadataInvalid(Box::new(e)))
+        }))?;
+        let layer_digest = crate::oci::Algorithm::Sha256.hash(&layer).to_string();
+        let annotations =
+            crate::oci::annotations::annotations_for_mcp(&name, &descriptor, "0.0.0-build", None, git.as_ref());
+        let report = BuildReport::new(kind, name, args.path.clone(), layer_digest, annotations.len());
         return Ok((report, ExitCode::Success));
     }
 

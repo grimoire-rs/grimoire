@@ -207,6 +207,18 @@ impl Vendor for ClaudeVendor {
         scope_root(workspace, scope).join("agents").join(format!("{name}.md"))
     }
 
+    fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            // The team-shared project MCP config at the workspace root.
+            ConfigScope::Project => Some(workspace.join(".mcp.json")),
+            // Claude Code's user-scope servers live in `.claude.json` — a
+            // SIBLING of the `~/.claude` root (inside `$CLAUDE_CONFIG_DIR`
+            // when set, which relocates every Claude path). `None` without
+            // a resolvable home: never a CWD-relative fallback.
+            ConfigScope::Global => Some(env_dir("CLAUDE_CONFIG_DIR").or_else(home_dir)?.join(".claude.json")),
+        }
+    }
+
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         render::render_skill_doc(doc, self)
     }

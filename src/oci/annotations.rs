@@ -384,6 +384,49 @@ pub fn annotations_for_bundle(
     a
 }
 
+/// Build the manifest annotation map for an MCP server descriptor.
+///
+/// The title is the descriptor `name` (the source file stem); the
+/// required `description` and the optional catalog metadata (`summary`,
+/// `keywords`, `repository`, `deprecated`) come from the descriptor's
+/// top-level fields. The map stays deterministic (no wall-clock
+/// `created`) so re-release is idempotent — see [`annotations_for_skill`].
+pub fn annotations_for_mcp(
+    name: &str,
+    descriptor: &crate::oci::mcp::McpDescriptor,
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), name.to_string());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        descriptor.description.clone(),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback — see `annotations_for_skill`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Mcp.to_string());
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: descriptor.repository.as_deref(),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
+    }
+    insert_git_provenance(&mut a, git);
+    if let Some(summary) = &descriptor.summary {
+        a.insert("com.grimoire.summary".to_string(), summary.clone());
+    }
+    if let Some(keywords) = &descriptor.keywords {
+        a.insert("com.grimoire.keywords".to_string(), keywords.clone());
+    }
+    if let Some(deprecated) = descriptor.deprecated.as_deref().and_then(normalize_deprecated) {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
+    a
+}
+
 /// Extract a scalar string `key` from a rule's forward-compat `extra` map.
 /// Catalog metadata (`keywords`, `summary`, `repository`) is authored as a
 /// plain string — keywords are comma-separated, matching the on-the-wire

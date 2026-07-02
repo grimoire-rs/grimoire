@@ -173,6 +173,8 @@ pub struct DesiredSet {
     /// member skills/rules/agents at resolve time; the identifier is the
     /// bundle artifact reference (floating tag or pinned digest).
     pub bundles: BTreeMap<String, Identifier>,
+    /// Declared MCP server descriptors, keyed by config name.
+    pub mcp: BTreeMap<String, Identifier>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -193,6 +195,7 @@ impl Clone for DesiredSet {
             rules: self.rules.clone(),
             agents: self.agents.clone(),
             bundles: self.bundles.clone(),
+            mcp: self.mcp.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -205,6 +208,7 @@ impl PartialEq for DesiredSet {
             && self.rules == other.rules
             && self.agents == other.agents
             && self.bundles == other.bundles
+            && self.mcp == other.mcp
     }
 }
 
@@ -238,6 +242,7 @@ impl DesiredSet {
             rules,
             agents,
             bundles,
+            mcp: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
         }
     }

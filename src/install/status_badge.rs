@@ -158,6 +158,7 @@ mod tests {
             )],
             rules: vec![],
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         }
     }
@@ -314,6 +315,7 @@ mod tests {
             skills: vec![],
             rules: vec![],
             agents: vec![LockedArtifact::direct("my-agent".to_string(), ArtifactKind::Agent, p)],
+            mcp: vec![],
             bundles: vec![],
         };
 

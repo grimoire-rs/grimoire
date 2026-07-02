@@ -146,6 +146,17 @@ async fn install_one<M: ArtifactMaterializer>(
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::ClientOutput;
 
+    // MCP descriptors never materialize files; they register entries in
+    // client MCP configs. The registration path lands with the vendor MCP
+    // writers — until then an mcp install is an explicit error, never a
+    // silent no-op or a panic.
+    if kind == ArtifactKind::Mcp {
+        return Err(InstallError::without_reference(InstallErrorKind::MaterializeFailed(
+            "mcp artifacts are not installable yet".to_string(),
+        ))
+        .into());
+    }
+
     let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.pinned.strip_advisory().to_string();
 
@@ -256,6 +267,8 @@ async fn install_one<M: ArtifactMaterializer>(
         // Bundles expand into members at resolve time and never enter the
         // lock, so the installer never sees one.
         ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
+        // MCP installs diverge into config registration before this point.
+        ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
     };
     if !canonical.exists() {
         return Err(
@@ -671,6 +684,7 @@ mod tests {
             skills: vec![],
             rules,
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         }
     }

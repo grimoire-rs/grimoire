@@ -26,8 +26,8 @@ use super::scope_resolution;
 /// `grim remove` arguments.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// `skill`, `rule`, `agent`, or `bundle`.
-    #[arg(value_parser = ["skill", "rule", "agent", "bundle"])]
+    /// `skill`, `rule`, `agent`, `bundle`, or `mcp`.
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: String,
 
     /// The config binding name to remove.
@@ -54,6 +54,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         "skill" => ArtifactKind::Skill,
         "agent" => ArtifactKind::Agent,
         "bundle" => ArtifactKind::Bundle,
+        "mcp" => ArtifactKind::Mcp,
         _ => ArtifactKind::Rule,
     };
 
@@ -71,6 +72,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         ArtifactKind::Rule => set.rules.remove(&args.name).is_some(),
         ArtifactKind::Agent => set.agents.remove(&args.name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(&args.name).is_some(),
+        ArtifactKind::Mcp => set.mcp.remove(&args.name).is_some(),
     };
 
     if !removed {
@@ -239,6 +241,7 @@ fn direct_id_of(
         ArtifactKind::Skill => &set.skills,
         ArtifactKind::Rule => &set.rules,
         ArtifactKind::Agent => &set.agents,
+        ArtifactKind::Mcp => &set.mcp,
         ArtifactKind::Bundle => return None,
     };
     map.get(name).cloned()
@@ -259,6 +262,7 @@ fn legacy_drop_from_lock(
         ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
         ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
         ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
+        ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
         ArtifactKind::Bundle => {
             let bundle = set_before
                 .bundles
@@ -337,6 +341,7 @@ mod tests {
             skills,
             rules: vec![],
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         }
     }

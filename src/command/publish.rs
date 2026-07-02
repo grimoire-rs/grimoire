@@ -180,6 +180,10 @@ pub struct PublishManifest {
     #[serde(default)]
     pub bundles: BTreeMap<String, PublishEntrySpec>,
 
+    /// MCP server descriptor entries, keyed by name.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, PublishEntrySpec>,
+
     /// Announcement defaults for `--announce` (target index repository,
     /// namespace, owner id).
     #[serde(default)]
@@ -571,6 +575,7 @@ fn kind_str(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Rule => "rule",
         ArtifactKind::Agent => "agent",
         ArtifactKind::Bundle => "bundle",
+        ArtifactKind::Mcp => "mcp",
     }
 }
 
@@ -737,7 +742,11 @@ fn validate_manifest(
     // data error: the caller almost certainly provided the wrong file.
     // Note: --only filtering cannot produce this condition (unknown names
     // already error before this point).
-    let total_entries = manifest.skills.len() + manifest.rules.len() + manifest.agents.len() + manifest.bundles.len();
+    let total_entries = manifest.skills.len()
+        + manifest.rules.len()
+        + manifest.agents.len()
+        + manifest.bundles.len()
+        + manifest.mcp.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
     }
@@ -763,6 +772,7 @@ fn validate_manifest(
         .chain(manifest.rules.keys())
         .chain(manifest.agents.keys())
         .chain(manifest.bundles.keys())
+        .chain(manifest.mcp.keys())
         .map(String::as_str)
         .collect();
 
@@ -803,6 +813,9 @@ fn validate_manifest(
     // Bundles accept pin=true; validate_entry skips the pin check for Bundle kind.
     for (name, spec) in &manifest.bundles {
         validate_entry(name, spec, ArtifactKind::Bundle, manifest_dir, manifest_path)?;
+    }
+    for (name, spec) in &manifest.mcp {
+        validate_entry(name, spec, ArtifactKind::Mcp, manifest_dir, manifest_path)?;
     }
 
     Ok(())
@@ -919,6 +932,7 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
         ArtifactKind::Rule => manifest_dir.join("rules").join(format!("{name}.md")),
         ArtifactKind::Agent => manifest_dir.join("agents").join(format!("{name}.md")),
         ArtifactKind::Bundle => manifest_dir.join("bundles").join(format!("{name}.toml")),
+        ArtifactKind::Mcp => manifest_dir.join("mcp").join(format!("{name}.toml")),
     }
 }
 
@@ -977,6 +991,7 @@ fn plan_entries(
     add_kind!(manifest.skills, ArtifactKind::Skill);
     add_kind!(manifest.rules, ArtifactKind::Rule);
     add_kind!(manifest.agents, ArtifactKind::Agent);
+    add_kind!(manifest.mcp, ArtifactKind::Mcp);
     add_kind!(manifest.bundles, ArtifactKind::Bundle);
 
     entries

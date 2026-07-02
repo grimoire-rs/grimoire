@@ -130,6 +130,12 @@ impl Vendor for OpenCodeVendor {
         workspace.join(".opencode").join("rules").join(format!("{name}.md"))
     }
 
+    fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        // MCP servers register in the same `opencode.json`/`.jsonc` grim
+        // already manages for rules (`mcp` key instead of `instructions`).
+        super::opencode_config::config_path_for_scope(workspace, scope)
+    }
+
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         let root = match scope {
             ConfigScope::Project => workspace.join(".opencode").join("agents"),

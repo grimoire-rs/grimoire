@@ -42,6 +42,11 @@ pub enum ArtifactKind {
     /// is never materialized or written to the lock itself — only the
     /// members it expands to are.
     Bundle,
+    /// An MCP server descriptor: a vendor-agnostic definition of a Model
+    /// Context Protocol server (transport, command/url, env). Installs by
+    /// registering an entry in each client's native MCP config file —
+    /// never as a materialized file of its own.
+    Mcp,
 }
 
 impl ArtifactKind {
@@ -52,6 +57,7 @@ impl ArtifactKind {
             Self::Rule => "rules",
             Self::Agent => "agents",
             Self::Bundle => "bundles",
+            Self::Mcp => "mcp",
         }
     }
 
@@ -66,6 +72,7 @@ impl ArtifactKind {
             "rule" => Some(Self::Rule),
             "agent" => Some(Self::Agent),
             "bundle" => Some(Self::Bundle),
+            "mcp" => Some(Self::Mcp),
             _ => None,
         }
     }
@@ -81,6 +88,7 @@ impl ArtifactKind {
             Self::Rule => "application/vnd.grimoire.rule.v1",
             Self::Agent => "application/vnd.grimoire.agent.v1",
             Self::Bundle => "application/vnd.grimoire.bundle.v1",
+            Self::Mcp => "application/vnd.grimoire.mcp.v1",
         }
     }
 
@@ -95,13 +103,16 @@ impl ArtifactKind {
             Self::Rule => "application/vnd.grimoire.rule.config.v1+json",
             Self::Agent => "application/vnd.grimoire.agent.config.v1+json",
             Self::Bundle => "application/vnd.grimoire.bundle.config.v1+json",
+            // Mcp postdates the legacy artifactType/config-media-type wire
+            // formats; the string exists only to keep these methods total.
+            Self::Mcp => "application/vnd.grimoire.mcp.config.v1+json",
         }
     }
 
     /// Parse an OCI `artifactType` media type back into a kind. `None` for any
     /// non-Grimoire type.
     pub fn from_artifact_type(s: &str) -> Option<Self> {
-        [Self::Skill, Self::Rule, Self::Agent, Self::Bundle]
+        [Self::Skill, Self::Rule, Self::Agent, Self::Bundle, Self::Mcp]
             .into_iter()
             .find(|k| k.artifact_type() == s)
     }
@@ -109,17 +120,18 @@ impl ArtifactKind {
     /// Parse an OCI config media type back into a kind (the fallback read
     /// path). `None` for the generic OCI image config or any non-Grimoire type.
     pub fn from_config_media_type(s: &str) -> Option<Self> {
-        [Self::Skill, Self::Rule, Self::Agent, Self::Bundle]
+        [Self::Skill, Self::Rule, Self::Agent, Self::Bundle, Self::Mcp]
             .into_iter()
             .find(|k| k.config_media_type() == s)
     }
 
     /// Whether the artifact materializes as a directory tree (skill) rather
-    /// than a single file (rule, agent). Bundles never materialize.
+    /// than a single file (rule, agent). Bundles never materialize; MCP
+    /// descriptors register into client configs instead of materializing.
     pub fn is_dir_artifact(self) -> bool {
         match self {
             Self::Skill => true,
-            Self::Rule | Self::Agent | Self::Bundle => false,
+            Self::Rule | Self::Agent | Self::Bundle | Self::Mcp => false,
         }
     }
 }
@@ -131,6 +143,7 @@ impl std::fmt::Display for ArtifactKind {
             Self::Rule => "rule",
             Self::Agent => "agent",
             Self::Bundle => "bundle",
+            Self::Mcp => "mcp",
         })
     }
 }
@@ -145,10 +158,12 @@ mod tests {
         assert_eq!(ArtifactKind::Rule.subdir(), "rules");
         assert_eq!(ArtifactKind::Agent.subdir(), "agents");
         assert_eq!(ArtifactKind::Bundle.subdir(), "bundles");
+        assert_eq!(ArtifactKind::Mcp.subdir(), "mcp");
         assert!(ArtifactKind::Skill.is_dir_artifact());
         assert!(!ArtifactKind::Rule.is_dir_artifact());
         assert!(!ArtifactKind::Agent.is_dir_artifact());
         assert!(!ArtifactKind::Bundle.is_dir_artifact());
+        assert!(!ArtifactKind::Mcp.is_dir_artifact());
     }
 
     #[test]
@@ -157,6 +172,7 @@ mod tests {
         assert_eq!(ArtifactKind::from_kind_str("rule"), Some(ArtifactKind::Rule));
         assert_eq!(ArtifactKind::from_kind_str("agent"), Some(ArtifactKind::Agent));
         assert_eq!(ArtifactKind::from_kind_str("bundle"), Some(ArtifactKind::Bundle));
+        assert_eq!(ArtifactKind::from_kind_str("mcp"), Some(ArtifactKind::Mcp));
         assert_eq!(ArtifactKind::from_kind_str("Skill"), None);
         assert_eq!(ArtifactKind::from_kind_str("widget"), None);
         // Display ⇄ from_kind_str round-trip for every kind.
@@ -165,6 +181,7 @@ mod tests {
             ArtifactKind::Rule,
             ArtifactKind::Agent,
             ArtifactKind::Bundle,
+            ArtifactKind::Mcp,
         ] {
             assert_eq!(ArtifactKind::from_kind_str(&k.to_string()), Some(k));
         }
@@ -177,6 +194,7 @@ mod tests {
             ArtifactKind::Rule,
             ArtifactKind::Agent,
             ArtifactKind::Bundle,
+            ArtifactKind::Mcp,
         ] {
             assert_eq!(ArtifactKind::from_artifact_type(k.artifact_type()), Some(k));
             assert_eq!(ArtifactKind::from_config_media_type(k.config_media_type()), Some(k));
@@ -217,6 +235,11 @@ mod tests {
         assert_eq!(ArtifactKind::Rule.to_string(), "rule");
         assert_eq!(ArtifactKind::Agent.to_string(), "agent");
         assert_eq!(ArtifactKind::Bundle.to_string(), "bundle");
+        assert_eq!(ArtifactKind::Mcp.to_string(), "mcp");
+        assert_eq!(
+            serde_json::from_str::<ArtifactKind>("\"mcp\"").unwrap(),
+            ArtifactKind::Mcp
+        );
         assert_eq!(serde_json::to_string(&ArtifactKind::Skill).unwrap(), "\"skill\"");
         assert_eq!(
             serde_json::from_str::<ArtifactKind>("\"agent\"").unwrap(),

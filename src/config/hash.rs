@@ -58,6 +58,13 @@ pub fn declaration_hash(set: &DesiredSet) -> String {
         push_canonical_table(&mut canonical, &set.bundles);
         canonical.push(',');
     }
+    // "mcp" < "rules" in JCS key order; emitted only when declared so
+    // mcp-free configs hash identically to pre-mcp grim (no version bump).
+    if !set.mcp.is_empty() {
+        canonical.push_str("\"mcp\":");
+        push_canonical_table(&mut canonical, &set.mcp);
+        canonical.push(',');
+    }
     canonical.push_str("\"rules\":");
     push_canonical_table(&mut canonical, &set.rules);
     canonical.push(',');
@@ -234,6 +241,24 @@ mod tests {
         let a = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
         let b = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
         assert_eq!(declaration_hash(&a), declaration_hash(&b));
+    }
+
+    #[test]
+    fn mcp_key_emitted_only_when_declared() {
+        // An mcp-free declaration hashes exactly like pre-mcp grim — no
+        // version bump, existing locks stay valid.
+        let base = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let mut with_empty = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        with_empty.mcp = BTreeMap::new();
+        assert_eq!(declaration_hash(&base), declaration_hash(&with_empty));
+
+        // Declaring one changes the hash deterministically.
+        let mut with_mcp = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        with_mcp.mcp.insert("grim".to_string(), id("ghcr.io/acme/mcp/grim:1"));
+        assert_ne!(declaration_hash(&base), declaration_hash(&with_mcp));
+        let mut again = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        again.mcp.insert("grim".to_string(), id("ghcr.io/acme/mcp/grim:1"));
+        assert_eq!(declaration_hash(&with_mcp), declaration_hash(&again));
     }
 
     fn set_with_agents(skills: &[(&str, &str)], agents: &[(&str, &str)]) -> DesiredSet {

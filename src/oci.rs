@@ -12,6 +12,7 @@ pub mod digest;
 pub mod git_provenance;
 pub mod identifier;
 pub mod manifest;
+pub mod mcp;
 pub mod pinned_identifier;
 pub mod reference;
 pub mod release;

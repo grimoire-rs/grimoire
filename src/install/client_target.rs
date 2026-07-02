@@ -126,6 +126,15 @@ impl ClientTarget {
             ArtifactKind::Skill => self.vendor().skills_root(workspace, scope).join(name),
             ArtifactKind::Rule => self.vendor().rule_path(workspace, scope, name),
             ArtifactKind::Agent => self.vendor().agent_path(workspace, scope, name),
+            // An MCP descriptor registers into the vendor's MCP config file
+            // (no file of its own); the config path is the reportable
+            // target. The workspace-conventional `.mcp.json` stands in when
+            // the vendor has no surface for this scope (report-only — the
+            // install itself skips such a vendor).
+            ArtifactKind::Mcp => self
+                .vendor()
+                .mcp_config_path(workspace, scope)
+                .unwrap_or_else(|| workspace.join(".mcp.json")),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
         }
@@ -165,6 +174,9 @@ impl ClientTarget {
             ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
+            // MCP descriptors register into client configs; the installer
+            // diverges before the materialization path.
+            ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
         }
     }
 

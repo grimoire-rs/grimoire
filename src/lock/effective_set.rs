@@ -54,6 +54,7 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
         (ArtifactKind::Skill, &set.skills),
         (ArtifactKind::Rule, &set.rules),
         (ArtifactKind::Agent, &set.agents),
+        (ArtifactKind::Mcp, &set.mcp),
     ] {
         for (name, id) in map {
             out.insert((kind, name.clone()), Origin::Direct(id.clone()));
@@ -164,6 +165,9 @@ pub fn declared_bundle_provides(set: &DesiredSet, cached: &[LockedBundle], kind:
         }
         ArtifactKind::Agent => {
             after.agents.remove(name);
+        }
+        ArtifactKind::Mcp => {
+            after.mcp.remove(name);
         }
         ArtifactKind::Bundle => {}
     }

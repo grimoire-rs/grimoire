@@ -85,6 +85,8 @@ struct RawConfig {
     agents: BTreeMap<String, String>,
     #[serde(default)]
     bundles: BTreeMap<String, String>,
+    #[serde(default)]
+    mcp: BTreeMap<String, String>,
 }
 
 /// The JSON Schema (schemars) for the on-disk `grimoire.toml` shape.
@@ -169,10 +171,13 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     // fully-qualified identifier, bare entries defaulting to `:latest`.
     let agents = parse_artifact_map(&raw.agents, &path)?;
     let bundles = parse_artifact_map(&raw.bundles, &path)?;
+    let mcp = parse_artifact_map(&raw.mcp, &path)?;
+    let mut set = DesiredSet::from_maps(skills, rules, agents, bundles);
+    set.mcp = mcp;
     Ok(ProjectConfig {
         options: raw.options,
         registries: raw.registries,
-        set: DesiredSet::from_maps(skills, rules, agents, bundles),
+        set,
     })
 }
 

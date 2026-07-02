@@ -104,6 +104,20 @@ impl Vendor for CopilotVendor {
             .join(format!("{name}.instructions.md"))
     }
 
+    fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            // Copilot CLI reads only a global file; the project-scope MCP
+            // surface in the Copilot ecosystem is VS Code's workspace
+            // config (`servers` key), used by Copilot Chat.
+            ConfigScope::Project => Some(workspace.join(".vscode").join("mcp.json")),
+            ConfigScope::Global => Some(
+                env_dir("COPILOT_HOME")
+                    .or_else(|| home_dir().map(|h| h.join(".copilot")))?
+                    .join("mcp-config.json"),
+            ),
+        }
+    }
+
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         let root = match scope {
             ConfigScope::Project => workspace.join(".github").join("agents"),

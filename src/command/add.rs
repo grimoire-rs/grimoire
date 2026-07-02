@@ -44,9 +44,10 @@ pub struct AddArgs {
     /// name is expanded against the effective default registry.
     pub reference: String,
 
-    /// The artifact kind (`skill`, `rule`, `agent`, or `bundle`). Inferred from
-    /// the published manifest's OCI `artifactType` when omitted.
-    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle"])]
+    /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, or `mcp`).
+    /// Inferred from the published manifest's OCI `artifactType` when
+    /// omitted.
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: Option<String>,
 
     /// The config binding name. Defaults to the reference's last path
@@ -193,6 +194,9 @@ pub(crate) fn declare(
         }
         ArtifactKind::Bundle => {
             set.bundles.insert(name, id);
+        }
+        ArtifactKind::Mcp => {
+            set.mcp.insert(name, id);
         }
     }
     set.invalidate_declaration_hash_cache();

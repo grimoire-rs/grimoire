@@ -340,6 +340,15 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::OpenCode, ArtifactKind::Bundle) => {
                     unreachable!("bundles are never materialized; they expand into members")
                 }
+
+                // MCP descriptors register into client configs, not files;
+                // their config-entry anchors land with the vendor MCP
+                // writers (the installer rejects mcp installs until then).
+                (ClientTarget::Claude, ArtifactKind::Mcp)
+                | (ClientTarget::Copilot, ArtifactKind::Mcp)
+                | (ClientTarget::OpenCode, ArtifactKind::Mcp) => {
+                    unreachable!("mcp registration anchors land with the vendor MCP writers")
+                }
             };
             // `GrimHome` is the universal fallback; deduplicate when the
             // primary already is `GrimHome`.
@@ -1374,6 +1383,9 @@ mod tests {
 
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
+            // MCP descriptors register into client configs, not files —
+            // their entry anchors land with the vendor MCP writers.
+            (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
         }
     }
 

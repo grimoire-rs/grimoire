@@ -33,8 +33,8 @@ use super::scope_resolution;
 /// `grim uninstall` arguments.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// `skill`, `rule`, or `agent`.
-    #[arg(value_parser = ["skill", "rule", "agent"])]
+    /// `skill`, `rule`, `agent`, or `mcp`.
+    #[arg(value_parser = ["skill", "rule", "agent", "mcp"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
@@ -62,6 +62,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let kind = match args.kind.as_str() {
         "skill" => ArtifactKind::Skill,
         "agent" => ArtifactKind::Agent,
+        "mcp" => ArtifactKind::Mcp,
         _ => ArtifactKind::Rule,
     };
 
@@ -189,6 +190,7 @@ pub(crate) fn undeclare_and_unlock(
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
         ArtifactKind::Agent => set.agents.remove(name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
+        ArtifactKind::Mcp => set.mcp.remove(name).is_some(),
     };
     if declared {
         set.invalidate_declaration_hash_cache();
@@ -268,6 +270,7 @@ mod tests {
                 .collect(),
             rules: Vec::new(),
             agents: Vec::new(),
+            mcp: vec![],
             bundles: Vec::new(),
         }
     }

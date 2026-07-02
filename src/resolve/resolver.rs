@@ -141,10 +141,11 @@ pub async fn resolve_lock_partial(
 
 /// Collect the artifacts to resolve in deterministic `BTreeMap` order:
 /// every declared skill (kind Skill), then every declared rule (kind
-/// Rule), then every declared agent (kind Agent). The final `(kind, name)`
-/// sort happens after resolution.
+/// Rule), then every declared agent (kind Agent), then every declared MCP
+/// descriptor (kind Mcp). The final `(kind, name)` sort happens after
+/// resolution.
 fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
-    let mut work = Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len());
+    let mut work = Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len() + set.mcp.len());
     for (name, id) in &set.skills {
         work.push(ArtifactRef {
             kind: ArtifactKind::Skill,
@@ -162,6 +163,13 @@ fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
     for (name, id) in &set.agents {
         work.push(ArtifactRef {
             kind: ArtifactKind::Agent,
+            name: name.clone(),
+            id: id.clone(),
+        });
+    }
+    for (name, id) in &set.mcp {
+        work.push(ArtifactRef {
+            kind: ArtifactKind::Mcp,
             name: name.clone(),
             id: id.clone(),
         });
@@ -645,11 +653,13 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
     let mut skills = Vec::new();
     let mut rules = Vec::new();
     let mut agents = Vec::new();
+    let mut mcp = Vec::new();
     for artifact in resolved {
         match artifact.kind {
             ArtifactKind::Skill => skills.push(artifact),
             ArtifactKind::Rule => rules.push(artifact),
             ArtifactKind::Agent => agents.push(artifact),
+            ArtifactKind::Mcp => mcp.push(artifact),
             // Bundles never produce lock entries — only their members do.
             ArtifactKind::Bundle => {}
         }
@@ -668,6 +678,7 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
         skills,
         rules,
         agents,
+        mcp,
         bundles,
     }
 }
@@ -979,6 +990,7 @@ mod tests {
             skills: vec![],
             rules: vec![],
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         };
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
@@ -1035,6 +1047,7 @@ mod tests {
             skills: vec![prev_a, prev_b],
             rules: vec![],
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         };
 
@@ -1074,6 +1087,7 @@ mod tests {
             skills: vec![],
             rules: vec![],
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         };
         let mock = MockAccess::new(vec![]);

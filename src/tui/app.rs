@@ -2077,6 +2077,7 @@ fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str)
         agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
         // A projection feeds the installer only — the bundle cache is not
         // consulted there, so it is not carried over.
+        mcp: vec![],
         bundles: Vec::new(),
     }
 }
@@ -2091,10 +2092,11 @@ fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Opt
         .iter_artifacts()
         .find(|a| a.kind == kind && a.name == name)
         .cloned()?;
-    let (skills, rules, agents) = match kind {
-        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new()),
-        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new()),
-        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry]),
+    let (skills, rules, agents, mcp) = match kind {
+        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new(), Vec::new()),
+        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new(), Vec::new()),
+        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry], Vec::new()),
+        ArtifactKind::Mcp => (Vec::new(), Vec::new(), Vec::new(), vec![entry]),
         ArtifactKind::Bundle => return None,
     };
     Some(GrimoireLock {
@@ -2102,6 +2104,7 @@ fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Opt
         skills,
         rules,
         agents,
+        mcp,
         bundles: Vec::new(),
     })
 }
@@ -2797,6 +2800,7 @@ mod tests {
             skills,
             rules,
             agents: vec![],
+            mcp: vec![],
             bundles: vec![],
         }
     }
