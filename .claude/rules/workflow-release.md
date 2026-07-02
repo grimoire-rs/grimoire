@@ -4,6 +4,8 @@ paths:
   - cliff.toml
   - CHANGELOG.md
   - .github/workflows/verify-deep.yml
+  - .github/workflows/release.yml
+  - .github/workflows/publish-catalog.yml
 ---
 
 # Release Implementation Notes
@@ -11,10 +13,9 @@ paths:
 Guidance for the release + versioning strategy. Read when working on
 release infra, versioning, or the changelog.
 
-> **Status: provisional.** Grimoire's release pipeline is scaffolded with
-> cargo-dist but the published-artifact story (how skills/rules are pushed
-> to a registry) is not designed yet. Keep this doc short and accurate to
-> the current scaffold; do not invent OCI publish details.
+The release has two halves: cargo-dist builds and publishes the `grim`
+binary; the first-party catalog (`catalog/`) is republished to GHCR as OCI
+artifacts via `grim publish` in a post-announce CI job.
 
 ## Key Decisions
 
@@ -76,14 +77,27 @@ When changing it, **preserve existing groups**.
 Release ceremony is a human-driven process with tooling support:
 
 ```bash
-task release:prepare    # Compute version, update CHANGELOG.md, run verify
+task release:prepare    # run verify, bump Cargo.toml (git-cliff --bumped-version), regenerate CHANGELOG.md
 # Human reviews the changes
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
-# Human decides when to push (never auto-push)
+git push --atomic origin main vX.Y.Z   # human-run — never auto-push
 ```
 
-After the tag is pushed, CI takes over: build → test → GitHub Release.
+The final push is always the human's call; `release:prepare` only prints
+it. After the tag is pushed, CI takes over: build → test → GitHub Release,
+then the post-announce jobs.
+
+### Catalog Publish
+
+`dist-workspace.toml` `post-announce-jobs` runs
+`.github/workflows/publish-catalog.yml` after the GitHub Release: it
+republishes every package in `catalog/publish.toml` to GHCR via `grim
+publish` (skip-existing, so only version-bumped packages actually push).
+Locally the same batch runs as `task catalog:release` (append flags after
+`--`, e.g. `-- --dry-run`). Catalog version bumps are staged in
+`catalog/publish.toml` during feature work (drift duty →
+`catalog/README.md`) and ride out with the next release.
 
 ### Version Between Releases
 

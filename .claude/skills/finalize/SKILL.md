@@ -53,6 +53,7 @@ Sibling `/commit` skill handles **working phase** (save progress during dev). `/
 - `main..HEAD` empty — nothing to finalize.
 - Working tree dirty — tell user commit or stash with `/commit` first. No auto-stash; user must consciously save state.
 - **Plan still in flight** — read `.claude/state/current_plan.md`; if pointer present, parse the referenced plan's `## Status` block. **Refuse** if `Step` is not `finalized`/`awaiting /finalize` or `Active phase` is not the last plan phase. `--force` overrides. Schema → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol".
+  - **Stale-pointer exception**: if the pointer's `Branch:` is not the branch being finalized AND that branch's work already landed on `main` (`git rev-list --count main..<branch>` is 0, or the branch is gone), the pointer is stranded — do not refuse on it. Repair it instead: set the referenced plan's `Step:` to `finalized` and delete `current_plan.md`, then continue.
 
 **Rebase target — always current local `main`.** `/finalize` produces branch fast-forwarding onto local `main` HEAD. Two cases:
 

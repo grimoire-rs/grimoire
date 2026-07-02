@@ -38,7 +38,9 @@ Default posture on four worktree branches (`goat`, `evelynn`, `sion`, `soraka`):
 
 Commit with subject exactly `Checkpoint` (no type, no body) means "rolling WIP". Amended every time new work lands on top. Never goes to `main`. `/finalize` refuses to land branch that still contains one.
 
-`task checkpoint` creates or amends rolling Checkpoint automatically.
+`task checkpoint` creates or amends rolling Checkpoint automatically. It
+stages everything (`git add .`) — the deliberate WIP-only exception to the
+stage-by-name rule, acceptable because Checkpoints never reach `main`.
 
 ## Conventional Commits (Quick Rules)
 
