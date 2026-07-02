@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-02
+
+### Added
+
+- Span-preserving JSON splice editor *(install)*
+- Add mcp artifact kind and wire format *(oci)*
+- Publish mcp descriptors *(release)*
+- Entry-typed client outputs with semantic drift *(install)*
+- Register mcp servers in client configs *(install)*
+- Publish grim mcp descriptor *(catalog)*
+- Per-call scope for MCP tools; drop --global/--config from grim mcp *(mcp)* **BREAKING**
+- Grim_fetch read tool (in-context artifact content) *(mcp)*
+- Grim_render write tool gated behind --allow-writes *(mcp)*
+
+### Changed
+
+- Extract shared managed-JSON parsing helpers *(install)*
+- Seedable project-config walk-up and scope resolution *(config)*
+
+### Documentation
+
+- Mcp artifact kind
+- Adr for per-call mcp scope and fetch/render tools
+- Per-call scope + fetch/render docs and catalog drift *(mcp)*
+
 ## [0.7.0] - 2026-07-02
 
 ### Added
@@ -40,10 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Group namespaced-registry rows under their configured root *(tui)*
 
-### Release
-
-- V0.6.2
-
 ## [0.6.1] - 2026-06-30
 
 ### Added
@@ -58,10 +79,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Detect updates via fresh tag discovery, not the cached catalog tag *(tui)*
-
-### Release
-
-- V0.6.1
 
 ## [0.6.0] - 2026-06-21
 
@@ -113,20 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop the custom artifactType too — GitLab rejects it *(oci)*
 - Apply swarm-review remediations across gitlab-registry-compat
 
-### Release
-
-- V0.5.0
-
 ## [0.4.3] - 2026-06-14
 
 ### Added
 
 - Add `grim schema` to emit JSON Schemas for the TOML formats *(cli)*
 - Portable anchor-relativized install state *(install)*
-
-### Release
-
-- V0.4.3
 
 ## [0.4.2] - 2026-06-13
 
@@ -140,10 +149,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout LFS logo so ocx describe publishes real PNG *(ci)*
 - Reap empty OpenCode rules dir on last uninstall *(install)*
 - Align table columns by chars, not bytes *(cli)*
-
-### Release
-
-- V0.4.2
 
 ## [0.4.1] - 2026-06-12
 
@@ -171,11 +176,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build the same catalog window the TUI loads *(search)*
 - Fall back to all clients when none are detected *(install)*
 - Set DOCKER_CONFIG via GITHUB_ENV in publish-catalog *(ci)*
-
-### Release
-
-- Catalog
-- V0.4.1
 
 ## [0.4.0] - 2026-06-11
 
@@ -238,10 +238,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recompute all row states after a batch operation *(tui)*
 - Hold the config flock on a sidecar, not the file itself *(lock)*
 
-### Release
-
-- V0.4.0
-
 ## [0.3.0] - 2026-06-04
 
 ### Added
@@ -258,10 +254,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Update project logo
 - Document registry authentication, login and logout
-
-### Release
-
-- V0.3.0
 
 ## [0.2.0] - 2026-06-01
 
@@ -301,6 +293,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.8.0]: https://github.com/grimoire-rs/grimoire/compare/v0.7.0..v0.8.0
 [0.7.0]: https://github.com/grimoire-rs/grimoire/compare/v0.6.2..v0.7.0
 [0.6.2]: https://github.com/grimoire-rs/grimoire/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/grimoire-rs/grimoire/compare/v0.6.0..v0.6.1
