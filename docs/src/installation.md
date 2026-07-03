@@ -19,7 +19,7 @@ land on `PATH`:
 curl -fsSL https://setup.ocx.sh/sh | sh
 ```
 
-On Windows, install ocx with [PowerShell][powershell] 7.4 or newer:
+On Windows, install ocx from [PowerShell][powershell]:
 
 ```powershell
 irm https://setup.ocx.sh/pwsh | iex
@@ -91,7 +91,7 @@ it and `grim` is on `PATH`:
 
 ```yaml
 include:
-  - component: gitlab.com/grimoire-rs/components/setup@1.0.0
+  - component: gitlab.com/grimoire-rs/components/setup@1.1.0
     # inputs:
     #   version: v0.7.0   # default: latest
 

@@ -136,8 +136,8 @@ Add `--format json` to any subcommand for machine-readable output. The shapes ar
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
 | `list` | array of `{"key":"…","value":"…"}` |
-| `registry list` | array of `{"alias":string or null,"url"\|"index":"…","default":bool}` |
-| `registry show` | `{"alias":"…","url"\|"index":"…","default":bool}` |
+| `registry list` | array of `{"alias":string or null,"oci"\|"index":"…","default":bool}` |
+| `registry show` | `{"alias":"…","oci"\|"index":"…","default":bool}` |
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
 
@@ -272,7 +272,11 @@ rematerializes it.
 
 `grim search [query]` searches the registry catalog by case-insensitive
 substring against repository, summary, description, and keywords; an empty
-query lists the whole catalog. When `[[registries]]` are configured, all
+query lists the whole catalog. The query is whitespace-split and the terms
+are ANDed — every term must match somewhere. A bare kind keyword (`skill`,
+`rule`, `agent`, `mcp`, `bundle` — singular or plural) filters by kind
+instead of matching as text, so `grim search skill review` finds skills
+matching "review". When `[[registries]]` are configured, all
 of them are browsed and the results are flattened into one table.
 `--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
 browse to exactly the registries it names — repeatable and comma-separated
@@ -481,6 +485,11 @@ channel tag always moves on re-publish — no skip, no `--force` needed.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
 `--git` embeds [git provenance](./publishing.md#git-provenance) on every
 published entry (forwarded to each `release`); a non-git path fails (65).
+`--announce` announces the published packages to a
+[package index](./package-index.md) git repository after the pushes —
+`--announce-repo <url>` picks the index repository (default
+`https://github.com/grimoire-rs/index`); the token comes from
+`GRIM_ANNOUNCE_TOKEN` (see [Publishing from CI](./ci.md)).
 The [global `--registry` flag][global-options] overrides the manifest's
 `registry` value for staging runs or acceptance tests without editing the file.
 `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not**
@@ -510,9 +519,10 @@ Pass the username with `-u`/`--username` (prompted on a terminal when omitted)
 and the password via `--password-stdin` or a hidden terminal prompt — there is
 no `--password <value>` flag, by design. `--allow-insecure-store` permits a
 base64 plaintext entry when no credential helper is configured. With no
-positional `registry`, it resolves `--registry`, then `default_registry`, then
-`GRIM_DEFAULT_REGISTRY`. See [Authentication](./authentication.md) for storage
-details.
+positional `registry`, it resolves `--registry`, then `GRIM_DEFAULT_REGISTRY`
+— the config `default_registry` option is not consulted on this path, and
+with neither set the command fails with exit 78. See
+[Authentication](./authentication.md) for storage details.
 
 ```sh
 echo "$TOKEN" | grim login ghcr.io -u alice --password-stdin

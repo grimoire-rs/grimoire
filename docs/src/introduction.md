@@ -1,9 +1,10 @@
 # Introduction
 
 Grimoire is an OCI-backed package manager for AI-agent configuration. Its
-binary, `grim`, installs, updates, and publishes the **skills** and **rules**
-that steer coding agents — distributing them through ordinary
-[OCI registries][oci] the same way container images are shipped.
+binary, `grim`, installs, updates, and publishes the **skills**, **rules**,
+**agents**, and **MCP servers** that steer coding agents — plus **bundles**
+that group them — distributing them through ordinary [OCI registries][oci]
+the same way container images are shipped.
 
 ## The problem
 

@@ -3,7 +3,7 @@
 Publishing by hand works until the second contributor bumps a version and
 forgets to run `grim publish`. The natural home for publishing is CI: every
 merge to the default branch (or every tag) re-publishes the manifest, and
-[skip-existing](./publishing.md#batch-publish) makes the re-run idempotent —
+[skip-existing](./publishing.md#batch-publish-skip-existing) makes the re-run idempotent —
 unchanged versions are no-ops, bumped versions push.
 
 Grimoire ships first-party CI integrations for both major forges: a
@@ -53,9 +53,13 @@ jobs:
 ```
 
 `--announce` clones the index repository, writes your `metadata.json`
-pointers, and opens the pull request via the [`gh` CLI][gh-cli]
-(preinstalled on GitHub runners; it picks up `GH_TOKEN`). The announce
-credential must be able to **push a branch** to the index repository:
+pointers, and opens the pull request directly through the GitHub REST API
+— no `gh` CLI involved. The token comes from `GRIM_ANNOUNCE_TOKEN` (always
+wins) or, as here, from `GH_TOKEN`/`GITHUB_TOKEN` when the index lives on
+the same GitHub host the CI runs on. The git push itself uses ambient git
+credentials — on GitHub runners, `gh auth setup-git` or a credential
+helper fed from the same token. The announce credential must be able to
+**push a branch** to the index repository:
 
 - **Your own or your organization's index** — a fine-grained PAT or GitHub
   App installation token with `contents` + `pull-requests` write on the
@@ -88,7 +92,7 @@ registry** using the job token — zero secrets for the registry side:
 ```yaml
 # .gitlab-ci.yml
 include:
-  - component: gitlab.com/grimoire-rs/components/publish@1.0.0
+  - component: gitlab.com/grimoire-rs/components/publish@1.1.0
     inputs:
       stage: deploy
 ```
@@ -116,13 +120,14 @@ live under a group-and-project path — `repository_prefix` handles that
 Announcing from GitLab CI to the GitHub-hosted public index crosses
 forges, so the job needs a GitHub token — the GitLab CI environment
 deliberately contributes nothing when the index host differs from the CI
-server host. Hand the token to the component and grim wires up both the
-git push and the pull request (opened via the GitHub REST API — no `gh`
-CLI involved):
+server host. Hand the token to the component: it exports it as
+`GRIM_ANNOUNCE_TOKEN` and installs it as the git credential for the push,
+and grim opens the pull request via the GitHub REST API — no `gh` CLI
+involved:
 
 ```yaml
 include:
-  - component: gitlab.com/grimoire-rs/components/publish@1.0.0
+  - component: gitlab.com/grimoire-rs/components/publish@1.1.0
     inputs:
       announce: true
       announce_token: $INDEX_ANNOUNCE_TOKEN   # masked CI/CD variable
@@ -143,7 +148,7 @@ options and finally to the pushed branch):
 
 ```yaml
 include:
-  - component: gitlab.com/grimoire-rs/components/publish@1.0.0
+  - component: gitlab.com/grimoire-rs/components/publish@1.1.0
     inputs:
       announce: true
       announce_repo: https://gitlab.example.com/platform/index.git
@@ -172,7 +177,6 @@ See [Consuming an Index](./package-index.md#consuming) for the transports
 and caching behavior.
 
 <!-- external -->
-[gh-cli]: https://cli.github.com/
 [gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/

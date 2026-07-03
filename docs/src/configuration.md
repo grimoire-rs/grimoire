@@ -136,10 +136,11 @@ writes the `[[registries]]` shape for new configs — `[options].default_registr
 is deprecated for new writes.
 
 **Known limitation**: `grim login` / `grim logout` with no positional argument
-or `--registry` flag resolve the registry from the `--registry` flag,
-`GRIM_DEFAULT_REGISTRY`, and the built-in default only — they do not consult
-`[[registries]]`. Pass the registry explicitly (`grim login ghcr.io/acme`) when
-your config uses `[[registries]]`-only.
+resolve the registry from the `--registry` flag, then `GRIM_DEFAULT_REGISTRY`
+only — they consult neither `[[registries]]` nor `[options].default_registry`,
+and with neither source set they fail with exit 78. Pass the registry
+explicitly (`grim login ghcr.io/acme`) when your config uses
+`[[registries]]`-only.
 
 **At-most-one `default = true`**: declaring two `[[registries]]` entries with
 `default = true` is a parse error (exit 78). When none set it, the first entry
@@ -301,6 +302,10 @@ applies.
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for [`grim publish --announce`](./package-index.md#announcing) — always wins over CI-provided tokens. Sent as an API header only, never logged. | unset |
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
+| `CLAUDE_CONFIG_DIR` | Claude Code config-dir override (vendor variable, honored read-only). Global-scope installs follow it: it replaces `~/.claude` for skills, rules, and agents, and relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`. Also drives global-scope client detection. | unset |
+| `COPILOT_HOME` | GitHub Copilot home override (vendor variable). Replaces `~/.copilot` for global-scope skills and agents, and relocates `mcp-config.json`. Also drives detection. | unset |
+| `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
+| `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
 
 Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
 `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,

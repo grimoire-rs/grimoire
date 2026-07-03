@@ -137,8 +137,9 @@ include:
       announce_token: $INDEX_ANNOUNCE_TOKEN
 ```
 
-The token becomes `GRIM_ANNOUNCE_TOKEN` for grim (always wins) and the
-git credential for the push. Use a **group access token** of the owning
+The component exports the token as `GRIM_ANNOUNCE_TOKEN` for grim (always
+wins) and installs it as the git credential for the push (grim itself
+pushes with ambient git credentials). Use a **group access token** of the owning
 group: its bot user is a real group member, so the ordinary
 membership check auto-merges its MRs — no validator allowlist needed.
 (A central bot announcing for *other* groups' namespaces goes into the
@@ -163,10 +164,16 @@ never prompts):
 
 ```toml
 [[registries]]
-alias = "platform"
-oci   = "registry.example.com/platform/skills"
-index = "https://gitlab.example.com/platform/index.git"
+alias   = "platform"
+index   = "https://gitlab.example.com/platform/index.git"
+default = true
 ```
+
+An entry sets **exactly one** of `oci` / `index` — index pointers carry
+their own fully-qualified registry refs, so no `oci` entry is needed to
+pull what the index lists (add a separate `[[registries]]` entry with
+`oci = "registry.example.com/…"` only if you also browse that registry's
+`_catalog` directly).
 
 GitLab Pages serving `all.json` also works as an `index =` locator, but
 only when the Pages site is public — grim's HTTP transport does not

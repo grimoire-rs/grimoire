@@ -159,16 +159,19 @@ that destination a **client target** and ships three: [Claude Code][claude],
 transformed into each client's native layout on install.
 
 [`grim install`](./commands.md#install) writes to the targets listed in the
-`clients` option in your config, defaulting to `["claude"]`; `--client`
-overrides it and accepts a comma-separated list to install into several AI
-clients at once.
+`clients` option in your config; without one it targets every client it
+detects (vendor directory or marker present), falling back to all clients
+when nothing is detected. `--client` overrides both and accepts a
+comma-separated list to install into several AI clients at once.
 
 ## The catalog
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) read a
-**catalog** — an index of the artifacts a registry offers, cached locally under
-`$GRIM_HOME` so repeat browsing is fast and works offline. Pass `--refresh` to
-rebuild it from the registry.
+**catalog** — an index of the artifacts your browse sources offer, cached
+locally under `$GRIM_HOME` so repeat browsing is fast and works offline. The
+catalog can span several sources at once: every configured `[[registries]]`
+entry contributes, and out of the box it is fed by the public
+[package index](./package-index.md). Pass `--refresh` to rebuild it.
 
 ## Online by default, offline on demand
 

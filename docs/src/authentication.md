@@ -33,8 +33,8 @@ and other CI setups; see [Configuration](./configuration.md#environment-variable
 
 `grim login [registry]` authenticates to a registry and stores the
 credential so later pulls and pushes reuse it. With no positional argument
-it resolves the registry the same way every command does — `--registry`,
-then the `default_registry` option, then `GRIM_DEFAULT_REGISTRY`.
+it falls back to the `--registry` flag, then `GRIM_DEFAULT_REGISTRY` — the
+config `default_registry` option is not consulted on this path.
 
 The username comes from `--username`/`-u`, or an interactive prompt when
 omitted on a terminal. The password is read from a hidden terminal prompt,
