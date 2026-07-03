@@ -3,11 +3,15 @@
 
 //! `grim publish` output.
 //!
-//! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status).
+//! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status);
+//! the announce outcome stays human prose on stderr.
 //!
-//! JSON format: an array of `{kind, reference, digest, tags, status}`
-//! objects (the report wraps a `Vec`, serialized to the bare array — no
-//! wrapper object, per subsystem-cli-api.md).
+//! JSON format: a wrapper object `{"entries": [...], "announce": ...}`.
+//! `entries` is the per-entry array (`{kind, ref, digest, tags, status}`);
+//! `announce` is `{outcome, branch, url?}` when the `--announce` step
+//! completed, else `null` (no `--announce`, dry run, fail-fast, or
+//! announce failure). Documented exception to the bare-array rule in
+//! subsystem-cli-api.md — the report carries a second dimension.
 
 use std::io::{self, Write};
 
@@ -50,6 +54,54 @@ impl Serialize for PublishStatus {
     }
 }
 
+/// The outcome discriminant of a completed `--announce` step.
+///
+/// Closed internal enum — the binary is the only consumer. Renders
+/// lowercase-hyphenated in both `Display` and JSON (`pull-request`,
+/// `branch-pushed`, `up-to-date`), mirroring [`PublishStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceStatus {
+    /// A pull/merge request was opened.
+    PullRequest,
+    /// The topic branch was pushed; the MR/PR is still to be opened.
+    BranchPushed,
+    /// The index already carried exactly this metadata.
+    UpToDate,
+}
+
+impl std::fmt::Display for AnnounceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PullRequest => "pull-request",
+            Self::BranchPushed => "branch-pushed",
+            Self::UpToDate => "up-to-date",
+        })
+    }
+}
+
+impl Serialize for AnnounceStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+/// The `--announce` section of the publish report (JSON only — plain
+/// output keeps the announce outcome as stderr prose).
+///
+/// `branch` is always present: the topic branch is deterministic and
+/// known for every completed outcome, so CI can consume it without
+/// grepping stderr. `url` is present only for [`AnnounceStatus::PullRequest`].
+#[derive(Debug, Serialize)]
+pub struct PublishAnnounce {
+    /// What the announce achieved.
+    pub outcome: AnnounceStatus,
+    /// The deterministic topic branch on the index repository.
+    pub branch: String,
+    /// The opened PR/MR URL (`pull-request` outcome only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// One row in the publish report: the outcome of a single manifest entry.
 #[derive(Debug, Serialize)]
 pub struct PublishEntry {
@@ -79,12 +131,25 @@ fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::
 pub struct PublishReport {
     /// Per-entry outcomes, in publish order.
     entries: Vec<PublishEntry>,
+    /// The completed `--announce` outcome; `None` when announce did not
+    /// run to completion (not requested, dry run, fail-fast, failure).
+    announce: Option<PublishAnnounce>,
 }
 
 impl PublishReport {
-    /// Build from operation results.
+    /// Build from operation results (no completed announce).
     pub fn new(entries: Vec<PublishEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            announce: None,
+        }
+    }
+
+    /// Attach the completed `--announce` outcome (consuming builder).
+    #[must_use]
+    pub fn with_announce(mut self, announce: Option<PublishAnnounce>) -> Self {
+        self.announce = announce;
+        self
     }
 
     /// Per-entry outcomes, in publish order (read-only — the report is
@@ -96,7 +161,11 @@ impl PublishReport {
 
 impl Serialize for PublishReport {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("entries", &self.entries)?;
+        map.serialize_entry("announce", &self.announce)?;
+        map.end()
     }
 }
 
@@ -202,7 +271,18 @@ mod tests {
     }
 
     #[test]
-    fn json_is_bare_array() {
+    fn announce_status_display_and_serialize_agree() {
+        assert_eq!(AnnounceStatus::PullRequest.to_string(), "pull-request");
+        assert_eq!(AnnounceStatus::BranchPushed.to_string(), "branch-pushed");
+        assert_eq!(AnnounceStatus::UpToDate.to_string(), "up-to-date");
+        assert_eq!(
+            serde_json::to_string(&AnnounceStatus::PullRequest).unwrap(),
+            "\"pull-request\""
+        );
+    }
+
+    #[test]
+    fn json_wraps_entries_with_null_announce() {
         let r = PublishReport::new(vec![PublishEntry {
             reference: "registry.example/acme/my-rule:0.1.0".to_string(),
             kind: ArtifactKind::Rule,
@@ -213,9 +293,68 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array());
-        assert_eq!(v[0]["ref"], "registry.example/acme/my-rule:0.1.0");
-        assert_eq!(v[0]["status"], "dry-run");
-        assert!(v[0]["digest"].is_null());
+        assert!(v.is_object());
+        assert!(v["announce"].is_null());
+        assert_eq!(v["entries"][0]["ref"], "registry.example/acme/my-rule:0.1.0");
+        assert_eq!(v["entries"][0]["status"], "dry-run");
+        assert!(v["entries"][0]["digest"].is_null());
+    }
+
+    #[test]
+    fn json_announce_object_carries_branch_and_conditional_url() {
+        let entry = || PublishEntry {
+            reference: "registry.example/acme/s:1.0.0".to_string(),
+            kind: ArtifactKind::Skill,
+            digest: None,
+            tags: vec![],
+            status: PublishStatus::Pushed,
+        };
+        let pr = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
+            outcome: AnnounceStatus::PullRequest,
+            branch: "announce/acme-12345678".to_string(),
+            url: Some("https://gitlab.example.com/g/index/-/merge_requests/7".to_string()),
+        }));
+        let v = serde_json::to_value(&pr).unwrap();
+        assert_eq!(v["announce"]["outcome"], "pull-request");
+        assert_eq!(v["announce"]["branch"], "announce/acme-12345678");
+        assert_eq!(
+            v["announce"]["url"],
+            "https://gitlab.example.com/g/index/-/merge_requests/7"
+        );
+
+        let pushed = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
+            outcome: AnnounceStatus::BranchPushed,
+            branch: "announce/acme-12345678".to_string(),
+            url: None,
+        }));
+        let v = serde_json::to_value(&pushed).unwrap();
+        assert_eq!(v["announce"]["outcome"], "branch-pushed");
+        assert_eq!(v["announce"]["branch"], "announce/acme-12345678");
+        assert!(
+            v["announce"].get("url").is_none(),
+            "url key must be absent off the pull-request outcome"
+        );
+    }
+
+    #[test]
+    fn plain_output_unchanged_with_announce_set() {
+        let r = PublishReport::new(vec![PublishEntry {
+            reference: "registry.example/acme/s:1.0.0".to_string(),
+            kind: ArtifactKind::Skill,
+            digest: None,
+            tags: vec![],
+            status: PublishStatus::Pushed,
+        }])
+        .with_announce(Some(PublishAnnounce {
+            outcome: AnnounceStatus::UpToDate,
+            branch: "announce/acme-12345678".to_string(),
+            url: None,
+        }));
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // Single entries table; the announce outcome stays stderr prose.
+        assert_eq!(out.lines().count(), 2);
+        assert!(!out.contains("announce"));
     }
 }

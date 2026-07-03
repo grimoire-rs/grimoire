@@ -311,7 +311,11 @@ Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
 `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,
 `GH_TOKEN`/`GITHUB_TOKEN`; `GITLAB_CI`, `CI_SERVER_HOST`, `CI_API_V4_URL`,
 `CI_PROJECT_NAMESPACE`, `GITLAB_TOKEN`) — only when the CI server host
-equals the announce target host. See
+equals the announce target host. On GitLab CI, `CI_JOB_TOKEN` is checked
+for **presence only**: when set and the index host matches
+`CI_SERVER_HOST`, grim hands git a fallback transport credential for the
+announce push — the value itself is never read into grim and never used
+for the MR API. See
 [Announcing Packages](./package-index.md#announcing).
 
 By default Grimoire resolves floating tags fresh from the registry, then caches

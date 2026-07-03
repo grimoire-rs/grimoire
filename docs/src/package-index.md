@@ -210,7 +210,11 @@ cases:
 - **token** — `GRIM_ANNOUNCE_TOKEN` always wins; in a host-matched CI the
   conventional variables apply (`GH_TOKEN`/`GITHUB_TOKEN`,
   `GITLAB_TOKEN` — never `CI_JOB_TOKEN`, it cannot open MRs). Tokens are
-  sent as API headers only and never logged.
+  sent as API headers only and never logged. The git **push transport**
+  is separate: on a host-matched GitLab CI runner it falls back to
+  `gitlab-ci-token:$CI_JOB_TOKEN` when no ambient git credential answers
+  — transport only, never the API
+  ([details](./ci.md#gitlab-announce-job-token)).
 - **`namespace`** — explicit > host-matched CI
   (`GITHUB_REPOSITORY_OWNER` / `CI_PROJECT_NAMESPACE`) > the
   authenticated GitHub API user.

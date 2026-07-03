@@ -75,7 +75,7 @@ pub enum RemovedStatus {
 
 ## JSON Serialization
 
-- Types wrapping `Vec<Entry>` implement custom `Serialize` to flatten to inner array (no wrapper object).
+- Types wrapping `Vec<Entry>` implement custom `Serialize` to flatten to inner array (no wrapper object). Documented exception: `publish_report.rs` carries a second dimension (the `--announce` outcome) and serializes as `{"entries": [...], "announce": ...}`.
 - Types using `HashMap` with `#[serde(flatten)]` produce top-level keyed objects — correct pattern for package-keyed results.
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
 

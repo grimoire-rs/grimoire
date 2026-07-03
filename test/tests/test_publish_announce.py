@@ -19,6 +19,7 @@ free of owner-lookup traffic.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -338,9 +339,15 @@ def test_publish_announce_plain_host_requires_owner_id(
 
     runner = grim_at(project_dir)
     _index_remote(tmp_path, runner)
-    result = runner.run("publish", "--announce", check=False)
+    result = runner.run("publish", "--announce", format="json", check=False)
     assert result.returncode == 64, f"expected 64, got {result.returncode}: {result.stderr}"
     assert "owner_id" in result.stderr
+    # The publish succeeded before announce config failed: the JSON report
+    # still renders the pushed entries with a null announce (exit 64, mirroring
+    # the exit-69 failure path).
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["entries"][0]["status"] == "pushed", data
 
 
 def test_publish_announce_unreachable_index_exits_unavailable(
@@ -548,3 +555,314 @@ def test_publish_announce_ci_env_host_mismatch_is_ignored(
     assert api.requests == [], f"mismatched CI host must not reach the API: {api.requests}"
     _announce_branch(bare)
     assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+
+
+# ── machine-readable announce report (--format json) ───────────────────────
+
+
+def test_publish_announce_json_reports_branch_pushed(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """Plain host: the JSON wrapper carries announce.outcome and the
+    deterministic topic branch — CI consumes it without grepping stderr."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-json"
+    _make_skill_source(project_dir, name, "JSON me.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    data = runner.json("publish", "--announce")
+    assert data["entries"][0]["status"] == "pushed", data
+    announce = data["announce"]
+    assert announce["outcome"] == "branch-pushed", data
+    assert announce["branch"] == _announce_branch(bare)
+    assert "url" not in announce, f"url key must be absent off pull-request: {announce}"
+
+
+def test_publish_announce_json_pull_request_carries_url_and_branch(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-json-mr"
+    _make_skill_source(project_dir, name, "JSON MR.")
+    api = forge_api()
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    # The JSON announce section is a distinct serialization path — assert the
+    # forge token never leaks through it (parity with the plain-format sibling).
+    assert TOKEN not in result.stdout + result.stderr, "announce token must never be printed"
+    data = json.loads(result.stdout)
+    announce = data["announce"]
+    assert announce["outcome"] == "pull-request", data
+    assert announce["url"] == MR_URL
+    assert announce["branch"] == _announce_branch(bare)
+
+
+def test_publish_announce_json_up_to_date_keeps_branch(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """Once the index default branch carries the metadata (MR merged), a
+    re-announce reports up-to-date WITH the branch."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-json-utd"
+    _make_skill_source(project_dir, name, "Up to date.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    first = runner.run("publish", "--announce", check=False)
+    assert first.returncode == 0, first.stderr
+    # "Merge" the announce MR: fast-forward the default branch to the topic.
+    branch = _announce_branch(bare)
+    default = _git(bare, "symbolic-ref", "--short", "HEAD").strip()
+    _git(bare, "update-ref", f"refs/heads/{default}", f"refs/heads/{branch}")
+
+    data = runner.json("publish", "--announce")
+    announce = data["announce"]
+    assert announce["outcome"] == "up-to-date", data
+    assert announce["branch"] == branch
+    assert "url" not in announce
+
+
+def test_publish_announce_json_dry_run_announce_is_null(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-json-dry"
+    _make_skill_source(project_dir, name, "Dry JSON.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", "--dry-run", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "announce: skipped (dry run)" in result.stderr
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["entries"][0]["status"] == "dry-run"
+
+
+def test_publish_announce_json_failure_keeps_entries(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """announce failure after a successful publish: exit 69, the JSON report
+    still renders with the pushed entries and announce null."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-json-fail"
+    _make_skill_source(project_dir, name, "Fail JSON.")
+    _manifest(project_dir, ns, name, str(tmp_path / "no-such-repo.git"), host=INDEX_HOST)
+
+    runner = grim_at(project_dir)
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["entries"][0]["status"] == "pushed", data
+
+
+def test_publish_announce_json_fail_fast_keeps_announce_null(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A mid-batch publish failure stops before the announce step: exit
+    non-zero, the JSON report's announce is null, and no topic branch is
+    pushed to the index. Locks the fail-fast-before-announce ordering — a
+    refactor that announced a partially-failed batch would break this."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _make_skill_source(project_dir, "aaa-ok", "Valid first entry.")
+    # An empty dir passes the upfront path check but fails at build time (no
+    # SKILL.md), injecting a deterministic mid-batch failure after aaa-ok
+    # pushes (kinds publish alphabetically: aaa-ok before zzz-broken).
+    (project_dir / "skills" / "zzz-broken").mkdir(parents=True)
+    _write(
+        project_dir / "publish.toml",
+        f'registry = "{REGISTRY_HOST}"\n'
+        f'repository_prefix = "{ns}"\n'
+        f'\n[announce]\nrepository = "{INDEX_URL}"\nnamespace = "acme"\nowner_id = 42\n'
+        f'\n[skills.aaa-ok]\nversion = "0.1.0"\n'
+        f'\n[skills.zzz-broken]\nversion = "0.1.0"\n',
+    )
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode != 0, f"fail-fast must exit non-zero: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, f"announce must be null on fail-fast: {data}"
+    heads = _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    assert "announce/" not in heads, f"no announce branch may be pushed: {heads!r}"
+
+
+# ── GitLab CI job-token transport fallback ─────────────────────────────────
+
+
+def test_publish_announce_job_token_is_inert_and_never_leaks(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """GITLAB_CI + CI_JOB_TOKEN + matching host injects the fallback
+    credential helper; a transport that needs no credential (the local
+    insteadOf rewrite) is unaffected, and the token never appears in
+    output."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-jobtok"
+    _make_skill_source(project_dir, name, "Job token.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    secret = "glcbt-job-token-secret"
+    runner.env.update(
+        {
+            "GITLAB_CI": "true",
+            "CI_SERVER_HOST": INDEX_HOST,
+            "CI_JOB_TOKEN": secret,
+        }
+    )
+    data = runner.json("publish", "--announce")
+    assert data["announce"]["outcome"] == "branch-pushed", data
+    _announce_branch(bare)
+    result = runner.run("publish", "--announce", check=False)
+    assert secret not in result.stdout + result.stderr, "job token must never be printed"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell shim fixture")
+def test_publish_announce_job_token_reaches_git_argv(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """The credential helper config reaches git's argv on clone and push —
+    and only the literal ${CI_JOB_TOKEN} reference, never the token value."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-shim"
+    _make_skill_source(project_dir, name, "Shim.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    real_git = shutil.which("git")
+    assert real_git, "git required on PATH"
+    log = tmp_path / "git-argv.log"
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.chmod(0o755)
+    runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
+
+    secret = "glcbt-job-token-secret"
+    runner.env.update(
+        {
+            "GITLAB_CI": "true",
+            "CI_SERVER_HOST": INDEX_HOST,
+            "CI_JOB_TOKEN": secret,
+        }
+    )
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+
+    lines = log.read_text().splitlines()
+    scoped_key = f"credential.https://{INDEX_HOST}.helper="
+    clone_lines = [l for l in lines if "clone" in l.split() and scoped_key in l]
+    push_lines = [l for l in lines if "push" in l.split() and scoped_key in l]
+    assert clone_lines, f"clone must carry the host-scoped credential helper: {lines}"
+    assert push_lines, f"push must carry the host-scoped credential helper: {lines}"
+    argv_log = log.read_text()
+    assert "gitlab-ci-token" in argv_log
+    # Host-scoped key, never the bare global `credential.helper` — so git only
+    # offers the token for the gated host (Clone2Leak / CVE-2024-53858 class).
+    assert "credential.helper=" not in argv_log, "the helper key must be host-scoped"
+    assert secret not in argv_log, "the token value must never enter git argv"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell shim fixture")
+def test_publish_announce_job_token_foreign_host_not_injected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A mismatched CI_SERVER_HOST must not inject the job-token helper."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-shim-foreign"
+    _make_skill_source(project_dir, name, "Foreign.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    real_git = shutil.which("git")
+    assert real_git, "git required on PATH"
+    log = tmp_path / "git-argv.log"
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.chmod(0o755)
+    runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
+    runner.env.update(
+        {
+            "GITLAB_CI": "true",
+            "CI_SERVER_HOST": "other.example.test",
+            "CI_JOB_TOKEN": "glcbt-job-token-secret",
+        }
+    )
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+    text = log.read_text()
+    assert "credential.helper=" not in text and "credential.https://" not in text, (
+        "helper must not be injected for a foreign host"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell shim fixture")
+def test_publish_announce_job_token_empty_not_injected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """An empty CI_JOB_TOKEN (set but blank) must not inject the helper —
+    locks the non-empty filter end to end, even on a matching host."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-shim-empty"
+    _make_skill_source(project_dir, name, "Empty token.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    real_git = shutil.which("git")
+    assert real_git, "git required on PATH"
+    log = tmp_path / "git-argv.log"
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.chmod(0o755)
+    runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
+    runner.env.update(
+        {"GITLAB_CI": "true", "CI_SERVER_HOST": INDEX_HOST, "CI_JOB_TOKEN": ""}
+    )
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+    text = log.read_text()
+    assert "credential.helper=" not in text and "credential.https://" not in text, (
+        "an empty job token must not inject the helper"
+    )
+
+
+# ── HOME-less runners (GitLab step environments) ────────────────────────────
+
+
+def test_publish_announce_succeeds_without_home(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """GitLab step environments don't set HOME — announce must not need it
+    (identity via -c, registry credentials degrade to anonymous)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-nohome"
+    _make_skill_source(project_dir, name, "No HOME.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    del runner.env["HOME"]
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, f"announce must not need HOME: {result.stderr}"
+    _announce_branch(bare)

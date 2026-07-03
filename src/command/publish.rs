@@ -444,35 +444,47 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     // Announce only after a fully successful, non-dry-run publish: every
     // planned entry is now live on the registry (freshly pushed or already
     // present via skip-existing).
+    let mut announce_section = None;
     if args.announce {
         if args.dry_run {
             eprintln!("announce: skipped (dry run)");
-        } else if let Err(err) = run_announce(ctx, args, &manifest, &entries).await {
-            // The publish itself succeeded — keep the report, surface the
-            // announce failure on stderr, and classify honestly: git/API
-            // failures exit Unavailable (69), announce misconfiguration
-            // (missing host/namespace/owner id) exits usage (64).
-            eprintln!("error: announce failed: {err:#}");
-            return Ok((PublishReport::new(report_entries), classify_error(&err)));
+        } else {
+            match run_announce(ctx, args, &manifest, &entries).await {
+                Ok(section) => announce_section = Some(section),
+                Err(err) => {
+                    // The publish itself succeeded — keep the report, surface the
+                    // announce failure on stderr, and classify honestly: git/API
+                    // failures exit Unavailable (69), announce misconfiguration
+                    // (missing host/namespace/owner id) exits usage (64).
+                    eprintln!("error: announce failed: {err:#}");
+                    return Ok((PublishReport::new(report_entries), classify_error(&err)));
+                }
+            }
         }
     }
 
-    Ok((PublishReport::new(report_entries), ExitCode::Success))
+    Ok((
+        PublishReport::new(report_entries).with_announce(announce_section),
+        ExitCode::Success,
+    ))
 }
 
 /// Execute the `--announce` step: derive one metadata pointer per planned
 /// entry (description read back from the just-published manifest via the
 /// access seam), then hand the set to
-/// [`crate::catalog::index_announce::announce`].
+/// [`crate::catalog::index_announce::announce`]. Returns the report
+/// section carrying the machine-readable outcome (`--format json`).
 async fn run_announce(
     ctx: &Context,
     args: &PublishArgs,
     manifest: &PublishManifest,
     entries: &[PlannedEntry],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::api::publish_report::PublishAnnounce> {
+    use crate::api::publish_report::{AnnounceStatus, PublishAnnounce};
     use crate::catalog::forge::{self, CiEnv, ForgeKind};
     use crate::catalog::index_announce::{
         AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, index_host,
+        job_token_credential_config,
     };
 
     let spec = manifest.announce.as_ref();
@@ -550,22 +562,46 @@ async fn run_announce(
         });
     }
 
+    let credential_config = job_token_credential_config(&ci_env, &repo_url);
     let request = AnnounceRequest {
-        repo_url: repo_url.clone(),
+        repo_url,
         host,
         namespace,
         owner_id,
         forge,
         packages,
+        credential_config,
     };
-    match super::grim(announce(&request).await)? {
-        AnnounceOutcome::PullRequest { url } => eprintln!("announced: {url}"),
-        AnnounceOutcome::BranchPushed { branch } => eprintln!(
-            "announced: pushed branch '{branch}' to {repo_url} — open the merge request to publish the pointers"
-        ),
-        AnnounceOutcome::UpToDate => eprintln!("announce: index already up to date"),
-    }
-    Ok(())
+    let section = match super::grim(announce(&request).await)? {
+        AnnounceOutcome::PullRequest { url, branch } => {
+            eprintln!("announced: {url}");
+            PublishAnnounce {
+                outcome: AnnounceStatus::PullRequest,
+                branch,
+                url: Some(url),
+            }
+        }
+        AnnounceOutcome::BranchPushed { branch } => {
+            eprintln!(
+                "announced: pushed branch '{branch}' to {} — open the merge request to publish the pointers",
+                request.repo_url
+            );
+            PublishAnnounce {
+                outcome: AnnounceStatus::BranchPushed,
+                branch,
+                url: None,
+            }
+        }
+        AnnounceOutcome::UpToDate { branch } => {
+            eprintln!("announce: index already up to date");
+            PublishAnnounce {
+                outcome: AnnounceStatus::UpToDate,
+                branch,
+                url: None,
+            }
+        }
+    };
+    Ok(section)
 }
 
 /// Return the singular kind string for constructing `--kind` flag value.

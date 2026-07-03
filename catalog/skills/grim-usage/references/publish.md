@@ -172,11 +172,24 @@ server host equals the index host**; a cross-forge announce wires its
 token through `GRIM_ANNOUNCE_TOKEN` (which always wins) and sets `forge`
 explicitly. `owner_id` is resolved via the forge API (GitHub always,
 GitLab with a token) — set it explicitly for hermetic runs, plain git
-hosts, or token-less GitLab.
+hosts, or token-less GitLab. On a host-matched GitLab runner the git
+*push* additionally falls back to `gitlab-ci-token:$CI_JOB_TOKEN` when no
+other git credential answers (transport only — the job token is never
+used for the MR API), so a same-instance announce can run with zero
+secrets once the index project's job-token permissions allow the push.
+Announce also tolerates GitLab's `HOME`-less step environments.
 
 **Announce failure after a successful publish exits 69** (`Unavailable`)
 — the publish report stands; only the index write/PR failed. Announce
 *misconfiguration* (missing `host`/`namespace`/`owner_id`) exits 64.
+
+The outcome is machine-readable: `grim publish --format json` emits a
+wrapper object `{"entries": [...], "announce": ...}` where `announce`
+carries `{outcome, branch, url?}` — `outcome` is `pull-request`,
+`branch-pushed`, or `up-to-date`, and `branch` (the deterministic topic
+branch) is always present, so CI reads it from stdout instead of grepping
+stderr. `announce` is `null` when the step did not complete (no
+`--announce`, dry run, a fail-fast stop, or failure).
 
 The default index auto-merges an announcement PR when: only your own
 namespace's `metadata.json` paths changed, you own that namespace (login

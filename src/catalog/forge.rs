@@ -63,6 +63,11 @@ pub struct CiEnv {
     pub ci_project_namespace: Option<String>,
     /// `GITLAB_TOKEN` (never `CI_JOB_TOKEN` — it cannot open MRs).
     pub gitlab_token: Option<String>,
+    /// `CI_JOB_TOKEN` is set and non-empty. Presence only — the value is
+    /// never read into grim (the git credential helper the announce push
+    /// appends reads it from the child environment) and never used for
+    /// the MR API (see `gitlab_token`).
+    pub ci_job_token_present: bool,
 }
 
 impl CiEnv {
@@ -85,6 +90,7 @@ impl CiEnv {
             ci_api_v4_url: var("CI_API_V4_URL"),
             ci_project_namespace: var("CI_PROJECT_NAMESPACE"),
             gitlab_token: var("GITLAB_TOKEN"),
+            ci_job_token_present: var("CI_JOB_TOKEN").is_some(),
         }
     }
 }

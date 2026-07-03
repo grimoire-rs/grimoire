@@ -165,6 +165,35 @@ ones. The self-hosted index can run the same
 the public one — the index repo ships a `.gitlab-ci.yml` for exactly
 that; setup in [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
+#### The job token carries the push {#gitlab-announce-job-token}
+
+Even without an announce token, the **push transport** works on a
+same-host index: when grim runs inside GitLab CI (`GITLAB_CI` set,
+`CI_JOB_TOKEN` present) and the index host equals `CI_SERVER_HOST`, it
+hands git a fallback credential — `gitlab-ci-token:$CI_JOB_TOKEN` via an
+inline credential helper that reads the token from the job environment.
+The token value never enters grim, a command line, or the disk, and it is
+never used for the MR API (it cannot open MRs). Ambient git credentials
+always win; the job token only answers when nothing else does.
+
+The prerequisite lives on the **index project**: its
+[job token permissions][gl-jobtoken] must allow the publishing project —
+add it to the allowlist and enable *Allow Git push requests to the
+repository* (GitLab 17.2+). With that in place, `announce: true` needs no
+`announce_token` at all: grim pushes the topic branch on the job token
+and opens the MR via push options where the server permits, else leaves
+the branch for a manual MR.
+
+The outcome is machine-readable: `grim publish --announce --format json`
+reports `{outcome, branch, url}` under `announce`
+([Report output](./publishing.md#batch-publish-report)) — a downstream
+job reads the branch from there instead of grepping stderr. Grim also
+runs fine in GitLab's `HOME`-less step environments: registry
+credentials degrade to anonymous unless `DOCKER_CONFIG` (or a
+`grim login` step) provides them, and the announce push needs no
+`~/.gitconfig`. Set `GRIM_HOME` when you want grim's data root somewhere
+other than the working directory.
+
 Consumers then wire the index into their config as usual:
 
 ```toml
@@ -178,6 +207,7 @@ and caching behavior.
 
 <!-- external -->
 [gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
+[gl-jobtoken]: https://docs.gitlab.com/ci/jobs/ci_job_token/
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/
 [gl-pat]: https://docs.gitlab.com/user/project/settings/project_access_tokens/

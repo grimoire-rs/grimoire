@@ -137,8 +137,37 @@ multi-item pattern (`InstallReport`/`UpdateReport`):
 - `PublishEntry { reference, kind, digest, tags, status }`,
   `PublishStatus` enum (`pushed | skipped | dry-run | failed`) with
   `Display` + `Serialize`.
-- Custom `Serialize` flattens to a bare JSON array; `print_plain` = single
-  `print_table` with static headers (subsystem-cli-api single-table rule).
+- Custom `Serialize` flattens to a bare JSON array (**superseded — see the
+  amendment below**); `print_plain` = single `print_table` with static
+  headers (subsystem-cli-api single-table rule).
+
+> **Amended (announce CI ergonomics, 0.8.x):** three coupled changes ship
+> together.
+>
+> 1. **Report shape.** The JSON shape is now a wrapper object
+>    `{"entries": [...], "announce": null|{outcome, branch, url?}}` so CI can
+>    consume the `--announce` outcome (topic branch always present, on every
+>    outcome: pull-request / branch-pushed / up-to-date) without grepping
+>    stderr. `announce` is `null` for a non-announce run, dry-run, fail-fast
+>    stop, or an announce failure. The bare-array rule in
+>    subsystem-cli-api.md records publish as its documented exception; the
+>    plain table is unchanged.
+> 2. **GitLab job-token transport fallback.** On GitLab CI, when
+>    `GITLAB_CI` is truthy, `CI_JOB_TOKEN` is set/non-empty, and the index
+>    host equals `CI_SERVER_HOST`, grim appends a `-c
+>    credential.https://<host>.helper=…` git config to the clone/push so the
+>    ambient job token authenticates the announce push as a **fallback**
+>    credential. The helper text carries only the literal `${CI_JOB_TOKEN}`
+>    (expanded by the child `sh`) — the token never enters grim's memory,
+>    argv, or disk. The key is **URL-scoped** to the gated host so a
+>    redirect/submodule cannot draw it to another host (Clone2Leak /
+>    CVE-2024-53858 class). `CI_JOB_TOKEN` stays **banned from the forge MR
+>    API** — it is a transport credential only. Prerequisite grim cannot
+>    ensure: the index project must grant push via its job-token allowlist.
+> 3. **HOME-less runners.** GitLab step environments omit `$HOME`; the
+>    publish/announce path tolerates it (registry credential read degrades
+>    to anonymous, git identity comes via `-c user.*`). No production change
+>    was required — regression test + docs only.
 
 ### D7 — Manifest vs bundle TOML disambiguation
 
@@ -213,7 +242,8 @@ distinct filename — see D7 rejections.
 
 ## NFRs
 
-- **Operability:** JSON report (bare array) for CI consumption; per-entry
+- **Operability:** JSON report (wrapper object `{entries, announce}` — see
+  the D6 amendment; originally a bare array) for CI consumption; per-entry
   status; deterministic ordering.
 - **Latency:** sequential pushes (publish.py parity). Parallel push rejected
   for v1 — registry index writes for the catalog are serialized deliberately

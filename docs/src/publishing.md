@@ -555,7 +555,7 @@ as a usage error.
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--tag <tag>` | Override the published tag with a movable channel tag (e.g. `canary`). Must be non-semver — semver values exit 65, keeping all semver releases in the manifest where the repo can track them. A channel tag always moves: re-publishing with `--tag` overwrites the existing tag without skipping and without `--force`. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
-| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. |
+| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
 ### Validation and fail-fast {#batch-publish-validation}
@@ -578,6 +578,42 @@ stops the batch. The report still renders — completed entries show their
 status (`pushed`, `skipped`, or `dry-run`), the failed entry shows `failed`,
 and remaining entries are unreported. Because skip-existing is the default,
 re-running from the top after a fix pushes only what is left.
+
+### Report output {#batch-publish-report}
+
+The plain report is one table (Kind | Ref | Digest | Tags | Status); the
+announce outcome stays human prose on stderr. `--format json` emits a
+wrapper object on stdout:
+
+```json
+{
+  "entries": [
+    {
+      "ref": "ghcr.io/acme/skills/code-review:1.2.0",
+      "kind": "skill",
+      "digest": "sha256:…",
+      "tags": ["1.2.0", "1.2", "1", "latest"],
+      "status": "pushed"
+    }
+  ],
+  "announce": {
+    "outcome": "pull-request",
+    "branch": "announce/acme-1a2b3c4d",
+    "url": "https://github.com/grimoire-rs/index/pull/7"
+  }
+}
+```
+
+`entries` carries one object per manifest entry processed, in publish
+order. `announce` carries the completed `--announce` outcome: `outcome`
+is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
+deterministic topic branch on the index repository — is always present;
+`url` appears only for `pull-request`. `announce` is `null` whenever the
+announce step did not complete: `--announce` not passed, a dry run, a
+fail-fast stop, or an announce failure (which still exits 69 with the
+entries rendered). A CI pipeline that needs the pushed branch — for
+example to trigger a downstream index-validation pipeline — reads it
+from here instead of parsing stderr.
 
 ### Example run {#batch-publish-example}
 

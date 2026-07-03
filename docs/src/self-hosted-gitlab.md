@@ -69,6 +69,12 @@ Then configure the project:
    (`CI_JOB_TOKEN` has no MR-merge or members endpoints).
 3. Store it as the **masked** CI/CD variable `GRIM_INDEX_BOT_TOKEN` on
    the index project.
+4. **Optional — token-less announce pushes**: allow publishing projects
+   under the index project's [job token permissions][gl-jobtoken]
+   (allowlist plus *Allow Git push requests to the repository*, GitLab
+   17.2+). grim then pushes announce branches on `CI_JOB_TOKEN` as a
+   fallback transport credential — no announce token needed on the
+   publishing side ([details](./ci.md#gitlab-announce-job-token)).
 
 Optional variables:
 
@@ -184,6 +190,7 @@ instances. Details: [Consuming an Index](./package-index.md#consuming).
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/pull/
 [gl-gat]: https://docs.gitlab.com/user/group/settings/group_access_tokens/
+[gl-jobtoken]: https://docs.gitlab.com/ci/jobs/ci_job_token/
 [gl-external-ci]: https://docs.gitlab.com/ci/pipelines/settings/#specify-a-custom-cicd-configuration-file
 
 <!-- grimoire -->

@@ -66,9 +66,52 @@ pub struct AnnounceRequest {
     pub forge: ForgeContext,
     /// The packages to announce.
     pub packages: Vec<AnnouncePackage>,
+    /// A `credential.helper=…` git config value appended (`-c`) to the
+    /// remote-touching git invocations (clone, push) as a fallback
+    /// credential — see [`job_token_credential_config`]. `None` leaves
+    /// the git transport on ambient credentials only.
+    pub credential_config: Option<String>,
 }
 
-/// What the announce achieved.
+/// The `credential.helper=…` git config value injecting the GitLab CI job
+/// token as a **fallback** transport credential.
+///
+/// `Some` only when all of: `GITLAB_CI` is truthy, `CI_JOB_TOKEN` is set,
+/// and the index repository's git host equals `CI_SERVER_HOST` — i.e. the
+/// index lives on the same GitLab instance whose job token the runner
+/// holds. The returned text contains **no secret**: the `!`-helper runs
+/// via `sh`, which expands the literal `${CI_JOB_TOKEN}` from the child
+/// environment git inherits, so the token never enters grim's memory,
+/// argv, or disk. The helper config key is **URL-scoped** to the gated
+/// host (`credential.https://<host>.helper`), so git only offers the token
+/// for that exact host — a redirect or submodule fetch to another host in
+/// the same invocation cannot draw it (Clone2Leak / CVE-2024-53858 class).
+/// Appended (never replacing) helper config means git consults ambient
+/// helpers first — an explicitly configured credential always wins. The job
+/// token stays banned from the forge MR API
+/// ([`super::forge::CiEnv::gitlab_token`]).
+pub fn job_token_credential_config(env: &super::forge::CiEnv, repo_url: &str) -> Option<String> {
+    if !env.gitlab_ci || !env.ci_job_token_present {
+        return None;
+    }
+    let host = index_host(repo_url)?;
+    if !env.ci_server_host.as_deref()?.eq_ignore_ascii_case(&host) {
+        return None;
+    }
+    // URL-scope the helper to the exact gated host so git only ever consults
+    // it for that host: a server-side redirect, a future submodule fetch, or
+    // any other credential lookup in the same git process to a different host
+    // cannot draw the job token (Clone2Leak / CVE-2024-53858 class). The gate
+    // above already proved this host equals `CI_SERVER_HOST`; `index_host`
+    // lowercases it, and git matches credential URLs case-insensitively.
+    Some(format!(
+        "credential.https://{host}.helper=!f() {{ if [ \"$1\" = get ]; then \
+         echo username=gitlab-ci-token; echo \"password=${{CI_JOB_TOKEN}}\"; fi; }}; f"
+    ))
+}
+
+/// What the announce achieved. Every variant carries the deterministic
+/// topic branch so CI can consume it regardless of outcome.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AnnounceOutcome {
     /// A pull/merge request was opened — via the forge API, or by a forge
@@ -76,6 +119,8 @@ pub enum AnnounceOutcome {
     PullRequest {
         /// The PR/MR URL.
         url: String,
+        /// The pushed topic branch name.
+        branch: String,
     },
     /// The topic branch was pushed; open the merge request on the host.
     BranchPushed {
@@ -83,7 +128,10 @@ pub enum AnnounceOutcome {
         branch: String,
     },
     /// The index already carries exactly this metadata — nothing to do.
-    UpToDate,
+    UpToDate {
+        /// The topic branch the metadata would have landed on.
+        branch: String,
+    },
 }
 
 /// Announce-tier failures.
@@ -121,17 +169,23 @@ pub enum AnnounceError {
 pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, AnnounceError> {
     let workdir = tempfile::tempdir()?;
     let clone = workdir.path().join("index");
+    // Fallback transport credential for every remote-touching invocation
+    // (clone + pushes); local operations don't need it.
+    let cred = request.credential_config.as_deref();
     git(
         None,
         "clone",
-        &[
-            "clone",
-            "--depth",
-            "1",
-            "--quiet",
-            &request.repo_url,
-            &clone.display().to_string(),
-        ],
+        &with_credential(
+            cred,
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "--quiet",
+                &request.repo_url,
+                &clone.display().to_string(),
+            ],
+        ),
     )
     .await?;
 
@@ -163,7 +217,7 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
 
     let status = git_output(&clone, "status", &["status", "--porcelain"]).await?;
     if status.trim().is_empty() {
-        return Ok(AnnounceOutcome::UpToDate);
+        return Ok(AnnounceOutcome::UpToDate { branch });
     }
 
     git(Some(&clone), "add", &["add", "-A"]).await?;
@@ -190,12 +244,17 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     let api_capable =
         request.forge.token.is_some() && matches!(request.forge.kind, ForgeKind::GitHub | ForgeKind::GitLab);
     if api_capable || request.forge.kind == ForgeKind::GitHub {
-        git(Some(&clone), "push", &["push", "--quiet", "--force", "origin", &branch]).await?;
+        git(
+            Some(&clone),
+            "push",
+            &with_credential(cred, &["push", "--quiet", "--force", "origin", &branch]),
+        )
+        .await?;
         if api_capable
             && let Some(url) =
                 super::forge::create_change_request(&request.forge, &request.repo_url, &branch, &message).await
         {
-            return Ok(AnnounceOutcome::PullRequest { url });
+            return Ok(AnnounceOutcome::PullRequest { url, branch });
         }
         return Ok(AnnounceOutcome::BranchPushed { branch });
     }
@@ -208,27 +267,35 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     let options_push = git_stderr(
         &clone,
         "push",
-        &[
-            "push",
-            "--force",
-            "-o",
-            "merge_request.create",
-            "-o",
-            &title_option,
-            "origin",
-            &branch,
-        ],
+        &with_credential(
+            cred,
+            &[
+                "push",
+                "--force",
+                "-o",
+                "merge_request.create",
+                "-o",
+                &title_option,
+                "origin",
+                &branch,
+            ],
+        ),
     )
     .await;
     match options_push {
         Ok(stderr) => Ok(match merge_request_url(&stderr) {
-            Some(url) => AnnounceOutcome::PullRequest { url },
+            Some(url) => AnnounceOutcome::PullRequest { url, branch },
             None => AnnounceOutcome::BranchPushed { branch },
         }),
         Err(_) => {
             // `?` propagates the retry's error — same root cause when the
             // push itself (not the options) is broken.
-            git(Some(&clone), "push", &["push", "--quiet", "--force", "origin", &branch]).await?;
+            git(
+                Some(&clone),
+                "push",
+                &with_credential(cred, &["push", "--quiet", "--force", "origin", &branch]),
+            )
+            .await?;
             Ok(AnnounceOutcome::BranchPushed { branch })
         }
     }
@@ -333,6 +400,21 @@ fn branch_name(namespace: &str, rendered: &[(String, String)]) -> String {
     }
     let hash = crate::oci::digest::Algorithm::Sha256.hash(&folded).hex()[..8].to_string();
     format!("announce/{namespace}-{hash}")
+}
+
+/// Prepend `-c <config>` (a git global option — must precede the verb)
+/// when a transport credential config is present.
+fn with_credential<'a>(config: Option<&'a str>, args: &[&'a str]) -> Vec<&'a str> {
+    match config {
+        Some(cfg) => {
+            let mut v = Vec::with_capacity(args.len() + 2);
+            v.push("-c");
+            v.push(cfg);
+            v.extend_from_slice(args);
+            v
+        }
+        None => args.to_vec(),
+    }
 }
 
 /// Run a git subprocess, mapping a nonzero exit to [`AnnounceError::Git`].
@@ -458,6 +540,76 @@ mod tests {
         ] {
             assert_eq!(index_host(locator).as_deref(), expected, "{locator}");
         }
+    }
+
+    fn gitlab_ci_env(server_host: &str) -> super::super::forge::CiEnv {
+        super::super::forge::CiEnv {
+            gitlab_ci: true,
+            ci_server_host: Some(server_host.to_string()),
+            ci_job_token_present: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn job_token_credential_config_requires_full_gate() {
+        let url = "https://gitlab.example.com/platform/index.git";
+
+        // All conditions met — including case-insensitive host match and
+        // URL shapes carrying credentials/ports (stripped by index_host).
+        for repo in [
+            url,
+            "git+https://gitlab.example.com/platform/index.git",
+            "ssh://git@GitLab.Example.com:2222/platform/index.git",
+            "https://oauth2:tok@gitlab.example.com/platform/index.git",
+        ] {
+            let cfg = job_token_credential_config(&gitlab_ci_env("gitlab.example.com"), repo)
+                .unwrap_or_else(|| panic!("expected Some for {repo}"));
+            // The key is URL-scoped to the gated host (never the bare global
+            // `credential.helper`), so git offers the token only for that
+            // host — a redirect/submodule to another host can't draw it.
+            assert!(
+                cfg.starts_with("credential.https://gitlab.example.com.helper=!"),
+                "{cfg}"
+            );
+            assert!(!cfg.starts_with("credential.helper="), "{cfg}");
+            assert!(cfg.contains("username=gitlab-ci-token"), "{cfg}");
+            // The literal, unexpanded env reference — never a token value.
+            assert!(cfg.contains("${CI_JOB_TOKEN}"), "{cfg}");
+        }
+
+        // Host mismatch.
+        assert_eq!(
+            job_token_credential_config(&gitlab_ci_env("gitlab.other.com"), url),
+            None
+        );
+        // Not GitLab CI.
+        let mut env = gitlab_ci_env("gitlab.example.com");
+        env.gitlab_ci = false;
+        assert_eq!(job_token_credential_config(&env, url), None);
+        // Job token absent.
+        let mut env = gitlab_ci_env("gitlab.example.com");
+        env.ci_job_token_present = false;
+        assert_eq!(job_token_credential_config(&env, url), None);
+        // CI_SERVER_HOST absent.
+        let mut env = gitlab_ci_env("gitlab.example.com");
+        env.ci_server_host = None;
+        assert_eq!(job_token_credential_config(&env, url), None);
+        // Local locator — no derivable host.
+        assert_eq!(
+            job_token_credential_config(&gitlab_ci_env("gitlab.example.com"), "/tmp/index.git"),
+            None
+        );
+    }
+
+    #[test]
+    fn with_credential_prepends_config_before_verb() {
+        let args = ["push", "--quiet", "origin", "b"];
+        assert_eq!(with_credential(None, &args), args.to_vec());
+        assert_eq!(
+            with_credential(Some("credential.helper=!x"), &args),
+            vec!["-c", "credential.helper=!x", "push", "--quiet", "origin", "b"]
+        );
     }
 
     #[test]
