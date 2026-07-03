@@ -42,7 +42,8 @@ Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
 `--registry <ref>` (repeatable / comma-separated).
 
 `login`/`logout` resolve the registry from the positional argument, else
-`--registry` / the `default_registry` option / `GRIM_DEFAULT_REGISTRY`.
+`--registry` / `GRIM_DEFAULT_REGISTRY` — the config `default_registry`
+option is not consulted on this path (`Context::default_registry()`).
 They read and write the docker config at `$DOCKER_CONFIG/config.json`
 (default `~/.docker/config.json`) — the same file the credential read path
 consults — so credentials round-trip with `docker login`.
