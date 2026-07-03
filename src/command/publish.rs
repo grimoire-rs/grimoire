@@ -938,7 +938,7 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
 
 /// Build the ordered list of entries to publish from a validated manifest.
 ///
-/// Order: skills → rules → agents → bundles, alphabetical within each
+/// Order: skills → rules → agents → mcp → bundles, alphabetical within each
 /// kind. When `--only` is non-empty only matching entries are included.
 /// When `--tag` is set it replaces the version tag for every entry.
 /// The `registry` parameter (already resolved against `--registry` flag

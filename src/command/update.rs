@@ -55,7 +55,7 @@ pub struct UpdateArgs {
 
     /// AI client(s) to re-materialize into (comma-separated, repeatable).
     /// Defaults to the config `clients` option, then all detected clients
-    /// (vendor dir present), then `claude` when none are detected.
+    /// (vendor dir present), then all clients when none are detected.
     #[arg(long = "client")]
     pub client: Vec<String>,
 }

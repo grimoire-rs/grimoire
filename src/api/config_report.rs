@@ -256,7 +256,7 @@ impl fmt::Display for Origin {
 ///
 /// Plain format: one table — `Alias | URL | Default`.
 ///
-/// JSON format: flat array of `{"alias":"…"|null,"url":"…","default":bool}`
+/// JSON format: flat array of `{"alias":"…"|null,"oci"|"index":"…","default":bool}`
 /// objects. Never wrapped in a parent object — per `subsystem-cli-api.md`
 /// custom-Serialize rule.
 #[derive(Debug)]
