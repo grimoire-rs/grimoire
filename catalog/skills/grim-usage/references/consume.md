@@ -17,11 +17,17 @@ relying on one.
 A complete first session, start to installed:
 
 ```sh
-grim init --registry ghcr.io/acme        # write grimoire.toml
+grim init                                # write grimoire.toml
 grim add ghcr.io/acme/code-review:1      # declare + pin in the lock
 grim install                             # materialize into AI clients
 grim status                              # confirm what landed
 ```
+
+No registry setup is required: out of the box grim browses the public
+package index (`https://index.grimoire.rs`) and expands short references
+against `ghcr.io/grimoire-rs`. Pulling from your own registry? Seed it as
+the default with `grim init --registry ghcr.io/acme` — see
+[registries.md](registries.md).
 
 From then on the steady state is `grim update` to roll floating tags
 forward and `grim status` to see where you stand.
