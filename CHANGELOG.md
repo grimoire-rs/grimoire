@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-03
+
+### Added
+
+- Machine-readable announce outcome + GitLab job-token push fallback *(publish)* **BREAKING**
+- BUMP/VERSION selection for release:prepare *(release)*
+
+### Documentation
+
+- Recommend ocx --global add grim for installation
+- Refresh stale pages against 0.8 behavior
+- Index-first quick loop in grim-usage (0.8.1) *(catalog)*
+
+### Fixed
+
+- Correct stale help strings and doc comments *(cli)*
+
 ## [0.8.0] - 2026-07-02
 
 ### Added
@@ -293,6 +310,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.8.1]: https://github.com/grimoire-rs/grimoire/compare/v0.8.0..v0.8.1
 [0.8.0]: https://github.com/grimoire-rs/grimoire/compare/v0.7.0..v0.8.0
 [0.7.0]: https://github.com/grimoire-rs/grimoire/compare/v0.6.2..v0.7.0
 [0.6.2]: https://github.com/grimoire-rs/grimoire/compare/v0.6.1..v0.6.2
