@@ -25,14 +25,20 @@ On Windows, install ocx with [PowerShell][powershell] 7.4 or newer:
 irm https://setup.ocx.sh/pwsh | iex
 ```
 
-Then install `grim` and make it the current version:
+Then add `grim` to your global ocx toolchain:
 
 ```sh
-ocx package install --select ocx.sh/grim
+ocx --global add grim
 ```
 
-`ocx.sh/grim` resolves to the newest release; re-run the same command to
-upgrade. The [grim package page][ocx-grim] lists every published version.
+Upgrading later is one command — it re-resolves every tool in the global
+toolchain to its newest release, `grim` included:
+
+```sh
+ocx --global upgrade
+```
+
+The [grim package page][ocx-grim] lists every published version.
 
 ## Install script
 
