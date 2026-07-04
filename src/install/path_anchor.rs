@@ -1206,6 +1206,7 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            claude_user_dir: None,
         };
         // abs uses a different case for the "Users"/"Alice"/"ws" segments —
         // on macOS (case-insensitive FS) this is the same path.
