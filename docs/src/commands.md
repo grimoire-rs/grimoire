@@ -26,7 +26,7 @@ These apply to every subcommand:
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
 | [`grim config`](#config) | Read and write `grimoire.toml` settings and registries. |
-| [`grim add`](#add) | Declare a skill/rule/agent/mcp server and lock it. |
+| [`grim add`](#add) | Declare a skill/rule/agent/mcp server, lock it, and install it by default. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
@@ -156,10 +156,11 @@ The `action` field in write confirmations takes one of: `set`, `unset`, `registr
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] [--no-install] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
-or bundle and immediately pins it in the lock. `<reference>` is the only
-required argument — `registry/repo:tag` or `registry/repo@sha256:…`.
+or bundle, pins it in the lock, and — by default — materializes it into your
+detected AI clients in one step. `<reference>` is the only required argument —
+`registry/repo:tag` or `registry/repo@sha256:…`.
 
 When `--kind` is omitted, the kind is inferred from the artifact's
 `com.grimoire.kind` manifest annotation set at release time (artifacts
@@ -168,11 +169,19 @@ published by older grim are still typed from their legacy `artifactType`). When
 segment. If the kind cannot be inferred (for example, a non-Grimoire image),
 `add` errors and asks you to supply `--kind` explicitly.
 
+By default `add` installs what it declares, so a single command is enough to
+start using an artifact. Only the freshly-added artifact (or, for a bundle, its
+members) is materialized; the rest of the lock is left for
+[`grim install`](#install). Pass `--no-install` to declare and lock only —
+useful when adding several artifacts before one `grim install` pass, or when
+choosing clients explicitly with [`grim install --client`](#install).
+
 ```sh
 grim add ghcr.io/acme/code-review:1
 grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2
 grim add --kind bundle ghcr.io/acme/python-stack:1
 grim add ghcr.io/grimoire-rs/mcp/grim:1
+grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands

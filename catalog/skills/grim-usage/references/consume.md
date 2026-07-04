@@ -18,8 +18,7 @@ A complete first session, start to installed:
 
 ```sh
 grim init                                # write grimoire.toml
-grim add ghcr.io/acme/code-review:1      # declare + pin in the lock
-grim install                             # materialize into AI clients
+grim add ghcr.io/acme/code-review:1      # declare, pin, and install
 grim status                              # confirm what landed
 ```
 
@@ -53,19 +52,25 @@ both files: [Configuration][config-toml].
 
 ## Declaring
 
-`grim add <reference>` declares an artifact and immediately pins it in
-the lock. The reference is the only required argument:
+`grim add <reference>` declares an artifact, pins it in the lock, and
+installs it into your detected clients — one command from nothing to using
+it. The reference is the only required argument:
 
 ```sh
 grim add ghcr.io/acme/code-review:1
 grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2
 grim add --kind bundle ghcr.io/acme/python-stack:1
+grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
 - `--kind` (skill, rule, agent, bundle, mcp) is normally inferred from the
   artifact's OCI `artifactType`, set at release time. If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
 - `--name` defaults to the reference's last path segment.
+- `--no-install` stops at declare + lock — no materialization. Use it to
+  add several artifacts before one `grim install`, or to pick clients with
+  `grim install --client`. Only the added entry installs otherwise; the
+  rest of the lock is left for `grim install`.
 
 If the reference is deprecated, `add` prints the publisher's deprecation
 notice on stderr and still completes the add — treat it as a prompt to
@@ -78,8 +83,11 @@ and rewrites the lock. You need it only after hand-editing the config —
 ## Installing
 
 `grim install` materializes every locked artifact into your AI clients'
-configuration directories. It writes into the clients selected by
-`--client`, the config's `clients` option, or auto-detection (details in
+configuration directories. Because `grim add` already installs the entry it
+declares, you reach for `grim install` to materialize the *whole* lock at
+once — after cloning a repo, in CI, or after a batch of `grim add
+--no-install`. It writes into the clients selected by `--client`, the
+config's `clients` option, or auto-detection (details in
 [registries.md](registries.md)):
 
 ```sh

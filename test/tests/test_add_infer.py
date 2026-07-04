@@ -90,7 +90,10 @@ def test_add_name_override_replaces_inferred_name(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    out = runner.json("add", sk.fq, "--name", "cr")
+    # `--no-install`: a `--name` that differs from the skill's tar root
+    # cannot be materialized (the installer keys the extracted tree off the
+    # binding name), so this stays a declaration-only check.
+    out = runner.json("add", "--no-install", sk.fq, "--name", "cr")
     assert out["name"] == "cr", (
         f"--name 'cr' must override the default segment name, got {out['name']!r}"
     )

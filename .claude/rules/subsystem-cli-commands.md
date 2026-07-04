@@ -17,7 +17,7 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | Command | Purpose |
 |---------|---------|
 | `grim init` | Write a fresh `grimoire.toml` in the current directory; `--registry <ref>` seeds the default `[[registries]]` entry |
-| `grim add [--kind …] [--name …] <ref>` | Declare a skill/rule/agent/mcp/bundle in `grimoire.toml` and pin it in the lock immediately |
+| `grim add [--kind …] [--name …] [--no-install] <ref>` | Declare a skill/rule/agent/mcp/bundle in `grimoire.toml`, pin it in the lock immediately, and (by default) materialize just that entry into the detected clients; `--no-install` stops at declare + lock |
 | `grim lock` | Resolve floating tags in `grimoire.toml` to digests and write `grimoire.lock` (after hand-edits; `add` locks what it declares) |
 | `grim config get\|set\|unset\|list <key>` | Read and write `grimoire.toml` settings (`[options]`, `[options.tui]`) and registry fields via dotted keys; `list [--show-origin]` dumps explicitly-set values for the active scope (never merged across scopes). Exit codes: unset `get` → 1, unknown key → 64, bad value → 65. |
 | `grim config registry add\|rm\|use\|show\|list` | Registry lifecycle for `[[registries]]` entries: `add <alias> --url <url> [--default]`, `rm <alias>`, `use <alias>` (at-most-one-default, clears prior), `show <alias>`, `list`. Alias not found or dup on `add` → 64. |

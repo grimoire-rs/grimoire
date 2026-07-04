@@ -28,8 +28,14 @@ use crate::api::add_report::AddReport;
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
+use crate::install::installer::install_and_persist;
+use crate::install::materializer::DefaultMaterializer;
+use crate::install::progress::SilentProgress;
+use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
+use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
+use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_options::ResolveOptions;
@@ -62,6 +68,36 @@ pub struct AddArgs {
     /// Explicit project config path.
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Whether to materialize the artifact after declaring it.
+    #[command(flatten)]
+    pub install: InstallOnAdd,
+}
+
+/// The `--[no-]install` toggle for `grim add`.
+///
+/// `grim add` materializes the freshly-declared artifact into the detected
+/// clients by default; `--no-install` restricts it to the declare + lock
+/// step (the pre-existing behaviour, still reachable for batch workflows
+/// that prefer a single `grim install` pass afterwards). `--install` is the
+/// affirmative default; the two flags override each other last-wins.
+#[derive(Debug, Args)]
+pub struct InstallOnAdd {
+    /// Install the added artifact immediately (the default).
+    #[arg(long, overrides_with = "no_install")]
+    install: bool,
+
+    /// Only declare and lock; skip materialization.
+    #[arg(long = "no-install", overrides_with = "install")]
+    no_install: bool,
+}
+
+impl InstallOnAdd {
+    /// Whether `grim add` should install after declaring. Default `true`;
+    /// `--no-install` (last-wins vs `--install`) turns it off.
+    pub fn enabled(&self) -> bool {
+        !self.no_install
+    }
 }
 
 /// Run `grim add`.
@@ -156,6 +192,15 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     let new_lock = super::grim(relock_declared(&set, previous.as_ref(), kind, &name, &access, scope.scope).await)?;
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
+    // Default: materialize the freshly-declared artifact into the detected
+    // clients right away (opt out with `--no-install`). Declare + relock
+    // already ran above; this mirrors the TUI single-row install — only the
+    // acted-on entry (or, for a bundle, its members) is projected out and
+    // installed, so the rest of a shared lock stays for `grim install`.
+    if args.install.enabled() {
+        install_added(&scope, kind, &name, &new_lock, &access).await?;
+    }
+
     // A bundle has no single pinned member to report; surface the bundle
     // reference itself. A skill/rule/agent reports the digest it resolved to.
     let pinned = if kind == ArtifactKind::Bundle {
@@ -169,6 +214,132 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// Materialize just the freshly-declared `kind`/`name` entry into the
+/// detected clients, reusing the shared install pipeline.
+///
+/// The lock may carry other declarations; only the acted-on entry (or a
+/// bundle's members) is projected out and installed, so a prior
+/// `--no-install` entry is never materialized as a side effect. The install
+/// state is persisted before any per-artifact failure is surfaced, and a
+/// refusal / hard error propagates as a non-zero exit via the shared
+/// [`install::finish`](super::install::finish).
+///
+/// # Errors
+///
+/// Target parse (65), install-state I/O (74), integrity refusal / registry
+/// / I/O failures propagate via the typed chain.
+async fn install_added(
+    scope: &super::scope_resolution::ResolvedScope,
+    kind: ArtifactKind,
+    name: &str,
+    new_lock: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+) -> anyhow::Result<()> {
+    // Project the acted-on entry out of the (now complete) lock.
+    let single = match kind {
+        ArtifactKind::Bundle => match new_lock.bundles.iter().find(|b| b.name == name) {
+            // The cached expansion's repo+tag select exactly this bundle's
+            // members (the tag is digest-safe — it mirrors member provenance).
+            Some(b) => bundle_members_lock(new_lock, &b.repo, &b.tag),
+            // A bundle that resolved to zero members: nothing to install.
+            None => return Ok(()),
+        },
+        _ => single_entry_lock(new_lock, kind, name)
+            .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
+    };
+
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+    ))?;
+    let mut state = super::grim(
+        super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
+    )?;
+    let materializer = DefaultMaterializer;
+
+    // Reuse the exact pipeline `grim install` runs (materialize + persist +
+    // vendor config sync). `add` differs only in installing a single-entry
+    // projection instead of the whole lock, never forcing (honours the
+    // integrity gate), and staying silent (no progress bar).
+    let outcomes = super::grim(
+        install_and_persist(
+            &single,
+            access,
+            &materializer,
+            &target,
+            &mut state,
+            &scope.roots,
+            scope.scope,
+            &scope.workspace,
+            &scope.config_path,
+            false,
+            &SilentProgress,
+        )
+        .await,
+    )?;
+
+    // Surface the first refusal / hard error (the report is discarded — the
+    // add report already names what was declared).
+    super::install::finish(outcomes)?;
+    Ok(())
+}
+
+/// Project the single `kind`/`name` entry out of `lock` as a one-artifact
+/// lock (same metadata), so the shared `install_all` path materializes
+/// exactly the acted-on entry and nothing else. `None` when the entry is
+/// absent from the resolved lock (defensive — not expected). Bundle entries
+/// go through [`bundle_members_lock`] instead.
+///
+/// Shared by `grim add`'s install-on-add path and the TUI single-row
+/// install action.
+pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
+    let entry = lock
+        .iter_artifacts()
+        .find(|a| a.kind == kind && a.name == name)
+        .cloned()?;
+    let (skills, rules, agents, mcp) = match kind {
+        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new(), Vec::new()),
+        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new(), Vec::new()),
+        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry], Vec::new()),
+        ArtifactKind::Mcp => (Vec::new(), Vec::new(), Vec::new(), vec![entry]),
+        ArtifactKind::Bundle => return None,
+    };
+    Some(GrimoireLock {
+        metadata: lock.metadata.clone(),
+        skills,
+        rules,
+        agents,
+        mcp,
+        bundles: Vec::new(),
+    })
+}
+
+/// Project the members the bundle `bundle_repo:bundle_tag` contributed out
+/// of `lock` as a members-only lock (same metadata), so the shared
+/// `install_all` path materializes exactly the acted-on bundle's members.
+/// Members are matched by the provenance the resolver stamps
+/// ([`LockedArtifact::bundles`] — a shared member lists every contributor);
+/// an empty projection means the bundle resolved to zero members (or every
+/// member was overridden by a direct declaration).
+///
+/// Shared by `grim add`'s install-on-add path and the TUI single-row
+/// install action.
+pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str) -> GrimoireLock {
+    let is_member = |a: &LockedArtifact| a.bundles.iter().any(|b| b.repo == bundle_repo && b.tag == bundle_tag);
+    GrimoireLock {
+        metadata: lock.metadata.clone(),
+        skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
+        rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
+        agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
+        // A projection feeds the installer only — the bundle cache is not
+        // consulted there, so it is not carried over.
+        mcp: vec![],
+        bundles: Vec::new(),
+    }
 }
 
 /// Declare `name = id` in the kind's config table
@@ -439,7 +610,35 @@ mod tests {
     use super::*;
     use crate::config::declaration::{ConfigOptions, DesiredSet};
     use crate::config::project_config::ProjectConfig;
+    use clap::Parser;
     use std::collections::BTreeMap;
+
+    /// Wraps `AddArgs` so the flattened `--[no-]install` flags can be parsed
+    /// from an argv in isolation.
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        add: AddArgs,
+    }
+
+    fn parse_install(argv: &[&str]) -> bool {
+        Harness::try_parse_from(argv).expect("parse").add.install.enabled()
+    }
+
+    #[test]
+    fn install_defaults_on_and_no_install_opts_out() {
+        // Default: install after declaring.
+        assert!(parse_install(&["grim", "ghcr.io/acme/x"]), "add installs by default");
+        assert!(parse_install(&["grim", "--install", "ghcr.io/acme/x"]));
+        // `--no-install` restricts to declare + lock.
+        assert!(
+            !parse_install(&["grim", "--no-install", "ghcr.io/acme/x"]),
+            "--no-install opts out"
+        );
+        // The two flags override each other last-wins.
+        assert!(parse_install(&["grim", "--no-install", "--install", "ghcr.io/acme/x"]));
+        assert!(!parse_install(&["grim", "--install", "--no-install", "ghcr.io/acme/x"]));
+    }
 
     #[test]
     fn write_config_round_trips_through_parser() {

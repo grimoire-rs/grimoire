@@ -25,7 +25,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::catalog::catalog_service;
 use crate::catalog::registry_catalog::Catalog;
-use crate::command::add::{declare, relock_declared, write_config};
+use crate::command::add::{bundle_members_lock, declare, relock_declared, single_entry_lock, write_config};
 use crate::command::grim;
 use crate::command::uninstall::undeclare_and_unlock;
 use crate::config::ResolvedRegistry;
@@ -36,7 +36,7 @@ use crate::config::scope::ConfigScope;
 use crate::env::grim_home;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
-use crate::install::installer::{InstallOutcome, install_all};
+use crate::install::installer::{InstallOutcome, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::progress::{InstallProgress, SilentProgress};
@@ -44,6 +44,7 @@ use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
+#[cfg(test)]
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
@@ -1870,33 +1871,24 @@ async fn perform(
     let materializer = DefaultMaterializer;
 
     // `update` forces re-materialization (rolling-release contract),
-    // matching `command::update`; `install` honours the integrity gate.
-    let outcomes = install_all(
+    // matching `command::update`; `install` honours the integrity gate. The
+    // shared pipeline (materialize + persist + vendor config sync) is the
+    // same seam `grim install` and `grim add` funnel through.
+    let outcomes = install_and_persist(
         &single,
         &ctx.access,
         &materializer,
         &target,
         &mut install_state,
         &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        &ctx.config_path,
         is_update,
+        &SilentProgress,
     )
-    .await;
-    // The single `persist` seam handles project-scope dir creation, the
-    // atomic write, and the conditional legacy-file reap (including the
-    // lossy-migration guard that was previously missing here).
-    install_state
-        .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
-        .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
-
-    // Converge vendor-owned config on the new state, mirroring
-    // `command::install`. The artifacts and install state are already
-    // persisted, so a config-sync failure is warn-only — the install
-    // completed, never a hard failure after the primary action.
-    for client in target.clients() {
-        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
-            tracing::warn!(client = %client, error = %e, "vendor config sync failed; install completed, registration skipped");
-        }
-    }
+    .await
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
 
     let mut label = "unchanged".to_string();
     for o in outcomes {
@@ -2061,54 +2053,6 @@ fn bundle_provides_files(ctx: &TuiContext, kind: ArtifactKind, name: &str) -> bo
 /// artifact); the materializer validates the actual payload shape.
 fn row_kind(kind: &str) -> ArtifactKind {
     ArtifactKind::from_kind_str(kind).unwrap_or(ArtifactKind::Skill)
-}
-
-/// Project the members the bundle `bundle_repo:bundle_tag` contributed out
-/// of `lock` as a members-only lock (same metadata), so the shared
-/// `install_all` path materializes exactly the acted-on bundle's members.
-/// Members are matched by the provenance the resolver stamps
-/// ([`LockedArtifact::bundles`] — a shared member lists every
-/// contributor); an empty projection means the bundle resolved to zero
-/// members (or every member was overridden by a direct declaration).
-fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str) -> GrimoireLock {
-    let is_member = |a: &LockedArtifact| a.bundles.iter().any(|b| b.repo == bundle_repo && b.tag == bundle_tag);
-    GrimoireLock {
-        metadata: lock.metadata.clone(),
-        skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
-        rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
-        agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
-        // A projection feeds the installer only — the bundle cache is not
-        // consulted there, so it is not carried over.
-        mcp: vec![],
-        bundles: Vec::new(),
-    }
-}
-
-/// Project the single `kind`/`name` entry out of `lock` as a one-artifact
-/// lock (same metadata), so the shared `install_all` path materializes
-/// exactly the acted-on row and nothing else. `None` when the entry is
-/// absent from the resolved lock (defensive — not expected). Bundle rows
-/// go through [`bundle_members_lock`] instead.
-fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
-    let entry = lock
-        .iter_artifacts()
-        .find(|a| a.kind == kind && a.name == name)
-        .cloned()?;
-    let (skills, rules, agents, mcp) = match kind {
-        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new(), Vec::new()),
-        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new(), Vec::new()),
-        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry], Vec::new()),
-        ArtifactKind::Mcp => (Vec::new(), Vec::new(), Vec::new(), vec![entry]),
-        ArtifactKind::Bundle => return None,
-    };
-    Some(GrimoireLock {
-        metadata: lock.metadata.clone(),
-        skills,
-        rules,
-        agents,
-        mcp,
-        bundles: Vec::new(),
-    })
 }
 
 /// Split `registry/repository` at the first `/`.

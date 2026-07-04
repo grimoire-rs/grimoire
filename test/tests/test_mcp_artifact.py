@@ -170,7 +170,9 @@ def test_install_registers_entries_in_every_client_config(
     (project_dir / "opencode.json").write_text('{\n  "model": "anthropic/claude"\n}\n')
     write_config(project_dir)
 
-    runner.json("add", ref)
+    # `--no-install` isolates the `install` step under test (which registers
+    # the entry into every detected client) from the default install-on-add.
+    runner.json("add", "--no-install", ref)
     rows = runner.json("install")
     assert rows[0]["status"] == "installed", rows
 

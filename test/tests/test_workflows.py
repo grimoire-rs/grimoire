@@ -65,19 +65,20 @@ def test_quickstart_walkthrough(
     assert result.returncode == 0, result.stderr
     assert (project_dir / "grimoire.toml").is_file()
 
-    # 2. Declare an artifact — kind and name are inferred, and the
-    #    floating tag is pinned immediately.
+    # 2. Declare an artifact — kind and name are inferred, the floating tag
+    #    is pinned, AND it is materialized into the detected client in one
+    #    step (install-on-add is the default).
     out = runner.json("add", f"{repo}:1")
     assert out["kind"] == "skill"
     assert out["name"] == "code-review"
     assert out["status"] == "added"
     assert "@sha256:" in out["pinned"]
-
-    # 3. Install into the AI client.
-    rows = runner.json("install")
-    assert {r["status"] for r in rows} == {"installed"}
     installed_index = project_dir / ".claude/skills/code-review/SKILL.md"
     assert "Code Review v1" in installed_index.read_text()
+
+    # 3. A follow-up `install` is a clean no-op — already materialized.
+    rows = runner.json("install")
+    assert {r["status"] for r in rows} == {"unchanged"}
 
     # 4. Check the state.
     rows = runner.json("status")
@@ -123,7 +124,9 @@ def test_quickstart_multiclient_install(
 
     result = runner.run("init", "--registry", registry, check=False)
     assert result.returncode == 0, result.stderr
-    runner.json("add", f"{repo}:1")
+    # `--no-install` isolates the `install --client` step under test from
+    # the default install-on-add (which would target the detected set).
+    runner.json("add", "--no-install", f"{repo}:1")
 
     rows = runner.json("install", "--client", "claude,copilot")
     assert {r["status"] for r in rows} == {"installed"}

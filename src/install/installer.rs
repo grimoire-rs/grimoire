@@ -15,8 +15,10 @@
 //! skills-then-rules iteration order so the caller can build a stable
 //! report.
 
+use std::path::Path;
 use std::sync::Arc;
 
+use crate::config::scope::ConfigScope;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
@@ -25,7 +27,7 @@ use crate::oci::{ArtifactKind, Digest, Identifier};
 
 use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
-use super::install_state::{InstallRecord, InstallState};
+use super::install_state::{InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
 use super::path_anchor::{AnchorError, AnchorRoots};
 use super::progress::{InstallProgress, SilentProgress};
@@ -129,6 +131,65 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     }
     progress.finish();
     results
+}
+
+/// Materialize `lock` into `target`'s clients, persist the resulting state,
+/// then converge each involved client's vendor-owned config.
+///
+/// The shared install pipeline wrapping [`install_all_with_progress`]:
+/// `grim install` (the whole lock), `grim add` (the freshly-declared entry
+/// only), and the TUI install action all funnel through it, so the
+/// persist + config-sync steps live in exactly one place. Callers differ
+/// only in which `lock` projection they pass, the `force` flag, and the
+/// `progress` sink; everything downstream of `install_all` is shared.
+///
+/// The per-item outcomes are returned for the caller to render. A persist
+/// failure is the only hard error (as [`InstallErrorKind::TargetIo`]); a
+/// config-sync failure is warn-only because the artifacts and state are
+/// already on disk. `grim_home` is read from `roots`, so the caller passes
+/// only the remaining persist coordinates (`scope`, `workspace`,
+/// `config_path`).
+#[allow(clippy::too_many_arguments)]
+pub async fn install_and_persist<M: ArtifactMaterializer>(
+    lock: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+    materializer: &M,
+    target: &InstallTarget,
+    state: &mut InstallState,
+    roots: &AnchorRoots,
+    scope: ConfigScope,
+    workspace: &Path,
+    config_path: &Path,
+    force: bool,
+    progress: &dyn InstallProgress,
+) -> Result<Vec<ArtifactInstall>, InstallError> {
+    let outcomes = install_all_with_progress(lock, access, materializer, target, state, roots, force, progress).await;
+
+    // Persist whatever installed (some artifacts may land before another
+    // fails) before surfacing any per-item error. One `persist` seam handles
+    // project-scope dir creation, the atomic write, and the legacy reap.
+    state
+        .persist(scope, workspace, &roots.grim_home, config_path)
+        .map_err(|e| match e {
+            PersistError::EnsureDir { path, source } | PersistError::Save { path, source } => {
+                InstallError::without_reference(InstallErrorKind::TargetIo { path, source })
+            }
+        })?;
+
+    // Converge vendor-owned config (e.g. OpenCode's managed `instructions`
+    // glob) for every involved client. The artifacts and state are already
+    // persisted, so a sync failure is warn-only, never a hard command error.
+    for client in target.clients() {
+        if let Err(e) = client.vendor().sync_config(state, workspace, scope) {
+            tracing::warn!(
+                client = %client,
+                error = %e,
+                "vendor config sync failed; artifacts installed and state saved, registration skipped"
+            );
+        }
+    }
+
+    Ok(outcomes)
 }
 
 /// Install one artifact into every selected client through the integrity

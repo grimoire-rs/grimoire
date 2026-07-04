@@ -86,7 +86,7 @@ fallback:
 ```markdown
 Read the companion skill `other-skill` at `../other-skill/SKILL.md`.
 If that file is missing, install it:
-`grim add registry.example.com/skills/other-skill:1 && grim install`
+`grim add registry.example.com/skills/other-skill:1` (installs by default)
 ```
 
 Pin the fallback to a floating major tag (`:1`) so consumers get fixes

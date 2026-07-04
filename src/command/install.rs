@@ -19,7 +19,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::cli::progress::StderrBar;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{ArtifactInstall, InstallOutcome, install_all_with_progress};
+use crate::install::installer::{ArtifactInstall, InstallOutcome, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::target::InstallTarget;
@@ -88,56 +88,34 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         None => &silent,
     };
 
-    let outcomes = install_all_with_progress(
-        &lock,
-        &access,
-        &materializer,
-        &target,
-        &mut state,
-        &scope.roots,
-        args.force,
-        progress,
-    )
-    .await;
-
-    // Persist whatever progress was made (some artifacts may have
-    // installed before another failed) before surfacing the first error.
-    // The single `persist` seam handles project-scope dir creation, the
-    // atomic write, and the conditional legacy-file reap in one place.
-    super::grim(
-        state
-            .persist(
-                scope.scope,
-                &scope.workspace,
-                &scope.roots.grim_home,
-                &scope.config_path,
-            )
-            .map_err(|e| match e {
-                crate::install::install_state::PersistError::EnsureDir { path, source }
-                | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-            }),
+    // The shared install pipeline: materialize the whole lock, persist the
+    // state, and converge each client's vendor config. `grim add` and the
+    // TUI install action funnel through the same seam.
+    let outcomes = super::grim(
+        install_and_persist(
+            &lock,
+            &access,
+            &materializer,
+            &target,
+            &mut state,
+            &scope.roots,
+            scope.scope,
+            &scope.workspace,
+            &scope.config_path,
+            args.force,
+            progress,
+        )
+        .await,
     )?;
-
-    // Converge vendor-owned config on the new state (e.g. OpenCode's
-    // managed `instructions` glob) for every involved client. The artifacts
-    // and install state are already persisted, so a config-sync failure (an
-    // unparseable / unreadable vendor config) is warn-only: the install
-    // succeeds, registration is skipped, never a hard command failure.
-    for client in target.clients() {
-        if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
-            tracing::warn!(
-                client = %client,
-                error = %e,
-                "vendor config sync failed; artifacts installed and state saved, registration skipped"
-            );
-        }
-    }
 
     finish(outcomes)
 }
 
 /// Wrap an install-state I/O failure as the install-tier `TargetIo` error.
-fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::install::install_error::InstallError {
+///
+/// Shared with `grim add`'s install-on-add path so both classify a
+/// state-file failure identically (exit 74).
+pub(crate) fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::install::install_error::InstallError {
     crate::install::install_error::InstallError::without_reference(
         crate::install::install_error::InstallErrorKind::TargetIo {
             path: path.to_path_buf(),
@@ -178,7 +156,10 @@ pub(crate) fn require_fresh_lock(scope: &ResolvedScope) -> anyhow::Result<crate:
 /// Turn per-artifact outcomes into the report + the worst exit code. A
 /// refusal or a hard error makes the run fail; a clean install/no-op is
 /// success.
-fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallReport, ExitCode)> {
+///
+/// Shared with `grim add`'s install-on-add path (which discards the report
+/// and only propagates the first refusal/error).
+pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallReport, ExitCode)> {
     let mut entries = Vec::with_capacity(outcomes.len());
     let mut first_error: Option<crate::error::Error> = None;
 
