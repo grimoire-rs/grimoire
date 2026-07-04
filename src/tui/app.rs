@@ -1425,7 +1425,7 @@ fn refresh_member_states(
 }
 
 /// The set of `(kind, registry/repository)` an active scope declares **directly**
-/// (in `[skills]`/`[rules]`/`[agents]`) — the key by which the via-bundle badge
+/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`) — the key by which the via-bundle badge
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
@@ -1433,6 +1433,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Skill, &set.skills),
         (ArtifactKind::Rule, &set.rules),
         (ArtifactKind::Agent, &set.agents),
+        (ArtifactKind::Mcp, &set.mcp),
     ] {
         for id in map.values() {
             out.insert((kind, id.registry_repository()));
@@ -3513,6 +3514,22 @@ mod tests {
             member_badge(&ctx, "localhost:5050", "grimoire/skills/demo"),
             ArtifactState::Installed,
             "a member also declared standalone shows plain installed"
+        );
+    }
+
+    #[test]
+    fn direct_declared_repos_includes_mcp() {
+        // Regression: a directly-declared MCP must land in the direct-declared
+        // set, else `member_display_state` flips every installed MCP to
+        // ViaBundle even when it was installed standalone (never via a bundle).
+        let mut set = DesiredSet::default();
+        let id = Identifier::new_registry("mcp/grim", "ghcr.io/grimoire-rs");
+        set.mcp.insert("grim".to_string(), id.clone());
+
+        let direct = direct_declared_repos(&set);
+        assert!(
+            direct.contains(&(ArtifactKind::Mcp, id.registry_repository())),
+            "a directly-declared MCP must be in the direct-declared set: {direct:?}"
         );
     }
 
