@@ -35,6 +35,7 @@ mod oci;
 mod resolve;
 mod skill;
 mod store;
+mod tls;
 mod tui;
 
 use clap::error::ErrorKind;

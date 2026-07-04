@@ -79,12 +79,8 @@ impl RegistryClient {
                 exceptions.push(r);
             }
         }
-        let config = ClientConfig {
-            protocol: ClientProtocol::HttpsExcept(exceptions),
-            ..Default::default()
-        };
         Self {
-            client: Client::new(config),
+            client: Client::new(registry_config(exceptions)),
         }
     }
 
@@ -144,6 +140,22 @@ fn parse_insecure_registries(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Build the `oci-client` config: HTTPS except for the given plain-HTTP hosts,
+/// with the embedded CA roots seeded as extra roots.
+///
+/// Seeding the roots is what keeps `Client::new` from panicking on a host with
+/// no system trust store: with an empty `extra_root_certificates` the fallback
+/// `reqwest::Client::default()` re-triggers the empty-store error as a panic.
+/// The roots merge with the platform store (and any `SSL_CERT_FILE` /
+/// `SSL_CERT_DIR` override) rather than replacing it — see [`crate::tls`].
+fn registry_config(exceptions: Vec<String>) -> ClientConfig {
+    ClientConfig {
+        protocol: ClientProtocol::HttpsExcept(exceptions),
+        extra_root_certificates: crate::tls::oci_extra_roots(),
+        ..Default::default()
+    }
 }
 
 impl Default for RegistryClient {
@@ -582,12 +594,8 @@ impl RegistryClient {
     /// exception list only knows the conventional loopback `:5000` forms,
     /// but a mock binds a random port, so add it explicitly.
     fn with_plain_http(registry: &str) -> Self {
-        let config = ClientConfig {
-            protocol: ClientProtocol::HttpsExcept(vec![registry.to_string()]),
-            ..Default::default()
-        };
         Self {
-            client: Client::new(config),
+            client: Client::new(registry_config(vec![registry.to_string()])),
         }
     }
 }
@@ -595,6 +603,20 @@ impl RegistryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the production client config must seed the embedded CA
+    /// roots. Without them, `oci-client`'s `Client::new` panics on a host with
+    /// no system trust store (its `reqwest::Client::default()` fallback
+    /// re-triggers the empty-store error). A non-empty `extra_root_certificates`
+    /// forces reqwest's merge-with-platform path, which never errors.
+    #[test]
+    fn registry_config_seeds_embedded_ca_roots() {
+        let config = registry_config(vec![]);
+        assert!(
+            !config.extra_root_certificates.is_empty(),
+            "registry client must seed embedded CA roots to avoid the empty-store panic"
+        );
+    }
 
     #[test]
     fn reference_for_tagged_identifier() {

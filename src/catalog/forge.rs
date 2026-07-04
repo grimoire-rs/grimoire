@@ -234,12 +234,15 @@ fn encode_segment(raw: &str) -> String {
     out
 }
 
-/// Shared HTTP client for forge API calls: 30s timeout, grim user-agent.
+/// Shared HTTP client for forge API calls: 30s timeout, grim user-agent,
+/// embedded CA roots merged with the system trust store (see [`crate::tls`]).
 fn client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION")))
-        .build()
+    crate::tls::merge_embedded_roots(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION"))),
+    )
+    .build()
 }
 
 /// Attach the forge-appropriate auth header (GitHub: `Authorization:

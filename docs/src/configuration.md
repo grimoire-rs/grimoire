@@ -306,6 +306,8 @@ applies.
 | `COPILOT_HOME` | GitHub Copilot home override (vendor variable). Replaces `~/.copilot` for global-scope skills and agents, and relocates `mcp-config.json`. Also drives detection. | unset |
 | `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
 | `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
+| `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
+| `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
 
 Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
 `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,
@@ -344,6 +346,24 @@ index-only browse set the push-side fallback applies.
 
 The `--offline` toggle has no config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
+## CA roots {#ca-roots}
+
+Every grim registry and package-index call is HTTPS, so it needs a set of
+trusted CA roots. Tools that rely solely on the host trust store break the
+moment there isn't one — a [distroless][distroless] or minimal CI image ships
+without `ca-certificates`, and grim's rustls stack treats an empty system store
+as a hard error rather than falling back to nothing.
+
+grim avoids that by compiling the [Mozilla CA root set][webpki-root-certs] into
+the binary. Those public roots are always available, so a registry pull works
+on a bare container with no trust store installed.
+
+The built-in roots are *merged* with the host trust store, never a replacement
+for it. A private or corporate CA supplied through the standard OpenSSL
+`SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a directory of PEM files)
+overrides is trusted *alongside* the public roots — so an internal registry
+behind a corporate CA and a public one both verify from the same process.
+
 ## Data layout
 
 The resolved-artifact content store, the catalog cache that
@@ -371,4 +391,6 @@ state file is kept out of version control without touching your root
 [gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
 [zot]: https://zotregistry.dev/
 [harbor]: https://goharbor.io/
+[distroless]: https://github.com/GoogleContainerTools/distroless
+[webpki-root-certs]: https://crates.io/crates/webpki-root-certs
 [dockerhub]: https://hub.docker.com/

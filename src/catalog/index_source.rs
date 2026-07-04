@@ -126,11 +126,13 @@ async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage
         format!("{base}/all.json")
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))?;
+    let client = crate::tls::merge_embedded_roots(
+        reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION"))),
+    )
+    .build()
+    .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))?;
     let response = client
         .get(&url)
         .send()
