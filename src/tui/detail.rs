@@ -212,16 +212,17 @@ pub fn detail_line_text(line: &DetailLine) -> String {
 /// The Detail pane's *inner* (border-less) size for a terminal of
 /// `(width, height)` — mirrors the layout math in `render::draw`: 5 rows
 /// of fixed chrome (title 1, search 3, legend 1), then side-by-side when
-/// the catalog plus a usable detail column fit, else a stacked band of
-/// at most 8 rows below the list.
+/// the catalog plus a usable detail column fit, else an even top/bottom
+/// split of the content area (list on top, Detail below).
 pub fn viewport(term: (u16, u16)) -> (u16, u16) {
     let (w, h) = term;
     let content_h = h.saturating_sub(5);
     let (dw, dh) = if w >= CATALOG_WIDTH + DETAIL_MIN_WIDTH {
         (w - CATALOG_WIDTH, content_h)
     } else {
-        // Stacked: the list keeps its Min(3) first, the band caps at 8.
-        (w, content_h.saturating_sub(3).min(8))
+        // Stacked: list takes the floored half (`content_h / 2`), Detail the
+        // remainder — matches the computed `Length(top)` split in render::draw.
+        (w, content_h - content_h / 2)
     };
     (dw.saturating_sub(2), dh.saturating_sub(2))
 }
@@ -514,12 +515,13 @@ mod tests {
         // Wide: side-by-side — detail gets all slack minus borders.
         let (w, h) = viewport((CATALOG_WIDTH + 60, 30));
         assert_eq!((w, h), (58, 23));
-        // Narrow: stacked — full width, band capped at 8 (6 inner).
+        // Narrow: stacked — full width, Detail gets the top-half remainder.
+        // content_h = 25, list = 12, Detail = 13, inner = 11.
         let (w, h) = viewport((80, 30));
-        assert_eq!((w, h), (78, 6));
-        // Short terminal: the band shrinks before the list's Min(3).
+        assert_eq!((w, h), (78, 11));
+        // Short terminal: content_h = 5, Detail = 3, inner = 1.
         let (_, h) = viewport((80, 10));
-        assert_eq!(h, 0);
+        assert_eq!(h, 1);
         // Tiny: saturates, never underflows.
         assert_eq!(viewport((0, 0)), (0, 0));
     }

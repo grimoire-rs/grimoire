@@ -923,9 +923,13 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             .split(chunks[2]);
         (cols[0], cols[1])
     } else {
+        // Stacked (narrow terminal): split evenly so Detail is not pinned to a
+        // short fixed band below the list. Computed `Length` (not Percentage)
+        // so `detail::viewport` can mirror the split with plain arithmetic.
+        let top = chunks[2].height / 2;
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(8)])
+            .constraints([Constraint::Length(top), Constraint::Min(0)])
             .split(chunks[2]);
         (rows[0], rows[1])
     };
