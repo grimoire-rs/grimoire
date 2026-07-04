@@ -243,7 +243,11 @@ mod tests {
     #[test]
     fn removes_skill_dir_and_rule_file_then_drops_records() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path();
+        // Canonicalize the root: uninstall returns resolved (canonicalized)
+        // paths, so the anchor root must be canonical too or macOS's
+        // /var -> /private/var symlink makes the removed-path assertion drift.
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let ws = ws.as_path();
         let state_path = ws.join("state.json");
 
         // A skill materializes to a directory tree.
@@ -291,7 +295,9 @@ mod tests {
     #[test]
     fn removes_multi_file_rule_index_and_support_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path();
+        // Canonical root: see removes_skill_dir_and_rule_file_then_drops_records.
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let ws = ws.as_path();
         let state_path = ws.join("state.json");
 
         // A multi-file rule: index file + sibling support directory.
