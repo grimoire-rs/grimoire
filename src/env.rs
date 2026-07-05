@@ -76,7 +76,7 @@ fn is_truthy(value: &str) -> bool {
 
 /// Best-effort home directory without an external crate: `$HOME` on Unix,
 /// `%USERPROFILE%` on Windows.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     non_empty_var(key).map(PathBuf::from)
 }

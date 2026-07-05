@@ -66,7 +66,14 @@ pub enum InstructionsSync {
 pub fn managed_entry(workspace: &Path, scope: ConfigScope) -> String {
     match scope {
         ConfigScope::Project => MANAGED_PROJECT_GLOB.to_string(),
-        ConfigScope::Global => workspace.join(MANAGED_PROJECT_GLOB).display().to_string(),
+        // OpenCode (a Node/JS tool) reads `instructions` entries as globs;
+        // JS glob engines treat `\` as an escape character, not a
+        // separator, so the entry must stay forward-slash even when
+        // `workspace` and the native join produce backslashes on Windows.
+        ConfigScope::Global => workspace
+            .join(MANAGED_PROJECT_GLOB)
+            .to_string_lossy()
+            .replace('\\', "/"),
     }
 }
 
@@ -83,7 +90,7 @@ pub fn config_path_for_scope(workspace: &Path, scope: ConfigScope) -> Option<Pat
         ConfigScope::Global => global_config_path(
             super::vendor::env_dir("OPENCODE_CONFIG"),
             super::vendor::env_dir("XDG_CONFIG_HOME"),
-            super::vendor::env_dir("HOME"),
+            super::vendor::home_dir(),
         ),
     }
 }
@@ -380,6 +387,20 @@ mod tests {
             managed_entry(ws, ConfigScope::Global),
             "/data/grim-home/.opencode/rules/*.md"
         );
+    }
+
+    /// Regression: a Windows-style workspace path must not leak `\` into
+    /// the OpenCode glob entry — JS glob engines treat `\` as an escape
+    /// character, not a separator.
+    #[test]
+    fn managed_entry_global_has_no_backslashes() {
+        let ws = Path::new("C:\\Users\\dev\\grim-home");
+        let entry = managed_entry(ws, ConfigScope::Global);
+        assert!(
+            !entry.contains('\\'),
+            "glob entry must be forward-slash only, got {entry:?}"
+        );
+        assert_eq!(entry, "C:/Users/dev/grim-home/.opencode/rules/*.md");
     }
 
     #[test]
