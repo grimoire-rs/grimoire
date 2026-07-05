@@ -161,6 +161,7 @@ def test_no_collision_two_projects_share_grim_home(
 
 
 def test_status_resolves_after_project_dir_move(
+    registry: str,
     grim_binary: Path,
     grim_home: Path,
     tmp_path: Path,

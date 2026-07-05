@@ -67,7 +67,7 @@ def _slugify(heading: str) -> str:
 
 
 def _anchors(page: Path) -> set[str]:
-    body = _strip_code_blocks(page.read_text())
+    body = _strip_code_blocks(page.read_text(encoding="utf-8"))
     anchors = {m.group("anchor") for m in _EXPLICIT_ANCHOR.finditer(body)}
     anchors |= {_slugify(m.group("text")) for m in _HEADING.finditer(body)}
     return anchors
@@ -75,7 +75,7 @@ def _anchors(page: Path) -> set[str]:
 
 def test_summary_matches_pages_on_disk() -> None:
     """``SUMMARY.md`` lists exactly the pages that exist."""
-    summary = (_DOCS_DIR / "SUMMARY.md").read_text()
+    summary = (_DOCS_DIR / "SUMMARY.md").read_text(encoding="utf-8")
     listed = {m.group("page") for m in _INTERNAL_LINK.finditer(summary)}
     on_disk = {p.name for p in _pages()}
     assert listed == on_disk, (
@@ -88,7 +88,7 @@ def test_summary_matches_pages_on_disk() -> None:
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
 def test_internal_links_resolve(page: Path) -> None:
     """Every internal link on the page hits an existing page and anchor."""
-    body = _strip_code_blocks(page.read_text())
+    body = _strip_code_blocks(page.read_text(encoding="utf-8"))
     problems: list[str] = []
     for m in _INTERNAL_LINK.finditer(body):
         target = _DOCS_DIR / m.group("page")

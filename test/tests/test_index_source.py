@@ -81,6 +81,10 @@ def _git_index_repo(tmp_path: Path, packages: list[dict]) -> Path:
 
 
 def _index_config(project_dir: Path, locator: str) -> None:
+    # `locator` goes into a TOML basic string, so callers passing a local
+    # path must forward-slash it (`Path.as_posix()`): a Windows `str(path)`
+    # embeds backslashes, which are invalid TOML escapes. git clones a
+    # forward-slash path fine on every platform.
     (project_dir / "grimoire.toml").write_text(
         f'[[registries]]\n'
         f'alias = "hub"\n'
@@ -172,7 +176,7 @@ def test_search_git_index_lists_packages(grim_at, project_dir: Path, tmp_path: P
             _package("git-bundle", "bundle", "gitlab.example/acme/bundles/git-bundle", "Bundle pointer"),
         ],
     )
-    _index_config(project_dir, str(repo))
+    _index_config(project_dir, repo.as_posix())
 
     rows = _search_rows(grim_at(project_dir))
     repos = [r.get("repo", "") for r in rows]
@@ -186,7 +190,7 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
         tmp_path,
         [_package("first", "skill", "ghcr.io/acme/skills/first", "First")],
     )
-    _index_config(project_dir, str(repo))
+    _index_config(project_dir, repo.as_posix())
     runner = grim_at(project_dir)
 
     assert any("first" in r.get("repo", "") for r in _search_rows(runner))
