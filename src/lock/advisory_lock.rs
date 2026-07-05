@@ -116,8 +116,14 @@ impl AdvisoryFileLock {
                 Err(e) => return Err(e),
             };
 
+            // fs4's `try_lock_exclusive` returns `Ok(true)` on acquire,
+            // `Ok(false)` on contention (another writer holds it), and `Err`
+            // only for a genuine I/O fault. The tri-state is what makes this
+            // correct on Windows, where `LockFileEx` reports contention as
+            // `ERROR_LOCK_VIOLATION` (os error 33) — fs4 folds that into
+            // `Ok(false)` rather than leaking the raw errno.
             match FileExt::try_lock_exclusive(&file) {
-                Ok(()) => {
+                Ok(true) => {
                     if sidecar_still_current(&file, &sidecar) {
                         return Ok(Self { file, sidecar });
                     }
@@ -125,7 +131,7 @@ impl AdvisoryFileLock {
                     // open and lock) — discard and retry on the live path.
                     continue;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(false) => {
                     return Err(LockError::new(target_path, LockErrorKind::Locked));
                 }
                 Err(e) => last_io = Some(e),

@@ -35,7 +35,7 @@ sha2 = "0.10"
 hex = "0.4"
 toml = "0.8"
 tempfile = "3"
-fs4 = "0.9"
+fs4 = "0.13"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
 # Already in-tree transitively via oci-client; used directly for the
