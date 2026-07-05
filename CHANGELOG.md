@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-07-05
+
+### Added
+
+- Install added artifact by default, --no-install to opt out *(add)*
+
+### Fixed
+
+- Include MCP in direct-declared set for via-bundle badge *(tui)*
+- Even split for stacked detail pane *(tui)*
+- Bundle CA roots so TLS works without a system trust store *(oci)*
+- Add missing claude_user_dir to macOS test AnchorRoots *(install)*
+- Canonicalize tempdir root in uninstall path assertions *(test)*
+- Classify Windows lock contention as TempFail *(lock)*
+- Make acceptance suite pass on Windows *(test)*
+
 ## [0.8.1] - 2026-07-03
 
 ### Added
@@ -310,6 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.8.2]: https://github.com/grimoire-rs/grimoire/compare/v0.8.1..v0.8.2
 [0.8.1]: https://github.com/grimoire-rs/grimoire/compare/v0.8.0..v0.8.1
 [0.8.0]: https://github.com/grimoire-rs/grimoire/compare/v0.7.0..v0.8.0
 [0.7.0]: https://github.com/grimoire-rs/grimoire/compare/v0.6.2..v0.7.0
