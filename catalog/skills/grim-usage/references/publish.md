@@ -117,6 +117,14 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   `repository` is used verbatim (name not appended) and wins over the prefix.
   Needed for registries that require a group/project path, e.g. GitLab.
   Full schema and charset rules: [Batch publishing with a manifest][batch-publish].
+- **CLI-enforced prefix.** A `--registry` value carrying a path after the
+  host (`--registry registry.example/group/project`) splits at the first
+  `/`: the host overrides the manifest `registry`, and the rest is an
+  enforced namespace prepended to every entry's resolved repository —
+  including a verbatim per-entry `repository`. The manifest `registry`
+  field itself stays a plain host (a path inside it exits 65). Lets a CI
+  pipeline force a publish run under a namespace without editing the
+  manifest.
 
 Common flags — confirm current spelling with `grim publish --help`:
 

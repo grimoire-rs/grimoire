@@ -976,6 +976,65 @@ def test_publish_per_entry_repository(
         tag_digest(f"{prefix}-ignored/prefix/{skill_name}", "0.1.0")
 
 
+def test_publish_registry_flag_prefix_nests_all_entries(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `--registry` value carrying a path after the host enforces the path
+    as an outer namespace: the manifest `repository_prefix` composes UNDER
+    it, and a verbatim per-entry `repository` nests too."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_a = f"{prefix}-a"
+    skill_b = f"{prefix}-b"
+    _make_skill_source(project_dir, skill_a)
+    _make_skill_source(project_dir, skill_b)
+    repo_prefix = f"{prefix}-ns"
+    verbatim_repo = f"{prefix}-custom/path"
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "ignored.example"\n'
+        f'repository_prefix = "{repo_prefix}"\n\n'
+        f"[skills.{skill_a}]\n"
+        f'version = "0.1.0"\n\n'
+        f"[skills.{skill_b}]\n"
+        f'version = "0.1.0"\n'
+        f'repository = "{verbatim_repo}"\n'
+    )
+
+    cli_prefix = f"{prefix}-enforced/ns"
+    rows = runner.json(
+        "publish",
+        "--registry",
+        f"{registry}/{cli_prefix}",
+        "--manifest",
+        str(manifest_path),
+    )["entries"]
+    assert len(rows) == 2, f"expected 2 rows, got {rows}"
+    row_a, row_b = rows  # alpha within kind: {prefix}-a before {prefix}-b
+
+    # Manifest repository_prefix composes UNDER the CLI prefix.
+    nested_a = f"{cli_prefix}/{repo_prefix}/{skill_a}"
+    assert row_a["ref"] == f"{registry}/{nested_a}:0.1.0", (
+        f"manifest prefix must nest under the CLI prefix, got {row_a['ref']!r}"
+    )
+    assert tag_digest(nested_a, "0.1.0") == row_a["digest"], (
+        "CLI-prefixed repo must resolve to the published manifest digest"
+    )
+
+    # A verbatim per-entry repository nests under the CLI prefix too.
+    nested_b = f"{cli_prefix}/{verbatim_repo}"
+    assert row_b["ref"] == f"{registry}/{nested_b}:0.1.0", (
+        f"per-entry repository must nest under the CLI prefix, got {row_b['ref']!r}"
+    )
+
+    # Nothing escaped the enforced namespace.
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(f"{repo_prefix}/{skill_a}", "0.1.0")
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(verbatim_repo, "0.1.0")
+
+
 def test_publish_wire_shape_empty_config(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

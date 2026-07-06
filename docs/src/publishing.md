@@ -425,6 +425,8 @@ pin = true                         # optional, bundle entries only; default fals
 
 The `registry` value is a plain host (e.g. `ghcr.io`, `localhost:5000`), not a
 full reference. All entries in the manifest publish to the same registry.
+Only the `--registry` *flag* may carry a repository prefix after the host —
+see [Repository namespace](#batch-publish-namespace).
 
 Entry names must start with a character in `[a-z0-9]` and contain only
 `[a-z0-9._-]` in the remainder. Uppercase letters, slashes, and `..`
@@ -475,6 +477,29 @@ Resolution precedence per entry (highest first):
 2. manifest `repository_prefix` → `{prefix}/{name}`
 3. default → `{kind.subdir()}/{name}` (unchanged backward-compatible behavior)
 
+**CLI-enforced prefix** — a third, outer layer set per run rather than in
+the manifest. When the global `--registry` flag value carries a path after
+the host (`--registry registry.gitlab.com/durzn/hearth`), the first `/`
+splits it: the host overrides the manifest `registry`, and the rest becomes
+an enforced namespace prepended to *every* entry's resolved repository —
+whichever branch above produced it, including a verbatim per-entry
+`repository`:
+
+```console
+$ grim publish --registry registry.gitlab.com/staging
+# manifest repository_prefix = "hearth/skill", skill hearth
+#   → registry.gitlab.com/staging/hearth/skill/hearth
+# per-entry repository = "custom/path"
+#   → registry.gitlab.com/staging/custom/path
+# neither field, skill bar
+#   → registry.gitlab.com/staging/skills/bar
+```
+
+This lets a CI pipeline force a whole publish run under a namespace (a
+staging area, a GitLab group/project) without editing the manifest. The
+manifest `registry` field itself stays a plain host — a path inside it is
+still rejected (exit 65).
+
 ```toml
 #:schema https://grimoire.rs/schemas/grim-publish.schema.json
 registry = "registry.gitlab.com"
@@ -494,7 +519,8 @@ The reporter's working example: registry `registry.gitlab.com`, prefix
 `durzn-technology/hearth/skill`, skill `hearth` → resolves to
 `registry.gitlab.com/durzn-technology/hearth/skill/hearth`.
 
-**Charset rules** — each `/`-separated segment of both fields must match
+**Charset rules** — each `/`-separated segment of both fields (and of the
+`--registry` path portion) must match
 the OCI name grammar: runs of `[a-z0-9]` joined by a single `.` or `_`, a
 double `__`, or a run of `-`, with no leading, trailing, or doubled
 separator. A leading or trailing `/`, empty `//` segments, `.` or `..`
@@ -554,7 +580,7 @@ as a usage error.
 | `--force` | Move existing exact-version tags instead of skipping them. Cannot be combined with `--tag`. |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--tag <tag>` | Override the published tag with a movable channel tag (e.g. `canary`). Must be non-semver — semver values exit 65, keeping all semver releases in the manifest where the repo can track them. A channel tag always moves: re-publishing with `--tag` overwrites the existing tag without skipping and without `--force`. |
-| `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
+| `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
 | `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 

@@ -153,7 +153,11 @@ pub struct PublishEntrySpec {
 #[serde(deny_unknown_fields)]
 pub struct PublishManifest {
     /// The OCI registry host to publish to (e.g. `registry.example`). May be
-    /// overridden by the `--registry` flag.
+    /// overridden by the `--registry` flag, whose value may also carry an
+    /// enforced repository prefix after the host
+    /// (`--registry registry.example/group/project`) — this field itself
+    /// stays a plain host (namespace in the manifest belongs to
+    /// `repository_prefix`).
     pub registry: String,
 
     /// Optional repository path prefix applied to every entry that does not
@@ -336,8 +340,11 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     // (skip_existing = !force), fail-fast into the report.
 
     let manifest = load_manifest(&args.manifest)?;
-    let registry = resolve_publish_registry(ctx, &manifest.registry);
+    let (registry, cli_prefix) = resolve_publish_registry(ctx, &manifest.registry);
     validate_registry_value(&registry, &args.manifest)?;
+    if let Some(prefix) = cli_prefix.as_deref() {
+        validate_repository_path(prefix, "--registry prefix", &args.manifest)?;
+    }
 
     let manifest_dir = args
         .manifest
@@ -359,7 +366,14 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         args.tag.as_deref(),
     )?;
 
-    let entries = plan_entries(&manifest, &manifest_dir, &registry, &args.only, args.tag.as_deref());
+    let entries = plan_entries(
+        &manifest,
+        &manifest_dir,
+        &registry,
+        cli_prefix.as_deref(),
+        &args.only,
+        args.tag.as_deref(),
+    );
 
     // Dry-run preview only: flag entries whose per-entry `repository` is used
     // verbatim and does not end in the entry name (the name was not appended).
@@ -633,10 +647,23 @@ pub(crate) fn resolve_force_skip(tag: Option<&str>, force: bool) -> (bool, bool)
 /// config tiers of the usual precedence chain do **not** apply here —
 /// the manifest value is an explicit input, like a fully-qualified
 /// reference passed to `grim release`.
-fn resolve_publish_registry(ctx: &Context, manifest_registry: &str) -> String {
+fn resolve_publish_registry(ctx: &Context, manifest_registry: &str) -> (String, Option<String>) {
     // Only the flag tier (not env, not config) overrides the manifest's
     // explicit registry value. Mirror how release.rs reads just the flag tier.
-    ctx.registry_flag().unwrap_or(manifest_registry).to_string()
+    //
+    // The flag value alone may carry a repository prefix after the host
+    // (`--registry registry.example/group/project`): the first `/` splits
+    // host from an enforced prefix that every planned entry is nested
+    // under. The manifest `registry` stays a plain host — a path in it is
+    // still rejected by `validate_registry_value` (namespace in the
+    // manifest belongs to `repository_prefix`).
+    match ctx.registry_flag() {
+        Some(flag) => match flag.split_once('/') {
+            Some((host, prefix)) => (host.to_string(), Some(prefix.to_string())),
+            None => (flag.to_string(), None),
+        },
+        None => (manifest_registry.to_string(), None),
+    }
 }
 
 /// Load and deserialize the publish manifest from `path`, enforcing the
@@ -949,15 +976,30 @@ fn resolve_source_path(
 /// 3. default → `{kind.subdir()}/{name}` (today's behavior, unchanged when
 ///    neither override is set).
 ///
-/// Both override values are charset-validated up front by
+/// `cli_prefix` (the path portion of a `--registry host/prefix` flag) is an
+/// enforced outer namespace: whichever branch above resolves, the result is
+/// nested under it as `{cli_prefix}/{repo}` — including a verbatim per-entry
+/// `repository`.
+///
+/// Both override values and the CLI prefix are charset-validated up front by
 /// [`validate_repository_path`]; `name` is gated by [`validate_entry_name`].
-fn entry_repository(name: &str, kind: ArtifactKind, spec: &PublishEntrySpec, prefix: Option<&str>) -> String {
-    if let Some(repo) = spec.repository.as_deref() {
+fn entry_repository(
+    name: &str,
+    kind: ArtifactKind,
+    spec: &PublishEntrySpec,
+    prefix: Option<&str>,
+    cli_prefix: Option<&str>,
+) -> String {
+    let repo = if let Some(repo) = spec.repository.as_deref() {
         repo.to_string()
     } else if let Some(prefix) = prefix {
         format!("{prefix}/{name}")
     } else {
         format!("{}/{name}", kind.subdir())
+    };
+    match cli_prefix {
+        Some(p) => format!("{p}/{repo}"),
+        None => repo,
     }
 }
 
@@ -978,11 +1020,14 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
 /// kind. When `--only` is non-empty only matching entries are included.
 /// When `--tag` is set it replaces the version tag for every entry.
 /// The `registry` parameter (already resolved against `--registry` flag
-/// precedence) is used to construct fully-qualified OCI references.
+/// precedence) is used to construct fully-qualified OCI references;
+/// `cli_prefix` (the path portion of a `--registry host/prefix` flag)
+/// nests every entry's repository under an enforced namespace.
 fn plan_entries(
     manifest: &PublishManifest,
     manifest_dir: &std::path::Path,
     registry: &str,
+    cli_prefix: Option<&str>,
     only: &[String],
     tag: Option<&str>,
 ) -> Vec<PlannedEntry> {
@@ -1000,7 +1045,13 @@ fn plan_entries(
                 }
                 let src = resolve_source_path(name, $kind, spec, manifest_dir);
                 let publish_tag = tag.unwrap_or(&spec.version);
-                let repo = entry_repository(name, $kind, spec, manifest.repository_prefix.as_deref());
+                let repo = entry_repository(
+                    name,
+                    $kind,
+                    spec,
+                    manifest.repository_prefix.as_deref(),
+                    cli_prefix,
+                );
                 let reference = format!("{registry}/{repo}:{publish_tag}");
                 // Only a verbatim per-entry `repository` can drop the name; the
                 // prefix and default branches always append it.
@@ -1479,12 +1530,12 @@ mod tests {
         // No override → today's behavior: `{kind-subdir}/{name}` (backward compat).
         let s = entry_spec("1.0.0", None);
         assert_eq!(
-            entry_repository("hearth", ArtifactKind::Skill, &s, None),
+            entry_repository("hearth", ArtifactKind::Skill, &s, None, None),
             "skills/hearth"
         );
-        assert_eq!(entry_repository("r", ArtifactKind::Rule, &s, None), "rules/r");
-        assert_eq!(entry_repository("a", ArtifactKind::Agent, &s, None), "agents/a");
-        assert_eq!(entry_repository("b", ArtifactKind::Bundle, &s, None), "bundles/b");
+        assert_eq!(entry_repository("r", ArtifactKind::Rule, &s, None, None), "rules/r");
+        assert_eq!(entry_repository("a", ArtifactKind::Agent, &s, None, None), "agents/a");
+        assert_eq!(entry_repository("b", ArtifactKind::Bundle, &s, None, None), "bundles/b");
     }
 
     #[test]
@@ -1492,8 +1543,47 @@ mod tests {
         // The manifest prefix replaces `{kind-subdir}`, appending the name.
         let s = entry_spec("1.0.0", None);
         assert_eq!(
-            entry_repository("hearth", ArtifactKind::Skill, &s, Some("durzn-technology/hearth/skill")),
+            entry_repository(
+                "hearth",
+                ArtifactKind::Skill,
+                &s,
+                Some("durzn-technology/hearth/skill"),
+                None
+            ),
             "durzn-technology/hearth/skill/hearth"
+        );
+    }
+
+    #[test]
+    fn entry_repository_cli_prefix_prepends_to_every_branch() {
+        // The --registry path portion is an enforced outer namespace: it
+        // nests the default, the manifest prefix, AND a verbatim per-entry
+        // repository.
+        let plain = entry_spec("1.0.0", None);
+        assert_eq!(
+            entry_repository("hearth", ArtifactKind::Skill, &plain, None, Some("staging")),
+            "staging/skills/hearth"
+        );
+        assert_eq!(
+            entry_repository(
+                "hearth",
+                ArtifactKind::Skill,
+                &plain,
+                Some("hearth/skill"),
+                Some("staging")
+            ),
+            "staging/hearth/skill/hearth"
+        );
+        let verbatim = entry_spec("1.0.0", Some("custom/path"));
+        assert_eq!(
+            entry_repository(
+                "hearth",
+                ArtifactKind::Skill,
+                &verbatim,
+                Some("ignored"),
+                Some("staging")
+            ),
+            "staging/custom/path"
         );
     }
 
@@ -1503,7 +1593,7 @@ mod tests {
         // (the name is NOT appended — mirrors `grim release`).
         let s = entry_spec("1.0.0", Some("durzn-technology/hearth/skill/hearth"));
         assert_eq!(
-            entry_repository("hearth", ArtifactKind::Skill, &s, Some("ignored/prefix")),
+            entry_repository("hearth", ArtifactKind::Skill, &s, Some("ignored/prefix"), None),
             "durzn-technology/hearth/skill/hearth"
         );
     }
@@ -1623,7 +1713,7 @@ mod tests {
         let mut manifest: PublishManifest =
             toml::from_str("registry = \"registry.gitlab.com\"\n\n[skills.hearth]\nversion = \"0.1.0\"\n").unwrap();
         manifest.repository_prefix = Some("durzn-technology/hearth/skill".to_string());
-        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", None, &[], None);
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].reference,
@@ -1646,7 +1736,7 @@ mod tests {
              [skills.hearth]\nversion = \"0.1.0\"\nrepository = \"durzn-technology/hearth/skill/hearth\"\n",
         )
         .unwrap();
-        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", None, &[], None);
         assert_eq!(
             entries[0].reference,
             "registry.gitlab.com/durzn-technology/hearth/skill/hearth:0.1.0"
@@ -1672,12 +1762,41 @@ mod tests {
              [skills.hearth]\nversion = \"0.1.0\"\nrepository = \"durzn-technology/hearth/skill\"\n",
         )
         .unwrap();
-        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", None, &[], None);
         assert_eq!(
             entries[0].reference,
             "registry.gitlab.com/durzn-technology/hearth/skill:0.1.0"
         );
         assert!(entries[0].name_not_appended);
+    }
+
+    #[test]
+    fn plan_entries_cli_prefix_nests_all_branches() {
+        // The --registry path portion nests every resolution branch: the
+        // manifest prefix composes UNDER it, and a verbatim per-entry
+        // repository is nested too (enforced namespace).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(
+            &dir.join("skills/hearth/SKILL.md"),
+            "---\nname: hearth\ndescription: d.\n---\n",
+        );
+        write(&dir.join("rules/lore.md"), "---\npaths: ['**/*.rs']\n---\n# L\n");
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"registry.gitlab.com\"\nrepository_prefix = \"hearth/skill\"\n\n\
+             [skills.hearth]\nversion = \"0.1.0\"\n\n\
+             [rules.lore]\nversion = \"0.1.0\"\nrepository = \"custom/path\"\n",
+        )
+        .unwrap();
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", Some("staging"), &[], None);
+        assert_eq!(
+            entries[0].reference, "registry.gitlab.com/staging/hearth/skill/hearth:0.1.0",
+            "manifest prefix must compose under the CLI prefix"
+        );
+        assert_eq!(
+            entries[1].reference, "registry.gitlab.com/staging/custom/path:0.1.0",
+            "verbatim per-entry repository must nest under the CLI prefix"
+        );
     }
 
     // ── validate_manifest: unknown --only name rejected ───────────────────
@@ -2033,7 +2152,7 @@ mod tests {
         }
 
         let manifest2: PublishManifest = toml::from_str(toml).unwrap();
-        let entries = plan_entries(&manifest2, dir2, "localhost:5000", &[], None);
+        let entries = plan_entries(&manifest2, dir2, "localhost:5000", None, &[], None);
 
         // Verify ordering: skills first (alpha within), then rules, agents, bundles
         let kinds: Vec<crate::oci::ArtifactKind> = entries.iter().map(|e| e.kind).collect();
@@ -2086,7 +2205,7 @@ mod tests {
     fn plan_entries_builds_conventional_paths_relative_to_manifest_dir() {
         // ADR D2: skills/{name}/, rules/{name}.md, agents/{name}.md, bundles/{name}.toml
         let (manifest, dir, _tmp) = make_manifest_dir();
-        let entries = plan_entries(&manifest, &dir, "localhost:5000", &[], None);
+        let entries = plan_entries(&manifest, &dir, "localhost:5000", None, &[], None);
 
         let by_name: std::collections::HashMap<&str, &PlannedEntry> =
             entries.iter().map(|e| (e.name.as_str(), e)).collect();
@@ -2123,7 +2242,7 @@ mod tests {
             "registry = \"r.example\"\n\n[rules.custom-rule]\nversion = \"0.2.0\"\npath = \"shared/custom-rule.md\"\n",
         )
         .unwrap();
-        let entries = plan_entries(&manifest, dir, "r.example", &[], None);
+        let entries = plan_entries(&manifest, dir, "r.example", None, &[], None);
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].path,
@@ -2138,7 +2257,7 @@ mod tests {
     fn plan_entries_builds_correct_oci_reference_format() {
         // Reference format: {registry}/{skills|rules|agents|bundles}/{name}:{version}
         let (manifest, dir, _tmp) = make_manifest_dir();
-        let entries = plan_entries(&manifest, &dir, "localhost:5000", &[], None);
+        let entries = plan_entries(&manifest, &dir, "localhost:5000", None, &[], None);
 
         let by_name: std::collections::HashMap<&str, &PlannedEntry> =
             entries.iter().map(|e| (e.name.as_str(), e)).collect();
@@ -2165,7 +2284,7 @@ mod tests {
     fn plan_entries_tag_override_replaces_version_in_reference() {
         // --tag canary replaces the version tag in the OCI reference (ADR D1)
         let (manifest, dir, _tmp) = make_manifest_dir();
-        let entries = plan_entries(&manifest, &dir, "localhost:5000", &[], Some("canary"));
+        let entries = plan_entries(&manifest, &dir, "localhost:5000", None, &[], Some("canary"));
 
         for entry in &entries {
             assert!(
@@ -2182,7 +2301,7 @@ mod tests {
     fn plan_entries_only_filter_limits_entries() {
         // --only filters the entry list to just the named entries (ADR D1)
         let (manifest, dir, _tmp) = make_manifest_dir();
-        let entries = plan_entries(&manifest, &dir, "localhost:5000", &["my-skill".to_string()], None);
+        let entries = plan_entries(&manifest, &dir, "localhost:5000", None, &["my-skill".to_string()], None);
 
         assert_eq!(entries.len(), 1, "--only my-skill must yield exactly 1 entry");
         assert_eq!(entries[0].name, "my-skill");
@@ -2197,6 +2316,7 @@ mod tests {
             &manifest,
             &dir,
             "localhost:5000",
+            None,
             &["my-rule".to_string(), "my-skill".to_string()],
             None,
         );
@@ -2219,7 +2339,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         assert_eq!(
             resolve_publish_registry(&ctx, "manifest.example"),
-            "manifest.example",
+            ("manifest.example".to_string(), None),
             "manifest registry must be used when --registry is absent"
         );
     }
@@ -2230,8 +2350,34 @@ mod tests {
         let ctx = Context::new(&opts(Some("flag.example")));
         assert_eq!(
             resolve_publish_registry(&ctx, "manifest.example"),
-            "flag.example",
+            ("flag.example".to_string(), None),
             "--registry flag must win over manifest.registry"
+        );
+    }
+
+    #[test]
+    fn resolve_publish_registry_flag_path_splits_into_host_and_prefix() {
+        // A --registry value carrying a path splits at the FIRST '/':
+        // host + enforced repository prefix (which may itself be nested).
+        let ctx = Context::new(&opts(Some("registry.gitlab.com/durzn/hearth")));
+        assert_eq!(
+            resolve_publish_registry(&ctx, "manifest.example"),
+            ("registry.gitlab.com".to_string(), Some("durzn/hearth".to_string())),
+            "--registry host/prefix must split into host + prefix"
+        );
+    }
+
+    #[test]
+    fn resolve_publish_registry_manifest_registry_is_never_split() {
+        // Only the flag tier may carry a prefix; a manifest registry with a
+        // path passes through unsplit so validate_registry_value still
+        // rejects it with the plain-host message (contract unchanged).
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        assert_eq!(
+            resolve_publish_registry(&ctx, "manifest.example/path"),
+            ("manifest.example/path".to_string(), None),
+            "manifest registry must pass through unsplit"
         );
     }
 
@@ -2288,7 +2434,7 @@ mod tests {
             .expect("manifest must be valid before batch");
 
         let registry = "localhost:5000";
-        let entries = plan_entries(&manifest, dir, registry, &[], None);
+        let entries = plan_entries(&manifest, dir, registry, None, &[], None);
         assert_eq!(entries.len(), 3, "2 skills + 1 rule = 3 entries");
 
         // Kind order: skills before rules (ADR D4)
@@ -2316,7 +2462,7 @@ mod tests {
         .unwrap();
 
         validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).expect("valid manifest");
-        let entries = plan_entries(&manifest, dir, "localhost:5000", &[], None);
+        let entries = plan_entries(&manifest, dir, "localhost:5000", None, &[], None);
 
         assert_eq!(entries.len(), 2);
 
@@ -2340,7 +2486,7 @@ mod tests {
             toml::from_str("registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n").unwrap();
 
         validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).expect("valid manifest");
-        let entries = plan_entries(&manifest, dir, "localhost:5000", &[], None);
+        let entries = plan_entries(&manifest, dir, "localhost:5000", None, &[], None);
         assert_eq!(entries.len(), 1);
 
         assert_eq!(entries[0].reference, "localhost:5000/skills/test-skill:0.1.0");
@@ -2656,6 +2802,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_registry_flag_prefix_nests_pushed_repository() {
+        // A --registry value carrying a path (`host/prefix`) enforces the
+        // prefix as an outer namespace on every pushed repository.
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"manifest.example\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access_and_registry(
+            tmp.path().to_path_buf(),
+            registry,
+            "localhost:5000/enforced/ns".to_string(),
+        );
+        let args = make_publish_args(manifest_path, vec![], None, false, false);
+        let (report, exit) = run(&ctx, &args)
+            .await
+            .expect("run with prefixed flag registry must succeed");
+        assert_eq!(exit, crate::cli::exit_code::ExitCode::Success);
+        assert_eq!(
+            report.entries()[0].reference,
+            "localhost:5000/enforced/ns/skills/test-skill:0.1.0",
+            "pushed reference must nest under the --registry prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_registry_flag_bad_prefix_is_data_error() {
+        // The path portion of --registry goes through the canonical
+        // repository-path gate: an invalid prefix aborts before any push (65).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"manifest.example\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        for flag in ["localhost:5000/", "localhost:5000/Bad/Prefix", "localhost:5000/p//q"] {
+            let ctx = Context::with_access_and_registry(
+                tmp.path().to_path_buf(),
+                crate::oci::access::memory_registry::MemoryRegistry::new(),
+                flag.to_string(),
+            );
+            let args = make_publish_args(manifest_path.clone(), vec![], None, false, false);
+            let err = run(&ctx, &args).await.expect_err("bad --registry prefix must fail");
+            assert_eq!(
+                classify_error(&err),
+                ExitCode::DataError,
+                "bad prefix '{flag}' must classify as DataError"
+            );
+        }
+    }
+
     // ── F6: --only foo with same name in [skills] and [rules] → 2 entries ─
 
     #[test]
@@ -2675,7 +2887,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = plan_entries(&manifest, dir, "localhost:5000", &["foo".to_string()], None);
+        let entries = plan_entries(&manifest, dir, "localhost:5000", None, &["foo".to_string()], None);
         assert_eq!(
             entries.len(),
             2,
