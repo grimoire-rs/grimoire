@@ -75,8 +75,17 @@ tempfile = "3"
 # write/erase path login/logout need). Pulled in via the
 # `external/docker_credential` submodule. Only Grimoire depends on this
 # crate (oci-client 0.16 does not), so the patch is self-contained.
+#
+# The `oci-client` fork carries the empty-system-trust-store fix: upstream's
+# `Client::default()` builds a rootless `reqwest::Client::default()` that panics
+# on a host with no `ca-certificates`, and `Client::try_from`'s `..Default`
+# tail constructs that default even on the seeded happy path — so seeding
+# `extra_root_certificates` alone (see src/tls.rs) cannot prevent the crash.
+# The fork seeds the default client's roots at the single shared site. Pulled
+# in via the `external/rust-oci-client` submodule (branch `ocx/integration`).
 [patch.crates-io]
 docker_credential = { path = "external/docker_credential" }
+oci-client = { path = "external/rust-oci-client" }
 
 # The profile that 'dist' will build with
 [profile.dist]

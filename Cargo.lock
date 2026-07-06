@@ -1401,8 +1401,6 @@ dependencies = [
 [[package]]
 name = "oci-client"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5261a7fb43d9c53b8e63e6d5e86860719dad253d015d022066c72d585125aed8"
 dependencies = [
  "bytes",
  "chrono",
@@ -1421,15 +1419,17 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "unicase",
+ "webpki-root-certs",
 ]
 
 [[package]]
 name = "oci-spec"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8445a2631507cec628a15fdd6154b54a3ab3f20ed4fe9d73a3b8b7a4e1ba03a"
+checksum = "3df6f876ad774d6a676f7e968f5c3edacc32f90e65fe680a8b686235396556fb"
 dependencies = [
  "const_format",
  "derive_builder",
