@@ -216,11 +216,24 @@ impl BundleMemberChecker {
             };
 
             let msg = match crate::resolve::resolver::fetch_bundle_members(&bundle_ref, &id, &access, &options).await {
-                Ok((members, _pinned)) => BundleMembersMsg::Ready {
-                    bundle_repo: bundle_repo.clone(),
-                    members,
-                    generation,
-                },
+                Ok((mut members, _pinned)) => {
+                    // Resolve `./`/`../`-relative member ids against the bundle
+                    // identifier the layer came from (issue #31) so the member
+                    // tree shows real repositories. An unresolvable id keeps
+                    // its raw string — member rendering stays fail-soft.
+                    for member in &mut members {
+                        if let Ok(resolved) =
+                            crate::oci::member_ref::MemberRef::parse(&member.id).and_then(|r| r.resolve(&id))
+                        {
+                            member.id = resolved.to_string();
+                        }
+                    }
+                    BundleMembersMsg::Ready {
+                        bundle_repo: bundle_repo.clone(),
+                        members,
+                        generation,
+                    }
+                }
                 Err(e) => BundleMembersMsg::Failed {
                     bundle_repo: bundle_repo.clone(),
                     // Use full error chain (format!("{e:#}")) so the root cause

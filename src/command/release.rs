@@ -206,11 +206,30 @@ async fn release_bundle(
         return Ok((report, ExitCode::Success));
     }
 
+    // Every member — absolute or `./`/`../`-relative — must resolve against
+    // this release target (issue #31): an escaping relative ref fails here
+    // (65), at publish time, not at some consumer's install. A bundle that
+    // would only resolve when mirrored *deeper* than its own publish target
+    // is broken at its published location, so rejecting it is correct.
+    for member in &members {
+        crate::oci::member_ref::MemberRef::parse(&member.id)
+            .and_then(|r| r.resolve(repo))
+            .map_err(|e| {
+                member_error(
+                    member,
+                    ResolveErrorKind::BundleInvalid(format!("member identifier '{}' does not resolve: {e}", member.id)),
+                )
+            })
+            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    }
+
     // `--pin`: resolve every floating member to a digest and bake it in, so
     // the published bundle is fully reproducible regardless of later tag
     // movement (the strong guarantee air-gapped / tunneled consumers want).
+    // Pinning deliberately freezes a relative member to its absolute,
+    // digest-pinned form — reproducibility forfeits late binding.
     if args.pin {
-        super::grim(pin_members(&access, &mut members).await)?;
+        super::grim(pin_members(&access, &mut members, repo).await)?;
     }
 
     let manifest = BundleManifest::new(members);
@@ -327,17 +346,24 @@ async fn release_mcp(
 
 /// Resolve every floating member to a digest in place. A member already
 /// pinned is left untouched. Failures carry the member as context.
+///
+/// A `./`/`../`-relative member resolves against the release target `repo`
+/// first (issue #31) — `--pin` freezes it to the absolute, digest-pinned
+/// form (reproducibility forfeits late binding, documented).
 async fn pin_members(
     access: &Arc<dyn OciAccess>,
     members: &mut [crate::oci::bundle::BundleMember],
+    repo: &Identifier,
 ) -> Result<(), ResolveError> {
     for member in members.iter_mut() {
-        let mid = Identifier::parse(&member.id).map_err(|_| {
-            member_error(
-                member,
-                ResolveErrorKind::BundleInvalid(format!("invalid member identifier '{}'", member.id)),
-            )
-        })?;
+        let mid = crate::oci::member_ref::MemberRef::parse(&member.id)
+            .and_then(|r| r.resolve(repo))
+            .map_err(|_| {
+                member_error(
+                    member,
+                    ResolveErrorKind::BundleInvalid(format!("invalid member identifier '{}'", member.id)),
+                )
+            })?;
         if mid.digest().is_some() {
             continue;
         }
@@ -631,5 +657,56 @@ mod tests {
             .await
             .expect_err("overwriting a version with different content must refuse");
         assert!(matches!(err.kind, ReleaseErrorKind::TagExists { .. }));
+    }
+
+    /// Issue #31: `--pin` resolves a `../`-relative member against the
+    /// release target, then freezes it to the absolute digest-pinned form.
+    #[tokio::test]
+    async fn pin_members_resolves_relative_against_release_target() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let registry = MemoryRegistry::new();
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        // The member artifact lives one directory up from the bundle repo.
+        let member_repo = Identifier::parse("localhost:5000/acme/skills/x").unwrap();
+        let tar = b"member tar".to_vec();
+        let manifest = manifest_of(&tar);
+        access.push_blob(&member_repo, &tar).await.unwrap();
+        let digest = access.push_manifest(&member_repo, &manifest).await.unwrap();
+        access.put_tag(&member_repo, "0", &digest).await.unwrap();
+
+        let release_target = Identifier::parse("localhost:5000/acme/bundles/tools").unwrap();
+        let mut members = vec![crate::oci::bundle::BundleMember {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "x".to_string(),
+            id: "../skills/x:0".to_string(),
+        }];
+        pin_members(&access, &mut members, &release_target)
+            .await
+            .expect("relative member must resolve then pin");
+        assert_eq!(
+            members[0].id,
+            format!("localhost:5000/acme/skills/x:0@{digest}"),
+            "pin freezes the relative ref to its absolute digest-pinned form"
+        );
+    }
+
+    /// Issue #31: a relative member that escapes the registry root fails at
+    /// release time (before any push), not at some consumer's install.
+    #[tokio::test]
+    async fn pin_members_rejects_escaping_relative_member() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let access: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
+        let release_target = Identifier::parse("localhost:5000/tools").unwrap(); // dir depth 0
+        let mut members = vec![crate::oci::bundle::BundleMember {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "x".to_string(),
+            id: "../skills/x:0".to_string(),
+        }];
+        let err = pin_members(&access, &mut members, &release_target)
+            .await
+            .expect_err("escaping member must fail");
+        assert!(matches!(err.kind, ResolveErrorKind::BundleInvalid(_)), "got {err:?}");
     }
 }

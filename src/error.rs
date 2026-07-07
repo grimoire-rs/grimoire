@@ -133,9 +133,9 @@ fn classify_config(err: &ConfigError) -> ExitCode {
         | ConfigErrorKind::RegistryInvalid { .. }
         | ConfigErrorKind::TreeSeparatorInvalid { .. } => ExitCode::ConfigError,
         ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
-        ConfigErrorKind::ArtifactValueMissingRegistry { .. } | ConfigErrorKind::ArtifactValueInvalid { .. } => {
-            ExitCode::DataError
-        }
+        ConfigErrorKind::ArtifactValueMissingRegistry { .. }
+        | ConfigErrorKind::ArtifactValueInvalid { .. }
+        | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => ExitCode::DataError,
         ConfigErrorKind::ConfigAlreadyExists => ExitCode::UsageError,
         ConfigErrorKind::Io(io) => classify_io(io),
     }

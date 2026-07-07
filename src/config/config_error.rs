@@ -88,6 +88,20 @@ pub enum ConfigErrorKind {
         source: IdentifierError,
     },
 
+    /// A bundle-source member value is a malformed relative reference
+    /// (`./`/`../` form — issue #31): a misplaced dot segment or a grammar
+    /// violation in the remainder. Bundle sources only; `grimoire.toml`
+    /// artifact tables never accept relative values.
+    #[error("artifact '{name}': value '{value}' is not a valid relative member reference")]
+    ArtifactValueRelativeInvalid {
+        name: String,
+        value: String,
+        // Boxed to keep the ConfigError Err-variant small (clippy
+        // result_large_err).
+        #[source]
+        source: Box<crate::oci::member_ref::MemberRefError>,
+    },
+
     /// `grim init` was called where a config already exists. Surfaced so
     /// a hand-edited file is never silently overwritten.
     #[error("config already exists")]

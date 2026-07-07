@@ -5,6 +5,11 @@
 # Members reference the floating major tag (:0 for the 0.x line) so skill
 # patch releases reach consumers via cascade tags + `grim update` without
 # a bundle re-release. Published without --pin for the same reason.
+#
+# Members are deployment-relative (../skills/<name> from the bundle's
+# bundles/ directory): the bundle resolves them against wherever it was
+# actually pulled from, so a mirror or prefix-published copy keeps
+# working (issue #31 dogfood).
 
 summary = "Grimoire first-party starter pack"
 keywords = "grimoire,grim,skills,authoring,ai-config,oci,starter"
@@ -12,6 +17,6 @@ description = "First-party skills: using the grim CLI, vendor-neutral AI-config 
 repository = "https://github.com/grimoire-rs/grimoire"
 
 [skills]
-grim-usage = "ghcr.io/grimoire-rs/skills/grim-usage:0"
-ai-config-authoring = "ghcr.io/grimoire-rs/skills/ai-config-authoring:0"
-grim-authoring = "ghcr.io/grimoire-rs/skills/grim-authoring:0"
+grim-usage = "../skills/grim-usage:0"
+ai-config-authoring = "../skills/ai-config-authoring:0"
+grim-authoring = "../skills/grim-authoring:0"

@@ -336,17 +336,13 @@ async fn expand_bundles(
 
         let bundle_repo = bundle_id.registry_repository();
         let bundle_tag = bundle_provenance_tag(bundle_id);
-        // Snapshot BEFORE the member validation loop consumes the list; a
-        // validation failure aborts the whole resolve, so an invalid list
-        // never reaches the lock.
-        snapshots.push(LockedBundle {
-            name: cfg_name.clone(),
-            repo: bundle_repo.clone(),
-            tag: bundle_tag.clone(),
-            pinned,
-            members: members.clone(),
-        });
 
+        // The lock snapshot stores RESOLVED (absolute) member ids so every
+        // downstream consumer (effective-set mutations, status, TUI lock
+        // path) stays relative-agnostic (issue #31). A validation failure
+        // below aborts the whole resolve before the snapshot is pushed, so
+        // an invalid list never reaches the lock.
+        let mut resolved_members = Vec::with_capacity(members.len());
         for member in members {
             if member.kind == ArtifactKind::Bundle {
                 return Err(ResolveError::new(
@@ -364,15 +360,25 @@ async fn expand_bundles(
                     ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
                 )
             })?;
-            let id = Identifier::parse(&member.id).map_err(|_| {
-                ResolveError::new(
-                    bundle_ref.clone(),
-                    ResolveErrorKind::BundleInvalid(format!(
-                        "member '{}' has an invalid identifier '{}'",
-                        member.name, member.id
-                    )),
-                )
-            })?;
+            // Absolute or deployment-relative (`./`/`../`) member id; a
+            // relative one resolves against the bundle identifier the layer
+            // was actually pulled from (late binding, issue #31).
+            let id = crate::oci::member_ref::MemberRef::parse(&member.id)
+                .and_then(|r| r.resolve(bundle_id))
+                .map_err(|e| {
+                    ResolveError::new(
+                        bundle_ref.clone(),
+                        ResolveErrorKind::BundleInvalid(format!(
+                            "member '{}' has an invalid identifier '{}': {e}",
+                            member.name, member.id
+                        )),
+                    )
+                })?;
+            resolved_members.push(BundleMember {
+                kind: member.kind,
+                name: member.name.clone(),
+                id: id.to_string(),
+            });
             out.push(ExpandedMember {
                 kind: member.kind,
                 name: member.name,
@@ -381,6 +387,13 @@ async fn expand_bundles(
                 bundle_tag: bundle_tag.clone(),
             });
         }
+        snapshots.push(LockedBundle {
+            name: cfg_name.clone(),
+            repo: bundle_repo,
+            tag: bundle_tag,
+            pinned,
+            members: resolved_members,
+        });
     }
     Ok((out, snapshots))
 }
@@ -1339,6 +1352,60 @@ mod tests {
             id: id.clone(),
         };
         (art_ref, id)
+    }
+
+    #[tokio::test]
+    async fn expand_bundles_resolves_relative_members_against_bundle_deployment() {
+        // Issue #31: a `../`-relative member id resolves against the bundle's
+        // own deployed repository directory, and the lock snapshot stores the
+        // RESOLVED absolute id so downstream lock consumers stay
+        // relative-agnostic.
+        let bm = BundleManifest::new(vec![
+            bundle_member(ArtifactKind::Skill, "x", "../skills/x:0"),
+            bundle_member(ArtifactKind::Rule, "r", "./r:1"),
+        ]);
+        let access = make_bundle_access(&bm);
+        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
+            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
+        )
+        .unwrap();
+
+        let (members, snapshots) = expand_bundles(&cfg.set, &access, &fast_options())
+            .await
+            .expect("relative members must resolve");
+
+        let by_name: BTreeMap<&str, String> = members.iter().map(|m| (m.name.as_str(), m.id.to_string())).collect();
+        assert_eq!(by_name["x"], "ghcr.io/acme/skills/x:0", "../ resolves one dir up");
+        assert_eq!(by_name["r"], "ghcr.io/acme/bundles/r:1", "./ resolves to the same dir");
+
+        let snap_ids: Vec<&str> = snapshots[0].members.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            snap_ids.contains(&"ghcr.io/acme/skills/x:0") && snap_ids.contains(&"ghcr.io/acme/bundles/r:1"),
+            "lock snapshot must hold resolved absolute ids, got {snap_ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_bundles_rejects_escaping_relative_member() {
+        // A `..` chain past the registry root is an error, never a clamp.
+        let bm = BundleManifest::new(vec![bundle_member(
+            ArtifactKind::Skill,
+            "x",
+            "../../../skills/x:0", // bundle dir depth is 2 (acme/bundles)
+        )]);
+        let access = make_bundle_access(&bm);
+        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
+            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
+        )
+        .unwrap();
+
+        let err = expand_bundles(&cfg.set, &access, &fast_options())
+            .await
+            .expect_err("escaping member must fail the resolve");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("escapes")),
+            "must be BundleInvalid naming the escape, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -944,3 +944,144 @@ def test_remote_flag_is_removed(grim_at, project_dir: Path) -> None:
     runner = grim_at(project_dir)
     result = runner.run("--remote", "status", check=False)
     assert result.returncode != 0, "the removed --remote flag must be rejected"
+
+
+# ---------------------------------------------------------------------------
+# Deployment-relative member refs (issue #31)
+# ---------------------------------------------------------------------------
+
+
+def test_relative_members_resolve_at_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`../` and `./` member refs resolve against the bundle's own deployed
+    repository directory at lock/install time."""
+    # Members live beside the bundle's directory: <repo>/skills/x and
+    # <repo>/bundles/y, the bundle itself at <repo>/bundles/tools.
+    make_artifact(
+        f"{unique_repo}/skills/x",
+        "skill",
+        {"x/SKILL.md": "---\nname: x\n---\n# x\n"},
+        tag="stable",
+    )
+    make_artifact(
+        f"{unique_repo}/bundles/y",
+        "skill",
+        {"y/SKILL.md": "---\nname: y\n---\n# y\n"},
+        tag="stable",
+    )
+
+    bundle_src = project_dir / "tools.toml"
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\ny = "./y:stable"\n')
+    runner = grim_at(project_dir)
+    runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/bundles/tools:1.0.0")
+
+    consumer = project_dir / "consumer"
+    consumer.mkdir()
+    write_config(consumer, bundles={"tools": f"{REGISTRY_HOST}/{unique_repo}/bundles/tools:1.0.0"})
+    crunner = grim_at(consumer)
+    crunner.run("lock")
+
+    lock = (consumer / "grimoire.lock").read_text()
+    assert f"{REGISTRY_HOST}/{unique_repo}/skills/x" in lock, (
+        f"../skills/x must resolve one directory up from the bundle; lock:\n{lock}"
+    )
+    assert f"{REGISTRY_HOST}/{unique_repo}/bundles/y" in lock, (
+        f"./y must resolve to the bundle's own directory; lock:\n{lock}"
+    )
+
+
+def test_relative_member_escape_fails_release(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `..` chain past the registry root fails the release (65) — at
+    publish time, not at some consumer's install."""
+    bundle_src = project_dir / "tools.toml"
+    # unique_repo has 2 segments; +1 for bundles/ = dir depth 3. Five ../
+    # escape the registry root.
+    bundle_src.write_text('[skills]\nx = "../../../../../skills/x:stable"\n')
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", str(bundle_src), f"{registry}/{unique_repo}/bundles/tools:1.0.0",
+        check=False,
+    )
+    assert result.returncode == 65, (
+        f"escaping relative member must exit 65, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert "escapes" in result.stderr, (
+        f"error must name the escape, got: {result.stderr.strip()}"
+    )
+
+
+def test_relative_bundle_mirrored_prefix(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The late-binding proof: one bundle source released under two prefixes
+    resolves its members under each bundle's own prefix at install."""
+    for prefix, body in (("a", "AAA"), ("b", "BBB")):
+        make_artifact(
+            f"{unique_repo}/{prefix}/skills/x",
+            "skill",
+            {"x/SKILL.md": f"---\nname: x\n---\n# {body}\n"},
+            tag="stable",
+        )
+
+    bundle_src = project_dir / "tools.toml"
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n')
+    runner = grim_at(project_dir)
+    for prefix in ("a", "b"):
+        runner.run(
+            "release", str(bundle_src),
+            f"{registry}/{unique_repo}/{prefix}/bundles/tools:1.0.0",
+        )
+
+    for prefix in ("a", "b"):
+        consumer = project_dir / f"consumer-{prefix}"
+        consumer.mkdir()
+        write_config(
+            consumer,
+            bundles={"tools": f"{REGISTRY_HOST}/{unique_repo}/{prefix}/bundles/tools:1.0.0"},
+        )
+        crunner = grim_at(consumer)
+        crunner.run("lock")
+        lock = (consumer / "grimoire.lock").read_text()
+        assert f"{REGISTRY_HOST}/{unique_repo}/{prefix}/skills/x" in lock, (
+            f"member must follow the {prefix!r} deployment prefix; lock:\n{lock}"
+        )
+        other = "b" if prefix == "a" else "a"
+        assert f"{unique_repo}/{other}/skills/x" not in lock, (
+            f"member must NOT leak the {other!r} prefix; lock:\n{lock}"
+        )
+
+
+def test_release_bundle_pin_freezes_relative_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """--pin resolves a relative member against the release target, then
+    freezes it to the absolute digest-pinned form (late binding forfeited)."""
+    make_artifact(
+        f"{unique_repo}/skills/x",
+        "skill",
+        {"x/SKILL.md": "---\nname: x\n---\n# v1\n"},
+        tag="stable",
+    )
+    digest = tag_digest(f"{unique_repo}/skills/x", "stable")
+
+    bundle_src = project_dir / "tools.toml"
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n')
+    runner = grim_at(project_dir)
+    runner.run(
+        "release", str(bundle_src),
+        f"{registry}/{unique_repo}/bundles/tools:1.0.0", "--pin",
+    )
+
+    consumer = project_dir / "consumer"
+    consumer.mkdir()
+    write_config(consumer, bundles={"tools": f"{REGISTRY_HOST}/{unique_repo}/bundles/tools:1.0.0"})
+    crunner = grim_at(consumer)
+    crunner.run("lock")
+    lock = (consumer / "grimoire.lock").read_text()
+    assert digest in lock, (
+        f"pinned relative member must carry the frozen digest; lock:\n{lock}"
+    )

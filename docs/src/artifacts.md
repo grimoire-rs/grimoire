@@ -339,13 +339,45 @@ Top-level keys and member tables:
 
 Each member entry maps the **config binding name** (the name the member is
 declared under when the bundle is added) to a fully-qualified reference —
-`registry/repo:tag` or `registry/repo@sha256:…`. Floating tags re-resolve
-on `grim update`; digest pins never move
+`registry/repo:tag` or `registry/repo@sha256:…` — or a
+[deployment-relative reference](#bundle-relative-refs). Floating tags
+re-resolve on `grim update`; digest pins never move
 ([floating versus pinned members](./concepts.md#bundle-pinning)).
 
 Limits enforced at parse time: at most 512 members per bundle, and the
 members document is capped at 512 KiB. Nested bundles are invalid — a
 bundle member must be a skill, rule, or agent.
+
+### Deployment-relative members {#bundle-relative-refs}
+
+A bundle authored with fully-qualified members hard-codes one registry: a
+mirror of the bundle — or a publish under an enforced
+[`--registry host/prefix`](./publishing.md#batch-publish-namespace)
+namespace — still points its consumers at the original member locations.
+
+A member value may instead be **relative to the bundle's own deployment**:
+a leading `./` names the directory of the bundle's repository, and each
+leading `../` climbs one directory. The relative form is stored verbatim
+in the published bundle and resolved at install time against wherever the
+bundle was actually pulled from, so one published bundle works unchanged
+under any mirror or namespace:
+
+```toml
+# Published at ghcr.io/acme/bundles/tools — and any mirror of it.
+[skills]
+x = "../skills/x:0"   # → <bundle-registry>/<prefix>/skills/x:0
+y = "./y:1"           # → …/bundles/y:1 (the bundle's own directory)
+```
+
+Relativity is explicit: a bare `skills/x:0` is still rejected as missing
+its registry. `.`/`..` are only valid as the leading run (`./a/../b` is
+an error), and a `../` chain that would climb above the registry root
+fails the release (exit 65) — at publish time, not at a consumer's
+install. Releasing with [`--pin`](./concepts.md#bundle-pinning) resolves
+a relative member against the release target first, then freezes it to
+its absolute digest-pinned form — reproducibility forfeits late binding.
+Bundles carrying relative members require a grim release with this
+feature; an older grim fails such a bundle cleanly as invalid.
 
 ### Example — bundle with all member kinds {#bundle-example}
 

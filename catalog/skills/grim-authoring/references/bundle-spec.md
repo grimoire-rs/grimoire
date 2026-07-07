@@ -48,9 +48,24 @@ rust-style = "registry.example.com/grimoire/rules/rust-style:1"
 reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b..."
 ```
 
-References must be fully qualified — `registry/repo:tag` or
-`registry/repo@sha256:…`; a registry-less ref fails validation. There is
-no `[bundles]` table — nested bundles are invalid.
+References are fully qualified — `registry/repo:tag` or
+`registry/repo@sha256:…` — or **deployment-relative**: a leading `./`
+names the directory of the bundle's own deployed repository, each
+leading `../` climbs one directory, and the ref resolves at install time
+against wherever the bundle was actually pulled from (so a mirrored or
+prefix-published bundle keeps working):
+
+```toml
+[skills]
+x = "../skills/x:0"   # → <bundle-registry>/<prefix>/skills/x:0
+y = "./y:1"           # → …/<bundle-dir>/y:1
+```
+
+Relativity is explicit — a bare registry-less ref (`skills/x:0`) still
+fails validation. `.`/`..` beyond the leading run is an error, and a
+`../` chain past the registry root fails the release (exit 65). `--pin`
+resolves relative members against the release target and freezes them
+absolute. There is no `[bundles]` table — nested bundles are invalid.
 
 ## Floating vs. Pinned
 

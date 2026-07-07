@@ -359,6 +359,15 @@ rust-style = "ghcr.io/acme/rust-style:2"
 code-reviewer = "ghcr.io/acme/code-reviewer:1"
 ```
 
+Members published beside the bundle can use
+[deployment-relative references](./artifacts.md#bundle-relative-refs)
+(`./name:tag`, `../skills/name:tag`) instead of fully-qualified ones —
+they resolve at install time against wherever the bundle was pulled from,
+so the bundle survives mirroring and enforced
+[`--registry host/prefix`](#batch-publish-namespace) namespaces. A
+relative member that would escape the registry root fails the release
+(exit 65).
+
 [`grim build`](./commands.md#build) validates it (a `.toml` path packs as a
 bundle), and [`grim release`](./commands.md#release) pushes it with the same
 cascade tags as any other artifact:
@@ -382,7 +391,10 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 A pinned bundle is reproducible on its own: it always expands to the exact same
 member digests, even on an air-gapped or tunneled network that cannot re-resolve
 a tag. Re-run the release (a cron job tracking `:stable`, say) to roll the
-pinned members forward.
+pinned members forward. A
+[deployment-relative member](./artifacts.md#bundle-relative-refs) is
+resolved against the release target and then pinned absolute —
+reproducibility forfeits its late binding.
 
 ## Batch publishing with a manifest {#batch-publish}
 

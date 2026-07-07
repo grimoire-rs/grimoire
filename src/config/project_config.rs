@@ -21,6 +21,7 @@ use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
+use crate::oci::member_ref::{MemberRef, MemberRefError};
 
 /// A parsed project-scope declaration with its on-disk location.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,12 +378,13 @@ pub struct BundleMetadata {
 /// `summary`/`keywords`/`description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleSource {
-    /// Skill members, name → validated identifier.
-    pub skills: BTreeMap<String, Identifier>,
-    /// Rule members, name → validated identifier.
-    pub rules: BTreeMap<String, Identifier>,
-    /// Agent members, name → validated identifier.
-    pub agents: BTreeMap<String, Identifier>,
+    /// Skill members, name → validated member reference (absolute or
+    /// deployment-relative — issue #31).
+    pub skills: BTreeMap<String, MemberRef>,
+    /// Rule members, name → validated member reference.
+    pub rules: BTreeMap<String, MemberRef>,
+    /// Agent members, name → validated member reference.
+    pub agents: BTreeMap<String, MemberRef>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -426,14 +428,15 @@ struct RawBundleSource {
     deprecated: Option<String>,
 }
 
-/// Parse + validate a bundle source: members through [`parse_artifact_map`],
-/// metadata passed through verbatim.
+/// Parse + validate a bundle source: members through [`parse_member_map`]
+/// (absolute or `./`/`../`-relative — issue #31), metadata passed through
+/// verbatim.
 fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigError> {
     let raw: RawBundleSource =
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
-    let skills = parse_artifact_map(&raw.skills, &path)?;
-    let rules = parse_artifact_map(&raw.rules, &path)?;
-    let agents = parse_artifact_map(&raw.agents, &path)?;
+    let skills = parse_member_map(&raw.skills, &path)?;
+    let rules = parse_member_map(&raw.rules, &path)?;
+    let agents = parse_member_map(&raw.agents, &path)?;
     Ok(BundleSource {
         skills,
         rules,
@@ -485,6 +488,53 @@ fn parse_artifact_map(
                         name: name.clone(),
                         value: value.clone(),
                         source: e,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Validate every bundle-member `(name → value)` entry as a [`MemberRef`]:
+/// a fully-qualified identifier or an explicit `./`/`../` reference
+/// relative to the bundle's deployment (issue #31). Bare entries get
+/// `:latest` injected at this schema boundary, mirroring
+/// [`parse_artifact_map`]. Bundle sources only — `grimoire.toml` artifact
+/// tables keep the strict absolute-only [`parse_artifact_map`].
+fn parse_member_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTreeMap<String, MemberRef>, ConfigError> {
+    let mut out = BTreeMap::new();
+    for (name, value) in raw {
+        match MemberRef::parse(value) {
+            Ok(member) => {
+                out.insert(name.clone(), member.with_default_tag_latest());
+            }
+            Err(MemberRefError::Identifier(e)) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::ArtifactValueMissingRegistry {
+                        name: name.clone(),
+                        value: value.clone(),
+                    },
+                ));
+            }
+            Err(MemberRefError::Identifier(e)) => {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::ArtifactValueInvalid {
+                        name: name.clone(),
+                        value: value.clone(),
+                        source: e,
+                    },
+                ));
+            }
+            Err(e) => {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::ArtifactValueRelativeInvalid {
+                        name: name.clone(),
+                        value: value.clone(),
+                        source: Box::new(e),
                     },
                 ));
             }
@@ -995,6 +1045,52 @@ rust-style = "ghcr.io/acme/rust-style:2"
         assert_eq!(
             src.metadata.repository.as_deref(),
             Some("https://github.com/acme/python-stack")
+        );
+    }
+
+    #[test]
+    fn bundle_source_accepts_relative_members_with_latest_injection() {
+        // Issue #31: explicit ./ and ../ member refs parse in bundle sources;
+        // a bare relative entry gets :latest injected at the schema boundary.
+        let src = BundleSource::from_toml_str(
+            "[skills]\nx = \"../skills/x:0\"\ny = \"./y\"\n\n[rules]\nr = \"ghcr.io/acme/rules/r:1\"\n",
+        )
+        .expect("relative members must parse");
+        assert_eq!(src.skills["x"].to_string(), "../skills/x:0");
+        assert_eq!(src.skills["y"].to_string(), "./y:latest", ":latest injected");
+        assert_eq!(src.rules["r"].to_string(), "ghcr.io/acme/rules/r:1");
+    }
+
+    #[test]
+    fn bundle_source_rejects_bare_and_misplaced_dot_members() {
+        // Bare refs keep the MissingRegistry contract (relativity is explicit).
+        let err = BundleSource::from_toml_str("[skills]\nx = \"skills/x:0\"\n").unwrap_err();
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ArtifactValueMissingRegistry { .. }),
+            "bare ref must stay MissingRegistry, got {:?}",
+            err.kind
+        );
+        // Dot segments beyond the leading run are rejected.
+        let err = BundleSource::from_toml_str("[skills]\nx = \"./a/../b:0\"\n").unwrap_err();
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ArtifactValueRelativeInvalid { .. }),
+            "interior dot segment must be rejected, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn grimoire_toml_artifact_tables_still_reject_relative_values() {
+        // The blanket `.`/`..` defence stays authoritative outside bundle
+        // sources: grimoire.toml declarations never accept relative refs.
+        let err = ProjectConfig::from_toml_str("[skills]\nx = \"./x:0\"\n").unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                ConfigErrorKind::ArtifactValueInvalid { .. } | ConfigErrorKind::ArtifactValueMissingRegistry { .. }
+            ),
+            "grimoire.toml must reject relative values, got {:?}",
+            err.kind
         );
     }
 

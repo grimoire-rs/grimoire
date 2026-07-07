@@ -138,7 +138,9 @@ comes from the consumer's own lock. Publishing with
 [`grim release --pin`](./publishing.md#bundles) instead freezes every floating
 member to a digest at publish time, so the bundle is reproducible on its own —
 the stronger guarantee for air-gapped or tunneled networks that cannot
-re-resolve a tag. See [Publishing](./publishing.md#bundles).
+re-resolve a tag. Pinning also freezes any
+[deployment-relative member](./artifacts.md#bundle-relative-refs) to its
+absolute form. See [Publishing](./publishing.md#bundles).
 
 ## Scopes
 

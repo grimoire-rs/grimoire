@@ -27,7 +27,7 @@ version = "0.2.0"
 repository = "grimoire-rs/skills/ai-config-authoring"
 
 [skills.grim-authoring]
-version = "0.3.0"
+version = "0.4.0"
 repository = "grimoire-rs/skills/grim-authoring"
 
 [mcp.grim]
@@ -35,5 +35,5 @@ version = "0.2.0"
 repository = "grimoire-rs/mcp/grim"
 
 [bundles.grim-essentials]
-version = "0.1.1"
+version = "0.2.0"
 repository = "grimoire-rs/bundles/grim-essentials"
