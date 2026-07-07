@@ -181,11 +181,32 @@ mod tests {
             entry["properties"]["repository"].is_object(),
             "per-entry repository must be a documented property"
         );
-        let entry_required = entry["required"].as_array().expect("entry required is an array");
+        // Since issue #29 the entry `version` is optional too, so the entry
+        // has NO required fields — schemars omits the `required` array
+        // entirely (or, defensively, an array without `repository`/`version`).
+        if let Some(entry_required) = entry.get("required").and_then(|r| r.as_array()) {
+            assert!(
+                !entry_required.iter().any(|r| r == "repository" || r == "version"),
+                "per-entry repository and version must be optional, got: {entry_required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn publish_schema_documents_catalog_wide_version() {
+        // Issue #29: the top-level `version` / `version_prefix` are documented
+        // optional manifest properties; `registry` stays the only required one.
+        let v = parsed(SchemaKind::Publish);
         assert!(
-            !entry_required.iter().any(|r| r == "repository"),
-            "per-entry repository must be optional, got: {entry_required:?}"
+            v["properties"]["version"].is_object(),
+            "top-level version must be a documented manifest property"
         );
+        assert!(
+            v["properties"]["version_prefix"].is_object(),
+            "version_prefix must be a documented manifest property"
+        );
+        let required = v["required"].as_array().expect("required is an array");
+        assert_eq!(required.len(), 1, "only `registry` required, got: {required:?}");
     }
 
     #[test]

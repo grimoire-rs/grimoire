@@ -1072,3 +1072,122 @@ def test_publish_wire_shape_empty_config(
         f"published manifest must carry com.grimoire.kind=skill, "
         f"got {manifest.get('annotations', {})!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests: catalog-wide version ref (issue #29)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_top_level_version_inherited_and_placeholder(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Entries without a version — or with the literal ${version} — inherit
+    the manifest's top-level version; an explicit per-entry version wins."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    rule_name = f"{prefix}-rule"
+    agent_name = f"{prefix}-agent"
+    _make_skill_source(project_dir, skill_name)
+    _make_rule_source(project_dir, rule_name)
+    _make_agent_source(project_dir, agent_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n'
+        f'version = "0.9.0"\n\n'
+        f"[skills.{skill_name}]\n\n"
+        f"[rules.{rule_name}]\n"
+        f'version = "${{version}}"\n\n'
+        f"[agents.{agent_name}]\n"
+        f'version = "0.2.0"\n'
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["entries"]
+    by_ref = {r["ref"]: r for r in rows}
+    assert any(ref.endswith(f"skills/{skill_name}:0.9.0") for ref in by_ref), (
+        f"omitted version must inherit the top-level 0.9.0, got {list(by_ref)}"
+    )
+    assert any(ref.endswith(f"rules/{rule_name}:0.9.0") for ref in by_ref), (
+        f"${{version}} must resolve to the top-level 0.9.0, got {list(by_ref)}"
+    )
+    assert any(ref.endswith(f"agents/{agent_name}:0.2.0") for ref in by_ref), (
+        f"explicit per-entry version must win, got {list(by_ref)}"
+    )
+
+
+def test_publish_cli_version_overrides_and_strips_v_prefix(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """--version wins over the manifest top-level version, and the default
+    'v' prefix is stripped — a CI git tag like v0.2.0 publishes 0.2.0."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n'
+        f'version = "0.1.0"\n\n'
+        f"[skills.{skill_name}]\n"
+    )
+
+    rows = runner.json(
+        "publish", "--manifest", str(manifest_path), "--dry-run", "--version", "v0.2.0"
+    )["entries"]
+    assert rows[0]["ref"].endswith(":0.2.0"), (
+        f"--version v0.2.0 must publish tag 0.2.0, got {rows[0]['reference']}"
+    )
+
+
+def test_publish_custom_version_prefix(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A manifest version_prefix replaces the default 'v' for stripping."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n'
+        f'version = "release-1.2.3"\n'
+        f'version_prefix = "release-"\n\n'
+        f"[skills.{skill_name}]\n"
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["entries"]
+    assert rows[0]["ref"].endswith(":1.2.3"), (
+        f"'release-' prefix must be stripped, got {rows[0]['reference']}"
+    )
+
+
+def test_publish_missing_version_everywhere_exits_65(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An entry without a version and no top-level/--version is a data error
+    (65) naming the entry."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+    )
+
+    result = runner.run(
+        "publish", "--manifest", str(manifest_path), "--dry-run", check=False
+    )
+    assert result.returncode == 65, (
+        f"missing version must exit 65, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert skill_name in result.stderr, (
+        f"error must name the entry, got: {result.stderr.strip()}"
+    )

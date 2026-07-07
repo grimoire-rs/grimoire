@@ -19,7 +19,7 @@ namespace = "grimoire-rs"
 owner_id = 298895348
 
 [skills.grim-usage]
-version = "0.8.2"
+version = "0.9.0"
 repository = "grimoire-rs/skills/grim-usage"
 
 [skills.ai-config-authoring]

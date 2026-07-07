@@ -92,9 +92,12 @@ example:
 
 ```toml
 registry = "ghcr.io"
+version = "0.9.0"    # optional catalog-wide version
 
 [skills.code-review]
-version = "1.2.0"
+version = "1.2.0"    # explicit per-entry version wins
+
+[rules.style]         # no version → inherits 0.9.0 (or `version = "${version}"`)
 
 [bundles.dev-stack]
 version = "0.3.0"
@@ -111,6 +114,13 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   resume from a specific entry.
 - **`pin = true` is bundle-only.** Setting it on a skill, rule, or agent
   entry is a validation error (exit 65).
+- **Catalog-wide version.** An optional top-level `version` covers every
+  entry that omits its own or sets the literal `${version}`; explicit
+  per-entry versions win. `grim publish --version <ref>` overrides the
+  top-level value for a run (CI git-tag case). Every version input first
+  has the manifest's `version_prefix` (default `v`) stripped, so
+  `--version v1.2.3` publishes `1.2.3`; pushed tags stay plain `X.Y.Z`.
+  An entry with no version anywhere exits 65.
 - **Namespace overrides.** By default an entry publishes to
   `{registry}/{kind-subdir}/{name}`. A manifest-level `repository_prefix`
   replaces the `{kind-subdir}` segment (`{prefix}/{name}`); a per-entry

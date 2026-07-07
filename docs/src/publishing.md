@@ -398,7 +398,7 @@ releases each entry in a fixed order.
 ### The publish.toml format {#batch-publish-manifest}
 
 A manifest has one required top-level field — `registry` — and up to five
-kind tables. Each table entry is a sub-table keyed by name with a required
+kind tables. Each table entry is a sub-table keyed by name with a
 `version` field:
 
 ```toml
@@ -406,7 +406,7 @@ kind tables. Each table entry is a sub-table keyed by name with a required
 registry = "ghcr.io"              # required; overridden by --registry
 
 [skills.grim-usage]
-version = "0.1.1"                  # required, strict X.Y.Z
+version = "0.1.1"                  # strict X.Y.Z
 
 [rules.custom-rule]
 version = "0.2.0"
@@ -422,6 +422,43 @@ version = "1.0.0"
 version = "0.1.0"
 pin = true                         # optional, bundle entries only; default false
 ```
+
+#### One version for the whole catalog {#batch-publish-version}
+
+A catalog whose packages release together shouldn't repeat the same
+version five times — that's five places to forget on the next bump. An
+optional top-level `version` covers every entry that omits its own (or
+sets the literal `${version}`, which resolves to the same value); an
+explicit per-entry `version` always wins:
+
+```toml
+registry = "ghcr.io"
+version = "0.9.0"                  # catalog-wide
+
+[skills.grim-usage]                # no version → 0.9.0
+
+[rules.custom-rule]
+version = "${version}"            # explicit reference → 0.9.0
+
+[mcp.acme-search]
+version = "1.0.0"                  # per-entry override wins
+```
+
+For CI runs that publish from a git tag, `grim publish --version <ref>`
+overrides the manifest's top-level `version` for that run. Every version
+input — the flag, the top-level value, and per-entry values — first has
+the manifest's `version_prefix` (default `"v"`) stripped when present, so
+`--version v1.2.3` (a typical tag ref) publishes tag `1.2.3`. Pushed OCI
+tags are always the plain `X.Y.Z` form. A different tagging convention
+sets its own prefix:
+
+```toml
+version_prefix = "release-"        # release-1.2.3 → 1.2.3
+```
+
+An entry that ends up with no version anywhere — no per-entry value, no
+top-level `version`, no `--version` — is a data error (exit 65) naming
+the entry.
 
 The `registry` value is a plain host (e.g. `ghcr.io`, `localhost:5000`), not a
 full reference. All entries in the manifest publish to the same registry.
@@ -580,13 +617,15 @@ as a usage error.
 | `--force` | Move existing exact-version tags instead of skipping them. Cannot be combined with `--tag`. |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--tag <tag>` | Override the published tag with a movable channel tag (e.g. `canary`). Must be non-semver — semver values exit 65, keeping all semver releases in the manifest where the repo can track them. A channel tag always moves: re-publishing with `--tag` overwrites the existing tag without skipping and without `--force`. |
+| `--version <version>` | Override the manifest's top-level `version` for this run — the CI git-tag case. The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. Entries with an explicit `version` keep it. See [One version for the whole catalog](#batch-publish-version). |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
 | `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
 ### Validation and fail-fast {#batch-publish-validation}
 
-`grim publish` validates the whole manifest before any push: every `version`
+`grim publish` validates the whole manifest before any push: every resolved
+`version` — after [inheritance and prefix stripping](#batch-publish-version) —
 must be strict `X.Y.Z` semver, every source path must exist, and `pin = true`
 is rejected on non-bundle entries (exit 65 for each). Only after the full
 manifest passes does the first network call happen.

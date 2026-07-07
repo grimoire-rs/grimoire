@@ -492,6 +492,11 @@ entry; a name absent from the manifest exits 65. `--tag <tag>` overrides
 the published tag with a movable channel tag (e.g. `canary`); semver values
 are rejected with exit 65, keeping all semver releases in the manifest. A
 channel tag always moves on re-publish — no skip, no `--force` needed.
+`--version <version>` overrides the manifest's top-level `version` (the
+catalog-wide value entries inherit); the manifest's `version_prefix`
+(default `v`) is stripped first, so publishing from a CI git tag is
+`--version "$GITHUB_REF_NAME"` — see
+[One version for the whole catalog](./publishing.md#batch-publish-version).
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
 `--git` embeds [git provenance](./publishing.md#git-provenance) on every
 published entry (forwarded to each `release`); a non-git path fails (65).

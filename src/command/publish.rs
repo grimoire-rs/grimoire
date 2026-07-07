@@ -48,6 +48,13 @@ pub struct PublishArgs {
     #[arg(long, value_name = "TAG", conflicts_with = "force")]
     pub tag: Option<String>,
 
+    /// Override the manifest's top-level `version` for this run (e.g. a CI
+    /// git tag). The manifest `version_prefix` (default `v`) is stripped
+    /// before validation, so `--version v1.2.3` publishes tag `1.2.3`.
+    /// Entries with an explicit `version` keep it.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
     /// Print the push plan without pushing anything.
     #[arg(long)]
     pub dry_run: bool,
@@ -121,8 +128,11 @@ pub struct AnnounceSpec {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishEntrySpec {
-    /// Strict semantic version (`X.Y.Z`). Required.
-    pub version: String,
+    /// Strict semantic version (`X.Y.Z`). Optional when the manifest sets a
+    /// top-level `version` — an omitted value or the literal `${version}`
+    /// inherits it. A leading `version_prefix` (default `v`) is stripped
+    /// before validation.
+    pub version: Option<String>,
 
     /// Source path override. When absent, the conventional path relative
     /// to the manifest directory is used:
@@ -159,6 +169,17 @@ pub struct PublishManifest {
     /// stays a plain host (namespace in the manifest belongs to
     /// `repository_prefix`).
     pub registry: String,
+
+    /// Optional catalog-wide version applied to every entry that omits its
+    /// `version` (or sets the literal `${version}`). May carry the
+    /// `version_prefix` (default `v`), which is stripped before validation.
+    /// Overridden for a run by `grim publish --version`.
+    pub version: Option<String>,
+
+    /// Literal prefix stripped from every version input (`--version`, the
+    /// top-level `version`, and per-entry versions) before strict-semver
+    /// validation. Default: `v` — so `v1.2.3` publishes tag `1.2.3`.
+    pub version_prefix: Option<String>,
 
     /// Optional repository path prefix applied to every entry that does not
     /// set its own `repository`: the published repository becomes
@@ -229,6 +250,62 @@ fn is_strict_semver(s: &str) -> bool {
         Ok(v) => v.pre.is_empty() && v.build.is_empty(),
         Err(_) => false,
     }
+}
+
+/// Resolve every entry's version in place (issue #29).
+///
+/// The effective catalog-wide version is `--version` (CLI) over the
+/// manifest's top-level `version`. An entry that omits `version` — or sets
+/// the literal `${version}` — inherits it; an explicit per-entry value
+/// wins. The manifest's `version_prefix` (default `v`) is stripped from
+/// every input (CLI, top-level, per-entry) before the strict-semver gate
+/// in `validate_entry`, so a CI git tag like `v1.2.3` publishes `1.2.3`.
+/// `${version}` is a literal string match — no templating.
+///
+/// Post-condition: every `spec.version` is `Some(_)` (validation still
+/// gates the value's shape).
+///
+/// # Errors
+///
+/// Data error (65) when an entry has no version and no catalog-wide
+/// version is available.
+fn resolve_versions(
+    manifest: &mut PublishManifest,
+    cli_version: Option<&str>,
+    manifest_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let prefix = manifest.version_prefix.clone().unwrap_or_else(|| "v".to_string());
+    let strip = |v: &str| v.strip_prefix(prefix.as_str()).unwrap_or(v).to_string();
+
+    let top = cli_version.or(manifest.version.as_deref()).map(strip);
+
+    let tables = [
+        &mut manifest.skills,
+        &mut manifest.rules,
+        &mut manifest.agents,
+        &mut manifest.bundles,
+        &mut manifest.mcp,
+    ];
+    for table in tables {
+        for (name, spec) in table.iter_mut() {
+            match spec.version.as_deref() {
+                None | Some("${version}") => match &top {
+                    Some(v) => spec.version = Some(v.clone()),
+                    None => {
+                        return Err(data_error_at(
+                            manifest_path,
+                            format!(
+                                "entry '{name}': no version — set a per-entry version, \
+                                 a top-level version, or pass --version"
+                            ),
+                        ));
+                    }
+                },
+                Some(v) => spec.version = Some(strip(v)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Emit a DataError (65) attributed to `path` via the
@@ -339,7 +416,9 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     // validate_manifest → plan_entries → per entry compose release::run
     // (skip_existing = !force), fail-fast into the report.
 
-    let manifest = load_manifest(&args.manifest)?;
+    let mut manifest = load_manifest(&args.manifest)?;
+    resolve_versions(&mut manifest, args.version.as_deref(), &args.manifest)?;
+    let manifest = manifest;
     let (registry, cli_prefix) = resolve_publish_registry(ctx, &manifest.registry);
     validate_registry_value(&registry, &args.manifest)?;
     if let Some(prefix) = cli_prefix.as_deref() {
@@ -913,14 +992,21 @@ fn validate_entry(
     }
 
     // Strict semver version (ADR D2). The bundle variant previously used a
-    // shorter message; unify to the full message for all kinds.
-    if !is_strict_semver(&spec.version) {
+    // shorter message; unify to the full message for all kinds. Versions are
+    // resolved (inherited, `${version}`-expanded, prefix-stripped) by
+    // `resolve_versions` before validation — the None arm is defensive.
+    let version = spec.version.as_deref().ok_or_else(|| {
+        data_error_at(
+            manifest_path,
+            format!("entry '{name}': missing version (set a per-entry, top-level, or --version value)"),
+        )
+    })?;
+    if !is_strict_semver(version) {
         return Err(data_error_at(
             manifest_path,
             format!(
-                "entry '{}': version '{}' is not strict semver (X.Y.Z required); \
-                 prerelease markers and v-prefixes are not allowed in manifest versions",
-                name, spec.version
+                "entry '{name}': version '{version}' is not strict semver (X.Y.Z required); \
+                 prerelease markers are not allowed (a leading version_prefix is stripped before this check)"
             ),
         ));
     }
@@ -1044,7 +1130,13 @@ fn plan_entries(
                     continue;
                 }
                 let src = resolve_source_path(name, $kind, spec, manifest_dir);
-                let publish_tag = tag.unwrap_or(&spec.version);
+                // Invariant: run() sequences resolve_versions → validate_manifest
+                // → plan_entries, so every version is Some by now.
+                let publish_tag = tag.unwrap_or_else(|| {
+                    spec.version
+                        .as_deref()
+                        .expect("versions resolved before planning")
+                });
                 let repo = entry_repository(
                     name,
                     $kind,
@@ -1141,7 +1233,7 @@ mod tests {
         assert_eq!(manifest.rules.len(), 1);
         assert_eq!(manifest.agents.len(), 1);
         assert_eq!(manifest.bundles.len(), 1);
-        assert_eq!(manifest.skills["grim-usage"].version, "0.1.1");
+        assert_eq!(manifest.skills["grim-usage"].version.as_deref(), Some("0.1.1"));
         assert!(manifest.rules["custom-rule"].path.is_some());
         assert!(manifest.bundles["grim-essentials"].pin);
         assert!(!manifest.skills["grim-usage"].pin);
@@ -1281,6 +1373,102 @@ mod tests {
             toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"v1.0.0\"\n").unwrap();
         let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
         assert!(err.is_err(), "'v1.0.0' must be rejected (v-prefix)");
+    }
+
+    // ── issue #29: catalog-wide version ref (resolve_versions) ────────────
+
+    #[test]
+    fn resolve_versions_inherits_top_level_and_expands_placeholder() {
+        let mut manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\nversion = \"0.9.0\"\n\n\
+             [skills.a]\n\n\
+             [rules.b]\nversion = \"${version}\"\n\n\
+             [mcp.c]\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
+        assert_eq!(
+            manifest.skills["a"].version.as_deref(),
+            Some("0.9.0"),
+            "omitted inherits"
+        );
+        assert_eq!(
+            manifest.rules["b"].version.as_deref(),
+            Some("0.9.0"),
+            "${{version}} inherits"
+        );
+        assert_eq!(manifest.mcp["c"].version.as_deref(), Some("0.2.0"), "explicit wins");
+    }
+
+    #[test]
+    fn resolve_versions_cli_overrides_and_strips_default_v_prefix() {
+        let mut manifest: PublishManifest =
+            toml::from_str("registry = \"r.example\"\nversion = \"0.1.0\"\n\n[skills.a]\n").unwrap();
+        resolve_versions(&mut manifest, Some("v0.2.0"), Path::new("test.toml")).expect("resolves");
+        assert_eq!(
+            manifest.skills["a"].version.as_deref(),
+            Some("0.2.0"),
+            "--version wins over the manifest and the default 'v' prefix is stripped"
+        );
+    }
+
+    #[test]
+    fn resolve_versions_strips_prefix_from_all_inputs_then_validation_passes() {
+        // The v-prefix rejection above still holds for validate_manifest alone;
+        // through the resolve step a prefixed input becomes valid strict semver.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("rules/my-rule.md"), "---\npaths: ['*.rs']\n---\nbody\n");
+        let mut manifest: PublishManifest =
+            toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"v1.0.0\"\n").unwrap();
+        resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
+        assert_eq!(manifest.rules["my-rule"].version.as_deref(), Some("1.0.0"));
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None)
+            .expect("stripped version must pass strict-semver validation");
+    }
+
+    #[test]
+    fn resolve_versions_custom_prefix() {
+        let mut manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\nversion = \"release-1.2.3\"\nversion_prefix = \"release-\"\n\n[skills.a]\n",
+        )
+        .unwrap();
+        resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
+        assert_eq!(manifest.skills["a"].version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn resolve_versions_missing_version_is_data_error_naming_entry() {
+        let mut manifest: PublishManifest = toml::from_str("registry = \"r.example\"\n\n[skills.lonely]\n").unwrap();
+        let err = resolve_versions(&mut manifest, None, Path::new("test.toml")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("lonely"), "error must name the entry, got: {msg}");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError
+        );
+    }
+
+    #[test]
+    fn resolve_versions_placeholder_without_top_level_is_data_error() {
+        let mut manifest: PublishManifest =
+            toml::from_str("registry = \"r.example\"\n\n[skills.a]\nversion = \"${version}\"\n").unwrap();
+        assert!(resolve_versions(&mut manifest, None, Path::new("test.toml")).is_err());
+    }
+
+    #[test]
+    fn resolve_versions_non_semver_after_strip_fails_validation() {
+        // resolve itself is shape-agnostic; the strict gate stays in
+        // validate_manifest and must reject a stripped non-semver value.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("skills/a/SKILL.md"), "---\nname: a\ndescription: d.\n---\n");
+        let mut manifest: PublishManifest = toml::from_str("registry = \"r.example\"\n\n[skills.a]\n").unwrap();
+        resolve_versions(&mut manifest, Some("vfoo"), Path::new("test.toml")).expect("resolve is shape-agnostic");
+        assert!(
+            validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).is_err(),
+            "'foo' must fail the strict-semver gate"
+        );
     }
 
     #[test]
@@ -1518,7 +1706,7 @@ mod tests {
     /// Build a bare entry spec for `entry_repository` unit tests.
     fn entry_spec(version: &str, repository: Option<&str>) -> PublishEntrySpec {
         PublishEntrySpec {
-            version: version.to_string(),
+            version: Some(version.to_string()),
             path: None,
             repository: repository.map(str::to_string),
             pin: false,
@@ -2508,6 +2696,7 @@ mod tests {
             manifest: manifest_path,
             only,
             tag,
+            version: None,
             dry_run,
             force,
             git: false,
