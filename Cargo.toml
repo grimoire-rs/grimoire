@@ -91,6 +91,10 @@ oci-client = { path = "external/rust-oci-client" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+# Symbols are useless in release assets (user backtraces are unsymbolized
+# anyway) and only bloat the download. cargo-auditable's .dep-v0 section
+# survives a symbol strip.
+strip = "symbols"
 
 [lints.rust]
 # Single binary crate, but the domain modules are written library-style:
