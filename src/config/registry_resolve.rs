@@ -62,6 +62,33 @@ pub fn classify_index(locator: &str) -> Option<SourceKind> {
     None
 }
 
+/// Dedup key for a declared locator (issue #28): trim whitespace, strip
+/// trailing slashes, and case-fold the scheme + host portion. The path
+/// stays case-sensitive (OCI namespaces and index paths are identity).
+/// Used only as the `seen` key — the stored url stays as first-declared.
+fn normalize_locator(locator: &str) -> String {
+    let trimmed = locator.trim().trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((s, r)) => (Some(s), r),
+        None => (None, trimmed),
+    };
+    let (host, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    let mut out = String::new();
+    if let Some(s) = scheme {
+        out.push_str(&s.to_ascii_lowercase());
+        out.push_str("://");
+    }
+    out.push_str(&host.to_ascii_lowercase());
+    if let Some(p) = path {
+        out.push('/');
+        out.push_str(p);
+    }
+    out
+}
+
 /// One browse source in the resolved set, in precedence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRegistry {
@@ -86,7 +113,8 @@ pub struct ResolvedRegistry {
 ///    the flag collapses; `$GRIM_DEFAULT_REGISTRY` (`env_default`) is a
 ///    default for tier 3, not a collapse trigger.
 /// 2. Otherwise the declared `[[registries]]` are authoritative — project
-///    entries then global entries, deduped by url (first occurrence wins).
+///    entries then global entries, deduped by normalized locator (trailing
+///    slashes and host case ignored; first occurrence wins).
 ///    Exactly one is marked primary: the first `default = true`, else the
 ///    first entry. When `[[registries]]` is non-empty the `env_default` is
 ///    NOT added to the browse set (it stays the short-id default only).
@@ -109,7 +137,7 @@ pub fn resolve_registries(
     let mut forced_set: Vec<ResolvedRegistry> = Vec::new();
     let mut forced_seen = std::collections::BTreeSet::new();
     for url in forced.iter().filter(|s| !s.is_empty()) {
-        if forced_seen.insert(url.as_str()) {
+        if forced_seen.insert(normalize_locator(url)) {
             forced_set.push(ResolvedRegistry {
                 url: url.clone(),
                 alias: None,
@@ -138,7 +166,7 @@ pub fn resolve_registries(
             // skip rather than fabricate an empty source.
             _ => continue,
         };
-        if seen.insert(locator.clone()) {
+        if seen.insert(normalize_locator(&locator)) {
             out.push(ResolvedRegistry {
                 url: locator,
                 alias: rc.alias.clone(),
@@ -448,6 +476,63 @@ mod tests {
         );
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].alias.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn textual_variants_of_same_locator_dedup_first_wins() {
+        // Issue #28: a project snapshot and a global declaration of the SAME
+        // index that differ only textually (trailing slash, host case) must
+        // collapse to one browse entry — not two catalog groups.
+        let set = resolve_registries(
+            &[],
+            &[rc(Some("proj"), "https://index.grimoire.rs", true)],
+            None,
+            &[rc(Some("glob"), "https://INDEX.grimoire.rs/", false)],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1, "textual variants must dedup: {set:?}");
+        assert_eq!(set[0].alias.as_deref(), Some("proj"), "first occurrence wins");
+        assert_eq!(
+            set[0].url, "https://index.grimoire.rs",
+            "stored url stays as first-declared"
+        );
+    }
+
+    #[test]
+    fn oci_host_case_variants_dedup() {
+        // Host case-folds; the repository path stays case-sensitive.
+        let set = resolve_registries(
+            &[],
+            &[rc(Some("a"), "GHCR.io/acme", false)],
+            None,
+            &[rc(Some("b"), "ghcr.io/acme", false)],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1, "host-case variants must dedup: {set:?}");
+        assert_eq!(set[0].alias.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn distinct_paths_do_not_dedup() {
+        // The path portion is case-sensitive and identity-relevant — two
+        // different namespaces on one host stay two sources.
+        let set = resolve_registries(
+            &[],
+            &[
+                rc(Some("a"), "ghcr.io/acme", false),
+                rc(Some("b"), "ghcr.io/Acme", false),
+            ],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 2, "distinct paths must both survive: {set:?}");
     }
 
     #[test]

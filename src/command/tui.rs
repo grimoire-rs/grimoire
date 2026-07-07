@@ -190,10 +190,12 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 /// built-in fallback, so plain Enter persists a browse source that
 /// actually lists packages either way.
 ///
-/// Accepting the pre-filled value deliberately snapshots it as a
-/// `[[registries]]` entry with `default = true` in the new config: the
-/// dialog's accepted value is an explicit user choice, unlike bare `grim init`
-/// (which keeps the fallback floating — see `command/init.rs`).
+/// Accepting the pre-filled value snapshots it as a `[[registries]]`
+/// entry with `default = true` in the new config — **except** when the
+/// accepted value is the built-in fallback index: that stays floating
+/// (never written to disk), matching bare `grim init` (`command/init.rs`)
+/// and avoiding a redundant declaration that duplicates the implicit
+/// default in the merged browse set (issue #28).
 ///
 /// # Errors
 ///
@@ -244,11 +246,18 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
 
     let init_args = crate::command::init::InitArgs {
         global: args.global,
-        registry,
+        registry: snapshot_choice(registry),
     };
     let (report, _) = crate::command::init::run(ctx, &init_args).await?;
     eprintln!("initialized {}", report.path.display());
     Ok(InitPrompt::Ready)
+}
+
+/// The registry the init dialog's accepted value snapshots into the new
+/// config — `None` for the built-in fallback index, which must stay
+/// floating (`command/init.rs` invariant; issue #28).
+fn snapshot_choice(registry: Option<String>) -> Option<String> {
+    registry.filter(|r| r != crate::command::FALLBACK_INDEX)
 }
 
 /// Resolve the init dialog's pre-fill: the primary **browse** source's
@@ -343,6 +352,19 @@ mod tests {
             global: false,
             registry: Vec::new(),
         }
+    }
+
+    #[test]
+    fn snapshot_choice_keeps_fallback_index_floating() {
+        // Issue #28: accepting the pre-filled built-in fallback index must
+        // NOT snapshot a [[registries]] entry — it stays implicit, matching
+        // bare `grim init` — while any other accepted value still persists.
+        assert_eq!(snapshot_choice(Some(crate::command::FALLBACK_INDEX.to_string())), None);
+        assert_eq!(
+            snapshot_choice(Some("https://index.example".to_string())),
+            Some("https://index.example".to_string())
+        );
+        assert_eq!(snapshot_choice(None), None);
     }
 
     #[test]
