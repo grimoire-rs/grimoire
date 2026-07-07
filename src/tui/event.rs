@@ -273,28 +273,21 @@ fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
 }
 
 /// List / detail keys: navigation, mode entry, and the artifact actions.
-/// `↑`/`↓` move the selection in the list and scroll the always-visible
-/// detail pane while the detail view is open. `j`/`k` scroll that pane
-/// line-by-line from the list or detail view, and `PageUp`/`PageDown` page
-/// it — both from *every* mode (search captures `j`/`k` as query text, but
-/// pgup/pgdn still page there). The pane has no focus model, so scrolling it
-/// never requires entering detail first.
+/// `↑`/`↓` ALWAYS move the selection — in the list and with the detail
+/// view open alike (issue #30: a detail-mode arrow hijack used to strand
+/// navigation until Esc). `j`/`k` scroll the always-visible detail pane
+/// line-by-line, and `PageUp`/`PageDown` page it — both from *every* mode
+/// (search captures `j`/`k` as query text, but pgup/pgdn still page
+/// there). The pane has no focus model, so scrolling it never requires
+/// entering detail first — and navigation never requires leaving it.
 fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Up => {
-            if state.mode == Mode::Detail {
-                state.scroll_detail(-1);
-            } else {
-                state.move_selection(-1);
-            }
+            state.move_selection(-1);
             TuiAction::None
         }
         TuiInput::Down => {
-            if state.mode == Mode::Detail {
-                state.scroll_detail(1);
-            } else {
-                state.move_selection(1);
-            }
+            state.move_selection(1);
             TuiAction::None
         }
         // `j`/`k` scroll the always-visible detail pane line-by-line from the
@@ -900,27 +893,27 @@ mod tests {
     }
 
     #[test]
-    fn detail_arrows_scroll_instead_of_moving_selection() {
+    fn arrows_always_move_selection_even_in_detail_mode() {
+        // Issue #30: Mode::Detail used to hijack ↑/↓ into detail-pane
+        // scrolling, silently stranding list navigation until Esc. Arrows
+        // now ALWAYS move the selection; the pane scrolls only via the
+        // focus-free j/k and pgup/pgdn keys.
         let mut s = seeded();
         handle(&mut s, TuiInput::Enter);
         assert_eq!(s.mode, Mode::Detail);
-        // Down scrolls the pane; the selection stays put.
+        // Down moves the selection — no hijack; the pane offset stays put.
         assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
-        assert_eq!(s.selected, 0, "selection unchanged in detail mode");
-        assert_eq!(s.detail_scroll, 1);
-        // j/k alias the scroll.
-        handle(&mut s, TuiInput::Char('j'));
-        assert_eq!(s.detail_scroll, 2);
-        handle(&mut s, TuiInput::Char('k'));
-        assert_eq!(s.detail_scroll, 1);
-        // Up scrolls back and saturates at the top.
+        assert_eq!(s.selected, 1, "arrows navigate the list in detail mode");
+        assert_eq!(s.detail_scroll, 0, "arrows never scroll the detail pane");
         handle(&mut s, TuiInput::Up);
-        handle(&mut s, TuiInput::Up);
-        assert_eq!(s.detail_scroll, 0);
         assert_eq!(s.selected, 0);
-        // Back in the list. j/k now scroll the always-visible detail pane from
-        // list mode too (no focus / detail-mode entry needed); the selection
-        // stays put. The fixture row's detail overflows (see the page test).
+        // j/k remain the detail-pane scroll keys, in detail mode too.
+        handle(&mut s, TuiInput::Char('j'));
+        assert_eq!(s.detail_scroll, 1);
+        assert_eq!(s.selected, 0, "j must not move the selection");
+        handle(&mut s, TuiInput::Char('k'));
+        assert_eq!(s.detail_scroll, 0);
+        // Back in the list: identical arrow + j/k behavior (no mode split).
         handle(&mut s, TuiInput::Esc);
         assert_eq!(s.mode, Mode::List);
         assert_eq!(handle(&mut s, TuiInput::Char('j')), TuiAction::None);
@@ -928,7 +921,6 @@ mod tests {
         assert_eq!(s.detail_scroll, 1, "j scrolls the detail pane from list mode");
         handle(&mut s, TuiInput::Char('k'));
         assert_eq!(s.detail_scroll, 0, "k scrolls the detail pane back");
-        // Arrows still move the selection in list mode.
         handle(&mut s, TuiInput::Down);
         assert_eq!(s.selected, 1);
     }

@@ -1304,8 +1304,8 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 /// overlay documents every action the event loop handles.
 fn help_entries() -> [(&'static str, &'static str); 16] {
     [
-        ("↑ / ↓", "move selection (scroll the detail pane when open)"),
-        ("j / k", "scroll the detail pane line by line (when open)"),
+        ("↑ / ↓", "move the selection (always — detail open or not)"),
+        ("j / k", "scroll the detail pane line by line (no focus needed)"),
         ("pgup/pgdn", "scroll the detail pane a page (no focus needed)"),
         ("space", "mark / unmark the row"),
         ("a / c", "mark all visible / clear marks"),

@@ -400,11 +400,12 @@ nothing). Cancelling closes the TUI.
 reference, its `Summary:` and `Description:` sections, and a `Metadata:`
 block with the keywords and the
 [repository URL](./publishing.md#metadata-repository) (version and install
-status stay on the catalog row). While the pane is open, `↑`/`↓` (or
-`j`/`k`) scroll it instead of moving the selection; `esc` returns to the
-list. `pgup`/`pgdn` scroll the pane from any mode — no need to open it
-first. Scrolling is clamped at both ends: it saturates at the top and
-stops when the content's last line reaches the pane's bottom edge.
+status stay on the catalog row). `↑`/`↓` always move the selection —
+detail open or not — so navigation is never stranded; `esc` returns to
+the list. The pane itself scrolls with `j`/`k` (line by line) and
+`pgup`/`pgdn` (a page), from any mode — no need to open it first.
+Scrolling is clamped at both ends: it saturates at the top and stops
+when the content's last line reaches the pane's bottom edge.
 
 A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like
