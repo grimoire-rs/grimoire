@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-07-07
+
+### Added
+
+- Enforce repository prefix via --registry host/prefix *(publish)*
+- Catalog-wide version with ${version} inheritance and --version override *(publish)*
+- Deployment-relative member refs resolved at install *(bundle)*
+
+### Fixed
+
+- Adopt patched oci-client fork to survive an empty trust store *(oci)*
+- Dedupe merged registries by normalized locator *(config)*
+- Arrow keys always navigate the list, even with detail open *(tui)*
+
 ## [0.8.3] - 2026-07-05
 
 ### Fixed
@@ -332,6 +346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.8.4]: https://github.com/grimoire-rs/grimoire/compare/v0.8.3..v0.8.4
 [0.8.3]: https://github.com/grimoire-rs/grimoire/compare/v0.8.2..v0.8.3
 [0.8.2]: https://github.com/grimoire-rs/grimoire/compare/v0.8.1..v0.8.2
 [0.8.1]: https://github.com/grimoire-rs/grimoire/compare/v0.8.0..v0.8.1
