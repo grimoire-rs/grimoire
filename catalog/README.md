@@ -9,7 +9,7 @@ authored here, validated by `grim build` in CI, published to
 
 ```
 catalog/
-├── publish.toml        # grim publish manifest: registry + per-package version tables
+├── publish.toml        # grim publish manifest: registry + catalog-wide version + package tables
 ├── taskfile.yml        # catalog: subsystem tasks (verify, release)
 ├── skills/<name>/      # one dir per skill package (SKILL.md + references/)
 ├── bundles/<name>.toml # one file per bundle package
@@ -40,22 +40,28 @@ between skill content and live `--help` output, trust `--help`.
 
 ## Versioning
 
-Versions live in `publish.toml`, independent per package, bumped via PR —
-**no git tags** (`cliff.toml`'s unanchored `tag_pattern` would pick catalog
-tags up and corrupt `--bumped-version`).
+Every catalog package publishes at **grim's own release version**. Entries
+in `publish.toml` omit their `version` and inherit the top-level one; the
+release CI passes `--version <git tag>` (the `v` prefix is stripped by
+grim), so the published catalog always matches the binary that shipped it.
+The top-level `version` in `publish.toml` is the fallback for local/manual
+runs — keep it at the next planned release. No catalog-specific git tags
+(`cliff.toml`'s unanchored `tag_pattern` would pick them up and corrupt
+`--bumped-version`).
 
-- **patch** — content fix
-- **minor** — new sections or reference files
-- **major** — restructure or renamed reference files
+Content changes therefore need **no per-package version bump** — they ride
+out with the next grim release automatically (skip-existing pushes every
+package whose version is new).
 
 Registry refs are kind-segmented: `ghcr.io/grimoire-rs/skills/<name>:<version>`,
 `ghcr.io/grimoire-rs/bundles/<name>:<version>` (per-entry `repository`
 overrides in `publish.toml` set the `skills/`/`bundles/` segment — see
 [Batch publishing with a manifest][batch-publish]). Semver releases
 cascade (`1.2.3` also moves `1.2`, `1`, `latest`). Bundle members
-reference the floating major tag (`:0` while on the 0.x line) and bundles
-publish without `--pin`, so skill patches
-reach bundle consumers via plain `grim update`.
+reference the floating major tag (`:0` while on the 0.x line, relative to
+the bundle's own deployment — `../skills/<name>:0`) and bundles publish
+without `--pin`, so skill patches reach bundle consumers via plain
+`grim update`.
 
 ## Local loop
 
@@ -69,16 +75,17 @@ task catalog:release -- --tag canary      # ad-hoc movable tag, manifest untouch
 task catalog:release -- --announce        # publish, then announce to the package index
 ```
 
-Semver always comes from `publish.toml` — there is no version argument, so
-the repo records exactly what was published. `--tag` rejects semver values.
+Semver comes from the release tag in CI (`--version`) or the top-level
+`version` in `publish.toml` locally — the repo records exactly what was
+published. `--tag` rejects semver values.
 
 CI publishes two ways, both via the `publish-catalog.yml` workflow (pushes
 to GHCR, then announces to the public package index): the manually
 dispatched `Publish Catalog` workflow, and a cargo-dist post-announce job
-on every grim release — idempotent when catalog versions are unchanged
-(same digest re-push is a no-op), loud failure when content changed
-without a `publish.toml` bump. Skills publish before bundles so bundle
-members always resolve. Never auto-publish on plain pushes to main.
+on every grim release — each release publishes the whole catalog at the
+release's version (skip-existing makes re-runs idempotent). Skills publish
+before bundles so bundle members always resolve. Never auto-publish on
+plain pushes to main.
 
 ## Keeping content honest
 

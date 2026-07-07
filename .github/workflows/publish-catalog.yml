@@ -12,7 +12,12 @@ name: Publish Catalog
 #   unchanged versions re-push the same digest (a no-op); changed content
 #   without a publish.toml bump fails loudly (bump discipline).
 #
-# Versions come from catalog/publish.toml; grim publish releases
+# Versions: every catalog package publishes at grim's own release version
+# — derived from the release git tag (workflow_call from the tag-triggered
+# release, or the vX.Y.Z grim_version dispatch input) and passed as
+# `grim publish --version <tag>` (the v prefix is stripped by grim). When
+# no tag is derivable (dispatch with grim_version=latest) the top-level
+# `version` in catalog/publish.toml applies. grim publish releases
 # skills/rules/agents before bundles so bundle members always resolve.
 #
 # Announce needs a cross-repo credential: GITHUB_TOKEN is repo-scoped, so
@@ -123,13 +128,38 @@ jobs:
           echo "$REGISTRY_TOKEN" | grim login "$REGISTRY" -u "$REGISTRY_USER" \
             --password-stdin --allow-insecure-store
 
+      - name: Derive catalog version
+        # Catalog packages publish at grim's release version (issue #29's
+        # --version feature): the tag ref on a workflow_call from the
+        # release pipeline, else a vX.Y.Z grim_version dispatch input.
+        # Empty ⇒ the top-level `version` in catalog/publish.toml applies.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GRIM_VERSION: ${{ inputs.grim_version }}
+        run: |
+          set -euo pipefail
+          version=""
+          if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$REF_NAME"
+          elif [[ "${GRIM_VERSION:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$GRIM_VERSION"
+          fi
+          echo "CATALOG_VERSION=$version" >> "$GITHUB_ENV"
+          echo "catalog version: ${version:-<publish.toml fallback>}"
+
       - name: Dry-run smoke
         # Always runs: full validate + pack + plan against the live
         # registry with zero writes, gating the real push below.
         env:
           SKIP_BUILD: "true"
           GRIM_COMMAND: grim
-        run: task catalog:release -- --dry-run
+        run: |
+          set -euo pipefail
+          args=(--dry-run)
+          if [[ -n "${CATALOG_VERSION:-}" ]]; then
+            args+=(--version "$CATALOG_VERSION")
+          fi
+          task catalog:release -- "${args[@]}"
 
       - name: Publish
         if: ${{ !inputs.dry_run }}
@@ -142,6 +172,9 @@ jobs:
           args=()
           if [[ "$FORCE" == "true" ]]; then
             args+=(--force)
+          fi
+          if [[ -n "${CATALOG_VERSION:-}" ]]; then
+            args+=(--version "$CATALOG_VERSION")
           fi
           task catalog:release -- "${args[@]}"
 
@@ -175,7 +208,11 @@ jobs:
             exit 0
           fi
           gh auth setup-git
-          task catalog:release -- --announce
+          args=(--announce)
+          if [[ -n "${CATALOG_VERSION:-}" ]]; then
+            args+=(--version "$CATALOG_VERSION")
+          fi
+          task catalog:release -- "${args[@]}"
 
       - name: grim logout
         if: always()

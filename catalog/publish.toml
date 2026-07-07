@@ -1,17 +1,20 @@
 # Publish manifest for first-party catalog packages.
 #
 # NOT a grim bundle — this file drives `grim publish`.
-# Versions are independent per package and bumped via PR (no git tags;
-# cliff.toml's unanchored tag_pattern would pick catalog tags up).
 #
-# Bump rules: patch = content fix; minor = new sections/reference files;
-# major = restructure or renamed reference files.
+# Versioning: every catalog package publishes at grim's own release
+# version. Entries omit their `version` and inherit the top-level one;
+# CI (publish-catalog.yml) overrides it per release with
+# `--version <git tag>` (the `v` prefix is stripped automatically). The
+# top-level value below is the fallback for local/manual runs — keep it
+# at the next planned release.
 #
 # Packages live on GHCR under the grimoire-rs org; discovery goes through
 # the public package index (grim publish --announce opens the index PR —
 # the same path any contributor uses).
 
 registry = "ghcr.io"
+version = "0.8.4"
 
 [announce]
 repository = "https://github.com/grimoire-rs/index"
@@ -19,21 +22,16 @@ namespace = "grimoire-rs"
 owner_id = 298895348
 
 [skills.grim-usage]
-version = "0.9.0"
 repository = "grimoire-rs/skills/grim-usage"
 
 [skills.ai-config-authoring]
-version = "0.2.0"
 repository = "grimoire-rs/skills/ai-config-authoring"
 
 [skills.grim-authoring]
-version = "0.4.0"
 repository = "grimoire-rs/skills/grim-authoring"
 
 [mcp.grim]
-version = "0.2.0"
 repository = "grimoire-rs/mcp/grim"
 
 [bundles.grim-essentials]
-version = "0.2.0"
 repository = "grimoire-rs/bundles/grim-essentials"
