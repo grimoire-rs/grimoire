@@ -64,10 +64,11 @@ impl std::fmt::Display for ArtifactState {
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    /// Flat list view (default at startup unless overridden by config).
-    #[default]
+    /// Flat list view. Opt in via `default_view = "flat"`.
     Flat,
-    /// Grouped collapsible tree view.
+    /// Grouped collapsible tree view — the default browse mode
+    /// ([`TuiState::new`] starts here; config `default_view` can override).
+    #[default]
     Tree,
 }
 
@@ -332,7 +333,7 @@ impl Default for TuiState {
             picker: None,
             default_registry: None,
             clients: Vec::new(),
-            view_mode: ViewMode::Flat,
+            view_mode: ViewMode::default(),
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: vec!["/".into()],
@@ -780,7 +781,10 @@ impl TuiState {
     /// pane's bottom edge, mirroring the top saturation.
     pub fn scroll_detail(&mut self, delta: i64) {
         let lines = super::detail::detail_lines(self.selected_row());
-        let max = super::detail::scroll_max(&lines, super::detail::viewport(self.term_size));
+        let max = super::detail::scroll_max(
+            &lines,
+            super::detail::viewport(self.term_size, self.show_registry_column()),
+        );
         let next = (i64::from(self.detail_scroll) + delta).clamp(0, i64::from(max));
         // `next` is in `[0, max]`, both u16-representable.
         self.detail_scroll = u16::try_from(next).unwrap_or(0);
@@ -791,7 +795,7 @@ impl TuiState {
     pub fn set_term_size(&mut self, size: (u16, u16)) {
         self.term_size = size;
         let lines = super::detail::detail_lines(self.selected_row());
-        let max = super::detail::scroll_max(&lines, super::detail::viewport(size));
+        let max = super::detail::scroll_max(&lines, super::detail::viewport(size, self.show_registry_column()));
         self.detail_scroll = self.detail_scroll.min(max);
     }
 
@@ -844,13 +848,24 @@ impl TuiState {
         self.registry_order.len() > 1
     }
 
+    /// Whether the flat list prepends a Registry column: only when more than
+    /// one registry is in scope *and* the view is flat (the tree expresses the
+    /// registry through its group nodes, so it never needs the column). Drives
+    /// both the header/row projection and the Catalog width
+    /// ([`super::detail::catalog_width`]).
+    pub fn show_registry_column(&self) -> bool {
+        self.is_multi_registry() && self.view_mode != ViewMode::Tree
+    }
+
     /// Seed the view mode from a typed [`crate::config::declaration::DefaultView`]
-    /// config value. `None` keeps the default (Flat).
+    /// config value. When unset (`None`) the browse view defaults to **Tree**:
+    /// it groups by registry (no Registry column) and reads more compactly than
+    /// the flat list. An explicit `Some(Flat)` opts back into the flat list.
     pub fn set_view_mode_from_config(&mut self, default_view: Option<crate::config::declaration::DefaultView>) {
-        match default_view {
-            Some(crate::config::declaration::DefaultView::Tree) => self.view_mode = ViewMode::Tree,
-            Some(crate::config::declaration::DefaultView::Flat) | None => {}
-        }
+        self.view_mode = match default_view {
+            Some(crate::config::declaration::DefaultView::Flat) => ViewMode::Flat,
+            Some(crate::config::declaration::DefaultView::Tree) | None => ViewMode::Tree,
+        };
     }
 
     /// Seed the tree build options from resolved config values.
@@ -1345,6 +1360,7 @@ mod tests {
 
     fn seeded() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("r/alpha", "first thing", &["rust"], ArtifactState::Installed),
             row("r/beta", "second thing", &["python"], ArtifactState::NotInstalled),
@@ -1547,6 +1563,7 @@ mod tests {
     #[test]
     fn summary_match_is_case_insensitive() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         let mut r = row("r/delta", "plain description", &[], ArtifactState::NotInstalled);
         r.summary = "Concise Blurb".to_string();
         s.set_rows(vec![r]);
@@ -1582,6 +1599,7 @@ mod tests {
     #[test]
     fn filter_is_multi_term_and_via_shared_matcher() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("acme/rust-style", "d", &["lint"], ArtifactState::NotInstalled),
             row("acme/python", "d", &["lint"], ArtifactState::NotInstalled),
@@ -1734,6 +1752,7 @@ mod tests {
     #[test]
     fn merge_catalog_rows_drops_marks_for_vanished_repos() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("acme/alpha", "d", &[], ArtifactState::Installed),
             row("acme/beta", "d", &[], ArtifactState::Installed),
@@ -1750,6 +1769,7 @@ mod tests {
     #[test]
     fn merge_catalog_rows_keeps_cursor_on_same_repo() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("acme/alpha", "d", &[], ArtifactState::Installed),
             row("acme/beta", "d", &[], ArtifactState::Installed),
@@ -1779,6 +1799,7 @@ mod tests {
     #[test]
     fn merge_catalog_rows_clamps_cursor_when_selected_repo_vanishes() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("acme/alpha", "d", &[], ArtifactState::Installed),
             row("acme/beta", "d", &[], ArtifactState::Installed),
@@ -1800,6 +1821,7 @@ mod tests {
     #[test]
     fn merge_catalog_rows_keeps_cursor_under_active_filter() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("acme/rust-a", "d", &["rust"], ArtifactState::Installed),
             row("acme/py-b", "d", &["python"], ArtifactState::Installed),
@@ -1855,6 +1877,7 @@ mod tests {
     #[test]
     fn filter_bare_kind_keyword_filters_by_kind() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         let skill = row("acme/code-review", "d", &[], ArtifactState::NotInstalled);
         let mut rule = row("acme/rust-style", "d", &[], ArtifactState::NotInstalled);
         rule.kind = "rule".to_string();
@@ -1899,7 +1922,7 @@ mod tests {
         let mut s = seeded();
         let max = super::super::detail::scroll_max(
             super::super::detail::detail_lines(s.selected_row()).as_slice(),
-            super::super::detail::viewport(s.term_size),
+            super::super::detail::viewport(s.term_size, s.show_registry_column()),
         );
         assert!(max > 0, "fixture content must overflow the default viewport");
         // Scrolling far past the end stops exactly at the content bottom.
@@ -1953,6 +1976,7 @@ mod tests {
 
     fn tree_seeded() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         // Two rows under the same registry → one group
         s.set_rows(vec![
             tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
@@ -2210,6 +2234,7 @@ mod tests {
     // would land on the WRONG group (detectable).
     fn two_group_tree() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             tree_row("reg/acme/x", "skill", ArtifactState::Installed),
             tree_row("reg/zeta/y", "skill", ArtifactState::NotInstalled),
@@ -2300,6 +2325,7 @@ mod tests {
     #[test]
     fn collapse_state_stable_across_filter_rebuilds() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
             tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
@@ -2419,6 +2445,7 @@ mod tests {
     #[test]
     fn query_exposes_matches_behind_collapsed_ancestor() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
             tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
@@ -2477,28 +2504,28 @@ mod tests {
         );
     }
 
-    // Gap (a): set_view_mode_from_config routes correctly.
+    // set_view_mode_from_config routes correctly. Unset defaults to Tree; an
+    // explicit Flat opts back into the flat list.
     //   Some(Tree)  → ViewMode::Tree
-    //   None        → ViewMode::Flat (unchanged)
-    //   Some(Flat)  → ViewMode::Flat (unchanged)
+    //   None        → ViewMode::Tree (the startup default)
+    //   Some(Flat)  → ViewMode::Flat
     #[test]
-    fn set_view_mode_from_config_tree_overrides_default() {
+    fn set_view_mode_from_config_resolves_default_view() {
         use crate::config::declaration::DefaultView;
         let mut s = TuiState::new();
-        assert_eq!(s.view_mode, ViewMode::Flat, "default view mode must be Flat");
 
         s.set_view_mode_from_config(Some(DefaultView::Tree));
         assert_eq!(s.view_mode, ViewMode::Tree, "Some(Tree) must set Tree view mode");
 
-        // Reset and verify None leaves Flat.
+        // Unset (None) selects the Tree default.
         let mut s2 = TuiState::new();
         s2.set_view_mode_from_config(None);
-        assert_eq!(s2.view_mode, ViewMode::Flat, "None must leave view mode as Flat");
+        assert_eq!(s2.view_mode, ViewMode::Tree, "None must default to Tree view mode");
 
-        // Some(Flat) also leaves it Flat.
+        // Some(Flat) opts back into the flat list.
         let mut s3 = TuiState::new();
         s3.set_view_mode_from_config(Some(DefaultView::Flat));
-        assert_eq!(s3.view_mode, ViewMode::Flat, "Some(Flat) must leave view mode as Flat");
+        assert_eq!(s3.view_mode, ViewMode::Flat, "Some(Flat) must set Flat view mode");
     }
 
     // Gap (b): set_tree_options normalizes empty separator list to ["/"].
@@ -2778,6 +2805,7 @@ mod tests {
     /// `scope_label` is set to `"project"` to match the cache key.
     fn member_state() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         let bundle_row = TuiRow {
             kind: "bundle".to_string(),
             registry: "reg".to_string(),
@@ -2912,6 +2940,7 @@ mod tests {
     /// no elision, registry roots ordered `[reg-a, reg-b]` (F13).
     fn two_registry_tree_state() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             row("reg-a/skill-a", "from reg-a", &[], ArtifactState::NotInstalled),
             row("reg-b/skill-b", "from reg-b", &[], ArtifactState::NotInstalled),

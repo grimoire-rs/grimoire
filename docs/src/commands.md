@@ -315,8 +315,10 @@ grim search --refresh --registry ghcr.io/acme
 ## grim tui {#tui}
 
 `grim tui` opens an interactive browser over your declared registries'
-catalogs. It shows the catalog with live install state in colour, toggling
-between a flat kind-grouped list and a collapsible tree (press `t`). When
+catalogs. It shows the catalog with live install state in colour, opening in
+the collapsible tree view by default and toggling to a flat kind-grouped list
+(press `t`; set [`options.tui.default_view`][options-tui] to `"flat"` to open
+there instead). When
 more than one registry is configured, the flat list adds a leading **Registry**
 column showing the configured alias (or the raw URL when no alias was set), and
 the Repo cell is shortened to the registry-relative path so names stay readable.

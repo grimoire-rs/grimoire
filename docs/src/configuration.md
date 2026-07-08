@@ -57,7 +57,7 @@ tree_separators = ["/", "-"]
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_view` | `"flat"` or `"tree"` | `"flat"` | The view mode the browser opens in. `"tree"` starts in the collapsible grouped tree; `"flat"` starts in the plain list. An unrecognised value is a config parse error — the enum is strict. The runtime `t` key still toggles between modes ephemerally; the config is never auto-rewritten. |
+| `default_view` | `"flat"` or `"tree"` | `"tree"` | The view mode the browser opens in. Absent, it opens in the collapsible grouped tree (which needs no Registry column and reads compactly); set `"flat"` to open in the plain list instead. An unrecognised value is a config parse error — the enum is strict. The runtime `t` key still toggles between modes ephemerally; the config is never auto-rewritten. |
 | `group_by_type` | boolean | `false` | When `true`, inserts an extra type-level group — `skill`, `rule`, `agent`, or `bundle` — between the registry root and the repository path segments in tree view. Has no effect in flat mode. |
 | `tree_separators` | array of single-character strings | (absent or `[]`) | The characters on which a repository path is split into nested tree groups. Omitting the field (or setting it to `[]`) leaves the array empty in the config file; at runtime, an empty array normalizes to `["/"]`. Add `"-"` to split on hyphens as well, so `code-review` becomes `code` → `review`. Each entry must be exactly one character; empty or multi-character entries are a parse error. |
 

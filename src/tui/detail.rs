@@ -26,22 +26,40 @@ pub const W_TAG: usize = 12;
 /// (`✘ integrity-missing`, 19 chars) so the header underline spans the
 /// full column instead of stopping at `Status`.
 pub const W_STATUS: usize = 19;
-/// Extra Catalog width reserved for the deprecation marker (` ⚠ deprecated`)
+/// Extra Catalog width reserved for the deprecation marker (` † deprecated`)
 /// appended inside the Status column on deprecated rows. Sized to the full
-/// marker — leading space + `⚠` (counted as two cells: U+26A0 is
-/// East-Asian-width-ambiguous and renders as two columns in some terminals) +
-/// space + the word `deprecated` (10) = 14 — so it never clips, even when the
-/// status label is at its widest (`✘ integrity-missing`).
-pub const W_DEPRECATED: usize = 14;
+/// marker — leading space + `†` (U+2020, a single monochrome cell) + space +
+/// the word `deprecated` (10) = 13 — so it never clips, even when the status
+/// label is at its widest (`✘ integrity-missing`).
+pub const W_DEPRECATED: usize = 13;
+/// Width of the Registry column shown in flat-view multi-registry mode
+/// (label + 2-column gap is added on top by [`catalog_width`]). The flat list
+/// prepends it when more than one registry is in scope.
+pub const W_REGISTRY: usize = 20;
 /// Total terminal columns the Catalog needs to show every fixed-width
 /// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + status,
 /// plus room for the trailing deprecation marker and 2 block borders.
 /// Selection is shown by row highlight (no leading symbol). Sized to exactly
-/// this side-by-side so Detail gets all slack.
+/// this side-by-side so Detail gets all slack. Excludes the optional Registry
+/// column — [`catalog_width`] adds it when that column is shown.
 pub const CATALOG_WIDTH: u16 =
     (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS + 2 + W_DEPRECATED) as u16 + 2 /* borders */;
 /// Narrowest usable Detail column (the side-by-side layout threshold).
 pub const DETAIL_MIN_WIDTH: u16 = 30;
+
+/// The Catalog's needed width for the current view. The flat multi-registry
+/// list prepends a Registry column (`W_REGISTRY` + a 2-column gap), so the
+/// Catalog block must be that much wider or the rightmost Status column (and
+/// its deprecation marker) overflows the fixed block and clips. Single source
+/// of truth for the side-by-side split threshold and the Catalog's fixed width.
+pub fn catalog_width(show_registry_column: bool) -> u16 {
+    CATALOG_WIDTH
+        + if show_registry_column {
+            (W_REGISTRY + 2) as u16
+        } else {
+            0
+        }
+}
 
 /// One semantic line of the Detail pane. Pure data — `draw` maps each
 /// kind to concrete styling with zero logic of its own.
@@ -214,11 +232,12 @@ pub fn detail_line_text(line: &DetailLine) -> String {
 /// of fixed chrome (title 1, search 3, legend 1), then side-by-side when
 /// the catalog plus a usable detail column fit, else an even top/bottom
 /// split of the content area (list on top, Detail below).
-pub fn viewport(term: (u16, u16)) -> (u16, u16) {
+pub fn viewport(term: (u16, u16), show_registry_column: bool) -> (u16, u16) {
     let (w, h) = term;
     let content_h = h.saturating_sub(5);
-    let (dw, dh) = if w >= CATALOG_WIDTH + DETAIL_MIN_WIDTH {
-        (w - CATALOG_WIDTH, content_h)
+    let catalog_w = catalog_width(show_registry_column);
+    let (dw, dh) = if w >= catalog_w + DETAIL_MIN_WIDTH {
+        (w - catalog_w, content_h)
     } else {
         // Stacked: list takes the floored half (`content_h / 2`), Detail the
         // remainder — matches the computed `Length(top)` split in render::draw.
@@ -513,17 +532,30 @@ mod tests {
     #[test]
     fn viewport_mirrors_the_layout_split() {
         // Wide: side-by-side — detail gets all slack minus borders.
-        let (w, h) = viewport((CATALOG_WIDTH + 60, 30));
+        let (w, h) = viewport((CATALOG_WIDTH + 60, 30), false);
         assert_eq!((w, h), (58, 23));
         // Narrow: stacked — full width, Detail gets the top-half remainder.
         // content_h = 25, list = 12, Detail = 13, inner = 11.
-        let (w, h) = viewport((80, 30));
+        let (w, h) = viewport((80, 30), false);
         assert_eq!((w, h), (78, 11));
         // Short terminal: content_h = 5, Detail = 3, inner = 1.
-        let (_, h) = viewport((80, 10));
+        let (_, h) = viewport((80, 10), false);
         assert_eq!(h, 1);
         // Tiny: saturates, never underflows.
-        assert_eq!(viewport((0, 0)), (0, 0));
+        assert_eq!(viewport((0, 0), false), (0, 0));
+    }
+
+    #[test]
+    fn viewport_reserves_the_registry_column_when_shown() {
+        // Multi-registry flat view: the Catalog claims `W_REGISTRY + 2` more
+        // columns, so the Detail pane at the same terminal width is narrower
+        // than the single-registry case by exactly that amount.
+        let term = (catalog_width(true) + 60, 30);
+        let (w_multi, _) = viewport(term, true);
+        let (w_single, _) = viewport(term, false);
+        assert_eq!(w_single - w_multi, (W_REGISTRY + 2) as u16);
+        // Detail still gets the slack beyond the wider Catalog: 60 - borders.
+        assert_eq!(w_multi, 58);
     }
 
     #[test]

@@ -26,9 +26,11 @@ use crate::oci::Identifier;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DefaultView {
-    /// Flat list view (the built-in default when this field is absent).
+    /// Flat list view. Opt in with `default_view = "flat"`; otherwise the
+    /// browser opens in tree view.
     Flat,
-    /// Grouped collapsible tree view.
+    /// Grouped collapsible tree view (the built-in default when this field is
+    /// absent).
     Tree,
 }
 

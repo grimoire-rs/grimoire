@@ -616,6 +616,7 @@ mod tests {
 
     fn seeded() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![row("r/a"), row("r/b"), row("r/c")]);
         s
     }
@@ -932,7 +933,7 @@ mod tests {
         // bottom clamp the page keys must respect.
         let max = crate::tui::detail::scroll_max(
             &crate::tui::detail::detail_lines(s.selected_row()),
-            crate::tui::detail::viewport(s.term_size),
+            crate::tui::detail::viewport(s.term_size, s.show_registry_column()),
         );
         let page = u16::try_from(DETAIL_PAGE).unwrap();
         assert!(max > page, "fixture content must overflow by more than one page");
@@ -1117,6 +1118,7 @@ mod p2_event_member_node_tests {
     /// Build a tree-mode TuiState with one bundle and one expanded member.
     fn bundle_state_with_expanded_member(member_state: ArtifactState, member_repo: Option<&str>) -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![bundle_row("reg/acme/bundle-x")]);
         s.set_default_registry(Some("reg".to_string()));
         s.toggle_view_mode(); // Tree mode
@@ -1148,6 +1150,7 @@ mod p2_event_member_node_tests {
     #[test]
     fn c5_expand_on_bundle_leaf_no_cache_emits_load_bundle_members() {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![bundle_row("reg/acme/bundle-x")]);
         s.set_default_registry(Some("reg".to_string()));
         s.toggle_view_mode();
@@ -1670,6 +1673,7 @@ mod tree_event_tests {
 
     fn two_leaf_state() -> TuiState {
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             TuiRow {
                 kind: "skill".to_string(),
@@ -1834,6 +1838,7 @@ mod tree_event_tests {
             source: None,
         };
         let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
         s.set_rows(vec![row("acme/nested/tool"), row("acme/sibling")]);
         s.set_default_registry(Some("reg".to_string()));
         handle(&mut s, TuiInput::ViewToggle); // → Tree

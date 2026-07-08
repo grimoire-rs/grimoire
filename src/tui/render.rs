@@ -17,15 +17,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::detail::{
-    CATALOG_WIDTH, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REPO, W_STATUS, W_TAG, detail_lines,
-    scroll_max, viewport,
+    DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REGISTRY, W_REPO, W_STATUS, W_TAG, catalog_width,
+    detail_lines, scroll_max, viewport,
 };
-
-/// Width of the Registry column shown in flat-view multi-registry mode.
-///
-/// Kept in `render.rs` (not `detail.rs`) because the column is only used by
-/// the flat-view list renderer, never by the detail pane or tree layout.
-const W_REGISTRY: usize = 20;
 use super::state::{ArtifactState, Mode, TuiState};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
@@ -251,7 +245,7 @@ pub struct RenderRow {
     /// [`RenderModel::show_registry_column`] is true; `None` for tree rows
     /// and single-registry flat rows (where the column is elided).
     pub registry: Option<String>,
-    /// Whether this row is deprecated. Drives the trailing, header-less `⚠`
+    /// Whether this row is deprecated. Drives the trailing, header-less `†`
     /// indicator column (rendered in yellow by [`draw`]); orthogonal to the
     /// install-status glyph. Leaf and flat rows carry it; group and member
     /// rows are always `false`.
@@ -378,7 +372,7 @@ fn render_leaf(
         None if !r.version.is_empty() => r.version.clone(),
         None => r.latest_tag.clone(),
     };
-    // Deprecation is flagged by a dedicated trailing `⚠` column (rendered in
+    // Deprecation is flagged by a dedicated trailing `†` column (rendered in
     // `draw`), not a Repo-cell prefix — so the Repo cell stays clean and
     // left-aligned with every other row.
     RenderRow {
@@ -488,7 +482,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 let (glyph, status_label, color) = status_view(*leaf_state);
                 let indent = "  ".repeat(*depth);
                 let r = state.rows.get(*row);
-                // Deprecation is flagged by the dedicated trailing `⚠` column
+                // Deprecation is flagged by the dedicated trailing `†` column
                 // (rendered in `draw`), not a label prefix — keeping the tree
                 // label clean and aligned with the bundle arrow.
                 let leaf_deprecated = r.is_some_and(|row| row.deprecated.is_some());
@@ -761,7 +755,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else {
         detail_lines(state.selected_row())
     };
-    let detail_scroll = state.detail_scroll.min(scroll_max(&detail, viewport(state.term_size)));
+    let detail_scroll = state.detail_scroll.min(scroll_max(
+        &detail,
+        viewport(state.term_size, state.show_registry_column()),
+    ));
 
     // Status is transient only — loading / counts / batch results, or the
     // marked-set action keys (contextual). The always-on key summary lives
@@ -884,7 +881,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         status,
         hint,
         hint_tiers,
-        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed   ⚠ deprecated"
+        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed   † deprecated"
             .to_string(),
         truncation_hint,
         detail_focused: state.mode == Mode::Detail,
@@ -893,7 +890,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         picker,
         // A: only show Registry column when more than one registry is in scope;
         // the tree view never needs it (registry roots are already tree nodes).
-        show_registry_column: state.is_multi_registry() && state.view_mode != crate::tui::state::ViewMode::Tree,
+        show_registry_column: state.show_registry_column(),
     }
 }
 
@@ -915,11 +912,14 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // falls back to a short band below it.
     // Side-by-side once there is room for the full Catalog plus a usable
     // Detail column; the Catalog takes exactly its natural width and
-    // Detail absorbs all remaining space.
-    let (list_area, detail_area) = if chunks[2].width >= CATALOG_WIDTH + DETAIL_MIN_WIDTH {
+    // Detail absorbs all remaining space. The Catalog width includes the
+    // Registry column when the flat multi-registry view shows it, so a wider
+    // catalog pushes the stacked fallback in earlier instead of clipping.
+    let catalog_w = catalog_width(model.show_registry_column);
+    let (list_area, detail_area) = if chunks[2].width >= catalog_w + DETAIL_MIN_WIDTH {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(CATALOG_WIDTH), Constraint::Min(DETAIL_MIN_WIDTH)])
+            .constraints([Constraint::Length(catalog_w), Constraint::Min(DETAIL_MIN_WIDTH)])
             .split(chunks[2]);
         (cols[0], cols[1])
     } else {
@@ -1107,12 +1107,12 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             ),
         ]);
         // Deprecation rides in the Status column: a space-separated yellow
-        // `⚠ deprecated` appended after the install-status label (orthogonal to
+        // `† deprecated` appended after the install-status label (orthogonal to
         // its color; the full notice lives in the detail pane). CATALOG_WIDTH
         // reserves the extra width so the marker is never clipped by the border.
         if r.deprecated {
             spans.push(Span::styled(
-                " ⚠ deprecated".to_string(),
+                " † deprecated".to_string(),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1285,9 +1285,9 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
         .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
         .collect();
     // Deprecation is orthogonal to install status (no `ColorKey`); append it
-    // as a literal yellow span so the trailing `⚠` indicator is explained.
+    // as a literal yellow span so the trailing `†` indicator is explained.
     spans.push(Span::styled(
-        "  ⚠ deprecated".to_string(),
+        "  † deprecated".to_string(),
         Style::default().fg(Color::Yellow),
     ));
     if !truncation_hint.is_empty() {
@@ -1482,7 +1482,7 @@ mod tests {
         // cell stays clean and left-aligned (no inline glyph).
         assert!(leaf.deprecated, "a deprecated row must set the deprecated flag");
         assert!(
-            !leaf.columns[0].contains('⚠'),
+            !leaf.columns[0].contains('†'),
             "the Repo cell must stay clean; got {:?}",
             leaf.columns[0]
         );
@@ -1491,10 +1491,10 @@ mod tests {
         let plain = row("r/beta", ArtifactState::NotInstalled);
         let leaf2 = render_leaf(&plain, "r/beta", false, false, None);
         assert!(!leaf2.deprecated, "non-deprecated row must not set the flag");
-        assert!(!leaf2.columns[0].contains('⚠'), "non-deprecated row must not be marked");
+        assert!(!leaf2.columns[0].contains('†'), "non-deprecated row must not be marked");
     }
 
-    // Regression: the trailing `⚠` must land INSIDE the Catalog box, not be
+    // Regression: the trailing `†` must land INSIDE the Catalog box, not be
     // clipped by its right border. `CATALOG_WIDTH` reserves a column for it.
     #[test]
     fn draw_renders_deprecation_indicator_inside_catalog_box() {
@@ -1502,17 +1502,19 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut s = TuiState::new();
+
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         let mut dep = row("r/alpha", ArtifactState::Installed);
         dep.deprecated = Some("use r/alpha-2".to_string());
         s.set_rows(vec![dep]);
         let model = frame(&s);
 
         // Side-by-side layout: Catalog gets exactly CATALOG_WIDTH columns.
-        let w = CATALOG_WIDTH + DETAIL_MIN_WIDTH + 4;
+        let w = catalog_width(false) + DETAIL_MIN_WIDTH + 4;
         let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
         term.draw(|f| draw(f, &model)).unwrap();
         let buf = term.backend().buffer();
-        // Reconstruct each screen row to confirm the whole `⚠ deprecated`
+        // Reconstruct each screen row to confirm the whole `† deprecated`
         // marker lands on the catalog row, not just the leading glyph.
         let cols = buf.area.width as usize;
         let lines: Vec<String> = buf
@@ -1525,8 +1527,56 @@ mod tests {
             .find(|l| l.contains("r/alpha"))
             .expect("the catalog row is rendered");
         assert!(
-            row_line.contains("⚠ deprecated"),
-            "the full `⚠ deprecated` marker must render unclipped on the row: {row_line:?}"
+            row_line.contains("† deprecated"),
+            "the full `† deprecated` marker must render unclipped on the row: {row_line:?}"
+        );
+    }
+
+    // Regression: with the flat multi-registry Registry column shown, the
+    // Catalog block must widen by that column's width so the rightmost Status
+    // label and its deprecation marker still fit. Before the fix the block was
+    // fixed at the single-registry `CATALOG_WIDTH` and the Registry column
+    // pushed Status (and `† deprecated`) off the right border.
+    #[test]
+    fn draw_multi_registry_row_keeps_status_and_marker_unclipped() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        // Two registries → is_multi_registry, and the default flat view keeps
+        // show_registry_column true so the Registry column is prepended.
+        s.set_registry_order(vec!["reg-one".into(), "reg-two".into()]);
+        // Longest status label + a deprecation marker: the tightest fit.
+        let mut dep = row("reg-one/alpha", ArtifactState::IntegrityMissing);
+        dep.deprecated = Some("use reg-one/alpha-2".to_string());
+        s.set_rows(vec![dep]);
+        let model = frame(&s);
+        assert!(
+            model.show_registry_column,
+            "two registries in the flat view must show the Registry column"
+        );
+
+        // Wide enough for side-by-side at the *widened* catalog width.
+        let w = catalog_width(true) + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let row_line = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .find(|l| l.contains("alpha"))
+            .expect("the catalog row is rendered");
+        assert!(
+            row_line.contains("integrity-missing"),
+            "the full Status label must render unclipped in multi-registry view: {row_line:?}"
+        );
+        assert!(
+            row_line.contains("† deprecated"),
+            "the full `† deprecated` marker must render unclipped in multi-registry view: {row_line:?}"
         );
     }
 
@@ -1540,12 +1590,14 @@ mod tests {
         use ratatui::style::Modifier;
 
         let mut s = TuiState::new();
+
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         let mut dep = row("r/alpha", ArtifactState::Installed);
         dep.deprecated = Some("use r/alpha-2".to_string());
         s.set_rows(vec![dep]);
         let model = frame(&s);
 
-        let w = CATALOG_WIDTH + DETAIL_MIN_WIDTH + 4;
+        let w = catalog_width(false) + DETAIL_MIN_WIDTH + 4;
         let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
         term.draw(|f| draw(f, &model)).unwrap();
         let buf = term.backend().buffer();
@@ -1558,7 +1610,7 @@ mod tests {
             })
             .expect("the header row is rendered");
         // Last column inside the Catalog box's right border.
-        let last_inner = CATALOG_WIDTH as usize - 2;
+        let last_inner = catalog_width(false) as usize - 2;
         assert!(
             cells[header_y * cols + last_inner]
                 .modifier
@@ -1570,6 +1622,7 @@ mod tests {
     #[test]
     fn frame_projects_known_state_snapshot() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("r/alpha", ArtifactState::Installed),
             row("r/beta", ArtifactState::NotInstalled),
@@ -1647,6 +1700,7 @@ mod tests {
     #[test]
     fn help_mode_sets_show_help() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         assert!(!frame(&s).show_help);
         s.enter_help();
@@ -1701,6 +1755,7 @@ mod tests {
     #[test]
     fn frame_marks_offline_and_loading() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_offline(true);
         assert!(s.loading);
         let m = frame(&s);
@@ -1713,6 +1768,7 @@ mod tests {
     #[test]
     fn frame_search_mode_shows_cursor_and_focus() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
         s.enter_search();
         s.apply_query("al");
@@ -1728,6 +1784,7 @@ mod tests {
     #[test]
     fn frame_projects_scope_label_and_persistent_hint() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.set_scope_label("project");
         let m = frame(&s);
@@ -1741,6 +1798,7 @@ mod tests {
     fn fit_hint_degrades_to_minimum() {
         let m = frame(&{
             let mut s = TuiState::new();
+            s.view_mode = crate::tui::state::ViewMode::Flat;
             s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
             s
         });
@@ -1764,6 +1822,7 @@ mod tests {
     #[test]
     fn frame_projects_picker_and_pinned_tag() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
         // No picker when not in version-pick mode.
         assert!(frame(&s).picker.is_none());
@@ -1785,6 +1844,7 @@ mod tests {
     #[test]
     fn detail_lines_follow_the_section_layout() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         let mut r = row("r/alpha", ArtifactState::Installed);
         r.summary = "short blurb".to_string();
         r.repository_url = Some("https://github.com/acme/alpha".to_string());
@@ -1823,6 +1883,7 @@ mod tests {
         // No summary, no description, no repository ⇒ `-` placeholders and
         // the Description section is omitted entirely.
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         let mut r = row("r/alpha", ArtifactState::Installed);
         r.description = String::new();
         s.set_rows(vec![r]);
@@ -1836,6 +1897,7 @@ mod tests {
     #[test]
     fn frame_clamps_detail_scroll_to_content_height() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
         // A small terminal so the content overflows its pane.
         s.set_term_size((40, 13));
@@ -1845,7 +1907,7 @@ mod tests {
             s.scroll_detail(1);
         }
         let m = frame(&s);
-        let max = scroll_max(&m.detail, viewport(s.term_size));
+        let max = scroll_max(&m.detail, viewport(s.term_size, s.show_registry_column()));
         assert_eq!(m.detail_scroll, max);
         assert!(max > 0, "an overflowing pane has a non-zero scroll range");
         // Within range: passed through untouched.
@@ -1860,6 +1922,7 @@ mod tests {
     #[test]
     fn frame_status_line_overrides_hint() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.set_status("installed r/a");
         assert_eq!(frame(&s).status, "installed r/a");
@@ -1868,6 +1931,7 @@ mod tests {
     #[test]
     fn frame_projects_selected_clients_and_omits_when_empty() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         // No clients selected ⇒ the span is omitted (empty string).
         assert_eq!(frame(&s).clients, "");
@@ -1878,6 +1942,7 @@ mod tests {
     #[test]
     fn frame_projects_truncation_hint_and_omits_when_complete() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         // An exhaustive window omits the hint entirely.
         assert_eq!(frame(&s).truncation_hint, "");
@@ -1895,7 +1960,7 @@ mod tests {
         let base = legend_line("");
         assert_eq!(base.spans.len(), 7, "six status glyphs + deprecation, no trailing hint");
         assert!(
-            base.spans.iter().any(|s| s.content.contains("⚠ deprecated")),
+            base.spans.iter().any(|s| s.content.contains("† deprecated")),
             "the legend explains the deprecation indicator"
         );
         // A non-empty hint adds one trailing span carrying the hint text.
@@ -1910,6 +1975,7 @@ mod tests {
     #[test]
     fn flat_view_strips_default_registry_prefix() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_default_registry(Some("localhost:5000".to_string()));
         s.set_rows(vec![
             row("localhost:5000/acme/tool", ArtifactState::Installed),
@@ -1925,6 +1991,7 @@ mod tests {
     #[test]
     fn frame_flat_view_keeps_full_ref() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("reg/acme/tool", ArtifactState::Installed)]);
         let m = frame(&s);
         assert_eq!(m.rows.len(), 1);
@@ -1942,6 +2009,7 @@ mod tests {
     #[test]
     fn tree_frame_produces_group_rows_with_non_null_group_field() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("reg/acme/alpha", ArtifactState::Installed),
             row("reg/acme/beta", ArtifactState::NotInstalled),
@@ -1966,6 +2034,7 @@ mod tests {
     #[test]
     fn tree_frame_leaves_have_nonzero_indent() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("reg/acme/alpha", ArtifactState::Installed)]);
         s.set_default_registry(Some("reg".to_string()));
         s.toggle_view_mode();
@@ -1982,11 +2051,12 @@ mod tests {
     }
 
     // A deprecated leaf sets the deprecated flag in tree view too (parity with
-    // the flat view's render_leaf), driving the trailing `⚠` column — without
+    // the flat view's render_leaf), driving the trailing `†` column — without
     // injecting a glyph into the (indented, arrow-bearing) label cell.
     #[test]
     fn tree_frame_flags_deprecated_leaf() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         let mut dep = row("reg/acme/alpha", ArtifactState::NotInstalled);
         dep.deprecated = Some("use reg/acme/alpha-2".to_string());
         s.set_rows(vec![dep, row("reg/acme/beta", ArtifactState::NotInstalled)]);
@@ -2005,7 +2075,7 @@ mod tests {
         );
         // No leaf injects the glyph into the label cell.
         assert!(
-            leaves.iter().all(|r| !r.columns[0].contains('⚠')),
+            leaves.iter().all(|r| !r.columns[0].contains('†')),
             "no label cell carries the glyph; cols: {:?}",
             leaves.iter().map(|r| r.columns[0].as_str()).collect::<Vec<_>>()
         );
@@ -2023,6 +2093,7 @@ mod tests {
     #[test]
     fn tree_frame_group_mark_state_tri_state() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("reg/acme/alpha", ArtifactState::Installed),
             row("reg/acme/beta", ArtifactState::NotInstalled),
@@ -2070,6 +2141,7 @@ mod tests {
     #[test]
     fn tree_group_detail_pane_returns_non_empty_lines() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("reg/acme/alpha", ArtifactState::Installed),
             row("reg/acme/beta", ArtifactState::NotInstalled),
@@ -2095,6 +2167,7 @@ mod tests {
     #[test]
     fn tree_group_col3_shows_status_glyph_not_rollup_label() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("reg/acme/alpha", ArtifactState::Installed),
             row("reg/acme/beta", ArtifactState::Installed),
@@ -2148,6 +2221,7 @@ mod tests {
     #[test]
     fn draw_leftmost_col_partial_vs_full_group_mark_differ() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row("reg/acme/alpha", ArtifactState::Installed),
             row("reg/acme/beta", ArtifactState::Installed),
@@ -2366,6 +2440,7 @@ mod tests {
     #[test]
     fn hint_tiers_are_view_mode_aware() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("reg/acme/alpha", ArtifactState::Installed)]);
         s.set_default_registry(Some("reg".to_string()));
 
@@ -2475,6 +2550,7 @@ mod p2_render_member_node_tests {
         // Directly call tree_render_rows on a synthetic state containing a
         // collapsed bundle leaf at depth 0 (no group above it).
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         // Use a no-default-registry setup so the bundle leaf is at depth 0.
         s.set_rows(vec![bundle_tui_row("acme/bundle-x")]);
         s.toggle_view_mode();
@@ -2499,6 +2575,7 @@ mod p2_render_member_node_tests {
     fn c1_bundle_leaf_arrow_glyph_expanded_shows_down_arrow() {
         // A bundle leaf that IS in expanded_bundles must show ▾.
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![bundle_tui_row("acme/bundle-x")]);
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
@@ -2527,6 +2604,7 @@ mod p2_render_member_node_tests {
         // A non-bundle leaf must NOT have a leading arrow. The prefix must be
         // byte-identical to indent + label (no ▸/▾/>/v insertion).
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![skill_tui_row("acme/my-skill")]);
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
@@ -2555,6 +2633,7 @@ mod p2_render_member_node_tests {
         // Bundle + non-bundle side-by-side in the same tree.
         // After P3: the bundle leaf gets an arrow, the non-bundle leaf does not.
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             bundle_tui_row("reg/acme/bundle-x"),
             skill_tui_row("reg/acme/my-skill"),
@@ -2635,6 +2714,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_two_registry_tree_yields_two_registry_root_rows() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::NotInstalled),
             row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
@@ -2685,6 +2765,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_empty_registry_in_order_renders_zero_zero_group_root() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         // No rows from "ghcr.io/empty"; one row from another registry.
         s.set_rows(vec![row_with_reg(
             "ghcr.io/acme",
@@ -2721,6 +2802,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_single_registry_tree_yields_zero_registry_root_rows() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("registry.example", "acme/alpha", ArtifactState::NotInstalled),
             row_with_reg("registry.example", "acme/beta", ArtifactState::NotInstalled),
@@ -2746,6 +2828,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_offline_registry_appears_in_status_line() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![]);
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string()],
@@ -2763,6 +2846,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_all_registries_offline_status_message() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![]);
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string(), "ghcr.io/other".to_string()],
@@ -2781,6 +2865,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_frame_truncated_registry_appears_in_status_line() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![]);
         s.registry_health = RegistryHealth {
             offline: vec![],
@@ -2804,6 +2889,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_mark_cascade_on_registry_root_marks_all_descendants() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("ghcr.io/acme", "alpha", ArtifactState::NotInstalled),
             row_with_reg("ghcr.io/acme", "beta", ArtifactState::Installed),
@@ -2831,6 +2917,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_selection_anchor_fallback_when_registry_absent_after_reload() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         // Initial state: 2 registries, cursor on something in the first registry
         s.set_rows(vec![
             row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::NotInstalled),
@@ -2864,6 +2951,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_flat_multi_registry_shows_registry_column() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed),
             row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
@@ -2911,6 +2999,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_flat_multi_registry_bare_host_row_attributes_to_configured() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("localhost:5050", "grimoire/skills/a", ArtifactState::NotInstalled),
             row_with_reg("localhost:5051", "tools/skills/b", ArtifactState::NotInstalled),
@@ -2946,6 +3035,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_flat_single_registry_no_registry_column() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row_with_reg(
             "registry.example",
             "acme/skill-a",
@@ -2979,6 +3069,7 @@ mod spec_multi_registry_render_tests {
     fn spec_tree_registry_root_shows_alias_label_when_alias_set() {
         use std::collections::BTreeMap;
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![
             row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed),
             row_with_reg("ghcr.io/other", "skill-b", ArtifactState::NotInstalled),
@@ -3014,6 +3105,7 @@ mod spec_multi_registry_render_tests {
     #[test]
     fn spec_tree_registry_root_shows_url_when_no_alias() {
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row_with_reg("ghcr.io/acme", "skill-a", ArtifactState::Installed)]);
         s.set_registry_order(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
         // No alias set — registry_labels empty, fallback is the URL itself.
@@ -3039,6 +3131,7 @@ mod spec_multi_registry_render_tests {
     fn spec_health_status_shows_alias_label() {
         use std::collections::BTreeMap;
         let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![]);
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string()],
