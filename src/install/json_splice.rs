@@ -193,6 +193,16 @@ fn parse_value(span: &str) -> Option<serde_json::Value> {
         .or_else(|| serde_json::from_str(&sanitize_jsonc(span)).ok())
 }
 
+/// The parsed value of `container.member` in `text`, if present.
+///
+/// Semantic lookup (full parse, JSONC-tolerant) — lets the installer
+/// distinguish "member exists with a different value" (a clobber) from
+/// "member absent" (a plain insert) before an upsert. Returns `None` for
+/// unparsable text; the subsequent [`upsert_member`] surfaces the error.
+pub fn member_value(text: &str, container: &str, member: &str) -> Option<serde_json::Value> {
+    Some(parse_value(text)?.get(container)?.get(member)?.clone())
+}
+
 /// The last member named `key` (JSON duplicate-key semantics: last wins,
 /// matching what serde_json and every client parser resolve).
 fn last_member<'m>(members: &'m [Member], key: &str) -> Option<&'m Member> {

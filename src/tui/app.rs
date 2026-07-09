@@ -1875,6 +1875,7 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
         InstallOutcome::AlreadyInstalled => "unchanged",
         InstallOutcome::Skipped(_) => "skipped",
         InstallOutcome::Refused { .. } => "refused (locally modified)",
+        InstallOutcome::RefusedUntracked { .. } => "refused (untracked file exists)",
     }
 }
 

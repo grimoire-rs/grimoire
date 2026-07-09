@@ -92,6 +92,13 @@ pub enum InstallErrorKind {
     #[error("blob digest mismatch: expected {expected}, got {actual}")]
     BlobDigestMismatch { expected: Digest, actual: Digest },
 
+    /// An install destination exists on disk but is not recorded for
+    /// that client: grim refuses to overwrite files it did not create.
+    #[error(
+        "destination '{path}' already exists for client {client} and was not created by grim; rerun with --force to overwrite"
+    )]
+    UntrackedDestination { client: String, path: PathBuf },
+
     /// The configured client target is not supported by this build.
     #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
     UnsupportedClient(String),

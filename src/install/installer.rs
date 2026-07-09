@@ -48,6 +48,11 @@ pub enum InstallOutcome {
     /// recorded vs. on-disk content hash so the caller can build a precise
     /// integrity error.
     Refused { recorded: Digest, actual: Digest },
+    /// Refused: the destination exists on disk with no recorded output
+    /// for this client — grim did not write it, so overwriting would
+    /// clobber a hand-authored file (or a foreign config entry). Carries
+    /// the client and path for a precise error. `--force` overrides.
+    RefusedUntracked { client: String, path: std::path::PathBuf },
 }
 
 /// One artifact's install result, paired with its reference for reporting.
@@ -289,6 +294,73 @@ async fn install_one<M: ArtifactMaterializer>(
         }
     }
 
+    // Untracked-clobber gate: a destination that exists on disk with no
+    // recorded output for its client was not written by grim, so
+    // overwriting it would clobber a hand-authored file. Refuse unless
+    // forced. Exception — identical footprint: rendering is
+    // deterministic per the Vendor contract, so when the on-disk
+    // footprint hash equals what this install would write, the files
+    // are adopted into the record instead (repairs the "state file
+    // lost, outputs intact" case).
+    let mut adopted = 0usize;
+    if !force {
+        for client in &materialize_set {
+            let tracked = recorded
+                .as_ref()
+                .is_some_and(|rec| rec.outputs.iter().any(|out| out.client == client.as_str()));
+            if tracked {
+                continue;
+            }
+            let dest = target.path_for(*client, kind, &artifact.name);
+            if !dest.exists() {
+                continue;
+            }
+            // A rule's support dir always lives at `<parent>/<name>/`;
+            // `footprint_hash` treats an absent support dir as no
+            // support, matching the preview when this version ships none.
+            let existing_support = match kind {
+                ArtifactKind::Rule => dest.parent().map(|p| p.join(&artifact.name)),
+                _ => None,
+            };
+            // Would-be output: render into a staging preview and hash it.
+            let preview_root = staging.path().join(format!("preview-{client}"));
+            std::fs::create_dir_all(&preview_root).map_err(|e| target_io(&preview_root, e))?;
+            // Install destinations are always `<root>/…/<name[.md]>`; a
+            // missing final component would be a `path_for` bug.
+            let Some(dest_name) = dest.file_name() else {
+                return Err(
+                    InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+                        "install destination '{}' has no final path component",
+                        dest.display()
+                    )))
+                    .into(),
+                );
+            };
+            let preview_dest = preview_root.join(dest_name);
+            client
+                .materialize(
+                    kind,
+                    &artifact.name,
+                    &canonical,
+                    &preview_dest,
+                    &pinned_str,
+                    staged_support.as_deref(),
+                )
+                .map_err(crate::error::Error::from)?;
+            let preview_support = staged_support.as_ref().map(|_| preview_root.join(&artifact.name));
+            let would =
+                footprint_hash(&preview_dest, preview_support.as_deref()).map_err(|e| target_io(&preview_dest, e))?;
+            let current = footprint_hash(&dest, existing_support.as_deref()).map_err(|e| target_io(&dest, e))?;
+            if current != would {
+                return Ok(InstallOutcome::RefusedUntracked {
+                    client: client.to_string(),
+                    path: dest,
+                });
+            }
+            adopted += 1;
+        }
+    }
+
     // Materialize into every client in the effective set, replacing any prior
     // output, and hash each client output for the integrity record.
     let mut client_records: Vec<ClientOutput> = Vec::with_capacity(materialize_set.len());
@@ -413,6 +485,10 @@ async fn install_one<M: ArtifactMaterializer>(
 
     Ok(if recorded.is_some() {
         InstallOutcome::Updated
+    } else if adopted > 0 && adopted == materialize_set.len() {
+        // Every output was adopted at an identical footprint — nothing
+        // changed on disk; only the record was rebuilt.
+        InstallOutcome::AlreadyInstalled
     } else {
         InstallOutcome::Installed
     })
@@ -591,6 +667,7 @@ async fn install_mcp(
     }
 
     let mut client_records: Vec<ClientOutput> = Vec::with_capacity(register_set.len());
+    let mut adopted = 0usize;
     for client in &register_set {
         let vendor = client.vendor();
         let Some(config_path) = vendor.mcp_config_path(target.workspace(), target.scope()) else {
@@ -640,6 +717,26 @@ async fn install_mcp(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(target_io(&config_path, e).into()),
         };
+        // Untracked-clobber gate (MCP): a pre-existing member the record
+        // does not cover was authored by the user or another tool —
+        // replacing its value would clobber it, so refuse unless forced.
+        // A semantically identical member is adopted into the record
+        // instead (the upsert below is a no-op for it).
+        let tracked = recorded
+            .as_ref()
+            .is_some_and(|rec| rec.outputs.iter().any(|out| out.client == client.as_str()));
+        if !force
+            && !tracked
+            && let Some(existing) = crate::install::json_splice::member_value(&raw, container, member)
+        {
+            if existing != value {
+                return Ok(InstallOutcome::RefusedUntracked {
+                    client: client.to_string(),
+                    path: config_path,
+                });
+            }
+            adopted += 1;
+        }
         match upsert_member(&raw, container, member, &value) {
             Ok(Splice::Changed(text)) => {
                 if let Some(parent) = config_path.parent()
@@ -689,6 +786,7 @@ async fn install_mcp(
         }
     }
 
+    let output_count = outputs.len();
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
@@ -698,6 +796,10 @@ async fn install_mcp(
 
     Ok(if recorded.is_some() {
         InstallOutcome::Updated
+    } else if adopted > 0 && adopted == output_count {
+        // Every registration was adopted at an identical value — nothing
+        // changed in any client config; only the record was rebuilt.
+        InstallOutcome::AlreadyInstalled
     } else {
         InstallOutcome::Installed
     })

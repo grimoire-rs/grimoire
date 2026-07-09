@@ -186,6 +186,18 @@ pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallR
                 }
                 InstallStatus::Refused
             }
+            Ok(InstallOutcome::RefusedUntracked { client, path }) => {
+                if first_error.is_none() {
+                    let r = reference.clone();
+                    first_error = Some(crate::error::Error::from(
+                        crate::install::install_error::InstallError::with_reference(
+                            r,
+                            crate::install::install_error::InstallErrorKind::UntrackedDestination { client, path },
+                        ),
+                    ));
+                }
+                InstallStatus::Refused
+            }
             Err(e) => {
                 if first_error.is_none() {
                     first_error = Some(e);

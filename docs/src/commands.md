@@ -209,6 +209,15 @@ targeted — every client whose vendor directory or marker is present —
 falling back to all clients when none are detected. `--force` overwrites a
 locally modified artifact instead of refusing it.
 
+Install never clobbers files it did not create: a destination that already
+exists on disk **without an install record** — a hand-authored skill
+directory, a rule file, or an MCP config member owned by you or another
+tool — is refused (exit 65) with the conflicting path named. `--force`
+overwrites and records it. One exception: when the existing content is
+identical to what the install would write, it is **adopted** into the
+install record and reported `unchanged` — so deleting the state file while
+leaving rendered files intact repairs itself on the next install.
+
 ```sh
 grim install
 grim install --client claude,copilot

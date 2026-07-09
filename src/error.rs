@@ -189,6 +189,7 @@ fn classify_install(err: &InstallError) -> ExitCode {
     match &err.kind {
         InstallErrorKind::BlobMissing => ExitCode::NotFound,
         InstallErrorKind::IntegrityMismatch { .. }
+        | InstallErrorKind::UntrackedDestination { .. }
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
