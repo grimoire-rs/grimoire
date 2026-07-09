@@ -71,6 +71,45 @@ def test_status_stale_when_config_changed(
     assert all(r["state"] == "stale" for r in rows)
 
 
+def test_status_json_includes_installed_outputs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`outputs` carries per-client `{client, path}` for an installed
+    artifact; a declared-but-not-installed artifact gets `outputs: []`."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    # Declare a second skill and re-lock so the config matches the lock
+    # (not stale) without installing it — declared-but-not-installed.
+    repo2 = f"{unique_repo}/s2"
+    make_artifact(repo2, "skill", {"s2/SKILL.md": "v\n"}, tag="stable")
+    write_config(
+        project_dir,
+        skills={
+            "s": f"{registry}/{repo}:stable",
+            "s2": f"{registry}/{repo2}:stable",
+        },
+    )
+    runner.run("lock", check=False)
+
+    rows = runner.json("status")
+    installed = next(r for r in rows if r["name"] == "s")
+    not_installed = next(r for r in rows if r["name"] == "s2")
+
+    assert installed["state"] == "installed"
+    assert len(installed["outputs"]) > 0
+    for output in installed["outputs"]:
+        assert set(output.keys()) == {"client", "path"}
+        assert Path(output["path"]).exists()
+
+    assert not_installed["state"] == "missing"
+    assert not_installed["outputs"] == []
+
+
 def test_status_outdated_when_lock_advances(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

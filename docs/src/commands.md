@@ -261,6 +261,26 @@ integrity-missing, or not installed. The `Source` column shows each artifact's
 [provenance](./concepts.md#bundles): `direct` or the bundle it came from. Pair
 with `--format json` to drive automation.
 
+`--format json` output carries an `outputs` array per artifact: the
+per-[client](./concepts.md#clients) locations the artifact was materialized
+to, read back from install state. It is empty for a declared-but-not-installed
+artifact. This is the supported way to script "where did grim put this file?"
+— the on-disk layout under each client's directory is an implementation
+detail and may change.
+
+```json
+{
+  "kind": "skill",
+  "name": "code-review",
+  "source": "direct",
+  "pinned": "ghcr.io/acme/code-review@sha256:1f2e...",
+  "state": "installed",
+  "outputs": [
+    { "client": "claude", "path": "/repo/.claude/skills/code-review" }
+  ]
+}
+```
+
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,

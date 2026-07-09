@@ -5,13 +5,20 @@
 //!
 //! Plain format: 5-column table (Kind | Name | Source | Pinned | State).
 //!
-//! JSON format: an array of `{kind, name, source, pinned, state}` objects
-//! (the report wraps a `Vec`, serialized to the bare array — no wrapper
-//! object, per subsystem-cli-api.md). `pinned` is `null` when the
+//! JSON format: an array of `{kind, name, source, pinned, state, outputs}`
+//! objects (the report wraps a `Vec`, serialized to the bare array — no
+//! wrapper object, per subsystem-cli-api.md). `pinned` is `null` when the
 //! artifact is declared but not yet locked. `source` is `"direct"` for a
 //! declared artifact or `"bundle: <registry/repo>"` for a bundle member.
+//! `outputs` is an array of `{client, path}` — the per-client materialized
+//! locations recorded in install state, reconciled against the
+//! currently-active client set. Always present; empty for an artifact with
+//! no recorded outputs (not installed, or a bundle row). Vendor on-disk
+//! layout is unstable — this field is the supported discovery channel for
+//! where an artifact was materialized.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use serde::{Serialize, Serializer};
 
@@ -19,6 +26,16 @@ use crate::cli::printer::{Printable, print_table};
 use crate::oci::{ArtifactKind, PinnedIdentifier};
 
 use super::artifact_status::ArtifactStatus;
+
+/// One client's materialized output location for a status entry.
+#[derive(Debug, Serialize)]
+pub struct StatusOutput {
+    /// The client target name (`claude`/`opencode`/`copilot`).
+    pub client: String,
+    /// The resolved on-disk path the artifact was materialized to for this
+    /// client.
+    pub path: PathBuf,
+}
 
 /// One declared artifact's status row.
 #[derive(Debug, Serialize)]
@@ -33,6 +50,9 @@ pub struct StatusEntry {
     #[serde(serialize_with = "serialize_opt_pinned")]
     pub pinned: Option<PinnedIdentifier>,
     pub state: ArtifactStatus,
+    /// Per-client materialized output locations. Empty when the artifact
+    /// has no recorded install-state outputs.
+    pub outputs: Vec<StatusOutput>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -111,6 +131,10 @@ mod tests {
                 source: "direct".to_string(),
                 pinned: Some(pinned("code-review")),
                 state: ArtifactStatus::Installed,
+                outputs: vec![StatusOutput {
+                    client: "claude".to_string(),
+                    path: "/w/.claude/skills/code-review".into(),
+                }],
             },
             StatusEntry {
                 kind: ArtifactKind::Rule,
@@ -118,6 +142,7 @@ mod tests {
                 source: "bundle: ghcr.io/acme/stack".to_string(),
                 pinned: None,
                 state: ArtifactStatus::Missing,
+                outputs: Vec::new(),
             },
         ]);
         let mut buf = Vec::new();
@@ -138,6 +163,7 @@ mod tests {
             source: "direct".to_string(),
             pinned: None,
             state: ArtifactStatus::Stale,
+            outputs: Vec::new(),
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -146,5 +172,26 @@ mod tests {
         assert!(v[0]["pinned"].is_null());
         assert_eq!(v[0]["source"], "direct");
         assert_eq!(v[0]["state"], "stale");
+        assert_eq!(v[0]["outputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn json_outputs_carries_client_and_path() {
+        let r = StatusReport::new(vec![StatusEntry {
+            kind: ArtifactKind::Skill,
+            name: "s".to_string(),
+            source: "direct".to_string(),
+            pinned: Some(pinned("s")),
+            state: ArtifactStatus::Installed,
+            outputs: vec![StatusOutput {
+                client: "claude".to_string(),
+                path: "/w/.claude/skills/s".into(),
+            }],
+        }]);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v[0]["outputs"][0]["client"], "claude");
+        assert_eq!(v[0]["outputs"][0]["path"], "/w/.claude/skills/s");
     }
 }

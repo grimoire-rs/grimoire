@@ -14,11 +14,11 @@
 use clap::Args;
 
 use crate::api::artifact_status::ArtifactStatus;
-use crate::api::status_report::{StatusEntry, StatusReport};
+use crate::api::status_report::{StatusEntry, StatusOutput, StatusReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
+use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::target::detect_clients;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -110,6 +110,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             source: "direct".to_string(),
             pinned: None,
             state,
+            outputs: Vec::new(),
         });
     }
 
@@ -117,7 +118,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
-        let state = derive_state(
+        let record = state.get(decl.kind, &decl.name);
+        let outputs = record_outputs(record, &active, &scope.roots);
+        let entry_state = derive_state(
             decl.kind,
             &decl.name,
             locked,
@@ -131,7 +134,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             name: decl.name,
             source: "direct".to_string(),
             pinned: locked.map(|l| l.pinned.clone()),
-            state,
+            state: entry_state,
+            outputs,
         });
     }
 
@@ -153,12 +157,15 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // Every contributing bundle is listed (a shared member carries
             // multi-provenance), comma-joined in lock order.
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
+            let record = state.get(member.kind, &member.name);
+            let outputs = record_outputs(record, &active, &scope.roots);
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
                 source: format!("bundle: {}", repos.join(", ")),
                 pinned: Some(member.pinned.clone()),
                 state: st,
+                outputs,
             });
         }
     }
@@ -203,6 +210,26 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
 
 fn find_locked<'a>(lock: &'a GrimoireLock, kind: ArtifactKind, name: &str) -> Option<&'a LockedArtifact> {
     lock.iter_artifacts().find(|a| a.kind == kind && a.name == name)
+}
+
+/// Build the reported `outputs` list for one declared artifact: the
+/// currently-active client outputs from its install record, resolved to
+/// absolute on-disk paths. `None` record (never installed) or an
+/// unresolvable anchored target (corrupt/tampered path, or an anchor root
+/// absent on this machine) yields no entry for that output — `status` never
+/// fails on this, it just omits what it cannot resolve.
+fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots: &AnchorRoots) -> Vec<StatusOutput> {
+    let Some(record) = record else {
+        return Vec::new();
+    };
+    active_outputs(&record.outputs, active)
+        .filter_map(|out| {
+            out.resolved_target(roots).ok().map(|path| StatusOutput {
+                client: out.client.clone(),
+                path,
+            })
+        })
+        .collect()
 }
 
 /// Derive the reported state for one declared artifact.
