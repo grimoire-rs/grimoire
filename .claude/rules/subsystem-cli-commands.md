@@ -21,11 +21,11 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim lock` | Resolve floating tags in `grimoire.toml` to digests and write `grimoire.lock` (after hand-edits; `add` locks what it declares) |
 | `grim config get\|set\|unset\|list <key>` | Read and write `grimoire.toml` settings (`[options]`, `[options.tui]`) and registry fields via dotted keys; `list [--show-origin]` dumps explicitly-set values for the active scope (never merged across scopes). Exit codes: unset `get` → 1, unknown key → 64, bad value → 65. |
 | `grim config registry add\|rm\|use\|show\|list` | Registry lifecycle for `[[registries]]` entries: `add <alias> --url <url> [--default]`, `rm <alias>`, `use <alias>` (at-most-one-default, clears prior), `show <alias>`, `list`. Alias not found or dup on `add` → 64. |
-| `grim install <ref>` | Fetch and install an AI-config artifact (skill/rule set) |
+| `grim install` | Materialize every locked artifact into the configured AI client(s); no positional — declare via `add`, scope clients via `--client`. Refuses to overwrite an untracked pre-existing destination (65) unless `--force`; adopts identical content into the record |
 | `grim status` | Report each declared artifact's state (installed, outdated, modified, …) with bundle provenance |
 | `grim search [query]` | Substring search over the registry catalog (repo, summary, description, keywords); empty query lists all |
 | `grim tui` | Interactive catalog browser with live install state (flat list / tree toggle) |
-| `grim update [<ref>]` | Pull newer versions |
+| `grim update [names…]` | Re-resolve floating tags, roll the lock forward, re-materialize what changed; prunes clean orphans that dropped out of the lock. No names = everything; names are config binding names, not refs |
 | `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |
 | `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action. **Exception:** an artifact a declared bundle still provides keeps its files (a directly-declared one degrades to `remove`; a bundle-only member is a no-op — remove the bundle to remove it) |
 | `grim build <path>` | Validate and pack a local skill/rule/agent/mcp/bundle without pushing (release dry run) |

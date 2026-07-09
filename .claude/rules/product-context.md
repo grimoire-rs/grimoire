@@ -20,10 +20,10 @@ paths:
 
 > An OCI-backed package manager for AI skills and rules.
 
-> **Status: provisional.** This document is an early placeholder. The real
-> product vision will be fleshed out by the maintainer. Treat statements
-> below as a sensible starting point, not a finalized contract — do not
-> derive deep implementation details from it.
+> **Status: active.** De-provisionalized on the road to 1.0.0 (see
+> `adr_render_layout_stability.md` and `docs/src/stability.md` for the
+> stability contract). Statements below are maintained positioning —
+> flag drift via the Update Protocol at the bottom of this file.
 
 Grimoire (binary: `grim`) is a CLI for installing, maintaining, and
 publishing AI-agent configuration — skills, rules, prompts, and related
@@ -36,7 +36,7 @@ This rule is the canonical product identity. Read it when reasoning about
 project direction, trade-offs, ADR motivation, research framing, doc
 narratives, or positioning.
 
-## The Problem (provisional)
+## The Problem
 
 Reusable AI-agent configuration (skills, rules, hooks, prompt templates)
 today tends to be copy-pasted between repositories with no versioning,
@@ -50,7 +50,7 @@ to publish a skill once and install or upgrade it across many projects.
 - **Standards-based** — stable, widely adopted, vendor-neutral
 - **Ecosystem tooling** — scanning, replication, GC already exist
 
-## Target Users (provisional)
+## Target Users
 
 - **Primary**: Engineers maintaining AI-agent configuration shared across
   multiple repositories or teams
@@ -58,7 +58,7 @@ to publish a skill once and install or upgrade it across many projects.
   skills and rules
 - **Non-target**: One-off, single-repo config that never needs to be shared
 
-## Product Principles (provisional)
+## Product Principles
 
 1. **Backend-friendly** — JSON output, composable commands, clean exit codes
 2. **Offline-first** — a local index/cache should make repeat operations
@@ -68,18 +68,21 @@ to publish a skill once and install or upgrade it across many projects.
 5. **Private-first** — registry auth is first-class; internal catalogs are
    as easy to use as public ones
 
-## CLI at a Glance (illustrative, not final)
+## CLI at a Glance
 
 ```bash
-grim install some/skill:1            # Fetch + install an AI config artifact
-grim list                            # Show installed skills/rules
-grim update                          # Pull newer versions
+grim add ghcr.io/acme/code-review:1  # Declare + lock + install an artifact
+grim install                         # Materialize the locked set into clients
+grim status                          # Per-artifact state (+ outputs in JSON)
+grim update                          # Re-resolve floating tags, roll forward
 grim release ./my-skill some/skill:1 # Push a single artifact to a registry
 grim publish                         # Batch-release packages from publish.toml
-grim remove some/skill               # Uninstall
+grim uninstall skill code-review     # Full inverse of install
 ```
 
-Global flags: `--offline`, `--remote`, `--format json` (illustrative).
+Global flags: `--offline`, `--global`, `--config <path>`,
+`--registry <ref>`, `--format json`. Full surface:
+`subsystem-cli-commands.md` and `docs/src/commands.md` (18 subcommands).
 
 ## Technical Overview
 
