@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::catalog::SearchQuery;
+use crate::catalog::{OciMeta, SearchQuery};
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
 
@@ -145,6 +145,9 @@ pub struct TuiRow {
     /// Publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the row marker + detail-pane highlight.
     pub deprecated: Option<String>,
+    /// Curated extra `org.opencontainers.image.*` annotations (license,
+    /// authors, url, documentation, vendor) shown in the detail pane.
+    pub oci: OciMeta,
     /// The representative tag (empty string when absent) — may be the
     /// moving `latest` pointer; used as the resolution fallback.
     pub latest_tag: String,
@@ -1339,6 +1342,7 @@ mod tests {
     fn row(repo: &str, desc: &str, kw: &[&str], state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -1955,6 +1959,7 @@ mod tests {
     fn tree_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2807,6 +2812,7 @@ mod tests {
         let mut s = TuiState::new();
         s.view_mode = ViewMode::Flat;
         let bundle_row = TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "bundle".to_string(),
             registry: "reg".to_string(),
             repository: "acme/bundle-x".to_string(),
@@ -3060,6 +3066,7 @@ mod p2_state_member_node_tests {
     fn bundle_tui_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),

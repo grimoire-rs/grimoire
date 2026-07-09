@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use crate::catalog::registry_catalog::Catalog;
+use crate::catalog::registry_catalog::{Catalog, OciMeta};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
 use crate::install::client_target::ClientTarget;
@@ -77,6 +77,9 @@ pub struct CatalogRow {
     /// The publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the search / TUI deprecation highlight.
     pub deprecated: Option<String>,
+    /// Curated extra `org.opencontainers.image.*` annotations shown in the
+    /// TUI detail pane. Empty when the artifact carries none of them.
+    pub oci: OciMeta,
     /// The representative tag the metadata was read from.
     pub latest_tag: Option<String>,
     /// The highest concrete semver tag, if any.
@@ -230,6 +233,7 @@ pub async fn load_catalog(
                         revision: e.revision.clone(),
                         created: e.created.clone(),
                         deprecated: e.deprecated.clone(),
+                        oci: e.oci.clone(),
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),
                         badge: derive_badge(

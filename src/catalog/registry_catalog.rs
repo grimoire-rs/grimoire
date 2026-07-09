@@ -72,6 +72,61 @@ pub enum CatalogVersion {
     V1 = 1,
 }
 
+/// Curated `org.opencontainers.image.*` annotations surfaced in the TUI
+/// detail pane, beyond the ones already carried as first-class
+/// [`CatalogEntry`] fields (title/description/version/source/revision/created).
+///
+/// Read straight off `manifest.annotations`; every field is `None` when its
+/// annotation is absent. grim itself only emits `licenses` today (skills), so
+/// the other four populate for OCI artifacts that carry the standard keys.
+///
+/// No `deny_unknown_fields`: a future grim may add a curated key, and an older
+/// binary should tolerate reading it from a shared cache rather than reject the
+/// whole entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciMeta {
+    /// `org.opencontainers.image.licenses` — SPDX license expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licenses: Option<String>,
+    /// `org.opencontainers.image.authors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<String>,
+    /// `org.opencontainers.image.url` — the project home page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `org.opencontainers.image.documentation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// `org.opencontainers.image.vendor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+}
+
+impl OciMeta {
+    /// Read the curated `org.opencontainers.image.*` keys off a manifest's
+    /// annotation map. Absent keys stay `None`.
+    fn from_annotations(annotations: &BTreeMap<String, String>) -> Self {
+        let get = |k: &str| annotations.get(k).cloned();
+        Self {
+            licenses: get("org.opencontainers.image.licenses"),
+            authors: get("org.opencontainers.image.authors"),
+            url: get("org.opencontainers.image.url"),
+            documentation: get("org.opencontainers.image.documentation"),
+            vendor: get("org.opencontainers.image.vendor"),
+        }
+    }
+
+    /// Whether every curated field is absent — the serde skip predicate, so an
+    /// artifact carrying none of these keys serializes no `oci` object.
+    fn is_empty(&self) -> bool {
+        self.licenses.is_none()
+            && self.authors.is_none()
+            && self.url.is_none()
+            && self.documentation.is_none()
+            && self.vendor.is_none()
+    }
+}
+
 /// One repository's catalog record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +169,11 @@ pub struct CatalogEntry {
     /// `None` when not deprecated. Surfaced as the search / TUI highlight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<String>,
+    /// Curated extra `org.opencontainers.image.*` annotations (licenses,
+    /// authors, url, documentation, vendor) surfaced in the TUI detail pane.
+    /// Empty when the manifest carried none of them.
+    #[serde(default, skip_serializing_if = "OciMeta::is_empty")]
+    pub oci: OciMeta,
     /// The representative tag the metadata was read from (may be the
     /// moving `latest` pointer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,6 +735,7 @@ impl Catalog {
             revision: None,
             created: None,
             deprecated: None,
+            oci: OciMeta::default(),
             latest_tag,
             version,
             fetched_at: fetched_at.clone(),
@@ -715,7 +776,7 @@ impl Catalog {
             Ok(m) => m,
             Err(_) => return bare(Some(tag), version.clone()),
         };
-        let (kind, description, summary, keywords, repository_url, revision, created, deprecated) = manifest
+        manifest
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
@@ -745,7 +806,12 @@ impl Catalog {
                 // A non-empty `com.grimoire.deprecated` marks the artifact
                 // deprecated (the single read seam normalizes/trims).
                 let deprecated = crate::oci::annotations::deprecation_message(&m.annotations);
-                (
+                // Curated standard OCI keys (license/authors/url/…) for the
+                // detail pane; absent on artifacts that don't carry them.
+                let oci = OciMeta::from_annotations(&m.annotations);
+                CatalogEntry {
+                    registry: registry.to_string(),
+                    repository: repository.to_string(),
                     kind,
                     description,
                     summary,
@@ -754,25 +820,13 @@ impl Catalog {
                     revision,
                     created,
                     deprecated,
-                )
+                    oci,
+                    latest_tag: Some(tag.clone()),
+                    version: version.clone(),
+                    fetched_at: fetched_at.clone(),
+                }
             })
-            .unwrap_or((None, None, None, Vec::new(), None, None, None, None));
-
-        CatalogEntry {
-            registry: registry.to_string(),
-            repository: repository.to_string(),
-            kind,
-            description,
-            summary,
-            keywords,
-            repository_url,
-            revision,
-            created,
-            deprecated,
-            latest_tag: Some(tag),
-            version,
-            fetched_at,
-        }
+            .unwrap_or_else(|| bare(Some(tag), version))
     }
 }
 
@@ -974,6 +1028,11 @@ mod tests {
                 revision: Some("abc123def456-dirty".to_string()),
                 created: Some("2026-06-29T12:00:00+00:00".to_string()),
                 deprecated: Some("use acme/code-review-2".to_string()),
+                oci: OciMeta {
+                    licenses: Some("Apache-2.0".to_string()),
+                    vendor: Some("Acme Inc".to_string()),
+                    ..OciMeta::default()
+                },
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
                 fetched_at: ts(10),
@@ -1007,6 +1066,16 @@ mod tests {
             e.deprecated.as_deref(),
             Some("use acme/code-review-2"),
             "deprecation message round-trips through disk"
+        );
+        assert_eq!(
+            e.oci.licenses.as_deref(),
+            Some("Apache-2.0"),
+            "OCI license round-trips through disk"
+        );
+        assert_eq!(
+            e.oci.vendor.as_deref(),
+            Some("Acme Inc"),
+            "OCI vendor round-trips through disk"
         );
         // Different registry ⇒ treated as cold cache.
         assert!(Catalog::load(&path, "ghcr.io").unwrap().is_none());
@@ -1710,6 +1779,28 @@ mod tests {
     }
 
     #[test]
+    fn oci_meta_reads_curated_keys_and_defaults_absent() {
+        let mut ann = BTreeMap::new();
+        ann.insert(
+            "org.opencontainers.image.licenses".to_string(),
+            "Apache-2.0".to_string(),
+        );
+        ann.insert("org.opencontainers.image.vendor".to_string(), "Acme Inc".to_string());
+        // An unrelated key is ignored.
+        ann.insert("org.opencontainers.image.title".to_string(), "code-review".to_string());
+        let oci = OciMeta::from_annotations(&ann);
+        assert_eq!(oci.licenses.as_deref(), Some("Apache-2.0"));
+        assert_eq!(oci.vendor.as_deref(), Some("Acme Inc"));
+        // Keys not present stay None.
+        assert_eq!(oci.authors, None);
+        assert_eq!(oci.url, None);
+        assert_eq!(oci.documentation, None);
+        assert!(!oci.is_empty());
+        // No curated keys ⇒ empty (the serde skip predicate).
+        assert!(OciMeta::from_annotations(&BTreeMap::new()).is_empty());
+    }
+
+    #[test]
     fn entry_matches_query_case_insensitively() {
         let parse = SearchQuery::parse;
         let e = CatalogEntry {
@@ -1723,6 +1814,7 @@ mod tests {
             revision: None,
             created: None,
             deprecated: None,
+            oci: OciMeta::default(),
             latest_tag: Some("latest".to_string()),
             version: None,
             fetched_at: ts(1),

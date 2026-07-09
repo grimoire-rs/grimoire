@@ -439,6 +439,7 @@ mod tests {
     fn row(repo: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),

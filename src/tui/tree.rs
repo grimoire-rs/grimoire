@@ -929,6 +929,7 @@ mod tests {
     fn row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -959,6 +960,7 @@ mod tests {
     /// that the simple first-'/' split in `row()` would misclassify.
     fn row2(registry: &str, repository: &str, kind: &str, state: ArtifactState) -> TuiRow {
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: kind.to_string(),
             registry: registry.to_string(),
             repository: repository.to_string(),
@@ -992,6 +994,7 @@ mod tests {
     /// the pointer's `ref` (bare host + path, as `index_source` stores it).
     fn index_row(source: &str, registry: &str, repository: &str, kind: &str) -> TuiRow {
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             source: Some(source.to_string()),
             ..row2(registry, repository, kind, ArtifactState::NotInstalled)
         }
@@ -2235,6 +2238,7 @@ mod p2_member_node_tests {
     fn tui_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2695,6 +2699,7 @@ mod spec_multi_registry_tree_tests {
     /// `repo` (which would mask the very bug these tests guard against).
     fn row_with_reg(registry: &str, repository: &str, kind: &str, state: ArtifactState) -> TuiRow {
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: kind.to_string(),
             registry: registry.to_string(),
             repository: repository.to_string(),

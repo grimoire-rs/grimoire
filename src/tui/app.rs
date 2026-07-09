@@ -1108,6 +1108,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 revision: e.revision.clone(),
                 created: e.created.clone(),
                 deprecated: e.deprecated.clone(),
+                oci: e.oci.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
                 // Show the explicit highest version; fall back to the
                 // representative tag when no semver tag exists.
@@ -1162,6 +1163,7 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 revision: e.revision.clone(),
                 created: e.created.clone(),
                 deprecated: e.deprecated.clone(),
+                oci: e.oci.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
                 // Show the explicit highest version; fall back to the
                 // representative tag when no semver tag exists.
@@ -2274,6 +2276,7 @@ async fn perform_member(
     // separator exists.
     let (registry, repository) = member_registry_repository(parent_registry, &repo);
     let synthetic_row = TuiRow {
+        oci: crate::catalog::OciMeta::default(),
         kind: kind.to_string(),
         registry,
         repository,
@@ -2500,6 +2503,7 @@ mod tests {
                 revision: None,
                 created: None,
                 deprecated: None,
+                oci: crate::catalog::OciMeta::default(),
                 latest_tag: Some("1.2.3".to_string()),
                 version: Some("1.2.3".to_string()),
                 badge: StatusBadge::NotInstalled,
@@ -2581,6 +2585,7 @@ mod tests {
     fn installed_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2790,6 +2795,7 @@ mod tests {
         // installed_row() splits on the first '/' and would produce registry="ghcr.io"
         // (wrong) — construct the row directly.
         let row = TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: "ghcr.io/acme".to_string(),
             repository: "skills/demo".to_string(),
@@ -4023,6 +4029,7 @@ mod tests {
     fn bundle_row_for_drain(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -4161,6 +4168,7 @@ mod tests {
         state.set_rows(vec![
             bundle_row_for_drain("reg/acme/bundle"),
             TuiRow {
+                oci: crate::catalog::OciMeta::default(),
                 kind: "skill".to_string(),
                 registry: "reg.example.io".to_string(),
                 repository: "acme/my-skill".to_string(),
@@ -4250,6 +4258,7 @@ mod tests {
         // A catalog row whose repo matches the member and whose latest_tag is
         // "1.0.0" (the only published tag).
         let catalog_rows = vec![TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: "localhost:5050".to_string(),
             repository: "grimoire/skills/demo".to_string(),
@@ -4314,6 +4323,7 @@ mod p2_app_member_node_tests {
     fn tui_row_with_tag(repo: &str, latest_tag: &str, pinned_version: Option<&str>) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),

@@ -595,6 +595,7 @@ mod tests {
     fn row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -1064,6 +1065,7 @@ mod p2_event_member_node_tests {
     fn bundle_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -1086,6 +1088,7 @@ mod p2_event_member_node_tests {
     fn skill_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -1676,6 +1679,7 @@ mod tree_event_tests {
         s.view_mode = ViewMode::Flat;
         s.set_rows(vec![
             TuiRow {
+                oci: crate::catalog::OciMeta::default(),
                 kind: "skill".to_string(),
                 registry: "reg".to_string(),
                 repository: "acme/alpha".to_string(),
@@ -1694,6 +1698,7 @@ mod tree_event_tests {
                 source: None,
             },
             TuiRow {
+                oci: crate::catalog::OciMeta::default(),
                 kind: "skill".to_string(),
                 registry: "reg".to_string(),
                 repository: "acme/beta".to_string(),
@@ -1820,6 +1825,7 @@ mod tree_event_tests {
         // single-child path-compression (#19) cannot fold acme into nested —
         // the two must stay distinct groups for this navigation test.
         let row = |repository: &str| TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: "reg".to_string(),
             repository: repository.to_string(),

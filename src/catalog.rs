@@ -24,6 +24,6 @@ pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
 pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow, load_catalog};
 #[allow(unused_imports)]
-pub use registry_catalog::{Catalog, CatalogEntry};
+pub use registry_catalog::{Catalog, CatalogEntry, OciMeta};
 #[allow(unused_imports)]
 pub use search_match::SearchQuery;

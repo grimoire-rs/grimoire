@@ -1454,6 +1454,7 @@ mod tests {
     fn row(repo: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2501,6 +2502,7 @@ mod p2_render_member_node_tests {
     fn bundle_tui_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2523,6 +2525,7 @@ mod p2_render_member_node_tests {
     fn skill_tui_row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
@@ -2688,6 +2691,7 @@ mod spec_multi_registry_render_tests {
 
     fn row_with_reg(registry: &str, repository: &str, state: ArtifactState) -> TuiRow {
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: registry.to_string(),
             repository: repository.to_string(),

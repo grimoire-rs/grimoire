@@ -135,6 +135,24 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
         },
     ]);
+    // Curated `org.opencontainers.image.*` metadata — each row shown only when
+    // the artifact carries that annotation, so an ordinary artifact's pane is
+    // unchanged. grim emits `licenses` (skills) today; the rest surface for OCI
+    // artifacts that carry the standard keys.
+    for (label, value) in [
+        ("License:", &r.oci.licenses),
+        ("Authors:", &r.oci.authors),
+        ("URL:", &r.oci.url),
+        ("Documentation:", &r.oci.documentation),
+        ("Vendor:", &r.oci.vendor),
+    ] {
+        if let Some(value) = value {
+            lines.push(DetailLine::MetaEntry {
+                label,
+                value: value.clone(),
+            });
+        }
+    }
     // Git provenance (`--git` publish opt-in) — shown only when present so an
     // ordinary artifact's detail pane is unchanged.
     if let Some(revision) = &r.revision {
@@ -429,6 +447,7 @@ mod tests {
 
     fn tui_row(deprecated: Option<&str>) -> TuiRow {
         TuiRow {
+            oci: crate::catalog::OciMeta::default(),
             kind: "skill".to_string(),
             registry: "localhost:5000".to_string(),
             repository: "acme/code-review".to_string(),
@@ -459,6 +478,53 @@ mod tests {
             _ => None,
         });
         assert_eq!(dep.as_deref(), Some("use acme/code-review-2"));
+    }
+
+    /// Collect the value of the `MetaEntry` with the given label, if present.
+    fn meta_value<'a>(lines: &'a [DetailLine], want: &str) -> Option<&'a str> {
+        lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry { label, value } if *label == want => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn detail_lines_show_curated_oci_metadata_when_present() {
+        let mut row = tui_row(None);
+        row.oci = crate::catalog::OciMeta {
+            licenses: Some("Apache-2.0".to_string()),
+            authors: Some("Jane Doe".to_string()),
+            url: Some("https://acme.example".to_string()),
+            documentation: Some("https://docs.acme.example".to_string()),
+            vendor: Some("Acme Inc".to_string()),
+        };
+        let lines = detail_lines(Some(&row));
+        assert_eq!(meta_value(&lines, "License:"), Some("Apache-2.0"));
+        assert_eq!(meta_value(&lines, "Authors:"), Some("Jane Doe"));
+        assert_eq!(meta_value(&lines, "URL:"), Some("https://acme.example"));
+        assert_eq!(meta_value(&lines, "Documentation:"), Some("https://docs.acme.example"));
+        assert_eq!(meta_value(&lines, "Vendor:"), Some("Acme Inc"));
+    }
+
+    #[test]
+    fn detail_lines_omit_curated_oci_metadata_when_absent() {
+        // A default (empty) OciMeta shows none of the curated rows.
+        let lines = detail_lines(Some(&tui_row(None)));
+        for label in ["License:", "Authors:", "URL:", "Documentation:", "Vendor:"] {
+            assert_eq!(meta_value(&lines, label), None, "{label} must be absent when unset");
+        }
+    }
+
+    #[test]
+    fn detail_lines_show_only_the_present_oci_fields() {
+        // Only `licenses` set ⇒ only the License row appears (partial metadata).
+        let mut row = tui_row(None);
+        row.oci.licenses = Some("MIT".to_string());
+        let lines = detail_lines(Some(&row));
+        assert_eq!(meta_value(&lines, "License:"), Some("MIT"));
+        for label in ["Authors:", "URL:", "Documentation:", "Vendor:"] {
+            assert_eq!(meta_value(&lines, label), None);
+        }
     }
 
     #[test]
