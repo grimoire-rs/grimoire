@@ -167,7 +167,7 @@ If the command prints a version string, you are ready for the
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/
 [ocx]: https://ocx.sh
-[ocx-grim]: https://ocx.sh/docs/catalog/grim
+[ocx-grim]: https://ocx.sh/catalog/grim
 [powershell]: https://learn.microsoft.com/powershell/scripting/install/installing-powershell
 [releases]: https://github.com/grimoire-rs/grimoire/releases
 [rustup]: https://rustup.rs
