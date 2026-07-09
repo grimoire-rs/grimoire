@@ -42,6 +42,15 @@ whose vendor directory or marker is present — falling back to all clients when
 none are detected. Unknown keys are rejected on parse, so a typo surfaces
 immediately rather than silently doing nothing.
 
+The top-level `show_deprecated` boolean (default `false`) controls whether
+[deprecated](./publishing.md#metadata-deprecated) artifacts appear in
+[`grim search`][grim-search] and the [`grim tui`][grim-tui] catalog. When
+`false`, a deprecated artifact is hidden unless it is installed in the scope
+(directly or through a bundle), so a deprecated dependency you already rely on
+stays visible; `true` shows them everywhere. It seeds the initial state only —
+the search `--show-deprecated` flag and the TUI `h` key override it per run, and
+the `h` toggle is never written back to the file.
+
 ### `[options.tui]` {#options-tui}
 
 The optional `[options.tui]` sub-table tunes the interactive catalog browser
@@ -382,6 +391,7 @@ state file is kept out of version control without touching your root
 
 <!-- internal -->
 [grim-tui]: ./commands.md#tui
+[grim-search]: ./commands.md#search
 [grim-config]: ./commands.md#config
 [grim-add]: ./commands.md#add
 [grim-remove]: ./commands.md#remove

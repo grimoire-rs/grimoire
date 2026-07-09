@@ -133,18 +133,77 @@ def test_search_highlights_deprecated_entry(
     )
     runner = grim_at(project_dir)
 
-    # JSON: the deprecation message rides a dedicated field.
+    # Deprecated entries are hidden by default — pass --show-deprecated to see
+    # the marker. JSON: the deprecation message rides a dedicated field.
     rows = runner.json(
-        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+        "search",
+        unique_repo,
+        "--show-deprecated",
+        "--registry",
+        f"{REGISTRY_HOST}/{unique_repo}",
+        "--refresh",
     )
     entry = next(r for r in rows if r["repo"].endswith(f"{unique_repo}/old-skill"))
     assert entry["deprecated"] == "use new-skill instead"
 
     # Plain: the Status cell gains a comma-separated `deprecated` suffix.
     plain = runner.plain(
-        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}"
+        "search",
+        unique_repo,
+        "--show-deprecated",
+        "--registry",
+        f"{REGISTRY_HOST}/{unique_repo}",
     )
     assert "deprecated" in plain.stdout, plain.stdout
+
+
+def test_search_hides_deprecated_entry_by_default(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A deprecated, uninstalled entry is omitted from search without the flag."""
+    make_artifact(
+        f"{unique_repo}/old-skill",
+        "skill",
+        {"old-skill/SKILL.md": "---\nname: old-skill\n---\n# old\n"},
+        tag="latest",
+        annotations={DEPRECATED: "use new-skill instead"},
+    )
+    rows = grim_at(project_dir).json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )
+    assert not any(r["repo"].endswith(f"{unique_repo}/old-skill") for r in rows), (
+        f"deprecated + uninstalled entry must be hidden by default; got {rows}"
+    )
+
+
+def test_search_shows_installed_deprecated_without_flag(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An installed deprecated artifact stays visible in search without the flag."""
+    dep = make_artifact(
+        f"{unique_repo}/old-rule",
+        "rule",
+        {"old-rule.md": "---\npaths: ['**/*.rs']\ndeprecated: use new-rule instead\n---\n# old\n"},
+        tag="v1",
+        annotations={DEPRECATED: "use new-rule instead"},
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    # `add` declares + locks + installs by default, so the artifact is now
+    # installed in the project scope.
+    added = runner.run("add", dep.fq)
+    assert added.returncode == 0, added.stderr
+
+    # Installed ⇒ shown even though it is deprecated and no flag was passed.
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )
+    entry = next(
+        (r for r in rows if r["repo"].endswith(f"{unique_repo}/old-rule")), None
+    )
+    assert entry is not None, f"installed deprecated entry must stay visible; got {rows}"
+    assert entry["deprecated"] == "use new-rule instead"
 
 
 def test_search_non_deprecated_entry_has_null_field(

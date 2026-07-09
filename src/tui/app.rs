@@ -114,6 +114,11 @@ pub struct TuiContext {
     pub alt: Option<ScopeSwap>,
     /// Resolved TUI display options from `[options.tui]` in the config.
     pub tui_options: crate::config::declaration::TuiOptions,
+    /// The effective initial deprecated-visibility (`--show-deprecated` flag
+    /// OR `[options].show_deprecated`). Seeds the state's `hide_deprecated`
+    /// once; the live `h` toggle owns it thereafter and persists across a
+    /// scope swap (so it is intentionally absent from [`ScopeSwap`]).
+    pub show_deprecated: bool,
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
@@ -225,6 +230,10 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // Seed the tree display options from the resolved config.
     state.set_view_mode_from_config(ctx.tui_options.default_view);
     state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
+    // Seed the deprecated-hiding filter: default config (`show_deprecated =
+    // false`) hides them. The `h` key toggles this live and, unlike the
+    // structural tree options above, is NOT re-seeded on a scope swap.
+    state.set_hide_deprecated(!ctx.show_deprecated);
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -1371,6 +1380,11 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         &direct_repos,
         &snapshot_repos,
     );
+    // Row states just changed, and the deprecated-hiding filter depends on
+    // state: re-run it so an uninstalled-just-now deprecated row drops out of
+    // the view immediately (and a freshly-installed one appears), instead of
+    // lingering until the next query edit or `h` toggle.
+    state.refresh_filter();
 }
 
 /// Re-derive the install state of every cached bundle-member node for the
@@ -2868,6 +2882,7 @@ mod tests {
             scope_label: "project".to_string(),
             alt: None,
             tui_options: Default::default(),
+            show_deprecated: false,
         }
     }
 
@@ -3106,6 +3121,7 @@ mod tests {
             scope_label: "project".to_string(),
             alt: None,
             tui_options: Default::default(),
+            show_deprecated: false,
         }
     }
 
@@ -4020,6 +4036,7 @@ mod tests {
             scope_label: "project".to_string(),
             alt: None,
             tui_options: Default::default(),
+            show_deprecated: false,
         };
         (tmp, ctx)
     }
@@ -4432,6 +4449,7 @@ mod p2_app_member_node_tests {
             scope_label: "project".to_string(),
             alt: None,
             tui_options: Default::default(),
+            show_deprecated: false,
         }
     }
 

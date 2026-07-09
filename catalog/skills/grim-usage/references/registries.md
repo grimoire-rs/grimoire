@@ -158,6 +158,7 @@ lock on every change.
   ```sh
   grim config set   options.clients claude,opencode
   grim config set   options.tui.default_view tree
+  grim config set   options.show_deprecated true   # show deprecated artifacts by default
   grim config get   options.clients          # bare value on one line; exit 1 if unset
   grim config list                           # every explicitly-set key in this scope
   ```
@@ -284,11 +285,18 @@ grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 ```
 
-A package the publisher has marked deprecated is flagged in both
-`grim search` output (a `deprecated` marker on the entry, and a
-`deprecated` field under `--format json`, which the `grim_search` MCP
-tool inherits) and the TUI (a yellow `⚠` on the entry, with the notice
-in the detail pane), so you can avoid pinning it.
+A package the publisher has marked deprecated is **hidden by default** from
+both `grim search` and the TUI — unless it is installed in the active scope
+(directly or via a bundle), so a deprecated dependency you already rely on
+stays visible. Reveal the rest with `grim search --show-deprecated`, the TUI
+`h` key (toggles live), or by defaulting `options.show_deprecated = true`
+(`grim config set options.show_deprecated true` — seeds both). A shown
+deprecated entry is flagged in `grim search` output (a `deprecated` marker on
+the entry, and a `deprecated` field under `--format json`, which the
+`grim_search` MCP tool inherits) and the TUI (a yellow `⚠` on the entry, with
+the notice in the detail pane), so you can avoid pinning it. The MCP
+`grim_search` tool has no deprecated toggle of its own — it follows the
+resolved scope's `options.show_deprecated`.
 
 `grim tui` browses your declared registries' catalogs interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a

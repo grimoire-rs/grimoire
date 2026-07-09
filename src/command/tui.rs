@@ -58,6 +58,11 @@ pub struct TuiArgs {
     #[arg(long)]
     pub refresh: bool,
 
+    /// Show deprecated artifacts on open (default: hidden unless installed).
+    /// The interactive `h` key toggles this live regardless.
+    #[arg(long)]
+    pub show_deprecated: bool,
+
     /// Browse against the global scope's lock/state instead of the
     /// discovered project.
     #[arg(long)]
@@ -141,6 +146,11 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         alt,
         roots: scope.roots,
         tui_options: scope.options.tui.clone(),
+        // Effective initial deprecated visibility: the `--show-deprecated`
+        // flag OR the scope's config default. The live `h` toggle persists
+        // across a project⇄global swap (a filter preference), so `ScopeSwap`
+        // is deliberately not given this field.
+        show_deprecated: args.show_deprecated || scope.options.show_deprecated,
     };
 
     app::run(tui_ctx).await?;
@@ -373,6 +383,7 @@ mod tests {
         let a = TuiArgs {
             registry: vec!["ghcr.io".to_string()],
             refresh: false,
+            show_deprecated: false,
             global: false,
             config: None,
         };
@@ -393,6 +404,7 @@ mod tests {
         let a = TuiArgs {
             registry: Vec::new(),
             refresh: false,
+            show_deprecated: false,
             global: false,
             config: Some(cfg),
         };
@@ -426,6 +438,7 @@ mod tests {
         let a = TuiArgs {
             registry: Vec::new(),
             refresh: false,
+            show_deprecated: false,
             global: false,
             config: Some(missing_cfg),
         };
@@ -439,6 +452,7 @@ mod tests {
         let a = TuiArgs {
             registry: Vec::new(),
             refresh: false,
+            show_deprecated: false,
             global: true,
             config: None,
         };
@@ -457,6 +471,7 @@ mod tests {
         let a = TuiArgs {
             registry: Vec::new(),
             refresh: false,
+            show_deprecated: false,
             global: false,
             config: Some(tmp.path().join("nope/grimoire.toml")),
         };

@@ -55,10 +55,12 @@ full reference is `--help` plus the docs site linked below.
 | `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` | [publish](references/publish.md) |
 
 > **Deprecation (0.6.x):** a publisher can retire a package without
-> unpublishing it; `add`, `status`, `search`, and `tui` then flag it as
-> deprecated (an `add` of a deprecated reference still succeeds). This is
-> runtime output, not a flag — see [Publishing][publishing]; `grim <cmd>
-> --help` does not list it.
+> unpublishing it; `add` and `status` flag it as deprecated (an `add` of a
+> deprecated reference still succeeds). `search` and `tui` **hide**
+> deprecated artifacts by default unless they are installed — reveal them
+> with `grim search --show-deprecated`, the TUI `h` key, or by setting
+> `options.show_deprecated = true` (`grim config set options.show_deprecated
+> true`). See [Publishing][publishing].
 >
 > **Git provenance (0.6.x):** `build`, `release`, and `publish` can embed
 > the publishing commit, date, and origin as OCI annotations via opt-in

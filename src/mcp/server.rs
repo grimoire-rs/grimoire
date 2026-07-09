@@ -64,6 +64,9 @@ impl GrimMcpServer {
         let search_args = crate::command::search::SearchArgs {
             query: args.query,
             refresh: args.refresh.unwrap_or(false),
+            // No tool param: defer to the resolved scope's config default
+            // (`options.show_deprecated`) for whether deprecated rows show.
+            show_deprecated: false,
             // Locked to the resolved scope's configured registry set — the tool
             // exposes no registry override (SSRF / CWE-918; see `SearchToolArgs`).
             registry: Vec::new(),

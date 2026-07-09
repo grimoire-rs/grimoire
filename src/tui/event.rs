@@ -581,6 +581,12 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                 TuiAction::None
             }
         },
+        // `h` flips the deprecated-hiding filter live (browse mode only; in
+        // search mode `handle_search` captures it as literal query text).
+        TuiInput::Char('h') => {
+            state.toggle_hide_deprecated();
+            TuiAction::None
+        }
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
         TuiInput::Backspace => TuiAction::None,
@@ -1042,6 +1048,29 @@ mod tests {
         assert_eq!(
             s.view_mode, mode_in_search,
             "`t` must not toggle view mode while searching"
+        );
+    }
+
+    #[test]
+    fn h_in_browse_toggles_hide_deprecated_literal_in_search() {
+        let mut s = seeded();
+        // `h` in List mode flips the deprecated-hiding filter and returns
+        // TuiAction::None (state-only change).
+        assert!(!s.hide_deprecated, "default is show (hide off)");
+        let action = handle(&mut s, TuiInput::Char('h'));
+        assert_eq!(action, TuiAction::None, "`h` returns None (state-only)");
+        assert!(s.hide_deprecated, "`h` toggles hide_deprecated on in browse");
+        // Second `h` toggles back.
+        handle(&mut s, TuiInput::Char('h'));
+        assert!(!s.hide_deprecated, "second `h` toggles back");
+        // In search mode `h` is a literal query char, NOT a toggle.
+        handle(&mut s, TuiInput::Char('/'));
+        let hide_before = s.hide_deprecated;
+        assert_eq!(handle(&mut s, TuiInput::Char('h')), TuiAction::None);
+        assert_eq!(s.query, "h", "`h` appends to query in search mode");
+        assert_eq!(
+            s.hide_deprecated, hide_before,
+            "`h` must not toggle the filter while searching"
         );
     }
 }

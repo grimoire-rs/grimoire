@@ -92,6 +92,7 @@ The supported dotted keys are:
 |-----|------------|-------|
 | `options.clients` | comma-separated client names | e.g. `claude,opencode`. Empty string clears the list. |
 | `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
+| `options.show_deprecated` | `true` or `false` | `false` is the default (deprecated artifacts are hidden from `grim search` and the TUI unless installed); setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). Seeds the initial state for both `grim search` and `grim tui`; the search `--show-deprecated` flag and the TUI `h` key override it per run. |
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
@@ -302,13 +303,18 @@ terminal that column is truncated to fit the width; piped output and
 [repository URL](./publishing.md#metadata-repository), or `null` when the
 artifact has none.
 
-A [deprecated](./publishing.md#metadata-deprecated) entry is flagged in the
-`Status` cell with a comma-suffixed `deprecated` (e.g. `installed,deprecated`),
-and JSON carries the notice in a `deprecated` field (`null` when the artifact
-is not deprecated).
+A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
+default** — unless it is installed in the active scope (directly or via a
+bundle), in which case it stays listed so you can see what you have. Pass
+`--show-deprecated` to include every deprecated entry, or set
+[`options.show_deprecated`](#config) to `true` to change the default. A shown
+deprecated entry is flagged in the `Status` cell with a comma-suffixed
+`deprecated` (e.g. `installed,deprecated`), and JSON carries the notice in a
+`deprecated` field (`null` when the artifact is not deprecated).
 
 ```sh
 grim search review
+grim search --show-deprecated review
 grim search --refresh --registry ghcr.io/acme
 ```
 
@@ -325,7 +331,14 @@ the Repo cell is shortened to the registry-relative path so names stay readable.
 It supports multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
-browser, `g` to switch scope, and `space` to mark rows.
+browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
+`space` to mark rows.
+
+Like [`grim search`](#search), deprecated artifacts that are not installed are
+**hidden on open** (installed-but-deprecated rows stay visible, still marked).
+Press `h` to reveal or re-hide them live, pass `--show-deprecated` to open with
+them shown, or set [`options.show_deprecated`](#config) to `true` for the
+default.
 
 **Tree view** — pressing `t` switches the catalog between flat list mode and
 a collapsible tree grouped by browse source and repository path. Rows from an

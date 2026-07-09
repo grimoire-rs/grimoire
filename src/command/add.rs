@@ -512,7 +512,7 @@ pub(crate) fn write_config(
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    let has_base_options = options.default_registry.is_some() || !options.clients.is_empty();
+    let has_base_options = options.default_registry.is_some() || !options.clients.is_empty() || options.show_deprecated;
     let has_tui_options = !options.tui.is_empty();
     if has_base_options || has_tui_options {
         out.push_str("[options]\n");
@@ -527,6 +527,13 @@ pub(crate) fn write_config(
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "clients = [{list}]");
+        }
+        // Top-level `[options]` key — emitted before the `[options.tui]`
+        // sub-table so the TOML stays valid (dotted-table keys must precede
+        // any sub-table under the same parent). Omitted when false (the
+        // default), matching the serde `skip_serializing_if` on the field.
+        if options.show_deprecated {
+            let _ = writeln!(out, "show_deprecated = true");
         }
         out.push('\n');
     }
@@ -656,6 +663,7 @@ mod tests {
         );
         let set = DesiredSet::from_parts(skills, rules);
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
             tui: Default::default(),
@@ -669,6 +677,29 @@ mod tests {
         assert_eq!(cfg.set.skills.len(), 1);
         assert_eq!(cfg.set.rules.len(), 1);
         assert_eq!(cfg.options.default_registry.as_deref(), Some("ghcr.io/acme"));
+    }
+
+    #[test]
+    fn write_config_show_deprecated_round_trips() {
+        // Regression guard: the top-level `show_deprecated` option is a manual
+        // serializer field (write_config is not serde-driven), so it must be
+        // both emitted and parseable. It must survive even when it is the ONLY
+        // option set (the `[options]` header gate includes it).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            show_deprecated: true,
+            default_registry: None,
+            clients: vec![],
+            tui: Default::default(),
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("show_deprecated = true"), "body was:\n{body}");
+        let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        assert!(cfg.options.show_deprecated, "show_deprecated must round-trip as true");
     }
 
     #[test]
@@ -723,6 +754,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -760,6 +792,7 @@ mod tests {
         // Provide a non-empty base options so [options] itself appears, but
         // leave tui at its Default.
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
             tui: TuiOptions::default(),
@@ -791,6 +824,7 @@ mod tests {
             default: true,
         }];
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -833,6 +867,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -880,6 +915,7 @@ tree_separators_typo = 1
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
             tui: Default::default(),
@@ -912,6 +948,7 @@ tree_separators_typo = 1
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            show_deprecated: false,
             default_registry: Some("legacy.example".to_string()),
             clients: vec![],
             tui: Default::default(),

@@ -29,6 +29,7 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
+use crate::install::status_badge::StatusBadge;
 use crate::install::target::detect_clients;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -48,6 +49,10 @@ pub struct SearchArgs {
     /// Force a catalog rebuild even if the cache is fresh.
     #[arg(long)]
     pub refresh: bool,
+
+    /// Include deprecated artifacts in results (default: hidden unless installed).
+    #[arg(long)]
+    pub show_deprecated: bool,
 
     /// Registries to search; repeatable and comma-separated (`--registry a,b`
     /// or `--registry a --registry b`) to browse several at once. Precedence
@@ -90,7 +95,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // then browse every configured registry through the shared catalog
     // service (the single seam `search`/`tui`/`mcp` share). A registry given
     // via `--registry` collapses the set to exactly that registry.
-    let (registries, lock, state, roots, active) = resolve_scope(ctx, args);
+    let (registries, lock, state, roots, active, cfg_show_deprecated) = resolve_scope(ctx, args);
     let badges = BadgeContext {
         lock: lock.as_ref(),
         state: &state,
@@ -121,11 +126,18 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         );
     }
 
+    // Deprecated artifacts are hidden by default. The effective show flag is
+    // the per-run `--show-deprecated` OR the scope's config default; an
+    // installed row (badge ≠ NotInstalled — covers direct + bundle installs)
+    // is always shown regardless.
+    let show = args.show_deprecated || cfg_show_deprecated;
+
     // Flatten the registry groups into the flat search table (sorted by
     // `registry/repository`).
     let entries: Vec<SearchEntry> = results
         .into_flat_rows()
         .into_iter()
+        .filter(|r| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
         .map(|r| SearchEntry {
             repo: r.repo(),
             kind: r.kind,
@@ -164,6 +176,17 @@ fn warn_unsupported_browse(offline: bool, result_empty: bool) -> bool {
     !offline && result_empty
 }
 
+/// Whether a catalog row survives the deprecated-hiding filter.
+///
+/// Deprecated rows are hidden unless the effective `show` flag is on, or the
+/// row is installed (`installed` = badge is anything other than
+/// `NotInstalled`, covering direct and bundle-provided installs). A
+/// non-deprecated row is always visible. Extracted so the gate is
+/// unit-testable without a full catalog.
+fn deprecated_row_visible(show: bool, deprecated: bool, installed: bool) -> bool {
+    show || !deprecated || installed
+}
+
 /// Resolve the registry browse set and best-effort badge inputs for the
 /// search. The registry set spans every configured `[[registries]]` (or the
 /// single default), so `grim search` browses all of them at once; an
@@ -180,15 +203,18 @@ fn resolve_scope(
     InstallState,
     AnchorRoots,
     Vec<ClientTarget>,
+    bool,
 ) {
     // An explicit `--registry` on the command collapses the browse set to
     // exactly those registries (in order, deduped, first is primary),
-    // independent of any `[[registries]]` declared in config.
+    // independent of any `[[registries]]` declared in config. No config scope
+    // is resolved on this path, so the config `show_deprecated` default is
+    // `false` (only the `--show-deprecated` flag can reveal them).
     if !args.registry.is_empty() {
         let registries =
             crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_REGISTRY, None);
         let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
-        return (registries, lock, state, roots, active);
+        return (registries, lock, state, roots, active, false);
     }
 
     let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
@@ -213,13 +239,15 @@ fn resolve_scope(
             InstallState::empty(std::path::Path::new("")),
             roots,
             ClientTarget::ALL.to_vec(),
+            false,
         );
     };
     let registries = super::registries_for_scope(ctx, &scope);
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let active = detect_clients(&scope.workspace, scope.scope);
-    (registries, lock, state, scope.roots, active)
+    let show_deprecated = scope.options.show_deprecated;
+    (registries, lock, state, scope.roots, active, show_deprecated)
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge
@@ -265,6 +293,7 @@ mod tests {
         SearchArgs {
             query: None,
             refresh: false,
+            show_deprecated: false,
             registry: Vec::new(),
             global: false,
             config: None,
@@ -281,6 +310,19 @@ mod tests {
         // Offline → quiet regardless (the cache is the source of truth).
         assert!(!warn_unsupported_browse(true, true));
         assert!(!warn_unsupported_browse(true, false));
+    }
+
+    #[test]
+    fn deprecated_row_visible_hides_only_hidden_deprecated_uninstalled() {
+        // show=true reveals everything.
+        assert!(deprecated_row_visible(true, true, false));
+        assert!(deprecated_row_visible(true, true, true));
+        // Non-deprecated rows are always visible.
+        assert!(deprecated_row_visible(false, false, false));
+        // Installed-but-deprecated stays visible even when hidden.
+        assert!(deprecated_row_visible(false, true, true));
+        // The one hidden case: hidden, deprecated, and not installed.
+        assert!(!deprecated_row_visible(false, true, false));
     }
 
     #[test]

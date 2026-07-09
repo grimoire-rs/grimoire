@@ -498,6 +498,43 @@ def test_group_by_type_set_get_unset(
     )
 
 
+def test_show_deprecated_set_get_unset(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set options.show_deprecated true`` → ``get`` exits 0 with 'true';
+    ``unset`` → subsequent ``get`` exits 1 (treated as unset when false).
+
+    Mirrors ``group_by_type``: the top-level ``show_deprecated`` bool returns
+    ``None`` when ``false`` so ``get`` and ``list`` treat it as an absent key.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.show_deprecated", "true")
+
+    result = runner.plain("config", "get", "options.show_deprecated")
+    assert result.returncode == 0, (
+        f"get of set show_deprecated must exit 0; got {result.returncode}"
+    )
+    assert "true" in result.stdout, f"get must return 'true'; got: {result.stdout!r}"
+
+    listed = runner.plain("config", "list")
+    assert "options.show_deprecated" in listed.stdout, (
+        f"list must show the set key; got: {listed.stdout!r}"
+    )
+
+    runner.run("config", "unset", "options.show_deprecated")
+
+    after = runner.run("config", "get", "options.show_deprecated", check=False)
+    assert after.returncode == 1, (
+        f"get of unset show_deprecated must exit 1; got {after.returncode}"
+    )
+    assert after.stdout.strip() == "", (
+        f"get after unset must produce no stdout; got: {after.stdout!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # D2: tree_separators round-trip
 # ---------------------------------------------------------------------------

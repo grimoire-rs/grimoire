@@ -226,6 +226,11 @@ pub struct TuiState {
     pub help_scroll: u16,
     /// The live search query.
     pub query: String,
+    /// When true, deprecated artifacts that are not installed are hidden from
+    /// the filtered view (both flat + tree). Seeded from `[options]
+    /// .show_deprecated` (negated) and toggled live by the `h` key; installed
+    /// deprecated rows always stay visible.
+    pub hide_deprecated: bool,
     /// Current interaction mode.
     pub mode: Mode,
     /// Whether a catalog load is in flight.
@@ -326,6 +331,7 @@ impl Default for TuiState {
             term_size: (80, 24),
             help_scroll: 0,
             query: String::new(),
+            hide_deprecated: false,
             mode: Mode::List,
             loading: true,
             offline: false,
@@ -374,7 +380,7 @@ enum SelectionAnchor {
 /// separator, and one row per keybinding entry. Single source for help-scroll
 /// clamping; the entry text lives in [`super::render::help_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
-pub(crate) const HELP_BODY_LINES: u16 = 18;
+pub(crate) const HELP_BODY_LINES: u16 = 19;
 
 impl TuiState {
     /// A fresh state in the loading phase.
@@ -761,6 +767,35 @@ impl TuiState {
         // different visible row. `display_len()` is the active view's row count.
         let len = self.display_len();
         self.clamp_tree_selection_to(len);
+    }
+
+    /// Seed the deprecated-hiding filter and recompute the view. Called once
+    /// at startup from the config default; the `h` key toggles it thereafter.
+    pub fn set_hide_deprecated(&mut self, v: bool) {
+        self.hide_deprecated = v;
+        self.recompute_filter();
+    }
+
+    /// Flip the deprecated-hiding filter live (the `h` key). Recomputes the
+    /// filtered view and re-clamps the selection so the cursor stays in range
+    /// as rows appear or disappear.
+    pub fn toggle_hide_deprecated(&mut self) {
+        self.detail_scroll = 0;
+        self.hide_deprecated = !self.hide_deprecated;
+        self.recompute_filter();
+        self.clamp_tree_selection_to(self.display_len());
+    }
+
+    /// Recompute the filtered view after row `state`s changed in place (an
+    /// install / uninstall / scope swap re-derives every badge). The
+    /// deprecated-hiding filter depends on `state`, so a row that just became
+    /// deprecated + uninstalled must drop out now — not linger until the next
+    /// query edit or `h` toggle. The cursor is preserved on the same artifact
+    /// when it stays visible, else clamped into range.
+    pub fn refresh_filter(&mut self) {
+        let anchor = self.selection_anchor();
+        self.recompute_filter();
+        self.restore_selection(anchor);
     }
 
     /// Move the selection by `delta` (saturating at both ends — never
@@ -1322,7 +1357,14 @@ impl TuiState {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| query.matches_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords))
+            .filter(|(_, r)| {
+                // Keep a row when the query matches AND it is not a hidden,
+                // deprecated, uninstalled artifact. An installed deprecated row
+                // (any state other than NotInstalled — covers direct + bundle)
+                // always stays visible.
+                query.matches_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords)
+                    && !(self.hide_deprecated && r.deprecated.is_some() && r.state == ArtifactState::NotInstalled)
+            })
             .map(|(i, _)| i)
             .collect();
     }
@@ -1413,6 +1455,70 @@ mod tests {
         assert_eq!(s.action_targets(), vec![0, 2]);
         s.toggle_mark_all_filtered(); // all marked ⇒ clears them
         assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn hide_deprecated_drops_uninstalled_keeps_installed() {
+        // A deprecated + NotInstalled row is hidden when hide_deprecated is on;
+        // a deprecated + Installed row stays visible (installed exception).
+        let mut dep_uninstalled = row("r/dep-un", "old", &[], ArtifactState::NotInstalled);
+        dep_uninstalled.deprecated = Some("use foo instead".to_string());
+        let mut dep_installed = row("r/dep-in", "old but present", &[], ArtifactState::Installed);
+        dep_installed.deprecated = Some("use bar instead".to_string());
+
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row("r/alpha", "first", &[], ArtifactState::Installed),
+            dep_uninstalled,
+            dep_installed,
+        ]);
+
+        // Default (hide off): all three visible.
+        assert_eq!(s.filtered.len(), 3, "nothing hidden by default");
+
+        // Hide deprecated: the uninstalled deprecated row drops; the installed
+        // deprecated one and the non-deprecated one stay.
+        s.set_hide_deprecated(true);
+        let visible: Vec<&str> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(s.filtered.len(), 2, "only the hidden deprecated row drops");
+        assert!(!visible.contains(&"r/dep-un"), "deprecated + uninstalled is hidden");
+        assert!(visible.contains(&"r/dep-in"), "deprecated + installed stays visible");
+        assert!(visible.contains(&"r/alpha"), "non-deprecated stays visible");
+
+        // Toggle reveals both again.
+        s.toggle_hide_deprecated();
+        assert!(!s.hide_deprecated, "toggle flips the flag back off");
+        assert_eq!(s.filtered.len(), 3, "toggling off reveals the hidden row");
+    }
+
+    #[test]
+    fn refresh_filter_hides_deprecated_row_after_uninstall() {
+        // Regression: with deprecated hidden, an installed deprecated row is
+        // shown (installed exception). After it is uninstalled in place
+        // (state → NotInstalled), `refresh_filter` must drop it — the hide
+        // predicate depends on `state`, so a state change alone must re-filter.
+        let mut dep_installed = row("r/dep", "old but present", &[], ArtifactState::Installed);
+        dep_installed.deprecated = Some("use bar instead".to_string());
+
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row("r/alpha", "first", &[], ArtifactState::Installed),
+            dep_installed,
+        ]);
+        s.set_hide_deprecated(true);
+        assert_eq!(s.filtered.len(), 2, "installed deprecated row stays visible");
+
+        // Simulate an in-place uninstall (what recompute_states does to rows).
+        let idx = s.rows.iter().position(|r| r.repo == "r/dep").unwrap();
+        s.rows[idx].state = ArtifactState::NotInstalled;
+        s.refresh_filter();
+
+        let visible: Vec<&str> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(s.filtered.len(), 1, "uninstalled deprecated row drops out");
+        assert!(!visible.contains(&"r/dep"), "deprecated row hidden after uninstall");
+        assert!(visible.contains(&"r/alpha"));
     }
 
     #[test]

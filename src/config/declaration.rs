@@ -103,6 +103,11 @@ pub struct ConfigOptions {
     /// TUI display options (grouped tree view, separators, default mode).
     #[serde(default, skip_serializing_if = "TuiOptions::is_empty")]
     pub tui: TuiOptions,
+    /// When false (default), deprecated artifacts are hidden from `grim search`
+    /// and the TUI catalog unless installed; true shows them everywhere. The
+    /// TUI `h` key toggles this ephemerally — config is never rewritten.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_deprecated: bool,
 }
 
 /// One configured browse source in the top-level `[[registries]]` array.

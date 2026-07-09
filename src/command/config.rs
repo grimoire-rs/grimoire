@@ -163,6 +163,7 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
 enum ParsedKey {
     OptionsClients,
     OptionsDefaultRegistry,
+    OptionsShowDeprecated,
     TuiDefaultView,
     TuiGroupByType,
     TuiTreeSeparators,
@@ -187,6 +188,7 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     match key {
         "options.clients" => return Ok(ParsedKey::OptionsClients),
         "options.default_registry" => return Ok(ParsedKey::OptionsDefaultRegistry),
+        "options.show_deprecated" => return Ok(ParsedKey::OptionsShowDeprecated),
         "options.tui.default_view" => return Ok(ParsedKey::TuiDefaultView),
         "options.tui.group_by_type" => return Ok(ParsedKey::TuiGroupByType),
         "options.tui.tree_separators" => return Ok(ParsedKey::TuiTreeSeparators),
@@ -227,7 +229,7 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     }
     Err(super::config_usage(format!(
         "unknown config key '{key}'; valid keys: options.clients, \
-         options.default_registry, options.tui.default_view, \
+         options.default_registry, options.show_deprecated, options.tui.default_view, \
          options.tui.group_by_type, options.tui.tree_separators, \
          registry.<alias>.oci, registry.<alias>.index, registry.<alias>.default"
     )))
@@ -256,6 +258,17 @@ fn get_value(
             }
         }
         ParsedKey::OptionsDefaultRegistry => options.default_registry.clone(),
+        ParsedKey::OptionsShowDeprecated => {
+            // `false` is the default and indistinguishable from unset on disk —
+            // return None so `get` exits 1 and `list` omits the key, consistent
+            // with `group_by_type`. Setting to `false` removes the key from the
+            // written config (see `apply_unset`).
+            if options.show_deprecated {
+                Some("true".to_string())
+            } else {
+                None
+            }
+        }
         ParsedKey::TuiDefaultView => options.tui.default_view.map(|v| match v {
             DefaultView::Flat => "flat".to_string(),
             DefaultView::Tree => "tree".to_string(),
@@ -331,6 +344,10 @@ fn apply_set(
         ParsedKey::OptionsDefaultRegistry => {
             reject_control_chars(value_str, "options.default_registry")?;
             options.default_registry = Some(value_str.to_string());
+            Ok(value_str.to_string())
+        }
+        ParsedKey::OptionsShowDeprecated => {
+            options.show_deprecated = parse_bool(value_str, "options.show_deprecated")?;
             Ok(value_str.to_string())
         }
         ParsedKey::TuiDefaultView => {
@@ -413,6 +430,10 @@ fn apply_unset(
             options.default_registry = None;
             Ok(())
         }
+        ParsedKey::OptionsShowDeprecated => {
+            options.show_deprecated = false;
+            Ok(())
+        }
         ParsedKey::TuiDefaultView => {
             options.tui.default_view = None;
             Ok(())
@@ -492,6 +513,12 @@ fn collect_entries(options: &ConfigOptions, registries: &[RegistryConfig]) -> Ve
         entries.push(ConfigEntry {
             key: "options.clients".to_string(),
             value: options.clients.join(","),
+        });
+    }
+    if options.show_deprecated {
+        entries.push(ConfigEntry {
+            key: "options.show_deprecated".to_string(),
+            value: "true".to_string(),
         });
     }
     if let Some(dv) = options.tui.default_view {
@@ -1094,6 +1121,10 @@ mod tests {
             Ok(ParsedKey::OptionsDefaultRegistry)
         ));
         assert!(matches!(
+            parse_key("options.show_deprecated"),
+            Ok(ParsedKey::OptionsShowDeprecated)
+        ));
+        assert!(matches!(
             parse_key("options.tui.default_view"),
             Ok(ParsedKey::TuiDefaultView)
         ));
@@ -1311,6 +1342,7 @@ mod tests {
         let mut options = ConfigOptions {
             clients: vec![],
             default_registry: None,
+            show_deprecated: false,
             tui: TuiOptions::default(),
         };
         let mut registries = vec![];
