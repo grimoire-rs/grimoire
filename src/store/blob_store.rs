@@ -39,6 +39,10 @@ impl BlobStore {
     }
 
     /// Whether a blob with `digest` is present in the cache.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; callers use get()'s Option instead of a separate existence check"
+    )]
     pub fn has(&self, digest: &Digest) -> bool {
         self.blob_path(digest).is_file()
     }

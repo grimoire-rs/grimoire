@@ -25,7 +25,6 @@ use async_trait::async_trait;
 
 use super::manifest::OciManifest;
 use super::{Digest, Identifier, PinnedIdentifier};
-use crate::env;
 use error::AccessError;
 
 /// Cache/source routing policy, derived once per invocation from the
@@ -46,14 +45,6 @@ pub enum AccessMode {
     /// Cache only. A miss that would require the network is refused
     /// (`Resolve` → `OfflineMiss`; pure `Query` → `Ok(None)`).
     Offline,
-}
-
-impl AccessMode {
-    /// Derive the mode from the environment: `Offline` when `$GRIM_OFFLINE`
-    /// is truthy, otherwise the always-fresh `Online` default.
-    pub fn from_env() -> Self {
-        if env::offline() { Self::Offline } else { Self::Online }
-    }
 }
 
 /// Caller intent for a mutable lookup.
@@ -120,10 +111,11 @@ pub trait OciAccess: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Pure-logic mirror of [`AccessMode::from_env`]'s precedence. Env
-    /// mutation is `unsafe` in edition 2024 and forbidden crate-wide, so
-    /// the offline-vs-online contract is asserted through a parameterized
-    /// reimplementation rather than by toggling the process environment.
+    /// Pure-logic mirror of [`crate::context::Context::access_mode`]'s
+    /// precedence. Env mutation is `unsafe` in edition 2024 and forbidden
+    /// crate-wide, so the offline-vs-online contract is asserted through a
+    /// parameterized reimplementation rather than by toggling the process
+    /// environment.
     fn mode_from(offline: bool) -> AccessMode {
         if offline {
             AccessMode::Offline

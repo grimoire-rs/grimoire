@@ -28,6 +28,10 @@ pub struct GlobalConfig {
 
 impl GlobalConfig {
     /// Parse from a TOML string (path-less; fixtures / in-memory use).
+    #[allow(
+        dead_code,
+        reason = "test-fixture constructor; production always resolves a real path via load"
+    )]
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         let parsed = ProjectConfig::from_toml_str(s)?;
         Ok(Self {

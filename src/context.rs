@@ -40,6 +40,12 @@ pub struct Context {
     /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
     registry_env: Option<String>,
     offline: bool,
+    /// The `--global` flag: operate on the global scope rather than the
+    /// discovered project. Consumed by scope-aware commands via
+    /// [`Self::global`] instead of a per-command redeclaration.
+    global: bool,
+    /// The `--config` flag: an explicit project config path.
+    config: Option<PathBuf>,
     /// Test-only injected `OciAccess` override.  When `Some`, `access()`
     /// returns this instead of constructing a real `CachedAccess`.  Only
     /// compiled in test builds (`#[cfg(test)]`).
@@ -53,7 +59,9 @@ impl std::fmt::Debug for Context {
         d.field("grim_home", &self.grim_home)
             .field("registry_flag", &self.registry_flag)
             .field("registry_env", &self.registry_env)
-            .field("offline", &self.offline);
+            .field("offline", &self.offline)
+            .field("global", &self.global)
+            .field("config", &self.config);
         #[cfg(test)]
         d.field("test_access", &self.test_access.as_ref().map(|_| "<injected>"));
         d.finish()
@@ -67,6 +75,8 @@ impl Clone for Context {
             registry_flag: self.registry_flag.clone(),
             registry_env: self.registry_env.clone(),
             offline: self.offline,
+            global: self.global,
+            config: self.config.clone(),
             #[cfg(test)]
             test_access: self.test_access.clone(),
         }
@@ -87,6 +97,8 @@ impl Context {
             registry_flag: options.registry.clone(),
             registry_env: env::default_registry(),
             offline: options.offline || env::offline(),
+            global: options.global,
+            config: options.config.clone(),
             #[cfg(test)]
             test_access: None,
         }
@@ -118,9 +130,12 @@ impl Context {
     }
 
     /// The default registry for short identifiers: the `--registry` flag,
-    /// else `$GRIM_DEFAULT_REGISTRY`. Used by `login` / `logout` (which keep
-    /// CLI-arg-first then this) — config defaults are layered in by
+    /// else `$GRIM_DEFAULT_REGISTRY`. Config defaults are layered in by
     /// `command::resolve_default_registry`, not here.
+    #[allow(
+        dead_code,
+        reason = "superseded by command::resolve_default_registry's fuller precedence chain; exercised directly by this module's tests"
+    )]
     pub fn default_registry(&self) -> Option<&str> {
         self.registry_flag().or(self.registry_env.as_deref())
     }
@@ -128,6 +143,17 @@ impl Context {
     /// Whether all network access is disabled for this invocation.
     pub fn offline(&self) -> bool {
         self.offline
+    }
+
+    /// The `--global` flag: operate on the global scope rather than the
+    /// discovered project.
+    pub fn global(&self) -> bool {
+        self.global
+    }
+
+    /// The `--config` flag: an explicit project config path, if given.
+    pub fn config(&self) -> Option<&std::path::Path> {
+        self.config.as_deref()
     }
 
     /// The resolved cache-routing mode for this invocation: `Offline` when
@@ -200,7 +226,20 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            global: false,
+            config: None,
             test_access: None,
+        }
+    }
+
+    /// [`Self::hermetic`] with an explicit `--global` / `--config` scope,
+    /// for tests that need a hermetic `$GRIM_HOME` (no ambient env reads)
+    /// alongside a specific scope resolution.
+    pub fn hermetic_scoped(grim_home: std::path::PathBuf, global: bool, config: Option<std::path::PathBuf>) -> Self {
+        Self {
+            global,
+            config,
+            ..Self::hermetic(grim_home)
         }
     }
 
@@ -220,6 +259,8 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            global: false,
+            config: None,
             test_access: Some(Arc::new(access)),
         }
     }
@@ -237,6 +278,8 @@ impl Context {
             registry_flag: vec![registry_flag],
             registry_env: None,
             offline: false,
+            global: false,
+            config: None,
             test_access: Some(Arc::new(access)),
         }
     }

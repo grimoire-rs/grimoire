@@ -429,6 +429,10 @@ impl InstallState {
     ///
     /// [`std::io::Error`] for a read failure; an unknown version or a
     /// corrupt file is surfaced as [`std::io::ErrorKind::InvalidData`].
+    #[allow(
+        dead_code,
+        reason = "V2-only test seam; production always goes through load_project/load_global (see doc above)"
+    )]
     pub fn load(scope_path: &Path) -> std::io::Result<Self> {
         let bytes = match std::fs::read(scope_path) {
             Ok(b) => b,
@@ -912,20 +916,6 @@ mod tests {
         let id = Identifier::new_registry(repo, "localhost:5000")
             .clone_with_digest(Digest::Sha256(std::iter::repeat_n(byte, 64).collect()));
         PinnedIdentifier::try_from(id).unwrap()
-    }
-
-    /// Build a minimal `AnchorRoots` — all optional vendor roots absent,
-    /// workspace and grim_home are irrelevant paths (never resolved in
-    /// these tests, which exercise serialization not resolution).
-    fn stub_roots() -> AnchorRoots {
-        AnchorRoots {
-            workspace: PathBuf::from("/tmp/ws"),
-            grim_home: PathBuf::from("/tmp/gh"),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-            claude_user_dir: None,
-        }
     }
 
     /// Build a `ClientOutput` with a `Workspace`-anchored target.

@@ -6,11 +6,6 @@
 //! `main` owns clap parsing and the usage-error mapping; everything after
 //! a successful parse is delegated to [`app::run`].
 
-// Phase 1 lands the domain core, error taxonomy, exit codes, and output
-// layer ahead of the commands that consume them (Phases 2–6). These APIs
-// are exercised by their own unit tests but have no production call site
-// yet; the allow is removed as later phases wire them in.
-#![allow(dead_code)]
 // `unwrap_used`/`expect_used` are library-style discipline for production
 // code; tests are explicitly permitted to unwrap (quality-rust.md). The
 // restriction lints do not auto-skip the test target under

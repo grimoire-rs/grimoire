@@ -74,14 +74,6 @@ pub enum AccessErrorKind {
     #[error("registry authentication failed")]
     Authentication(#[source] Box<dyn std::error::Error + Send + Sync>),
 
-    /// The requested manifest does not exist on the registry.
-    #[error("manifest not found")]
-    ManifestNotFound,
-
-    /// The requested blob does not exist on the registry.
-    #[error("blob not found")]
-    BlobNotFound,
-
     /// A manifest was fetched but could not be parsed into the Grimoire
     /// subset (e.g. an image index where an image manifest was expected).
     #[error("invalid manifest: {0}")]
@@ -112,7 +104,7 @@ mod tests {
     #[test]
     fn display_with_identifier_uses_prefix() {
         let id = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
-        let err = AccessError::with_identifier(id, AccessErrorKind::ManifestNotFound);
+        let err = AccessError::with_identifier(id, AccessErrorKind::InvalidManifest("test".to_string()));
         assert!(err.to_string().starts_with("ghcr.io/acme/code-review:stable: "));
     }
 

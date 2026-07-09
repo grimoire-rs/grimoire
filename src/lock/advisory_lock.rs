@@ -48,6 +48,10 @@ use crate::lock::lock_error::{LockError, LockErrorKind};
 pub struct AdvisoryFileLock {
     // Held so the fd stays open for the lock's lifetime; closing it (on
     // drop) releases the lock. Never read directly.
+    #[allow(
+        dead_code,
+        reason = "RAII guard field — held for its Drop side effect, never read (quality-rust.md RAII Guards)"
+    )]
     file: File,
     // The sidecar path, retained so Drop can unlink it.
     sidecar: PathBuf,

@@ -107,12 +107,6 @@ pub enum ConfigErrorKind {
     #[error("config already exists")]
     ConfigAlreadyExists,
 
-    /// The lock's canonicalization-contract version is from a newer
-    /// release; reading is refused rather than comparing against a hash
-    /// this build would compute differently.
-    #[error("unsupported declaration_hash_version {version}; this build understands version 1")]
-    UnsupportedDeclarationHashVersion { version: u8 },
-
     /// No `grimoire.toml` was found by walking up from the working
     /// directory (project scope).
     #[error("no grimoire.toml found by walking up from the working directory")]

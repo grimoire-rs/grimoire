@@ -20,6 +20,17 @@ const DETAIL_PAGE: i64 = 5;
 /// The terminal-independent input alphabet.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+///
+/// The named action variants (`Install`..`Quit`) are never constructed by
+/// the real crossterm key-mapping layer in `super::app` (it maps hotkeys
+/// straight to `Char(c)`, matched alongside the named variant in every
+/// `handle_*` arm below); they exist for test readability and as a
+/// crossterm-independent alternative for a future non-keyboard input
+/// source. Every arm here is exercised directly by this module's tests.
+#[allow(
+    dead_code,
+    reason = "named action variants have no crossterm producer yet; see doc above"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiInput {
     /// Move selection up.

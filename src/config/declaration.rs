@@ -224,11 +224,19 @@ impl Eq for DesiredSet {}
 impl DesiredSet {
     /// Construct from explicit skill/rule maps with no bundles (fixtures,
     /// programmatic callers). The declaration-hash cache starts empty.
+    #[allow(
+        dead_code,
+        reason = "test-fixture convenience wrapper over from_maps; production always supplies agents/bundles"
+    )]
     pub fn from_parts(skills: BTreeMap<String, Identifier>, rules: BTreeMap<String, Identifier>) -> Self {
         Self::from_parts_with_bundles(skills, rules, BTreeMap::new())
     }
 
     /// Construct from explicit skill, rule, and bundle maps with no agents.
+    #[allow(
+        dead_code,
+        reason = "test-fixture convenience wrapper over from_maps; production always supplies agents"
+    )]
     pub fn from_parts_with_bundles(
         skills: BTreeMap<String, Identifier>,
         rules: BTreeMap<String, Identifier>,

@@ -50,6 +50,10 @@ pub struct StoreOptions {
 #[async_trait]
 pub trait CredentialStore: Send + Sync {
     /// Fetch the credential for `registry`. `Ok(None)` when none is stored.
+    #[allow(
+        dead_code,
+        reason = "protocol completeness (docker credential-helper get/put/delete); tested directly, no `grim login --check`-style caller yet"
+    )]
     async fn get(&self, registry: &str) -> Result<Option<Credential>, AuthError>;
 
     /// Persist `cred` for `registry`.
@@ -86,6 +90,7 @@ impl DockerCredentialStore {
 
     /// Construct a store pointed at an explicit path (tests, and callers
     /// that resolve the path themselves).
+    #[allow(dead_code, reason = "test-fixture constructor; production always goes through `new`")]
     pub fn with_path(config_path: PathBuf, opts: StoreOptions) -> Self {
         Self {
             config_path,
@@ -94,6 +99,10 @@ impl DockerCredentialStore {
     }
 
     /// The on-disk path this store reads and mutates.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; no production reader yet"
+    )]
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
@@ -148,6 +157,10 @@ where
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "backs CredentialStore::get, exercised via store.get() in tests; no production caller of get() yet"
+)]
 fn get_blocking(path: &Path, canonical: &str) -> Result<Option<Credential>, AuthError> {
     let config = read_config(path)?;
     match resolve_helper(&config, canonical) {
@@ -276,6 +289,10 @@ fn resolve_helper(config: &DockerConfig, canonical: &str) -> Option<String> {
         .or_else(|| config.creds_store.clone())
 }
 
+#[allow(
+    dead_code,
+    reason = "backs get_blocking's plaintext tier, exercised via store.get() in tests"
+)]
 fn read_plaintext(config: &DockerConfig, canonical: &str) -> Option<Credential> {
     let entry = config.auths.get(canonical)?;
     if let Some(token) = &entry.identity_token {

@@ -282,6 +282,10 @@ impl Catalog {
     }
 
     /// The registry this catalog indexes.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; callers key off CatalogGroup instead"
+    )]
     pub fn registry(&self) -> &str {
         &self.registry
     }
@@ -379,6 +383,10 @@ impl Catalog {
     ///
     /// [`CatalogError`] for a cache parse/version failure, or a genuine
     /// registry transport/auth failure during an online rebuild.
+    #[allow(
+        dead_code,
+        reason = "superseded by load_or_refresh_coordinated in production; kept as the simpler seam ~25 tests use"
+    )]
     pub async fn load_or_refresh(
         path: &Path,
         registry: &str,

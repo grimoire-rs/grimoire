@@ -77,17 +77,6 @@ pub enum LockErrorKind {
     /// computed hash.
     #[error("unsupported declaration_hash_version {version}; this build understands version 1")]
     UnsupportedVersion { version: u8 },
-
-    /// Partial-resolve refused: the predecessor lock's declaration hash
-    /// does not match the current declaration. Both are surfaced so an
-    /// operator can diff the lock against the live config.
-    #[error(
-        "partial-resolve refused: lock declaration_hash {previous_hash} does not match current {current_hash}; retry with a full resolve"
-    )]
-    StaleLockOnPartial {
-        previous_hash: String,
-        current_hash: String,
-    },
 }
 
 #[cfg(test)]

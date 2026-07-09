@@ -67,14 +67,6 @@ pub struct AddArgs {
     #[arg(long, short = 'n')]
     pub name: Option<String>,
 
-    /// Operate on the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
-
     /// Whether to materialize the artifact after declaring it.
     #[command(flatten)]
     pub install: InstallOnAdd,
@@ -114,7 +106,7 @@ impl InstallOnAdd {
 /// against a different identifier (64), or lock/resolve failures propagate
 /// via the typed error chain.
 pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     // Hold the config flock for the read-modify-write + relock window.
     let _guard = match scope_resolution::lockable_config_path(&scope) {
@@ -457,18 +449,6 @@ pub(crate) async fn relock_entry(
             }
         }
         None => resolve_lock(set, access, scope, &ResolveOptions::default()).await,
-    }
-}
-
-/// Parse `<ref>`, expanding a short identifier against `default_registry`
-/// when one is configured.
-pub(crate) fn parse_reference(
-    reference: &str,
-    default_registry: Option<&str>,
-) -> Result<Identifier, crate::oci::identifier::error::IdentifierError> {
-    match default_registry {
-        Some(def) => Identifier::parse_with_default_registry(reference, def),
-        None => Identifier::parse(reference),
     }
 }
 

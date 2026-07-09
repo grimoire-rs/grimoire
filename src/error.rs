@@ -130,7 +130,6 @@ fn classify_config(err: &ConfigError) -> ExitCode {
     match &err.kind {
         ConfigErrorKind::TomlParse(_)
         | ConfigErrorKind::FileTooLarge { .. }
-        | ConfigErrorKind::UnsupportedDeclarationHashVersion { .. }
         | ConfigErrorKind::RegistryInvalid { .. }
         | ConfigErrorKind::TreeSeparatorInvalid { .. } => ExitCode::ConfigError,
         ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
@@ -155,7 +154,6 @@ fn classify_lock(err: &LockError) -> ExitCode {
         | LockErrorKind::TomlSerialize(_)
         | LockErrorKind::FileTooLarge { .. }
         | LockErrorKind::UnsupportedVersion { .. } => ExitCode::ConfigError,
-        LockErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
         LockErrorKind::Io(io) => classify_io(io),
     }
 }
@@ -166,7 +164,6 @@ fn classify_access(err: &AccessError) -> ExitCode {
         AccessErrorKind::Authentication(_) => ExitCode::AuthError,
         AccessErrorKind::Registry(_) => ExitCode::Unavailable,
         AccessErrorKind::OfflineMiss => ExitCode::OfflineBlocked,
-        AccessErrorKind::ManifestNotFound | AccessErrorKind::BlobNotFound => ExitCode::NotFound,
         AccessErrorKind::DigestMismatch { .. } | AccessErrorKind::InvalidManifest(_) => ExitCode::DataError,
         AccessErrorKind::Io { source, .. } => classify_io(source),
     }
@@ -216,7 +213,6 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         SkillErrorKind::MissingSkillMd
         | SkillErrorKind::NameMismatch { .. }
         | SkillErrorKind::NameInvalid(_)
-        | SkillErrorKind::DescriptionInvalid(_)
         | SkillErrorKind::FrontmatterParse(_)
         | SkillErrorKind::MissingFrontmatter
         | SkillErrorKind::MetadataInvalid(_)
@@ -226,13 +222,11 @@ fn classify_skill(err: &SkillError) -> ExitCode {
     }
 }
 
-/// Map a release-tier error to an exit code. A bad version, a missing tag,
-/// or a refused tag overwrite is a data error (65).
+/// Map a release-tier error to an exit code. A missing tag or a refused tag
+/// overwrite is a data error (65).
 fn classify_release(err: &ReleaseError) -> ExitCode {
     match &err.kind {
-        ReleaseErrorKind::InvalidVersion { .. } | ReleaseErrorKind::MissingTag | ReleaseErrorKind::TagExists { .. } => {
-            ExitCode::DataError
-        }
+        ReleaseErrorKind::MissingTag | ReleaseErrorKind::TagExists { .. } => ExitCode::DataError,
     }
 }
 

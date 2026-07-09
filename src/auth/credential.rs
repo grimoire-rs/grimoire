@@ -36,6 +36,10 @@ impl Credential {
     }
 
     /// Construct an identity-token credential (OAuth2 refresh).
+    #[allow(
+        dead_code,
+        reason = "used by auth/store.rs's get/read_plaintext, not yet wired to a `grim login` caller"
+    )]
     pub fn identity_token(token: SecretString) -> Self {
         Self {
             username: String::new(),
@@ -45,6 +49,10 @@ impl Credential {
     }
 
     /// True when every field is empty.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; no production caller yet"
+    )]
     pub fn is_empty(&self) -> bool {
         self.username.is_empty()
             && self.password.expose_secret().is_empty()

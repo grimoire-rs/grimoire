@@ -169,18 +169,6 @@ pub struct TuiRow {
     pub source: Option<String>,
 }
 
-impl TuiRow {
-    /// The fully-qualified `registry/repository` reference, derived from the
-    /// authoritative [`Self::registry`] and [`Self::repository`] fields.
-    ///
-    /// Equals the stored `repo` field, which is retained for the many callers
-    /// that key on it; collapsing the two into this accessor is a deferred
-    /// follow-up.
-    pub fn repo(&self) -> String {
-        format!("{}/{}", self.registry, self.repository)
-    }
-}
-
 /// Per-registry health summary, aggregated from the loaded
 /// [`crate::catalog::catalog_service::CatalogResults`].
 ///
@@ -1120,6 +1108,10 @@ impl TuiState {
 
     /// Collapse the selected group (add it to the collapsed set). A no-op
     /// when not in tree mode, or when the selected row is a leaf.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by tests; the real `←` key path uses collapse_or_jump_to_parent/toggle_collapse_selected instead"
+    )]
     pub fn collapse_selected(&mut self) {
         if self.view_mode != ViewMode::Tree {
             return;
@@ -1132,13 +1124,6 @@ impl TuiState {
             let new_len = self.flattened().len();
             self.clamp_tree_selection_to(new_len);
         }
-    }
-
-    /// Insert `bundle_repo` into `expanded_bundles` (mark this bundle leaf as
-    /// expanded). No-op if already present. Does NOT affect `bundle_members`
-    /// cache or emit actions — callers handle those.
-    pub fn expand_bundle_leaf(&mut self, bundle_repo: String) {
-        self.expanded_bundles.insert(bundle_repo);
     }
 
     /// Remove `bundle_repo` from `expanded_bundles` (collapse this bundle

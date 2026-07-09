@@ -61,10 +61,6 @@ pub enum SkillErrorKind {
     #[error("invalid skill name: {0}")]
     NameInvalid(String),
 
-    /// The skill description violates the length rules.
-    #[error("invalid skill description: {0}")]
-    DescriptionInvalid(String),
-
     /// The YAML frontmatter could not be parsed.
     #[error("invalid YAML frontmatter")]
     FrontmatterParse(#[source] serde_yaml::Error),

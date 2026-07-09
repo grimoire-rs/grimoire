@@ -43,6 +43,10 @@ pub enum InstallOutcome {
     /// Already installed at the locked pin with intact content — no-op.
     AlreadyInstalled,
     /// Skipped for a benign reason (carried for forward use).
+    #[allow(
+        dead_code,
+        reason = "no producer yet; consumers already wired in tui/app.rs and command/install.rs"
+    )]
     Skipped(String),
     /// Refused: locally modified and `force` was not set. Carries the
     /// recorded vs. on-disk content hash so the caller can build a precise

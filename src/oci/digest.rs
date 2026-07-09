@@ -68,6 +68,10 @@ impl Algorithm {
     /// # Errors
     ///
     /// Returns any I/O error from opening or reading the file.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; production file hashing goes through install::content_hash instead"
+    )]
     pub fn hash_file(self, path: &Path) -> std::io::Result<Digest> {
         let hex = match self {
             Self::Sha256 => hash_file_hex::<sha2::Sha256>(path)?,
@@ -122,6 +126,10 @@ impl Digest {
     }
 
     /// Returns the first [`DIGEST_SHORT_LEN`] hex characters for display.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; display call sites use to_short_string instead"
+    )]
     pub fn short_hex(&self) -> &str {
         &self.hex()[..DIGEST_SHORT_LEN]
     }
@@ -137,6 +145,7 @@ impl Digest {
 /// returning the lowercase hex output. Shared across the
 /// [`Algorithm::hash_file`] variants so the read-and-hash loop is not
 /// triplicated.
+#[allow(dead_code, reason = "backs Algorithm::hash_file, which is itself test-only for now")]
 fn hash_file_hex<H>(path: &Path) -> std::io::Result<String>
 where
     H: sha2::Digest,

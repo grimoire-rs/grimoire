@@ -62,6 +62,16 @@ pub enum CatalogErrorKind {
     Parse(#[source] serde_json::Error),
 
     /// The catalog file declares an on-disk version this build cannot read.
+    ///
+    /// Currently unreachable via [`CatalogError::parse`] (the sole catalog
+    /// version, `V1`, is enforced by `serde_repr` and surfaces as
+    /// [`Self::Parse`] instead); kept classified and directly tested
+    /// (`display_prefixes_with_path`) as the landing spot for a future
+    /// version-2 envelope that needs a softer-than-`Parse` rejection.
+    #[allow(
+        dead_code,
+        reason = "classified in error.rs; awaiting a second on-disk catalog version"
+    )]
     #[error("unsupported catalog version: {version}")]
     UnsupportedVersion { version: u8 },
 

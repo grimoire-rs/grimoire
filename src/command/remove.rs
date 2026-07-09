@@ -32,14 +32,6 @@ pub struct RemoveArgs {
 
     /// The config binding name to remove.
     pub name: String,
-
-    /// Operate on the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
 }
 
 /// Run `grim remove`.
@@ -58,7 +50,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         _ => ArtifactKind::Rule,
     };
 
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     let _guard = match scope_resolution::lockable_config_path(&scope) {
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),

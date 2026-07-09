@@ -128,6 +128,10 @@ impl ArtifactKind {
     /// Whether the artifact materializes as a directory tree (skill) rather
     /// than a single file (rule, agent). Bundles never materialize; MCP
     /// descriptors register into client configs instead of materializing.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; install/materializer call sites match ArtifactKind inline instead"
+    )]
     pub fn is_dir_artifact(self) -> bool {
         match self {
             Self::Skill => true,

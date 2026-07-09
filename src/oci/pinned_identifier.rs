@@ -45,6 +45,10 @@ impl PinnedIdentifier {
     }
 
     /// Returns a copy with the digest replaced. Tag (if any) is preserved.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by this module's tests; no production caller yet"
+    )]
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self(self.0.clone_with_digest(digest))
     }

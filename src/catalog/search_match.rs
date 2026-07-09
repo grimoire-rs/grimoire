@@ -129,6 +129,10 @@ impl SearchQuery {
     /// that is broader than the query (terms matching summary/description/
     /// keywords rather than the name) only affects build *coverage*, never
     /// correctness of the rows that survive.
+    #[allow(
+        dead_code,
+        reason = "production load_catalog deliberately skips build-time prefiltering (see catalog_service.rs doc) for identical cross-frontend results; kept for load_or_refresh callers and its own test suite"
+    )]
     pub fn prefilter_term(&self) -> &str {
         // `fold` keeps the first term of any equal-length tie (a strict `>`
         // never replaces an equally-long earlier term), unlike `max_by_key`

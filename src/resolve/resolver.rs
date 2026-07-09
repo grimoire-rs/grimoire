@@ -628,8 +628,6 @@ async fn retry_chain(
                         return Err(ResolveError::new(reference.clone(), ResolveErrorKind::AuthFailure(err)));
                     }
                     AccessErrorKind::OfflineMiss
-                    | AccessErrorKind::ManifestNotFound
-                    | AccessErrorKind::BlobNotFound
                     | AccessErrorKind::InvalidManifest(_)
                     | AccessErrorKind::DigestMismatch { .. } => {
                         return Err(ResolveError::new(

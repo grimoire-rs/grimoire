@@ -30,15 +30,7 @@ use super::scope_resolution::{self, ResolvedScope};
 
 /// `grim lock` arguments.
 #[derive(Debug, Args)]
-pub struct LockArgs {
-    /// Lock the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
-}
+pub struct LockArgs {}
 
 /// Run `grim lock`.
 ///
@@ -46,8 +38,8 @@ pub struct LockArgs {
 ///
 /// Config (78), tag-not-found (79), auth (80), registry-unreachable (69),
 /// or flock-contended (75) failures propagate via the typed error chain.
-pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     // Hold the advisory flock for the resolve+write window. A global
     // config that does not exist yet has no file to lock — the atomic

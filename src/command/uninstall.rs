@@ -39,14 +39,6 @@ pub struct UninstallArgs {
 
     /// The config binding name to uninstall.
     pub name: String,
-
-    /// Operate on the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
 }
 
 /// Run `grim uninstall`.
@@ -66,7 +58,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         _ => ArtifactKind::Rule,
     };
 
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     let _guard = match scope_resolution::lockable_config_path(&scope) {
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),

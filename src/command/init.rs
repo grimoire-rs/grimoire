@@ -26,11 +26,6 @@ use crate::context::Context;
 /// `grim init` arguments.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Create the global config (`$GRIM_HOME/grimoire.toml`) instead of a
-    /// project-local one.
-    #[arg(long)]
-    pub global: bool,
-
     /// Seed the default registry as a `[[registries]]` entry with
     /// `default = true`.
     #[arg(long)]
@@ -44,7 +39,7 @@ pub struct InitArgs {
 /// Returns a [`ConfigError`] (`ConfigAlreadyExists` ⇒ exit 64, I/O ⇒ 74)
 /// if the file exists or cannot be written.
 pub async fn run(ctx: &Context, args: &InitArgs) -> anyhow::Result<(InitReport, ExitCode)> {
-    let (path, scope) = if args.global {
+    let (path, scope) = if ctx.global() {
         (ctx.paths().global_config(), ConfigScope::Global)
     } else {
         let cwd = std::env::current_dir().context("resolving the current directory for `grim init`")?;

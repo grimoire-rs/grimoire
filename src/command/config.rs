@@ -8,10 +8,9 @@
 //! lifecycle.  All under one `config` umbrella (see
 //! `adr_grim_config_command.md`).
 //!
-//! Scope is selected by `--global` / `--config` declared on `ConfigArgs`
-//! and passed to `scope_resolution::resolve` — the same pattern every
-//! scope-aware command (`lock`, `install`, `status`) follows, because
-//! `Context` does not expose those flags.
+//! Scope is selected by the root `--global` / `--config` flags, read off
+//! [`Context`] and passed to `scope_resolution::resolve` — the same
+//! pattern every scope-aware command (`lock`, `install`) follows.
 
 use clap::{Args, Subcommand};
 use unicode_width::UnicodeWidthChar as _;
@@ -31,19 +30,11 @@ use super::scope_resolution::{self, lockable_config_path};
 
 /// `grim config` arguments.
 ///
-/// Scope flags (`--global`, `--config`) apply to the whole command tree and
-/// must precede the subcommand: `grim config --global get <key>`.
+/// The root `--global` / `--config` scope flags apply to the whole command
+/// tree and work positionally before or after the subcommand: `grim config
+/// --global get <key>` or `grim config get <key> --global`.
 #[derive(Debug, Args)]
 pub struct ConfigArgs {
-    /// Operate on the global config (`$GRIM_HOME/grimoire.toml`) instead of
-    /// the discovered project config.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
-
     #[command(subcommand)]
     pub command: ConfigCommand,
 }
@@ -138,21 +129,21 @@ pub enum RegistryCommand {
 /// failure (IoError 74), or alias not found (UsageError 64).
 pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigReport, ExitCode)> {
     match &args.command {
-        ConfigCommand::Get { key } => run_get(ctx, args, key),
-        ConfigCommand::Set { key, value } => run_set(ctx, args, key, value),
-        ConfigCommand::Unset { key } => run_unset(ctx, args, key),
-        ConfigCommand::List => run_list(ctx, args),
+        ConfigCommand::Get { key } => run_get(ctx, key),
+        ConfigCommand::Set { key, value } => run_set(ctx, key, value),
+        ConfigCommand::Unset { key } => run_unset(ctx, key),
+        ConfigCommand::List => run_list(ctx),
         ConfigCommand::Registry(r) => match &r.command {
             RegistryCommand::Add {
                 alias,
                 oci,
                 index,
                 default,
-            } => run_registry_add(ctx, args, alias, oci.as_deref(), index.as_deref(), *default),
-            RegistryCommand::Rm { alias } => run_registry_rm(ctx, args, alias),
-            RegistryCommand::Use { alias } => run_registry_use(ctx, args, alias),
-            RegistryCommand::Show { alias } => run_registry_show(ctx, args, alias),
-            RegistryCommand::List => run_registry_list(ctx, args),
+            } => run_registry_add(ctx, alias, oci.as_deref(), index.as_deref(), *default),
+            RegistryCommand::Rm { alias } => run_registry_rm(ctx, alias),
+            RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
+            RegistryCommand::Show { alias } => run_registry_show(ctx, alias),
+            RegistryCommand::List => run_registry_list(ctx),
         },
     }
 }
@@ -715,7 +706,7 @@ fn commit_config(
 
 // ── Sub-command handlers ──────────────────────────────────────────────────────
 
-fn run_get(ctx: &Context, args: &ConfigArgs, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+fn run_get(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let parsed = parse_key(key)?;
     if matches!(parsed, ParsedKey::RegistryAlias { .. }) {
         return Err(super::config_usage(
@@ -723,7 +714,7 @@ fn run_get(ctx: &Context, args: &ConfigArgs, key: &str) -> anyhow::Result<(Confi
              use registry.<alias>.oci or registry.<alias>.default",
         ));
     }
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let value = get_value(&parsed, &scope.options, &scope.registries)?;
     let exit_code = if value.is_some() {
         ExitCode::Success
@@ -740,9 +731,9 @@ fn run_get(ctx: &Context, args: &ConfigArgs, key: &str) -> anyhow::Result<(Confi
     ))
 }
 
-fn run_set(ctx: &Context, args: &ConfigArgs, key: &str, value: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+fn run_set(ctx: &Context, key: &str, value: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let parsed = parse_key(key)?;
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
     let _guard = acquire_config_lock(&scope)?;
@@ -763,9 +754,9 @@ fn run_set(ctx: &Context, args: &ConfigArgs, key: &str, value: &str) -> anyhow::
     ))
 }
 
-fn run_unset(ctx: &Context, args: &ConfigArgs, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let parsed = parse_key(key)?;
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
     let _guard = acquire_config_lock(&scope)?;
@@ -786,15 +777,14 @@ fn run_unset(ctx: &Context, args: &ConfigArgs, key: &str) -> anyhow::Result<(Con
     ))
 }
 
-fn run_list(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+fn run_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let entries = collect_entries(&scope.options, &scope.registries);
     Ok((ConfigReport::List(ConfigListReport { entries }), ExitCode::Success))
 }
 
 fn run_registry_add(
     ctx: &Context,
-    args: &ConfigArgs,
     alias: &str,
     oci: Option<&str>,
     index: Option<&str>,
@@ -823,7 +813,7 @@ fn run_registry_add(
         )));
     }
 
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
     let _guard = acquire_config_lock(&scope)?;
@@ -860,8 +850,8 @@ fn run_registry_add(
     ))
 }
 
-fn run_registry_rm(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+fn run_registry_rm(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
     let _guard = acquire_config_lock(&scope)?;
@@ -887,8 +877,8 @@ fn run_registry_rm(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::Res
     ))
 }
 
-fn run_registry_use(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
     let _guard = acquire_config_lock(&scope)?;
@@ -915,8 +905,8 @@ fn run_registry_use(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::Re
     ))
 }
 
-fn run_registry_show(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+fn run_registry_show(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let rc = find_registry(&scope.registries, alias)
         .ok_or_else(|| super::config_usage(format!("no registry '{alias}'; add it with `grim config registry add`")))?;
     Ok((
@@ -930,8 +920,8 @@ fn run_registry_show(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::R
     ))
 }
 
-fn run_registry_list(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let rows = scope
         .registries
         .iter()

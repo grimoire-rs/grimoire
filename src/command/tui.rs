@@ -45,14 +45,6 @@ fn scope_label(scope: ConfigScope) -> &'static str {
 /// `grim tui` arguments.
 #[derive(Debug, Args)]
 pub struct TuiArgs {
-    /// Registries to browse; repeatable and comma-separated (`--registry a,b`
-    /// or `--registry a --registry b`) to browse several at once. Precedence
-    /// (highest first): this flag (or the global `--registry`), then
-    /// `GRIM_DEFAULT_REGISTRY`, then project config `default_registry`, then
-    /// global config.
-    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Append)]
-    pub registry: Vec<String>,
-
     /// Force a catalog rebuild even if the cache is fresh (governs the
     /// initial load only; the interactive `r` key always forces a reload).
     #[arg(long)]
@@ -62,15 +54,6 @@ pub struct TuiArgs {
     /// The interactive `h` key toggles this live regardless.
     #[arg(long)]
     pub show_deprecated: bool,
-
-    /// Browse against the global scope's lock/state instead of the
-    /// discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path (for scope badge / install target).
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
 }
 
 /// Run `grim tui`.
@@ -90,28 +73,28 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     // No config for the requested scope yet: offer to initialize one before
     // the session starts. The prompt runs before raw mode, so plain stdin
     // reads are safe; declining closes the TUI cleanly.
-    if config_missing(ctx, args) && matches!(prompt_init(ctx, args).await?, InitPrompt::Cancelled) {
+    if config_missing(ctx) && matches!(prompt_init(ctx).await?, InitPrompt::Cancelled) {
         return Ok(ExitCode::Success);
     }
 
-    let scope = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
+    let scope = scope_resolution::resolve(ctx, ctx.global(), ctx.config())
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let access = super::access_seam(ctx)?;
 
     // Resolve the full ordered registry set for the active scope via the shared
     // multi-registry seam (mirrors `grim search` / `grim mcp`).
-    let registries = resolve_registries_for_tui(ctx, args, &scope);
+    let registries = resolve_registries_for_tui(ctx, &scope);
     let primary_registry = crate::config::primary_registry(&registries).to_string();
 
     // Resolve the *other* scope too so the TUI can toggle Global ⇄
     // Project at runtime. It is best-effort: if the alternate scope
     // cannot be resolved (e.g. no project config discoverable), the
     // toggle is simply disabled rather than failing the whole TUI.
-    let alt = scope_resolution::resolve(ctx, !args.global, args.config.as_deref())
+    let alt = scope_resolution::resolve(ctx, !ctx.global(), ctx.config())
         .ok()
         .filter(|other| other.scope != scope.scope)
         .map(|other| {
-            let alt_registries = resolve_registries_for_tui(ctx, args, &other);
+            let alt_registries = resolve_registries_for_tui(ctx, &other);
             let alt_primary = crate::config::primary_registry(&alt_registries).to_string();
             ScopeSwap {
                 scope: other.scope,
@@ -170,11 +153,11 @@ enum InitPrompt {
 /// explicit `--config` path is never treated as missing here — `grim init`
 /// writes only the canonical locations, so a bad explicit path keeps
 /// surfacing as the usual hard error instead of initializing elsewhere.
-fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
-    if args.global {
+fn config_missing(ctx: &Context) -> bool {
+    if ctx.global() {
         return !ctx.paths().global_config().exists();
     }
-    if args.config.is_some() {
+    if ctx.config().is_some() {
         return false;
     }
     match crate::config::project_config::ProjectConfig::discover(None) {
@@ -194,8 +177,8 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 /// edited value can never contradict its stored key).
 ///
 /// The pre-selected type and its prefill come from the **effective**
-/// browse primary (`--registry` flag > `[[registries]]` primary > legacy
-/// `default_registry` chain > the built-in fallback **index**,
+/// browse primary (root `--registry` flag > `[[registries]]` primary >
+/// legacy `default_registry` chain > the built-in fallback **index**,
 /// [`crate::command::FALLBACK_INDEX`]); the non-default type prefills its
 /// built-in fallback, so plain Enter persists a browse source that
 /// actually lists packages either way.
@@ -211,18 +194,18 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 ///
 /// Propagates dialog I/O failures and any `grim init` error (e.g. a
 /// config racing into existence maps to the usual exit-64 error).
-async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt> {
+async fn prompt_init(ctx: &Context) -> anyhow::Result<InitPrompt> {
     if !std::io::stdin().is_terminal() {
         eprintln!("no grimoire.toml found and stdin is not a terminal; run `grim init` first");
         return Ok(InitPrompt::Cancelled);
     }
 
-    let label = if args.global {
+    let label = if ctx.global() {
         ctx.paths().global_config().display().to_string()
     } else {
         "./grimoire.toml".to_string()
     };
-    let scope = if args.global {
+    let scope = if ctx.global() {
         ConfigScope::Global
     } else {
         ConfigScope::Project
@@ -233,7 +216,7 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     // can never diverge. The browse default's shape pre-selects the type
     // (index for an unconfigured user); the other type falls back to its
     // built-in so switching always offers a working prefill.
-    let browse_default = resolve_browse_default(ctx, args);
+    let browse_default = resolve_browse_default(ctx);
     let (index_prefill, oci_prefill, kind) =
         if crate::config::registry_resolve::classify_index(&browse_default).is_some() {
             (
@@ -255,7 +238,6 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     };
 
     let init_args = crate::command::init::InitArgs {
-        global: args.global,
         registry: snapshot_choice(registry),
     };
     let (report, _) = crate::command::init::run(ctx, &init_args).await?;
@@ -271,23 +253,26 @@ fn snapshot_choice(registry: Option<String>) -> Option<String> {
 }
 
 /// Resolve the init dialog's pre-fill: the primary **browse** source's
-/// locator. An explicit `--registry` flag wins outright; otherwise the
-/// scope's browse set resolves via the same seam the session browses with
-/// ([`crate::command::registries_for_scope`]) and the primary entry's
-/// locator is returned — which for an unconfigured user is the built-in
-/// fallback **index** ([`crate::command::FALLBACK_INDEX`]), not the
-/// push-side [`crate::command::FALLBACK_REGISTRY`] (a GHCR-style OCI entry
-/// would browse empty because `_catalog` is gated).
+/// locator. The root `--registry` flag (`ctx.registry_flags()`) wins
+/// outright — and, unlike the fallthrough paths below, is checked before
+/// any scope resolution runs, so this stays a pure, I/O-free lookup when
+/// the flag is set; otherwise the scope's browse set resolves via the same
+/// seam the session browses with ([`crate::command::registries_for_scope`])
+/// and the primary entry's locator is returned — which for an
+/// unconfigured user is the built-in fallback **index**
+/// ([`crate::command::FALLBACK_INDEX`]), not the push-side
+/// [`crate::command::FALLBACK_REGISTRY`] (a GHCR-style OCI entry would
+/// browse empty because `_catalog` is gated).
 ///
 /// On scope-resolution failure (no `grimoire.toml` discoverable — the
 /// normal case for this dialog), the global-`[[registries]]`-aware
 /// fallback set ([`crate::command::registries_global_fallback`]) is used so
 /// a `[[registries]]`-only global config is still honored.
-fn resolve_browse_default(ctx: &Context, args: &TuiArgs) -> String {
-    if let Some(r) = args.registry.first() {
+fn resolve_browse_default(ctx: &Context) -> String {
+    if let Some(r) = ctx.registry_flags().first() {
         return r.clone();
     }
-    let set = match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
+    let set = match scope_resolution::resolve(ctx, ctx.global(), ctx.config()) {
         Ok(scope) => crate::command::registries_for_scope(ctx, &scope),
         Err(_) => crate::command::registries_global_fallback(ctx),
     };
@@ -303,30 +288,16 @@ fn resolve_browse_default(ctx: &Context, args: &TuiArgs) -> String {
 /// `grim search` / `grim mcp` seam (`catalog_service::load_catalog`).
 ///
 /// Behavior (D-RESOLVE):
-/// - An explicit `--registry` flag (repeatable / comma-separated) collapses to
-///   exactly those registries (in order, deduped, first is primary).
+/// - The root `--registry` flag (repeatable / comma-separated,
+///   `ctx.registry_flags()`) collapses to exactly those registries (in
+///   order, deduped, first is primary).
 /// - Otherwise, `[[registries]]` is authoritative; the legacy scalar
-///   `default_registry` and the global config tiers are folded in via
-///   [`super::registries_for_scope`] — the same seam `grim search` uses.
-/// - The built-in fallback (`FALLBACK_REGISTRY`) ensures a non-empty result.
-fn resolve_registries_for_tui(
-    ctx: &Context,
-    args: &TuiArgs,
-    scope: &scope_resolution::ResolvedScope,
-) -> Vec<ResolvedRegistry> {
-    if !args.registry.is_empty() {
-        // Explicit --registry collapses to exactly those registries (in order,
-        // deduped, first is primary).
-        return crate::config::resolve_registries(
-            &args.registry,
-            &[],
-            None,
-            &[],
-            None,
-            crate::command::FALLBACK_REGISTRY,
-            None,
-        );
-    }
+///   `default_registry` and the global config tiers are folded in.
+/// - The built-in fallback (`FALLBACK_INDEX`) ensures a non-empty result.
+///
+/// [`super::registries_for_scope`] already implements this precedence (the
+/// `--registry` flag is its highest tier), so it is the single seam here.
+fn resolve_registries_for_tui(ctx: &Context, scope: &scope_resolution::ResolvedScope) -> Vec<ResolvedRegistry> {
     super::registries_for_scope(ctx, scope)
 }
 
@@ -379,15 +350,13 @@ mod tests {
 
     #[test]
     fn explicit_registry_wins() {
-        let ctx = Context::new(&opts());
-        let a = TuiArgs {
-            registry: vec!["ghcr.io".to_string()],
-            refresh: false,
-            show_deprecated: false,
-            global: false,
-            config: None,
-        };
-        assert_eq!(resolve_browse_default(&ctx, &a), "ghcr.io");
+        // The registry-flag short-circuit runs before any scope resolution,
+        // so a non-hermetic Context is safe here (matches the pre-collapse
+        // test — see `resolve_browse_default`'s doc comment).
+        let mut o = opts();
+        o.registry = vec!["ghcr.io".to_string()];
+        let ctx = Context::new(&o);
+        assert_eq!(resolve_browse_default(&ctx), "ghcr.io");
     }
 
     #[test]
@@ -400,15 +369,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
-        let ctx = Context::hermetic(tmp.path().to_path_buf());
-        let a = TuiArgs {
-            registry: Vec::new(),
-            refresh: false,
-            show_deprecated: false,
-            global: false,
-            config: Some(cfg),
-        };
-        assert_eq!(resolve_browse_default(&ctx, &a), crate::command::FALLBACK_INDEX);
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(cfg));
+        assert_eq!(resolve_browse_default(&ctx), crate::command::FALLBACK_INDEX);
     }
 
     #[test]
@@ -429,37 +391,23 @@ mod tests {
             "[[registries]]\nurl = \"global-tui.example\"\ndefault = true\n",
         )
         .unwrap();
-        let ctx = Context::hermetic(tmp.path().to_path_buf());
         // No --config, no --global: scope_resolution tries to discover a
         // project config in the CWD. In a hermetic test this may succeed or
         // fail depending on CWD; pass a missing explicit config path to force
         // scope resolution to error (no file at that path ⇒ Err branch).
         let missing_cfg = tmp.path().join("no-such/grimoire.toml");
-        let a = TuiArgs {
-            registry: Vec::new(),
-            refresh: false,
-            show_deprecated: false,
-            global: false,
-            config: Some(missing_cfg),
-        };
-        assert_eq!(resolve_browse_default(&ctx, &a), "global-tui.example");
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing_cfg));
+        assert_eq!(resolve_browse_default(&ctx), "global-tui.example");
     }
 
     #[test]
     fn config_missing_global_checks_grim_home_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = Context::hermetic(tmp.path().to_path_buf());
-        let a = TuiArgs {
-            registry: Vec::new(),
-            refresh: false,
-            show_deprecated: false,
-            global: true,
-            config: None,
-        };
-        assert!(config_missing(&ctx, &a), "absent global config offers init");
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), true, None);
+        assert!(config_missing(&ctx), "absent global config offers init");
 
         std::fs::write(ctx.paths().global_config(), "[skills]\n\n[rules]\n").unwrap();
-        assert!(!config_missing(&ctx, &a), "existing global config skips the prompt");
+        assert!(!config_missing(&ctx), "existing global config skips the prompt");
     }
 
     #[test]
@@ -467,15 +415,12 @@ mod tests {
         // An explicit --config path (even a missing one) keeps the normal
         // hard-error path — init writes only canonical locations.
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = Context::hermetic(tmp.path().to_path_buf());
-        let a = TuiArgs {
-            registry: Vec::new(),
-            refresh: false,
-            show_deprecated: false,
-            global: false,
-            config: Some(tmp.path().join("nope/grimoire.toml")),
-        };
-        assert!(!config_missing(&ctx, &a));
+        let ctx = Context::hermetic_scoped(
+            tmp.path().to_path_buf(),
+            false,
+            Some(tmp.path().join("nope/grimoire.toml")),
+        );
+        assert!(!config_missing(&ctx));
     }
 
     #[test]

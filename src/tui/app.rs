@@ -1659,6 +1659,10 @@ impl InstallProgress for BatchProgress<'_> {
 /// [`crate::install::uninstall`] seam — no forked logic either way. Each
 /// row's state is refreshed; the status line aggregates `n ok, m failed`.
 /// Silent batch (no progress sink) — the default for tests.
+#[allow(
+    dead_code,
+    reason = "test-only convenience wrapper over run_batch_with_progress; the real event loop always supplies a progress sink"
+)]
 async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: BatchOp) {
     run_batch_with_progress(ctx, state, rows, op, &SilentProgress).await;
 }

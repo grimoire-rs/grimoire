@@ -41,17 +41,9 @@ pub struct UpdateArgs {
     /// Specific artifact names to update; empty ⇒ update everything.
     pub names: Vec<String>,
 
-    /// Update the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
     /// Overwrite a locally modified artifact instead of refusing it.
     #[arg(long)]
     pub force: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
 
     /// AI client(s) to re-materialize into (comma-separated, repeatable).
     /// Defaults to the config `clients` option, then all detected clients
@@ -67,7 +59,7 @@ pub struct UpdateArgs {
 /// Lock/resolve failures (78/79/80/69/75), partial stale-lock (65), or
 /// integrity/I-O failures propagate via the typed chain.
 pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     let _guard = match scope_resolution::lockable_config_path(&scope) {
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),

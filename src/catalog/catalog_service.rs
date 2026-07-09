@@ -101,10 +101,18 @@ pub struct CatalogGroup {
     /// The registry host (and optional namespace).
     pub registry: String,
     /// The configured alias for this registry, if any.
+    #[allow(
+        dead_code,
+        reason = "captured for a future alias display; no TUI/search consumer yet"
+    )]
     pub alias: Option<String>,
     /// Whether this registry's browse window hit the repository cap.
     pub truncated: bool,
     /// RFC3339 timestamp of this registry's catalog build.
+    #[allow(
+        dead_code,
+        reason = "captured for a future \"last refreshed\" display; no consumer yet"
+    )]
     pub built_at: String,
     /// Whether this group lacks freshly-built network data this call: `true`
     /// when the browse ran in `--offline` mode, or the registry was

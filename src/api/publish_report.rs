@@ -154,6 +154,10 @@ impl PublishReport {
 
     /// Per-entry outcomes, in publish order (read-only — the report is
     /// built once from operation results and never mutated).
+    #[allow(
+        dead_code,
+        reason = "exercised directly by command/publish.rs tests; rendering goes through Serialize"
+    )]
     pub fn entries(&self) -> &[PublishEntry] {
         &self.entries
     }

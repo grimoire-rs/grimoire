@@ -98,6 +98,10 @@ impl TryFrom<RawLockedArtifact> for LockedArtifact {
 
 impl LockedArtifact {
     /// A directly-declared (non-bundle) locked artifact.
+    #[allow(
+        dead_code,
+        reason = "test-fixture convenience constructor; production builds LockedArtifact via struct literals in resolver.rs"
+    )]
     pub fn direct(name: String, kind: ArtifactKind, pinned: PinnedIdentifier) -> Self {
         Self {
             name,

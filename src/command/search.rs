@@ -276,18 +276,6 @@ fn load_badges_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::options::{GlobalOptions, OutputFormat};
-
-    fn opts() -> GlobalOptions {
-        GlobalOptions {
-            format: OutputFormat::Plain,
-            offline: false,
-            log_level: None,
-            config: None,
-            global: false,
-            registry: Vec::new(),
-        }
-    }
 
     fn args() -> SearchArgs {
         SearchArgs {

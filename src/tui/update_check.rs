@@ -74,6 +74,10 @@ pub enum CheckMsg {
     /// set by `repo` key, preserving marks, selection, and any live per-row
     /// `↑` flags — but only when the stamp matches the live generation; a
     /// catalog walked under a now-superseded scope is discarded on drain.
+    #[allow(
+        dead_code,
+        reason = "only spawn_catalog_refresh constructs this, and that seam is not yet called from app::run's event loop"
+    )]
     CatalogReady { catalog: Box<Catalog>, generation: u64 },
     /// The row's floating tag now resolves to a digest that differs from
     /// its locked pin — a newer version is available. Stamped with the
@@ -82,11 +86,11 @@ pub enum CheckMsg {
     /// The row's floating tag still resolves to its locked digest (or the
     /// tag vanished / offline yielded nothing). No state change. Stamped
     /// with the scheduling generation.
-    RowUpToDate { repo: String, generation: u64 },
+    RowUpToDate { generation: u64 },
     /// The per-row check failed (transport/auth). Degrade silently — the
     /// row keeps whatever state it had; the next scheduled check retries.
     /// Stamped with the scheduling generation.
-    Failed { repo: String, generation: u64 },
+    Failed { generation: u64 },
 }
 
 /// The work a single per-row check needs: the stable key to report back
@@ -174,6 +178,10 @@ pub struct UpdateChecker {
     /// The OCI-access seam (shared, cache-write-through).
     access: Arc<dyn OciAccess>,
     /// The registry whose catalog is refreshed.
+    #[allow(
+        dead_code,
+        reason = "backs spawn_catalog_refresh, the single-registry background-refresh seam adr_multi_registry_mcp.md leaves as a follow-up"
+    )]
     registry: String,
     /// In-flight + finished task handles, reaped each tick and aborted on
     /// drop.
@@ -278,6 +286,10 @@ impl UpdateChecker {
     /// A refresh failure is swallowed: the existing rows stay, and the next
     /// `r`/`--refresh` retries. The catalog write-through is handled inside
     /// [`Catalog::load_or_refresh`].
+    #[allow(
+        dead_code,
+        reason = "single-registry background-refresh seam adr_multi_registry_mcp.md leaves as a follow-up; not yet called from app::run's event loop"
+    )]
     pub fn spawn_catalog_refresh(&mut self, catalog_path: std::path::PathBuf) {
         let tx = self.tx.clone();
         let access = Arc::clone(&self.access);
@@ -371,16 +383,10 @@ impl UpdateChecker {
                                 generation,
                             }
                         } else {
-                            CheckMsg::RowUpToDate {
-                                repo: check.repo,
-                                generation,
-                            }
+                            CheckMsg::RowUpToDate { generation }
                         }
                     }
-                    Err(_) => CheckMsg::Failed {
-                        repo: check.repo,
-                        generation,
-                    },
+                    Err(_) => CheckMsg::Failed { generation },
                 };
                 // Drop on a full channel: a stale per-row result is
                 // superseded by the next scheduled check; never block.

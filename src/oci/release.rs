@@ -21,7 +21,7 @@
 
 use super::Identifier;
 
-/// A release-tier failure (currently only an unparseable version).
+/// A release-tier failure.
 ///
 /// Three-layer shape: top [`crate::error::Error`] → context-bearing
 /// [`ReleaseError`] → discriminant [`ReleaseErrorKind`].
@@ -69,14 +69,6 @@ impl std::error::Error for ReleaseError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReleaseErrorKind {
-    /// The release version is not valid semver.
-    #[error("invalid semantic version '{version}'")]
-    InvalidVersion {
-        version: String,
-        #[source]
-        source: semver::Error,
-    },
-
     /// The release reference carried no tag, so there is nothing to
     /// publish under.
     #[error("release reference has no tag; expected registry/repo:tag")]

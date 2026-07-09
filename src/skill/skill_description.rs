@@ -36,6 +36,10 @@ impl SkillDescription {
     }
 
     /// The validated description as a string slice.
+    #[allow(
+        dead_code,
+        reason = "exercised directly by tests in skill_frontmatter.rs, skill_package.rs, agent_frontmatter.rs; production reads via Display instead"
+    )]
     pub fn as_str(&self) -> &str {
         &self.0
     }

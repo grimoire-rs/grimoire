@@ -31,14 +31,6 @@ use super::scope_resolution::{self, ResolvedScope};
 /// `grim install` arguments.
 #[derive(Debug, Args)]
 pub struct InstallArgs {
-    /// Install the global scope instead of the discovered project.
-    #[arg(long)]
-    pub global: bool,
-
-    /// Explicit project config path.
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
-
     /// Overwrite a locally modified artifact instead of refusing it.
     #[arg(long)]
     pub force: bool,
@@ -58,7 +50,7 @@ pub struct InstallArgs {
 /// Lock missing / stale (79 / 65), integrity (65), offline (81),
 /// registry (69), or I/O (74) failures propagate via the typed chain.
 pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallReport, ExitCode)> {
-    let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     let _guard = match scope_resolution::lockable_config_path(&scope) {
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
