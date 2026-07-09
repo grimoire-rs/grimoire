@@ -204,8 +204,9 @@ fn handle_help(state: &mut TuiState, input: TuiInput) -> TuiAction {
     }
 }
 
-/// Search-mode keys: text entry plus commit/cancel. Navigation still works
-/// so the user can scroll results while typing.
+/// Search-mode keys: text entry plus commit/cancel. Up/Down commit the
+/// query and hand focus to the list (so action keys act instead of typing
+/// into the query); narrow with the query first, then arrow to leave.
 fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Char(c) => {
@@ -220,11 +221,15 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.apply_query(q);
             TuiAction::None
         }
+        // Arrows leave the search box for the list, then move — so the next
+        // action key (i/u/d) acts on a row instead of appending to the query.
         TuiInput::Up => {
+            state.back();
             state.move_selection(-1);
             TuiAction::None
         }
         TuiInput::Down => {
+            state.back();
             state.move_selection(1);
             TuiAction::None
         }
@@ -860,11 +865,28 @@ mod tests {
     }
 
     #[test]
-    fn search_mode_navigation_still_scrolls() {
+    fn search_mode_arrow_leaves_search_and_moves() {
         let mut s = seeded();
         handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(s.mode, Mode::Search);
         handle(&mut s, TuiInput::Down);
-        assert_eq!(s.selected, 1);
+        assert_eq!(s.mode, Mode::List); // focus left the search box
+        assert_eq!(s.selected, 1); // and advanced one row
+    }
+
+    #[test]
+    fn action_key_acts_after_leaving_search_via_arrow() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::Down); // leaves search, selects row 1
+        assert_eq!(s.query, ""); // 'i' below is an action, NOT query text
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('i')),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![1]
+            }
+        );
     }
 
     #[test]
