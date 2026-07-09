@@ -623,9 +623,14 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 /// Build detail lines for a selected virtual [`DisplayRow::Member`] row.
 ///
 /// Looks the `MemberNode` up from the bundle-member cache using the row's
-/// `parent_bundle_repo` and the active scope label, then delegates to
-/// [`detail_lines_for_member`]. Falls back to a generic "no selection" text
-/// when the cache entry is absent (race between display and cache eviction).
+/// `parent_bundle_repo` and the active scope label. When the member is itself
+/// a catalog row (its `member_repo` resolves to a `state.rows` entry), render
+/// the **rich** [`detail_lines`] pane — the same Summary/Description/metadata
+/// a standalone selection gets — with a trailing `Via bundle:` provenance
+/// line. Otherwise (non-catalog / offline / foreign-registry member) fall back
+/// to the sparse [`detail_lines_for_member`]. Falls back to a generic "no
+/// selection" text when the cache entry is absent (race between display and
+/// cache eviction).
 fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::DisplayRow>) -> Vec<DetailLine> {
     use super::bundle_members::BundleMemberCache;
     use super::tree::DisplayRow;
@@ -646,6 +651,19 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
         // Match by label AND kind to handle duplicate labels across different
         // artifact kinds (W4: label-only lookup could return the wrong member).
         if let Some(node) = members.iter().find(|m| &m.label == label && m.kind == *kind) {
+            // A member that is itself a catalog artifact gets the full detail
+            // pane (Summary/Description/OCI metadata), keyed by the exact repo
+            // catalog rows are found by, plus a `Via bundle:` provenance line.
+            if let Some(repo) = node.member_repo.as_deref()
+                && let Some(catalog_row) = state.rows.iter().find(|r| r.repo == repo)
+            {
+                let mut lines = detail_lines(Some(catalog_row));
+                lines.push(DetailLine::MetaEntry {
+                    label: "Via bundle:",
+                    value: sanitize_member_label(parent_bundle_repo),
+                });
+                return lines;
+            }
             return detail_lines_for_member(node, parent_bundle_repo);
         }
     }
@@ -1894,6 +1912,88 @@ mod tests {
         assert!(!detail.contains("Description:"), "empty description omits the section");
         assert!(detail.contains("Repository: -"));
         assert!(m.detail.contains(&DetailLine::Text("-".to_string())), "summary dash");
+    }
+
+    /// Build a `DisplayRow::Member` plus a matching `Ready` bundle-member
+    /// cache entry, for the member-detail pane tests.
+    fn member_row_and_cache(
+        parent_bundle_repo: &str,
+        label: &str,
+        member_repo: Option<&str>,
+    ) -> (crate::tui::tree::DisplayRow, crate::tui::bundle_members::MemberNode) {
+        use crate::oci::ArtifactKind;
+        let node = crate::tui::bundle_members::MemberNode {
+            kind: ArtifactKind::Skill,
+            label: label.to_string(),
+            member_repo: member_repo.map(str::to_string),
+            state: ArtifactState::NotInstalled,
+            related: member_repo.is_some(),
+        };
+        let member = crate::tui::tree::DisplayRow::Member {
+            label: label.to_string(),
+            depth: 1,
+            kind: ArtifactKind::Skill,
+            state: ArtifactState::NotInstalled,
+            related: node.related,
+            parent_bundle_repo: parent_bundle_repo.to_string(),
+            member_repo: member_repo.map(str::to_string),
+        };
+        (member, node)
+    }
+
+    #[test]
+    fn catalog_backed_member_gets_rich_detail_with_provenance() {
+        // A bundle member that is itself a catalog row must render the full
+        // Summary/Description/Metadata pane (the same one a standalone
+        // selection gets) plus a `Via bundle:` provenance line — not the
+        // sparse Kind/State/Via set.
+        use crate::tui::bundle_members::BundleMemberCache;
+        let bundle_repo = "reg/acme/bundles/pack";
+        let mut r = row("reg/acme/skill-a", ArtifactState::NotInstalled);
+        r.summary = "the member blurb".to_string();
+
+        let mut s = TuiState::new();
+        s.set_rows(vec![r]);
+        let (member, node) = member_row_and_cache(bundle_repo, "skill-a", Some("reg/acme/skill-a"));
+        s.bundle_members.insert(
+            (s.scope_label.clone(), bundle_repo.to_string()),
+            BundleMemberCache::Ready(vec![node]),
+        );
+
+        let lines = member_detail_lines_from_state(&s, Some(&member));
+        let text = lines.iter().map(detail_line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Summary:"), "rich pane renders the Summary section");
+        assert!(text.contains("the member blurb"), "rich pane renders the row's summary");
+        assert!(
+            lines.contains(&DetailLine::MetaEntry {
+                label: "Via bundle:",
+                value: bundle_repo.to_string(),
+            }),
+            "the bundle provenance line is appended"
+        );
+    }
+
+    #[test]
+    fn non_catalog_member_keeps_sparse_detail() {
+        // A member whose repo is not a catalog row (foreign / offline) falls
+        // back to the sparse Kind/State/Via pane.
+        use crate::tui::bundle_members::BundleMemberCache;
+        let bundle_repo = "reg/acme/bundles/pack";
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("reg/acme/skill-a", ArtifactState::NotInstalled)]);
+        // Member repo points at something NOT in `rows`.
+        let (member, node) = member_row_and_cache(bundle_repo, "foreign", Some("reg/other/foreign"));
+        s.bundle_members.insert(
+            (s.scope_label.clone(), bundle_repo.to_string()),
+            BundleMemberCache::Ready(vec![node]),
+        );
+
+        let lines = member_detail_lines_from_state(&s, Some(&member));
+        let text = lines.iter().map(detail_line_text).collect::<Vec<_>>().join("\n");
+        assert!(!text.contains("Summary:"), "sparse pane has no Summary section");
+        assert!(text.contains("Kind:"), "sparse pane shows Kind");
+        assert!(text.contains("State:"), "sparse pane shows State");
+        assert!(text.contains("Via bundle:"), "sparse pane still shows provenance");
     }
 
     #[test]
