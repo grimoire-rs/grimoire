@@ -33,22 +33,54 @@ pub mod update;
 pub use command_error::CommandError;
 
 /// Resolve the registry for `login` / `logout`: an explicit (non-empty)
-/// argument wins, else the `--registry` flag, else `$GRIM_DEFAULT_REGISTRY`
-/// (the context's `default_registry`, which folds flag-then-env). A miss is
-/// a classifiable config error, not a panic. The CLI argument stays first;
-/// env beats config because config is not consulted on the login path.
+/// argument wins — substituting a configured `[[registries]]` alias when the
+/// argument matches one (mirroring the `alias/repo` substitution
+/// [`crate::config::resolve_reference`] applies for `add`/`search`), else
+/// taken as a literal hostname. Otherwise the resolved scope's registry set
+/// supplies the primary: `--registry` flag, `$GRIM_DEFAULT_REGISTRY`, the
+/// project/global `[[registries]]` default, or the legacy
+/// `[options].default_registry` chain — the same seam
+/// [`registries_for_scope`] / [`registries_global_fallback`] `add`/`release`
+/// already use. A miss is a classifiable config error, not a panic.
+///
+/// Unlike `add`/`release`, `login`/`logout` never substitute the built-in
+/// [`FALLBACK_REGISTRY`] when nothing is configured — silently storing (or
+/// erasing) a credential for a registry the user never named would be a
+/// silent surprise, so an unresolved browse set (only the built-in index
+/// tier) still errors.
 ///
 /// # Errors
 ///
 /// [`CommandError::NoLoginRegistry`] when neither an argument nor a
-/// default registry is available.
+/// resolvable default registry is available.
 pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&str>) -> anyhow::Result<String> {
+    let registries = login_registries(ctx);
     if let Some(reg) = explicit.filter(|r| !r.is_empty()) {
-        return Ok(reg.to_string());
+        return Ok(registries
+            .iter()
+            .find(|r| r.alias.as_deref() == Some(reg))
+            .map(|r| r.url.clone())
+            .unwrap_or_else(|| reg.to_string()));
     }
-    ctx.default_registry()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
+    match crate::config::registry_resolve::primary_registry(&registries) {
+        "" => Err(anyhow::Error::from(crate::error::Error::from(
+            command_error::CommandError::NoLoginRegistry,
+        ))),
+        primary => Ok(primary.to_string()),
+    }
+}
+
+/// The registry set `login`/`logout` resolve aliases and the configured
+/// default against: the project scope's browse set when one is
+/// discoverable, else the global-`[[registries]]`-aware fallback — the same
+/// seam `add`/`release`/`search` use ([`registries_for_scope`] /
+/// [`registries_global_fallback`]), so a `[[registries]]` alias or default
+/// declared at either scope round-trips through `login`/`logout` too.
+fn login_registries(ctx: &crate::context::Context) -> Vec<crate::config::ResolvedRegistry> {
+    match scope_resolution::resolve(ctx, false, None) {
+        Ok(scope) => registries_for_scope(ctx, &scope),
+        Err(_) => registries_global_fallback(ctx),
+    }
 }
 
 /// The built-in default registry for push-side and short-id expansion,

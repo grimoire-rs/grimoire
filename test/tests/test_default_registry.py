@@ -161,6 +161,40 @@ def test_add_config_default_registry_persists_fq_name(
     )
 
 
+def test_add_short_id_honors_global_registries_array(
+    grim_at, project_dir: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression (ADR G2/B1): a ``[[registries]]`` default declared only in
+    the GLOBAL config must resolve a project-scope short id — the project
+    config declares neither ``[[registries]]`` nor ``[options].default_registry``,
+    so the only source of a default is the global config's array. Must not
+    silently fall back to the built-in ``ghcr.io/grimoire-rs``."""
+    make_artifact(
+        f"{unique_repo}/global-tool",
+        "skill",
+        {"global-tool/SKILL.md": "---\nname: global-tool\ndescription: d\n---\n# G\n"},
+        tag="1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[[registries]]\noci = "{REGISTRY_HOST}"\ndefault = true\n')
+    write_config(project_dir)
+
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    short_ref = f"{unique_repo}/global-tool:1"
+    out = runner.json("add", short_ref)
+    assert out["status"] == "added", (
+        f"add must resolve via the global [[registries]] default, not fall back "
+        f"to the built-in registry: {out!r}"
+    )
+
+    cfg_text = (project_dir / "grimoire.toml").read_text()
+    assert f"{REGISTRY_HOST}/{unique_repo}/global-tool" in cfg_text, (
+        f"the skill binding must use the global registry host '{REGISTRY_HOST}/', "
+        f"got:\n{cfg_text}"
+    )
+
+
 def test_add_short_id_in_index_only_project_uses_default_chain(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

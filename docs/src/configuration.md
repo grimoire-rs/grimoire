@@ -144,12 +144,15 @@ read for back-compat and never destroyed on re-serialize, but `grim init` now
 writes the `[[registries]]` shape for new configs — `[options].default_registry`
 is deprecated for new writes.
 
-**Known limitation**: `grim login` / `grim logout` with no positional argument
-resolve the registry from the `--registry` flag, then `GRIM_DEFAULT_REGISTRY`
-only — they consult neither `[[registries]]` nor `[options].default_registry`,
-and with neither source set they fail with exit 78. Pass the registry
-explicitly (`grim login ghcr.io/acme`) when your config uses
-`[[registries]]`-only.
+**`grim login` / `grim logout`**: a positional registry argument matching a
+configured `[[registries]]` alias substitutes that entry's URL. With no
+argument, the registry resolves through the same chain as `add`/`search`:
+the `--registry` flag, `GRIM_DEFAULT_REGISTRY`, the project/global
+`[[registries]]` default, then the legacy `[options].default_registry`
+chain. Unlike `add`/`release`, `login`/`logout` never fall back to the
+built-in default registry — with nothing configured anywhere, they fail
+with exit 78 rather than silently storing (or erasing) a credential for a
+registry you never named. See [`grim login`][grim-login].
 
 **At-most-one `default = true`**: declaring two `[[registries]]` entries with
 `default = true` is a parse error (exit 78). When none set it, the first entry
@@ -395,6 +398,7 @@ state file is kept out of version control without touching your root
 [grim-config]: ./commands.md#config
 [grim-add]: ./commands.md#add
 [grim-remove]: ./commands.md#remove
+[grim-login]: ./authentication.md#login
 
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry

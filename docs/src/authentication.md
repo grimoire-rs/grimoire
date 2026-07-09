@@ -32,9 +32,17 @@ and other CI setups; see [Configuration](./configuration.md#environment-variable
 ## grim login {#login}
 
 `grim login [registry]` authenticates to a registry and stores the
-credential so later pulls and pushes reuse it. With no positional argument
-it falls back to the `--registry` flag, then `GRIM_DEFAULT_REGISTRY` — the
-config `default_registry` option is not consulted on this path.
+credential so later pulls and pushes reuse it. The `registry` argument
+accepts either a hostname or a configured [`[[registries]]`
+alias][registries-config], which substitutes that entry's URL — the same
+alias resolution `add`/`search` apply to a qualified `alias/repo`
+reference. With no argument, the registry resolves through the same chain
+as `add`/`search`: the `--registry` flag, `GRIM_DEFAULT_REGISTRY`, the
+project/global `[[registries]]` default, then the legacy
+`[options].default_registry` chain. Unlike `add`/`release`, `login` never
+falls back to the built-in default registry — with nothing configured
+anywhere it fails with exit 78, since silently storing a credential for a
+registry you never named would be a silent surprise.
 
 The username comes from `--username`/`-u`, or an interactive prompt when
 omitted on a terminal. The password is read from a hidden terminal prompt,
@@ -117,6 +125,9 @@ grim logout "$REGISTRY"
 Because Grimoire shares the Docker config, a prior [`docker login`][docker-login]
 step in the same job is enough on its own — `grim` reuses whatever Docker
 stored.
+
+<!-- internal -->
+[registries-config]: ./configuration.md#multiple-registries
 
 <!-- external -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

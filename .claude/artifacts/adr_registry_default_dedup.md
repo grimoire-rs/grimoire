@@ -7,7 +7,7 @@ Owner: Architect (/architect). Handoff to: Builder (/builder), QA (/qa-engineer)
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-20
 **Deciders:** Maintainer (Michael Herwig); Architect worker (draft)
 **Beads Issue:** N/A
@@ -355,6 +355,63 @@ Recommended v1 stance (pending maintainer confirmation — see Open Questions):
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-20 | Architect worker | Initial draft (Option A chosen) |
+| 2026-07-09 | Builder worker | Closed G2/B1 (locked with a regression test; already fixed) and G5 (`login`/`logout` alias + default resolution); status → Accepted. See Refinements below. |
+
+---
+
+## Refinements
+
+*Added 2026-07-09, closing the Completeness Review's actionable/deferred findings for the pre-1.0 trust-bug pass.*
+
+**G2/B1 — already fixed, now regression-locked.** Re-investigation found
+`release` and `tui` were already routed through
+`primary_registry_for_scope` / `primary_registry_global_fallback`
+(`src/command.rs`) by commit `3def40e` (2026-06-20, same day as this ADR's
+initial draft) — both fold in the project *and* global `[[registries]]`
+tiers, including the no-project-config fallback case B1 described. `add`
+and `grim mcp`'s `grim_fetch` also already resolve short ids correctly via
+`registries_for_scope`, which folds `global_config_registries` at tier 2;
+their narrow `global_config_default`-based fallback only fires for an
+index-only browse set (no OCI entry anywhere in scope), where falling to
+the documented short-id chain is the intended, tested behavior — not a
+bug. Added `test_add_short_id_honors_global_registries_array` to
+`test/tests/test_default_registry.py` as a permanent regression lock for
+this exact scenario (project scope has neither `[[registries]]` nor
+`[options].default_registry`; only the global config declares
+`[[registries]]`); it passes against the current binary, confirming the
+hole is closed. `global_config_default` (`src/command.rs`) itself was left
+unchanged — it is correctly scoped to its two remaining call sites.
+
+**G5 — fixed.** `resolve_login_registry` (`src/command.rs`) previously
+consulted only the CLI argument, `--registry` flag, and
+`$GRIM_DEFAULT_REGISTRY` — never `[[registries]]` or
+`[options].default_registry` at either scope, matching the ADR's original
+"known limitation" framing. It now resolves through the same seam
+`add`/`release` use (`registries_for_scope` on a discoverable project
+scope, else `registries_global_fallback`): a positional argument matching
+a configured alias substitutes that entry's url (mirroring
+`resolve_reference`'s `alias/repo` substitution), and an omitted argument
+resolves the scope's `[[registries]]` default or the legacy
+`default_registry` chain. Deliberately **not** matched to `add`/`release`
+in one respect: `login`/`logout` never substitute the built-in fallback
+registry when nothing is configured anywhere — storing or erasing a
+credential for a registry the user never named would be a silent
+surprise, so that case still errors with `NoLoginRegistry` (exit 78).
+
+Implementing this fix surfaced a genuine, unrelated pre-existing bug: the
+unannotated `registry: Option<String>` positional field on `LoginArgs` /
+`LogoutArgs` shared a clap argument id with the top-level
+`--registry` flag (`GlobalOptions::registry`, `global = true`). A bare
+positional value (e.g. `grim login corp`) was silently also populating
+`Context::registry_flags()`, which forces tier 1 of `resolve_registries`
+and bypasses `[[registries]]` entirely — masking alias resolution before
+it could ever run. Fixed by renaming the field to `host` in both structs
+(clap arg id changes with the field name; user-facing CLI syntax
+unchanged). Locked with a Rust unit test in each file
+(`positional_host_does_not_leak_into_global_registry_flag`) that flattens
+the real `GlobalOptions` alongside the subcommand's `Args` — the isolated
+per-file `Harness` used by the pre-existing tests does not include
+`GlobalOptions` and could not have caught this.
 
 ---
 

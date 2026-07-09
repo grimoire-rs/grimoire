@@ -585,9 +585,11 @@ Pass the username with `-u`/`--username` (prompted on a terminal when omitted)
 and the password via `--password-stdin` or a hidden terminal prompt — there is
 no `--password <value>` flag, by design. `--allow-insecure-store` permits a
 base64 plaintext entry when no credential helper is configured. With no
-positional `registry`, it resolves `--registry`, then `GRIM_DEFAULT_REGISTRY`
-— the config `default_registry` option is not consulted on this path, and
-with neither set the command fails with exit 78. See
+positional `registry`, it resolves `--registry`, then `GRIM_DEFAULT_REGISTRY`,
+then the configured `[[registries]]` (aliases resolve; the default entry
+wins) — but never the built-in fallback registry: with nothing configured
+anywhere the command fails with exit 78 rather than storing a credential
+for a registry you never named. See
 [Authentication](./authentication.md) for storage details.
 
 ```sh

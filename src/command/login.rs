@@ -42,10 +42,19 @@ pub struct LoginArgs {
     #[arg(long)]
     pub allow_insecure_store: bool,
 
-    /// Registry hostname (e.g. `ghcr.io`). Falls back to the `--registry`
-    /// flag, then `GRIM_DEFAULT_REGISTRY`. The `default_registry` config
-    /// option is not consulted on the login path.
-    pub registry: Option<String>,
+    /// Registry hostname (e.g. `ghcr.io`), or a configured `[[registries]]`
+    /// alias (substituted to that entry's url). Falls back to the
+    /// `--registry` flag, `GRIM_DEFAULT_REGISTRY`, the resolved scope's
+    /// `[[registries]]` default, or the legacy `default_registry` config
+    /// chain — never the built-in fallback registry.
+    ///
+    /// Named `host` rather than `registry`: an unannotated field literally
+    /// named `registry` collides with the top-level `--registry` global
+    /// flag's clap argument id (`GlobalOptions::registry`, `global = true`)
+    /// — clap conflates the two into one id, so a bare positional value
+    /// here would also poison [`crate::context::Context::registry_flags`]
+    /// and force-collapse the browse set, defeating alias resolution.
+    pub host: Option<String>,
 }
 
 /// Run `grim login`.
@@ -55,7 +64,7 @@ pub struct LoginArgs {
 /// A missing/empty credential input (usage error 64), a missing registry
 /// (config error 78), or a credential-store failure (auth/I/O tiers).
 pub async fn run(ctx: &Context, args: &LoginArgs) -> anyhow::Result<(LoginReport, ExitCode)> {
-    let registry = super::resolve_login_registry(ctx, args.registry.as_deref())?;
+    let registry = super::resolve_login_registry(ctx, args.host.as_deref())?;
 
     // Credential input blocks on a TTY / stdin read, so it runs on the
     // blocking pool — never parking an async worker thread (quality-rust.md).
@@ -174,5 +183,31 @@ mod tests {
     #[test]
     fn registry_is_optional_at_parse() {
         parse(&[]).expect("registry optional (resolved at runtime)");
+    }
+
+    /// Regression: `LoginArgs::host` must not share a clap argument id with
+    /// `GlobalOptions::registry` (`--registry`, `global = true`) — a shared
+    /// id would let a bare positional value leak into the global
+    /// `--registry` flag's matches, force-collapsing the multi-registry
+    /// browse set and defeating `[[registries]]` alias resolution (see the
+    /// doc comment on [`LoginArgs::host`]).
+    #[test]
+    fn positional_host_does_not_leak_into_global_registry_flag() {
+        #[derive(clap::Parser)]
+        struct FullHarness {
+            #[command(flatten)]
+            global: crate::cli::options::GlobalOptions,
+            #[command(subcommand)]
+            cmd: Sub,
+        }
+        let cli = FullHarness::try_parse_from(["grim", "login", "corp"]).expect("parses");
+        assert!(
+            cli.global.registry.is_empty(),
+            "a bare positional host must not populate the global --registry flag: {:?}",
+            cli.global.registry
+        );
+        match cli.cmd {
+            Sub::Login(a) => assert_eq!(a.host.as_deref(), Some("corp")),
+        }
     }
 }

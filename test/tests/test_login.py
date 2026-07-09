@@ -134,6 +134,7 @@ def _login(
         capture_output=True,
         text=True,
         env=env,
+        cwd=str(grim.cwd) if grim.cwd else None,
     )
 
 
@@ -153,6 +154,7 @@ def _logout(
         capture_output=True,
         text=True,
         env=env,
+        cwd=str(grim.cwd) if grim.cwd else None,
     )
 
 
@@ -316,3 +318,105 @@ def test_logout_via_helper_erases_credential(grim: GrimRunner, docker_config: Pa
     assert res.returncode == 0, res.stderr
     store = json.loads(Path(credential_helper["_STORE_FILE"]).read_text())
     assert "ghcr.io" not in store
+
+
+# ---------------------------------------------------------------------------
+# [[registries]] resolution (ADR G5) — login/logout must consult the
+# configured alias and default, consistent with add/search/release.
+# ---------------------------------------------------------------------------
+
+
+def test_login_resolves_configured_default_registry(
+    grim_at, project_dir: Path, docker_config: Path
+) -> None:
+    """No positional registry, no ``--registry`` flag, no env — ``grim login``
+    must resolve the project's ``[[registries]]`` default instead of erroring
+    with "no registry given"."""
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\noci = "registry.corp.example"\ndefault = true\n'
+    )
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    res = _login(
+        runner,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        fmt="json",
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["registry"] == "registry.corp.example", payload
+    cfg = _read_config(docker_config)
+    assert "registry.corp.example" in cfg["auths"], cfg
+
+
+def test_login_resolves_registries_alias(
+    grim_at, project_dir: Path, docker_config: Path
+) -> None:
+    """A positional argument matching a configured ``[[registries]]`` alias
+    substitutes that entry's url — mirroring the `alias/repo` resolution
+    `add`/`search` already apply."""
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\n'
+    )
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    res = _login(
+        runner,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "corp",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        fmt="json",
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["registry"] == "registry.corp.example", (
+        f"the 'corp' alias must substitute its configured url, got: {payload!r}"
+    )
+
+
+def test_logout_resolves_registries_alias(
+    grim_at, project_dir: Path, docker_config: Path
+) -> None:
+    """``grim logout`` resolves a configured alias the same way `login` does,
+    so the pair round-trips against the same credential key."""
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\ndefault = true\n'
+    )
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    _login(
+        runner,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+    )
+    assert "registry.corp.example" in _read_config(docker_config).get("auths", {})
+
+    res = _logout(runner, "corp", docker_config=docker_config)
+    assert res.returncode == 0, res.stderr
+    assert "registry.corp.example" not in _read_config(docker_config).get("auths", {})
+
+
+def test_login_no_registry_anywhere_is_config_error(
+    grim_at, project_dir: Path, docker_config: Path
+) -> None:
+    """Unlike `add`/`release`, `login` must never silently substitute the
+    built-in fallback registry — storing a credential the user never named
+    would be a silent surprise. Nothing configured anywhere ⇒ exit 78."""
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    runner = grim_at(project_dir)
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+
+    res = _login(
+        runner,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+    )
+    assert res.returncode == 78, res.stderr
+    assert "no registry" in res.stderr.lower(), res.stderr
