@@ -177,6 +177,13 @@ members) is materialized; the rest of the lock is left for
 useful when adding several artifacts before one `grim install` pass, or when
 choosing clients explicitly with [`grim install --client`](#install).
 
+The declared name is a unique key per kind: re-running `add` with a
+`(kind, name)` pair that is already declared under a *different* reference
+refuses (exit 64) instead of silently replacing it, and names the existing
+reference in the error. Pass `--name` to bind the new reference under a
+different name. Re-declaring the exact same reference stays a no-op
+overwrite.
+
 ```sh
 grim add ghcr.io/acme/code-review:1
 grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2

@@ -19,6 +19,12 @@
 //! under the config flock: a partial relock when a previous lock exists, a
 //! full resolve otherwise. The new lock is saved with `generated_at`
 //! preservation for the untouched entries.
+//!
+//! The declared `(kind, name)` pair is a per-scope-unique key: declaring a
+//! name that already exists under a *different* identifier refuses (exit
+//! 64) instead of silently replacing it — re-run with `--name` to pick
+//! another binding name. Re-declaring the exact same identifier stays an
+//! idempotent overwrite.
 
 use std::sync::Arc;
 
@@ -104,8 +110,9 @@ impl InstallOnAdd {
 ///
 /// # Errors
 ///
-/// Config (78/79/74), invalid reference (65), or lock/resolve failures
-/// propagate via the typed error chain.
+/// Config (78/79/74), invalid reference (65), a same-name declare conflict
+/// against a different identifier (64), or lock/resolve failures propagate
+/// via the typed error chain.
 pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
 
@@ -173,8 +180,25 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         tracing::warn!("{id} is deprecated: {message}");
     }
 
+    // At 1.0 a declared name is a true per-scope-unique key: declaring
+    // `(kind, name)` against a *different* identifier than what is already
+    // declared must refuse loudly rather than silently clobber it.
+    // Re-declaring the *same* identifier stays the pre-existing idempotent
+    // overwrite. The check runs on the local clone before any write, so a
+    // refusal leaves the on-disk config and lock untouched.
     let mut set = scope.set.clone();
-    declare(&mut set, kind, name.clone(), id.clone());
+    if let Some(existing) = declare(&mut set, kind, name.clone(), id.clone())
+        && existing != id
+    {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            CommandError::DeclareConflict {
+                kind,
+                name,
+                existing: existing.to_string(),
+                requested: id.to_string(),
+            },
+        )));
+    }
 
     // Persist the edited config (re-serialize the parsed declaration).
     super::grim(write_config(
@@ -347,30 +371,28 @@ pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle
 /// declaration-hash cache. The kind-dispatch seam shared by `grim add`
 /// and the TUI install action so a bundle can never be coerced into a
 /// skill/rule/agent table.
+///
+/// Always overwrites and returns the identifier that previously occupied
+/// `(kind, name)`, if any — the TUI install/update action relies on this
+/// unconditional overwrite (re-installing the same row at a different
+/// pinned version is a deliberate identifier change, not a conflict).
+/// `grim add` uses the returned previous value to refuse a *different*
+/// identifier before persisting; see [`run`].
 pub(crate) fn declare(
     set: &mut crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
     name: String,
     id: Identifier,
-) {
-    match kind {
-        ArtifactKind::Skill => {
-            set.skills.insert(name, id);
-        }
-        ArtifactKind::Rule => {
-            set.rules.insert(name, id);
-        }
-        ArtifactKind::Agent => {
-            set.agents.insert(name, id);
-        }
-        ArtifactKind::Bundle => {
-            set.bundles.insert(name, id);
-        }
-        ArtifactKind::Mcp => {
-            set.mcp.insert(name, id);
-        }
-    }
+) -> Option<Identifier> {
+    let previous = match kind {
+        ArtifactKind::Skill => set.skills.insert(name, id),
+        ArtifactKind::Rule => set.rules.insert(name, id),
+        ArtifactKind::Agent => set.agents.insert(name, id),
+        ArtifactKind::Bundle => set.bundles.insert(name, id),
+        ArtifactKind::Mcp => set.mcp.insert(name, id),
+    };
     set.invalidate_declaration_hash_cache();
+    previous
 }
 
 /// Re-lock after declaring `(kind, name)`: a bundle always full-resolves
@@ -645,6 +667,56 @@ mod tests {
         // The two flags override each other last-wins.
         assert!(parse_install(&["grim", "--no-install", "--install", "ghcr.io/acme/x"]));
         assert!(!parse_install(&["grim", "--install", "--no-install", "ghcr.io/acme/x"]));
+    }
+
+    #[test]
+    fn declare_returns_none_on_fresh_insert() {
+        let mut set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let id = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
+        let previous = declare(&mut set, ArtifactKind::Skill, "code-review".to_string(), id.clone());
+        assert!(
+            previous.is_none(),
+            "first declare of a name must return no previous value"
+        );
+        assert_eq!(set.skills.get("code-review"), Some(&id));
+    }
+
+    #[test]
+    fn declare_returns_previous_identifier_on_overwrite() {
+        // `declare` always overwrites (the TUI install/update action relies
+        // on this); it surfaces the previous value so the caller can decide
+        // whether the overwrite is a conflict.
+        let mut set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let first = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
+        let second = Identifier::parse("ghcr.io/other/code-review:stable").unwrap();
+        declare(&mut set, ArtifactKind::Skill, "code-review".to_string(), first.clone());
+        let previous = declare(&mut set, ArtifactKind::Skill, "code-review".to_string(), second.clone());
+        assert_eq!(previous, Some(first));
+        assert_eq!(set.skills.get("code-review"), Some(&second));
+    }
+
+    #[test]
+    fn declare_conflict_error_names_kind_name_existing_and_hints_flag() {
+        // Regression guard for the declare-time name-conflict guard: the
+        // message must name the kind, the conflicting name, the existing
+        // reference, and hint the `--name` fix.
+        let err = CommandError::DeclareConflict {
+            kind: ArtifactKind::Skill,
+            name: "code-review".to_string(),
+            existing: "ghcr.io/acme/code-review:stable".to_string(),
+            requested: "ghcr.io/other/code-review:stable".to_string(),
+        };
+        let message = err.to_string();
+        assert!(message.contains("skill"), "message must name the kind: {message}");
+        assert!(
+            message.contains("code-review"),
+            "message must name the conflicting name: {message}"
+        );
+        assert!(
+            message.contains("ghcr.io/acme/code-review:stable"),
+            "message must name the existing reference: {message}"
+        );
+        assert!(message.contains("--name"), "message must hint --name: {message}");
     }
 
     #[test]

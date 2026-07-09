@@ -109,6 +109,7 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                     CommandError::NoLoginRegistry => ExitCode::ConfigError,
                     CommandError::LoginInput(_) => ExitCode::UsageError,
                     CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
+                    CommandError::DeclareConflict { .. } => ExitCode::UsageError,
                     CommandError::ConfigUsage(_) => ExitCode::UsageError,
                     CommandError::ConfigValue(_) => ExitCode::DataError,
                 },
@@ -362,6 +363,21 @@ mod tests {
 
         let usage: anyhow::Error = Error::from(CommandError::LoginInput("bad input")).into();
         assert_eq!(classify_error(&usage), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn command_declare_conflict_classifies_as_usage_error() {
+        // A same-name re-declare against a different identifier is a
+        // conflicting invocation the caller fixes with `--name` — same
+        // exit-code contract as `ConfigErrorKind::ConfigAlreadyExists`.
+        let inner = CommandError::DeclareConflict {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "code-review".to_string(),
+            existing: "ghcr.io/acme/code-review:stable".to_string(),
+            requested: "ghcr.io/other/code-review:stable".to_string(),
+        };
+        let err: anyhow::Error = Error::from(inner).into();
+        assert_eq!(classify_error(&err), ExitCode::UsageError);
     }
 
     #[test]

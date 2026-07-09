@@ -104,6 +104,72 @@ def test_remove_absent_entry_is_reported_not_error(
     assert out["status"] == "absent"
 
 
+def test_add_same_name_conflicting_reference_refuses(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A declared name is a true per-scope-unique key: re-declaring
+    `(kind, name)` against a *different* identifier must refuse loudly
+    (exit 64, UsageError) instead of silently clobbering the first
+    declaration. Both artifacts share the last path segment
+    (`code-review`), so `add` infers the same default binding name for
+    both — a realistic name collision, not a contrived one.
+    """
+    sk_a = make_artifact(
+        f"{unique_repo}/vendor-a/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: vendor a\n---\n# CR a\n"},
+        tag="stable",
+    )
+    sk_b = make_artifact(
+        f"{unique_repo}/vendor-b/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: vendor b\n---\n# CR b\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    out = runner.json("add", "--no-install", sk_a.fq)
+    assert out["name"] == "code-review"
+
+    result = runner.run("add", "--no-install", sk_b.fq, check=False)
+    assert result.returncode == 64, (
+        f"conflicting re-declare must exit 64 (UsageError), got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert "code-review" in result.stderr
+    assert "--name" in result.stderr
+
+    # The refusal must not mutate the config — vendor-a's declaration
+    # survives untouched, vendor-b never lands.
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert "vendor-a" in cfg
+    assert "vendor-b" not in cfg
+
+
+def test_add_same_name_same_reference_is_idempotent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Re-declaring the exact same `(kind, name, identifier)` stays a clean
+    no-op overwrite — the conflict guard only fires on a genuine mismatch.
+    """
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    first = runner.json("add", "--no-install", sk.fq)
+    assert first["status"] == "added"
+
+    second = runner.json("add", "--no-install", sk.fq)
+    assert second["status"] == "added"
+    assert second["pinned"] == first["pinned"]
+
+
 def test_add_two_entries_then_lock_install(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

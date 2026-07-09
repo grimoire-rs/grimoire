@@ -42,6 +42,24 @@ pub enum CommandError {
     #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|bundle")]
     KindInferenceFailed { reference: String },
 
+    /// `add` declared a `(kind, name)` that already exists in the config
+    /// bound to a *different* identifier. The declared name is a true
+    /// per-scope-unique key, so a silent overwrite would clobber the
+    /// existing binding without the caller's awareness. Re-declaring the
+    /// *same* identifier never reaches this variant — that path stays the
+    /// pre-existing idempotent overwrite (exit 0). Exit 64: the same
+    /// "conflicting invocation, fix and retry" contract as
+    /// [`crate::config::config_error::ConfigErrorKind::ConfigAlreadyExists`].
+    #[error(
+        "{kind} '{name}' is already declared as {existing}; pass --name to declare '{requested}' under a different name"
+    )]
+    DeclareConflict {
+        kind: crate::oci::ArtifactKind,
+        name: String,
+        existing: String,
+        requested: String,
+    },
+
     /// `config` received an unknown dotted key, a duplicate alias, or
     /// another input that violates the command contract (exit 64).
     #[error("{0}")]
