@@ -180,15 +180,11 @@ mod tests {
 
     #[test]
     fn global_scope_resolves_under_grim_home() {
+        // Hermetic: route grim_home into a tempdir so the test never
+        // reads the developer's real ~/.grimoire/grimoire.toml (which
+        // may declare skills and broke the is_empty assertion).
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY-free env handling: GlobalOptions carries no GRIM_HOME, so
-        // build a Context whose grim_home points into the tempdir by
-        // routing through the public constructor with the env unset and
-        // asserting on the structural path shape instead.
-        let mut o = opts();
-        o.global = true;
-        let _ = dir;
-        let ctx = Context::new(&o);
+        let ctx = Context::hermetic(dir.path().to_path_buf());
         let scope = resolve(&ctx, true, None).expect("global resolves with empty config");
         assert_eq!(scope.scope, ConfigScope::Global);
         assert!(scope.set.skills.is_empty());

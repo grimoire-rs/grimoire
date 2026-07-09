@@ -137,6 +137,11 @@ fn classify_config(err: &ConfigError) -> ExitCode {
         | ConfigErrorKind::ArtifactValueInvalid { .. }
         | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => ExitCode::DataError,
         ConfigErrorKind::ConfigAlreadyExists => ExitCode::UsageError,
+        // A missing config file is a NotFound contract case (docs:
+        // "Explicit --config <path> not found" ⇒ 79), not a generic I/O
+        // failure: discovery guards existence and the global config
+        // absorbs absence, so config-tier ENOENT means an explicit path.
+        ConfigErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound => ExitCode::NotFound,
         ConfigErrorKind::Io(io) => classify_io(io),
     }
 }
@@ -484,6 +489,30 @@ mod tests {
         let io = std::io::Error::other("disk gone");
         let err: anyhow::Error = io.into();
         assert_eq!(classify_error(&err), ExitCode::Failure);
+    }
+
+    #[test]
+    fn config_io_not_found_classifies_as_not_found() {
+        // Contract (docs "Exit codes"): a missing explicit `--config
+        // <path>` exits 79 (NotFound), not 74 (IoError). Config-tier
+        // ENOENT only arises from an explicit path — discovery checks
+        // existence and the global config absorbs absence.
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err: anyhow::Error = Error::from(ConfigError::new(
+            std::path::PathBuf::from("/x/grimoire.toml"),
+            ConfigErrorKind::Io(io),
+        ))
+        .into();
+        assert_eq!(classify_error(&err), ExitCode::NotFound);
+
+        // Any other config-tier I/O failure keeps the generic mapping.
+        let io = std::io::Error::other("disk gone");
+        let err: anyhow::Error = Error::from(ConfigError::new(
+            std::path::PathBuf::from("/x/grimoire.toml"),
+            ConfigErrorKind::Io(io),
+        ))
+        .into();
+        assert_eq!(classify_error(&err), ExitCode::IoError);
     }
 
     #[test]
