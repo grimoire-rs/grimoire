@@ -14,6 +14,7 @@
 //! logic). This module is excluded from acceptance tests; its logic is
 //! covered headlessly by the pure modules' unit tests.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{self};
 use std::sync::Arc;
@@ -1591,6 +1592,67 @@ fn order_tags(tags: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Aggregate each row's inner per-artifact progress into one continuous
+/// batch bar.
+///
+/// The batch loop counts rows (baseline total = `rows.len()`), but each row's
+/// own `install_all` drives the sink per *artifact*: a skill row is `1/1`, a
+/// bundle row is `1/N` over its expanded members. Feeding that inner sink
+/// straight to the modal would collapse a bundle to `1/1` and flash `1/1` N
+/// times for a multi-skill batch. This adapter offsets each row's local
+/// positions by the artifacts already finished and grows the grand total as
+/// bundle rows reveal their real member count, so the modal reads a smooth
+/// `0/N → N/N` across the whole batch. Wraps any [`InstallProgress`] sink
+/// (the live [`InstallModal`], or [`SilentProgress`] in tests).
+struct BatchProgress<'a> {
+    inner: &'a dyn InstallProgress,
+    /// Artifacts finished in prior rows — the position offset for this row.
+    done: Cell<usize>,
+    /// The current row's artifact count, folded into `done` at `finish`.
+    row_total: Cell<usize>,
+    /// Running grand total; starts at `rows.len()` (one slot per row) and
+    /// grows when a bundle row expands beyond its pre-counted single slot.
+    grand: Cell<usize>,
+}
+
+impl<'a> BatchProgress<'a> {
+    fn new(inner: &'a dyn InstallProgress, rows: usize) -> Self {
+        Self {
+            inner,
+            done: Cell::new(0),
+            row_total: Cell::new(0),
+            grand: Cell::new(rows),
+        }
+    }
+}
+
+impl InstallProgress for BatchProgress<'_> {
+    fn start(&self, total: usize) {
+        self.row_total.set(total);
+        let old = self.grand.get();
+        // A bundle expands beyond the single slot it was pre-counted as.
+        if total > 1 {
+            self.grand.set(old + total - 1);
+        }
+        // (Re)establish the modal total when it grew, or on the very first
+        // row (`start` renders position 0, so repaint at the true offset).
+        if self.grand.get() != old || self.done.get() == 0 {
+            self.inner.start(self.grand.get());
+            self.inner.advance(self.done.get(), "installing…");
+        }
+    }
+
+    fn advance(&self, position: usize, label: &str) {
+        self.inner.advance(self.done.get() + position, label);
+    }
+
+    fn finish(&self) {
+        // Suppress the per-row finish — fold this row's count into the offset
+        // so the next row continues the same bar instead of resetting it.
+        self.done.set(self.done.get() + self.row_total.get());
+    }
+}
+
 /// Run a batch [`BatchOp`] over `rows` indices (the marked set, or the
 /// single selection). Install/update reuse the **same** resolve → lock →
 /// materialize path the commands use; uninstall reuses the shared
@@ -1622,24 +1684,33 @@ async fn run_batch_with_progress(
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut last_err: Option<String> = None;
 
-    // Drive the progress sink at the batch (per-row) grain so the modal shows
-    // `n/total` over every acted-on row with the current repo as its label.
-    // Each row's own `install_all` is a single artifact (or a bundle's
-    // members), so per-artifact progress would always read 1/1 — the meaningful
-    // count is the rows. Uninstall is local, but the same loop drives it so a
-    // delete shows progress too. The inner `perform`/`perform_uninstall` are
-    // silent (no nested sink that would reset the counter).
-    progress.start(total);
+    // Install/update route each row's inner per-artifact progress through a
+    // `BatchProgress` adapter that aggregates it into one continuous batch bar
+    // (`0/N → N/N` over every member, growing the total as bundle rows reveal
+    // their real member count) — a bundle no longer collapses to `1/1`, and a
+    // multi-skill batch stays a stable `n/N`. Uninstall is local (no inner
+    // installer), so it keeps the row-grain sink directly. The status line
+    // aggregates batch context regardless.
+    let batch = BatchProgress::new(progress, total);
+    match op {
+        // A "working…" frame while the first row's lock resolves; the inner
+        // installer (re)establishes the real total. `SilentProgress` no-ops.
+        BatchOp::Install | BatchOp::Update => progress.start(0),
+        // Local delete: the row grain is the meaningful count.
+        BatchOp::Uninstall => progress.start(total),
+    }
     for (n, &i) in rows.iter().enumerate() {
         let Some(row) = state.rows.get(i).cloned() else {
             continue;
         };
-        progress.advance(n + 1, &row.repo);
         state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
         let outcome = match op {
-            BatchOp::Install => perform(ctx, &row, false, None).await.map(|_| ()),
-            BatchOp::Update => perform(ctx, &row, true, None).await.map(|_| ()),
-            BatchOp::Uninstall => perform_uninstall(ctx, &row),
+            BatchOp::Install => perform(ctx, &row, false, None, &batch).await.map(|_| ()),
+            BatchOp::Update => perform(ctx, &row, true, None, &batch).await.map(|_| ()),
+            BatchOp::Uninstall => {
+                progress.advance(n + 1, &row.repo);
+                perform_uninstall(ctx, &row)
+            }
         };
         match outcome {
             Ok(()) => ok += 1,
@@ -1816,15 +1887,17 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
 /// undeclared lock entry), and then only the acted-on artifact is
 /// materialized.
 ///
-/// The TUI renders progress at the batch (per-row) grain on the modal
-/// itself (see [`run_batch_with_progress`]), so this single-artifact
-/// materialize stays silent — a nested per-artifact sink would reset the
-/// batch counter to 1/1.
+/// The `progress` sink is driven per materialized artifact (one call for a
+/// skill/rule, one per member for a bundle). A batch install passes a
+/// [`BatchProgress`] adapter that aggregates these into the modal's
+/// continuous `n/N` bar; a single-member action passes [`SilentProgress`]
+/// (the modal keeps its indeterminate `working…` frame).
 async fn perform(
     ctx: &TuiContext,
     row: &TuiRow,
     is_update: bool,
     name_override: Option<&str>,
+    progress: &dyn InstallProgress,
 ) -> anyhow::Result<String> {
     // Use the authoritative registry/repository fields directly — never
     // first-slash-split `repo`, which mis-attributes namespaced registries like
@@ -1901,7 +1974,7 @@ async fn perform(
         &ctx.workspace,
         &ctx.config_path,
         is_update,
-        &SilentProgress,
+        progress,
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -2310,8 +2383,9 @@ async fn perform_member(
     };
     // Use the member's own binding name (its lock/install key) for the
     // declaration, not the repo basename — they differ when the bundle aliases
-    // the member.
-    perform(ctx, &synthetic_row, is_update, Some(&name)).await
+    // the member. A single-member action keeps the modal's `working…` frame
+    // (no aggregated batch bar), so pass the silent sink.
+    perform(ctx, &synthetic_row, is_update, Some(&name), &SilentProgress).await
 }
 
 /// Perform a member uninstall action, reusing the shared seams for file
@@ -3142,7 +3216,9 @@ mod tests {
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
 
-        let label = perform(&ctx, &row, false, None).await.expect("bundle install succeeds");
+        let label = perform(&ctx, &row, false, None, &SilentProgress)
+            .await
+            .expect("bundle install succeeds");
         assert_eq!(label, "installed");
 
         // Declared under [bundles], never [skills].
@@ -3202,7 +3278,9 @@ mod tests {
         let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &row, false, None).await.expect("bundle install succeeds");
+        perform(&ctx, &row, false, None, &SilentProgress)
+            .await
+            .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
 
         perform_uninstall(&ctx, &row).expect("bundle uninstall succeeds");
@@ -3249,7 +3327,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3309,7 +3387,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "latest".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None)
+        perform(&ctx, &skill_row, false, None, &SilentProgress)
             .await
             .expect("skill install succeeds");
 
@@ -3317,7 +3395,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3352,7 +3430,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3420,7 +3498,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         let lock = lock_io::load(&ctx.lock_path).expect("lock loads");
@@ -3457,7 +3535,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3472,7 +3550,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "1.0.0".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None)
+        perform(&ctx, &skill_row, false, None, &SilentProgress)
             .await
             .expect("skill install succeeds");
 
@@ -3511,7 +3589,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
 
@@ -3541,7 +3619,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3594,7 +3672,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
 
@@ -3618,7 +3696,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "1.0.0".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None)
+        perform(&ctx, &skill_row, false, None, &SilentProgress)
             .await
             .expect("skill install succeeds");
         let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
@@ -3652,7 +3730,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -3688,14 +3766,14 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "latest".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None)
+        perform(&ctx, &skill_row, false, None, &SilentProgress)
             .await
             .expect("skill install succeeds");
 
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None)
+        perform(&ctx, &bundle_row, false, None, &SilentProgress)
             .await
             .expect("bundle install succeeds");
 
@@ -3787,13 +3865,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_progress_counts_rows_not_per_artifact() {
-        // Regression: the TUI drove the progress sink inside each row's
-        // single-artifact `install_all`, so a multi-row batch always read
-        // 1/1. The sink must be driven at the row grain instead: start(N),
-        // then advance(1..=N) labelled with the current repo, then finish —
-        // independent of how many artifacts each row materializes (the bundle
-        // row pulls in a member via its own, now silent, install).
+    async fn batch_progress_aggregates_inner_installer_across_rows() {
+        // Regression: `perform` fed the inner per-member installer a
+        // `SilentProgress`, so the modal only ever saw the row-grain sink and
+        // a bundle collapsed to 1/1. `perform` must forward the batch adapter
+        // so the inner installer's per-artifact steps reach the sink,
+        // aggregated into one continuous bar (offset by prior rows, never
+        // resetting to 1/1). This exercises the real `perform` wiring
+        // end-to-end (the pure offset/total math is unit-tested separately).
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path();
         std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
@@ -3807,7 +3886,9 @@ mod tests {
         state.set_rows(vec![skill_row, bundle_row]);
 
         // `set_rows` kind-sorts the rows (bundle before skill), so the row
-        // order is [bundle, skill]; drive every visible row.
+        // order is [bundle, skill]. The fixture bundle has one member (`demo`)
+        // and the standalone row is also `demo`, so both rows materialize one
+        // artifact labelled `skill demo`.
         let recorder = RecordingProgress::default();
         run_batch_with_progress(&ctx, &mut state, &[0, 1], BatchOp::Install, &recorder).await;
 
@@ -3815,12 +3896,112 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                // Pre-loop "working…" frame while the first lock resolves.
+                "start:0".to_string(),
+                // First row: inner installer (re)establishes the batch total
+                // and repaints at offset 0, then advances to position 1.
                 "start:2".to_string(),
-                "advance:1:localhost:5050/grimoire/bundles/starter-pack".to_string(),
-                "advance:2:localhost:5050/grimoire/skills/demo".to_string(),
+                "advance:0:installing…".to_string(),
+                "advance:1:skill demo".to_string(),
+                // Second row continues the same bar (offset by the first row).
+                "advance:2:skill demo".to_string(),
                 "finish".to_string(),
             ],
-            "batch progress must count rows (start:2, advance 1→2 by repo), not reset to 1/1 per artifact"
+            "the inner installer's steps must reach the sink, aggregated into a continuous bar (no 1/1 reset)"
+        );
+    }
+
+    #[test]
+    fn batch_progress_offsets_and_grows_total() {
+        // Pure adapter math (no terminal, no `perform`): replay the calls the
+        // inner installer makes for (a) three single-artifact rows, (b) one
+        // five-member bundle row, (c) a mixed skill + bundle batch. Assert the
+        // sink never sees a 1/1 collapse and positions stay monotonic.
+
+        // (a) three single-artifact rows → positions 1,2,3 out of a stable 3.
+        let rec = RecordingProgress::default();
+        let batch = BatchProgress::new(&rec, 3);
+        for _ in 0..3 {
+            batch.start(1);
+            batch.advance(1, "skill x");
+            batch.finish();
+        }
+        assert_eq!(
+            *rec.events.lock().unwrap(),
+            vec![
+                "start:3".to_string(),
+                "advance:0:installing…".to_string(),
+                "advance:1:skill x".to_string(),
+                "advance:2:skill x".to_string(),
+                "advance:3:skill x".to_string(),
+            ],
+            "single-artifact rows must accumulate 1→3 over a stable total, never reset to 1/1"
+        );
+
+        // (b) one bundle row with five members → grand total grows 1→5,
+        // positions 1..=5.
+        let rec = RecordingProgress::default();
+        let batch = BatchProgress::new(&rec, 1);
+        batch.start(5);
+        for p in 1..=5 {
+            batch.advance(p, "skill member");
+        }
+        batch.finish();
+        assert_eq!(
+            *rec.events.lock().unwrap(),
+            vec![
+                "start:5".to_string(),
+                "advance:0:installing…".to_string(),
+                "advance:1:skill member".to_string(),
+                "advance:2:skill member".to_string(),
+                "advance:3:skill member".to_string(),
+                "advance:4:skill member".to_string(),
+                "advance:5:skill member".to_string(),
+            ],
+            "a bundle row must expand the total to its member count, not collapse to 1/1"
+        );
+
+        // (c) mixed skill (1) then bundle (5) → total grows 2→6, positions
+        // monotonic non-decreasing across the whole batch.
+        let rec = RecordingProgress::default();
+        let batch = BatchProgress::new(&rec, 2);
+        // skill row
+        batch.start(1);
+        batch.advance(1, "skill a");
+        batch.finish();
+        // bundle row
+        batch.start(5);
+        for p in 1..=5 {
+            batch.advance(p, "skill member");
+        }
+        batch.finish();
+        let events = rec.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                "start:2".to_string(),
+                "advance:0:installing…".to_string(),
+                "advance:1:skill a".to_string(),
+                "start:6".to_string(),
+                "advance:1:installing…".to_string(),
+                "advance:2:skill member".to_string(),
+                "advance:3:skill member".to_string(),
+                "advance:4:skill member".to_string(),
+                "advance:5:skill member".to_string(),
+                "advance:6:skill member".to_string(),
+            ],
+            "a mixed batch must grow the total as the bundle expands, keeping positions monotonic"
+        );
+        // Positions extracted from `advance:` events are non-decreasing.
+        let positions: Vec<usize> = events
+            .iter()
+            .filter_map(|e| e.strip_prefix("advance:"))
+            .filter_map(|rest| rest.split(':').next())
+            .map(|p| p.parse::<usize>().unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] <= w[1]),
+            "batch positions must be monotonic non-decreasing, got {positions:?}"
         );
     }
 
