@@ -16,3 +16,4 @@
 - [MCP Server Artifacts](./mcp-servers.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)
+- [Stability and Versioning](./stability.md)

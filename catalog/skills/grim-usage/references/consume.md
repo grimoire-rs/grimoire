@@ -66,7 +66,11 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 - `--kind` (skill, rule, agent, bundle, mcp) is normally inferred from the
   artifact's OCI `artifactType`, set at release time. If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
-- `--name` defaults to the reference's last path segment.
+- `--name` defaults to the reference's last path segment. A name that is
+  already declared for that kind under a *different* reference refuses
+  (exit 64) instead of silently replacing it — pass `--name` to bind the
+  new reference under another name. Re-adding the same reference is a
+  no-op.
 - `--no-install` stops at declare + lock — no materialization. Use it to
   add several artifacts before one `grim install`, or to pick clients with
   `grim install --client`. Only the added entry installs otherwise; the
@@ -96,8 +100,9 @@ grim install --client claude,copilot
 ```
 
 Install never deletes anything, and it refuses to overwrite an artifact
-you have modified locally — pass `--force` to overwrite deliberately.
-See [troubleshooting.md](troubleshooting.md) for the integrity gate.
+you have modified locally — or any pre-existing same-named file it has
+no record of writing — pass `--force` to overwrite deliberately.
+See [troubleshooting.md](troubleshooting.md) for the integrity gates.
 
 ## Updating
 
@@ -122,7 +127,10 @@ discarded.
 `grim status` reports each declared artifact's state — installed,
 outdated, locally modified, integrity-missing, or not installed. The
 `Source` column shows provenance: `direct`, or the bundle the artifact
-came from. Pair with `--format json` to drive automation.
+came from. Pair with `--format json` to drive automation — its `outputs`
+array lists the per-client paths an artifact was materialized to, and is
+the supported way to script against install locations (the on-disk
+vendor layout itself is not a stable contract).
 
 ## Removing
 

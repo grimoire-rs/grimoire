@@ -29,9 +29,12 @@ Whatever default applied, the expanded reference is persisted **fully
 qualified** in `grimoire.toml` and the lock — so a config never depends
 on the environment that wrote it.
 
-One exception: `grim login` / `grim logout` resolve their registry from
-the positional argument, then `--registry`, then `GRIM_DEFAULT_REGISTRY`
-— config files are not consulted on the login path. Confirm with
+`grim login` / `grim logout` resolve their registry from the positional
+argument, then `--registry`, then `GRIM_DEFAULT_REGISTRY`, then the
+configured `[[registries]]` (aliases resolve, the default entry wins) —
+but unlike other commands they never fall back to the built-in registry:
+with nothing configured anywhere they error (78) rather than silently
+storing a credential for a registry you never named. Confirm with
 `grim login --help`.
 
 Environment variables that matter here (full table:
