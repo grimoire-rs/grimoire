@@ -128,6 +128,10 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
 ) -> Vec<ArtifactInstall> {
     let work: Vec<(&LockedArtifact, ArtifactKind)> = lock.iter_artifacts().map(|a| (a, a.kind)).collect();
 
+    // Loaded once per run for the cross-scope shadow check (one small
+    // JSON read); `None` when the other scope has no readable state.
+    let other_scope = other_scope_state(target, roots);
+
     progress.start(work.len());
     let mut results = Vec::with_capacity(work.len());
     for (index, (artifact, kind)) in work.into_iter().enumerate() {
@@ -145,6 +149,11 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             .unwrap_or(crate::install::client_target::ClientTarget::Claude);
         let report_target = target.path_for(primary, kind, &artifact.name);
         let result = install_one(artifact, kind, access, materializer, target, state, roots, force).await;
+        if result.is_ok()
+            && let Some(other) = &other_scope
+        {
+            warn_cross_scope_shadow(other, kind, &artifact.name, target);
+        }
         results.push(ArtifactInstall {
             reference,
             target: report_target,
@@ -153,6 +162,55 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     }
     progress.finish();
     results
+}
+
+/// The OTHER scope's install state, for the cross-scope shadow check.
+/// Best-effort: any read/parse failure yields `None` — the check must
+/// never fail or slow an install.
+///
+/// Direction note: only project → global is reachable today. A global
+/// install resolves its workspace to `$GRIM_HOME` (see
+/// `scope_resolution::resolve_in`), so the global arm looks for a
+/// `.grimoire/state.json` that never exists there and degrades to `None`;
+/// warning global installs about project copies would need the invoking
+/// cwd threaded down.
+fn other_scope_state(target: &InstallTarget, roots: &AnchorRoots) -> Option<InstallState> {
+    match target.scope() {
+        ConfigScope::Project => {
+            let path = InstallState::global_path(&roots.grim_home.join("state"));
+            InstallState::load_global(&path, roots).ok()
+        }
+        ConfigScope::Global => {
+            let workspace = target.workspace();
+            InstallState::load_project(workspace, &roots.grim_home, &workspace.join("grimoire.toml")).ok()
+        }
+    }
+}
+
+/// Warn when `(kind, name)` is also installed at the other scope for a
+/// client this install targets: both copies are visible to that client,
+/// and the vendor's own precedence decides which wins.
+fn warn_cross_scope_shadow(other: &InstallState, kind: ArtifactKind, name: &str, target: &InstallTarget) {
+    let Some(record) = other.get(kind, name) else {
+        return;
+    };
+    let overlapping: Vec<&str> = record
+        .outputs
+        .iter()
+        .map(|out| out.client.as_str())
+        .filter(|client| target.clients().iter().any(|c| c.as_str() == *client))
+        .collect();
+    if overlapping.is_empty() {
+        return;
+    }
+    let other_scope = match target.scope() {
+        ConfigScope::Project => ConfigScope::Global,
+        ConfigScope::Global => ConfigScope::Project,
+    };
+    tracing::warn!(
+        "{kind} '{name}' is also installed at {other_scope} scope for {}; both copies are visible to that client",
+        overlapping.join(", ")
+    );
 }
 
 /// Materialize `lock` into `target`'s clients, persist the resulting state,

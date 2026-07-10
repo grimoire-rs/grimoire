@@ -107,6 +107,33 @@ def test_offline_cold_cache_blocks_install_exit_81(
     )
 
 
+def test_project_install_warns_on_global_scope_shadow(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A project-scope install of a (kind, name) already installed at
+    global scope for an overlapping client warns about the shadow —
+    both copies are visible to the client, its own precedence decides."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    runner = grim_at(project_dir)
+
+    # Install at global scope first (isolated $HOME; detection falls back
+    # to all clients, so the global record covers claude).
+    runner.run("add", "--global", sk.fq)
+
+    # Now the same (kind, name) at project scope.
+    write_config(project_dir)
+    result = runner.run("add", sk.fq)
+    assert "also installed at global scope" in result.stderr, (
+        f"project install shadowing a global copy must warn; stderr:\n"
+        f"{result.stderr}"
+    )
+
+
 def test_offline_warm_blob_cache_succeeds(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
