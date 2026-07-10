@@ -37,7 +37,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
 use crate::cli::exit_code::ExitCode;
-use crate::cli::options::GlobalOptions;
+use crate::cli::options::{GlobalOptions, OutputFormat};
 use crate::command::add::AddArgs;
 use crate::command::build::BuildArgs;
 use crate::command::config::ConfigArgs;
@@ -131,10 +131,19 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    // Captured before `cli` moves into `app::run` so both Err arms can
+    // decide whether to emit the JSON error document (OutputFormat: Copy).
+    let format = cli.global.format;
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
             tracing::error!("failed to start async runtime: {err}");
+            emit_error_document(
+                format,
+                ExitCode::Failure,
+                &format!("failed to start async runtime: {err}"),
+            );
             return ExitCode::Failure.into();
         }
     };
@@ -146,8 +155,33 @@ fn main() -> std::process::ExitCode {
             // stderr (a `tracing::error!` here would duplicate the line —
             // the default filter also writes to stderr).
             eprintln!("{err:#}");
-            classify_error(&err).into()
+            let code = classify_error(&err);
+            emit_error_document(format, code, &format!("{err:#}"));
+            code.into()
         }
+    }
+}
+
+/// Under `--format json`, print the structured error document to stdout:
+/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>"}}`.
+///
+/// stdout — not stderr — because stderr carries tracing output and the two
+/// would interleave; a consumer parses stdout and treats a top-level
+/// `error` key as the error document (see `docs/src/json-interface.md`).
+/// Plain mode emits nothing here (the human chain is already on stderr).
+fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str) {
+    if format != OutputFormat::Json {
+        return;
+    }
+    let doc = serde_json::json!({
+        "error": {
+            "code": code.slug(),
+            "exit": code as u8,
+            "message": message,
+        }
+    });
+    if let Ok(rendered) = serde_json::to_string_pretty(&doc) {
+        println!("{rendered}");
     }
 }
 

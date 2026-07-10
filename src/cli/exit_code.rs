@@ -54,6 +54,30 @@ pub enum ExitCode {
     OfflineBlocked = 81,
 }
 
+impl ExitCode {
+    /// The stable machine-readable slug for the JSON error document's
+    /// `code` field (see `docs/src/json-interface.md`).
+    ///
+    /// Exhaustive for totality; `Success` maps to `"success"` but is
+    /// never emitted — the error document only renders on the Err path.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::UsageError => "usage",
+            Self::DataError => "data",
+            Self::Unavailable => "unavailable",
+            Self::IoError => "io",
+            Self::TempFail => "temp-fail",
+            Self::NoPermission => "no-permission",
+            Self::ConfigError => "config",
+            Self::NotFound => "not-found",
+            Self::AuthError => "auth",
+            Self::OfflineBlocked => "offline-blocked",
+        }
+    }
+}
+
 impl From<ExitCode> for std::process::ExitCode {
     fn from(value: ExitCode) -> Self {
         std::process::ExitCode::from(value as u8)
@@ -126,6 +150,24 @@ mod tests {
     #[test]
     fn exit_code_offline_blocked_is_81() {
         assert_eq!(ExitCode::OfflineBlocked as u8, 81);
+    }
+
+    #[test]
+    fn slug_is_locked_for_every_variant() {
+        // Slugs are a 1.0 contract (json-interface.md) — quote each one
+        // literally so a rename is caught here, not by a consumer.
+        assert_eq!(ExitCode::Success.slug(), "success");
+        assert_eq!(ExitCode::Failure.slug(), "failure");
+        assert_eq!(ExitCode::UsageError.slug(), "usage");
+        assert_eq!(ExitCode::DataError.slug(), "data");
+        assert_eq!(ExitCode::Unavailable.slug(), "unavailable");
+        assert_eq!(ExitCode::IoError.slug(), "io");
+        assert_eq!(ExitCode::TempFail.slug(), "temp-fail");
+        assert_eq!(ExitCode::NoPermission.slug(), "no-permission");
+        assert_eq!(ExitCode::ConfigError.slug(), "config");
+        assert_eq!(ExitCode::NotFound.slug(), "not-found");
+        assert_eq!(ExitCode::AuthError.slug(), "auth");
+        assert_eq!(ExitCode::OfflineBlocked.slug(), "offline-blocked");
     }
 
     #[test]
