@@ -52,7 +52,7 @@ def test_release_install_lands_index_and_support_dir(
     consumer = grim_at(write_dir)
     write_config(write_dir, rules={"my-rule": f"{repo}:1.0.0"})
     consumer.run("lock", check=False)
-    rows = consumer.json("install")
+    rows = consumer.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     # Both the index AND the support tree land beside each other.
@@ -63,7 +63,7 @@ def test_release_install_lands_index_and_support_dir(
     assert (rules / "my-rule/examples.md").read_text() == "# Examples\nworked example\n"
 
     # A no-op reinstall: intact footprint ⇒ nothing to do.
-    again = consumer.json("install")
+    again = consumer.json("install")["items"]
     assert {r["status"] for r in again} == {"unchanged"}
 
 
@@ -81,7 +81,7 @@ def test_support_file_edit_is_detected_as_drift(
 
     # Hand-edit a *support* file (not the index): status must flag drift.
     (project_dir / ".claude/rules/my-rule/examples.md").write_text("tampered\n")
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     by_name = {r["name"]: r for r in status}
     assert by_name["my-rule"]["state"] == "modified", (
         f"editing a support file must be detected as drift, got {status}"

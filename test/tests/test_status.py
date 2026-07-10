@@ -21,7 +21,7 @@ def test_status_json_is_array_and_exit_0(
     assert result.returncode == 0
     import json
 
-    arr = json.loads(result.stdout)
+    arr = json.loads(result.stdout)["items"]
     assert isinstance(arr, list)
     assert arr[0]["name"] == "s"
 
@@ -35,11 +35,11 @@ def test_status_missing_then_installed(
     runner = grim_at(project_dir)
 
     runner.run("lock", check=False)
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     assert rows[0]["state"] == "missing"
 
     runner.run("install", check=False)
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     assert rows[0]["state"] == "installed"
 
 
@@ -67,7 +67,7 @@ def test_status_stale_when_config_changed(
     assert result.returncode == 0
     import json
 
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert all(r["state"] == "stale" for r in rows)
 
 
@@ -96,7 +96,7 @@ def test_status_json_includes_installed_outputs(
     )
     runner.run("lock", check=False)
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     installed = next(r for r in rows if r["name"] == "s")
     not_installed = next(r for r in rows if r["name"] == "s2")
 
@@ -130,5 +130,5 @@ def test_status_outdated_when_lock_advances(
     write_config(project_dir, skills={"s": v2.pinned})
     runner.run("lock", check=False)
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     assert rows[0]["state"] == "outdated"

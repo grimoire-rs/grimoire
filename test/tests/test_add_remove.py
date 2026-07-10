@@ -37,7 +37,7 @@ def test_add_no_install_declares_and_locks_only(
     assert "code-review" in cfg
     assert (project_dir / "grimoire.lock").is_file()
     assert_not_exists(project_dir / ".claude/skills/code-review")
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     cr = next(r for r in status if r["name"] == "code-review")
     assert cr["state"] == "missing"
 
@@ -62,9 +62,9 @@ def test_add_installs_by_default(
 
     # The install state reports it installed; a follow-up `install` is a
     # clean no-op since the artifact is already materialized.
-    cr = next(r for r in runner.json("status") if r["name"] == "code-review")
+    cr = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
     assert cr["state"] == "installed"
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"unchanged"}
 
 
@@ -194,7 +194,7 @@ def test_add_two_entries_then_lock_install(
     runner.json("add", "--no-install", ru.fq)
 
     # The lock carries both; install materializes both cleanly.
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
     assert (project_dir / ".claude/rules/rust-style.md").is_file()

@@ -77,7 +77,7 @@ def test_bundle_status_ignores_removed_client(
 
     runner = grim_at(project_dir)
     runner.run("lock", check=True)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
     # Both client layouts received the members.
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
@@ -86,7 +86,7 @@ def test_bundle_status_ignores_removed_client(
     # The user disables the opencode client.
     shutil.rmtree(project_dir / ".opencode")
 
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     # Every currently-active client (claude) has intact files ⇒ nothing is
     # missing or modified. Before the fix, the stale opencode outputs made
     # the members read `missing`.
@@ -178,7 +178,7 @@ def test_uninstall_tolerates_missing_target_files(
 
     result = runner.run("uninstall", "skill", "code-review", check=False)
     assert result.returncode == 0, result.stderr
-    out = runner.json("status")
+    out = runner.json("status")["items"]
     assert all(r["name"] != "code-review" for r in out), "record must be dropped"
 
 
@@ -225,7 +225,7 @@ def test_partial_client_update_bumps_all_active_clients(
     (project_dir / ".claude").mkdir(exist_ok=True)
     (project_dir / ".opencode").mkdir(exist_ok=True)
 
-    rows_v1 = runner.json("install")
+    rows_v1 = runner.json("install")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows_v1), (
         f"v1 install must succeed: {rows_v1}"
     )
@@ -280,7 +280,7 @@ def test_partial_client_update_bumps_all_active_clients(
     )
 
     # Step 6: status must report installed (not outdated/modified) for the rule.
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     rule_rows = [r for r in status if r["name"] == "rust-style"]
     assert rule_rows, f"rust-style must appear in status; got: {status}"
     for row in rule_rows:

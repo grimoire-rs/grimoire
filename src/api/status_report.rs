@@ -5,9 +5,9 @@
 //!
 //! Plain format: 5-column table (Kind | Name | Source | Pinned | State).
 //!
-//! JSON format: an array of `{kind, name, source, pinned, state, outputs}`
-//! objects (the report wraps a `Vec`, serialized to the bare array — no
-//! wrapper object, per subsystem-cli-api.md). `pinned` is `null` when the
+//! JSON format: `{"items": [...]}` where each item is a
+//! `{kind, name, source, pinned, state, outputs}` object (uniform `items`
+//! envelope, per subsystem-cli-api.md). `pinned` is `null` when the
 //! artifact is declared but not yet locked. `source` is `"direct"` for a
 //! declared artifact or `"bundle: <registry/repo>"` for a bundle member.
 //! `outputs` is an array of `{client, path}` — the per-client materialized
@@ -67,28 +67,22 @@ fn serialize_opt_pinned<S: Serializer>(pinned: &Option<PinnedIdentifier>, s: S) 
 }
 
 /// The result of a status query: one row per declared artifact.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct StatusReport {
-    entries: Vec<StatusEntry>,
+    items: Vec<StatusEntry>,
 }
 
 impl StatusReport {
     /// Build from operation results.
-    pub fn new(entries: Vec<StatusEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for StatusReport {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<StatusEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for StatusReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         let rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| {
                 vec![
@@ -168,11 +162,12 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array());
-        assert!(v[0]["pinned"].is_null());
-        assert_eq!(v[0]["source"], "direct");
-        assert_eq!(v[0]["state"], "stale");
-        assert_eq!(v[0]["outputs"], serde_json::json!([]));
+        assert!(v.is_object());
+        assert!(v["items"].is_array());
+        assert!(v["items"][0]["pinned"].is_null());
+        assert_eq!(v["items"][0]["source"], "direct");
+        assert_eq!(v["items"][0]["state"], "stale");
+        assert_eq!(v["items"][0]["outputs"], serde_json::json!([]));
     }
 
     #[test]
@@ -191,7 +186,7 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v[0]["outputs"][0]["client"], "claude");
-        assert_eq!(v[0]["outputs"][0]["path"], "/w/.claude/skills/s");
+        assert_eq!(v["items"][0]["outputs"][0]["client"], "claude");
+        assert_eq!(v["items"][0]["outputs"][0]["path"], "/w/.claude/skills/s");
     }
 }

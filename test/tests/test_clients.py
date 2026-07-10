@@ -79,7 +79,7 @@ def test_no_clients_config_installs_to_detected_clients(
 
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert rows, "install must return a non-empty result set"
     assert all(r["status"] in ("installed", "unchanged") for r in rows), (
         f"all entries must be installed/unchanged, got: {rows}"
@@ -106,7 +106,7 @@ def test_no_detected_clients_falls_back_to_all_clients(
 
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert rows, "install must return a non-empty result set"
 
     # Every client layout received the artifacts.
@@ -141,7 +141,7 @@ def test_config_clients_array_installs_to_all_declared_clients(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert rows, "install must return a non-empty result set"
     assert all(r["status"] in ("installed", "unchanged") for r in rows), (
         f"all entries must be installed/unchanged, got: {rows}"
@@ -179,7 +179,7 @@ def test_client_flag_overrides_config_clients(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert rows, "install must return a non-empty result set"
 
     # OpenCode layout must exist.

@@ -347,7 +347,7 @@ def test_publish_announce_plain_host_requires_owner_id(
     # the exit-69 failure path).
     data = json.loads(result.stdout)
     assert data["announce"] is None, data
-    assert data["entries"][0]["status"] == "pushed", data
+    assert data["items"][0]["status"] == "pushed", data
 
 
 def test_publish_announce_unreachable_index_exits_unavailable(
@@ -573,7 +573,7 @@ def test_publish_announce_json_reports_branch_pushed(
     runner = grim_at(project_dir)
     bare = _index_remote(tmp_path, runner)
     data = runner.json("publish", "--announce")
-    assert data["entries"][0]["status"] == "pushed", data
+    assert data["items"][0]["status"] == "pushed", data
     announce = data["announce"]
     assert announce["outcome"] == "branch-pushed", data
     assert announce["branch"] == _announce_branch(bare)
@@ -645,7 +645,7 @@ def test_publish_announce_json_dry_run_announce_is_null(
     assert "announce: skipped (dry run)" in result.stderr
     data = json.loads(result.stdout)
     assert data["announce"] is None, data
-    assert data["entries"][0]["status"] == "dry-run"
+    assert data["items"][0]["status"] == "dry-run"
 
 
 def test_publish_announce_json_failure_keeps_entries(
@@ -663,7 +663,7 @@ def test_publish_announce_json_failure_keeps_entries(
     assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
     data = json.loads(result.stdout)
     assert data["announce"] is None, data
-    assert data["entries"][0]["status"] == "pushed", data
+    assert data["items"][0]["status"] == "pushed", data
 
 
 def test_publish_announce_json_fail_fast_keeps_announce_null(

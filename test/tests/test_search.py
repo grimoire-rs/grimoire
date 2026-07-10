@@ -51,7 +51,7 @@ def test_search_finds_matching_entries_with_kind_and_status(
     # test's repos (deterministic on the shared registry).
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     by_repo = {r["repo"]: r for r in rows}
     sk = next(
         v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/code-review")
@@ -97,7 +97,7 @@ def test_search_exposes_summary_and_full_description(
 
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     by_repo = {r["repo"]: r for r in rows}
     with_summary = next(
         v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/with-summary")
@@ -141,7 +141,7 @@ def test_search_exposes_repository_url_with_https_guard(
 
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     by_repo = {r["repo"]: r for r in rows}
     with_repo = next(
         v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/with-repo")
@@ -175,7 +175,7 @@ def test_search_query_miss_is_empty_array_exit_0(
         check=False,
     )
     assert result.returncode == 0
-    arr = json.loads(result.stdout)
+    arr = json.loads(result.stdout)["items"]
     assert isinstance(arr, list)
     assert arr == []
 
@@ -187,7 +187,7 @@ def test_search_refresh_repopulates(
     # Cold catalog before the artifact exists (namespace-scoped).
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     assert rows == []
 
     make_artifact(
@@ -198,7 +198,7 @@ def test_search_refresh_repopulates(
     )
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     assert [r for r in rows if r["repo"].endswith(f"{unique_repo}/late")], (
         f"--refresh must repopulate the catalog, got {rows}"
     )
@@ -221,7 +221,7 @@ def test_search_status_flips_to_installed_after_install(
 
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     match = [
         r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")
     ]
@@ -242,7 +242,7 @@ def test_search_offline_serves_cached_exit_0(
     # Warm the catalog cache online (namespace-scoped).
     warm = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     assert [r for r in warm if r["repo"].endswith(f"{unique_repo}/cached")]
 
     result = runner.run(
@@ -259,7 +259,7 @@ def test_search_offline_serves_cached_exit_0(
         f"offline search must exit 0, got {result.returncode}; "
         f"{result.stderr}"
     )
-    arr = json.loads(result.stdout)
+    arr = json.loads(result.stdout)["items"]
     assert [r for r in arr if r["repo"].endswith(f"{unique_repo}/cached")], (
         f"offline must serve the warm cache, got {arr}"
     )
@@ -302,7 +302,7 @@ def test_search_multi_term_is_and(
     # Warm a catalog scoped to this test's repos (namespaced registry).
     warm = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"rust-lint", "rust-fmt"} <= warm_repos, (
         f"warm catalog must hold both repos, got {warm_repos}"
@@ -312,7 +312,7 @@ def test_search_multi_term_is_and(
     # matches only rust-lint (rust-fmt's keywords/description lack `lint`).
     rows = runner.json(
         "--offline", "search", f"{unique_repo} lint", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
-    )
+    )["items"]
     repos = [r["repo"] for r in rows]
     assert any(r.endswith(f"{unique_repo}/rust-lint") for r in repos), (
         f"the entry matching both terms must surface, got {repos}"
@@ -352,7 +352,7 @@ def test_search_kind_keyword_filters(
     # Warm a catalog scoped to this test's repos (namespaced registry).
     warm = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"a-skill", "a-rule"} <= warm_repos, (
         f"warm catalog must hold both kinds, got {warm_repos}"
@@ -361,7 +361,7 @@ def test_search_kind_keyword_filters(
     # `<unique_repo> rule` over the warm cache ⇒ only the rule survives.
     rule_rows = runner.json(
         "--offline", "search", f"{unique_repo} rule", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
-    )
+    )["items"]
     rule_repos = [r["repo"] for r in rule_rows]
     assert all(r["kind"] == "rule" for r in rule_rows), rule_rows
     assert any(r.endswith(f"{unique_repo}/a-rule") for r in rule_repos), rule_repos
@@ -372,7 +372,7 @@ def test_search_kind_keyword_filters(
     # `<unique_repo> skill` over the warm cache ⇒ only the skill survives.
     skill_rows = runner.json(
         "--offline", "search", f"{unique_repo} skill", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
-    )
+    )["items"]
     skill_repos = [r["repo"] for r in skill_rows]
     assert all(r["kind"] == "skill" for r in skill_rows), skill_rows
     assert any(r.endswith(f"{unique_repo}/a-skill") for r in skill_repos), skill_repos
@@ -408,7 +408,7 @@ def test_search_kind_agent_keyword_filters_to_agents_only(
     # Warm the catalog scoped to this test's repos.
     warm = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     warm_repos = {r["repo"].split("/")[-1] for r in warm}
     assert {"my-agent", "my-rule"} <= warm_repos, (
         f"warm catalog must hold both kinds, got {warm_repos}"
@@ -417,7 +417,7 @@ def test_search_kind_agent_keyword_filters_to_agents_only(
     # `<unique_repo> agent` over the warm cache ⇒ only the agent survives.
     agent_rows = runner.json(
         "--offline", "search", f"{unique_repo} agent", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
-    )
+    )["items"]
     agent_repos = [r["repo"] for r in agent_rows]
     assert all(r["kind"] == "agent" for r in agent_rows), agent_rows
     assert any(r.endswith(f"{unique_repo}/my-agent") for r in agent_repos), agent_repos

@@ -10,10 +10,10 @@
 //! representative tag. A deprecated row carries a comma-suffixed `deprecated`
 //! in its `Status` cell (e.g. `installed,deprecated`).
 //!
-//! JSON format: an array of
+//! JSON format: `{"items": [...]}` where each item is a
 //! `{kind, repo, summary, description, version, latest_tag, repository,
-//! revision, created, deprecated, status}` objects (the report wraps a `Vec`,
-//! serialized to the bare array — no wrapper object, per subsystem-cli-api.md).
+//! revision, created, deprecated, status}` object (uniform `items`
+//! envelope, per subsystem-cli-api.md).
 //! The `description` stays full and untruncated; both `version` and the
 //! representative `latest_tag` are kept; `repository` is the HTTPS source URL
 //! or `null`; `revision`/`created` are the git provenance (`--git` opt-in) or
@@ -81,21 +81,15 @@ impl Serialize for SearchEntry {
 }
 
 /// The result of a catalog search: one row per matching repository.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct SearchReport {
-    entries: Vec<SearchEntry>,
+    items: Vec<SearchEntry>,
 }
 
 impl SearchReport {
     /// Build from operation results.
-    pub fn new(entries: Vec<SearchEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for SearchReport {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<SearchEntry>) -> Self {
+        Self { items }
     }
 }
 
@@ -121,7 +115,7 @@ impl Printable for SearchReport {
         const BLURB: usize = 2;
 
         let mut rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| {
                 let base = e.summary.as_deref().or(e.description.as_deref()).unwrap_or("-");
@@ -205,15 +199,16 @@ mod tests {
     }
 
     #[test]
-    fn json_is_bare_array() {
+    fn json_is_items_envelope() {
         let r = SearchReport::new(vec![entry("localhost:5000/acme/x", StatusBadge::NotInstalled)]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array());
-        assert_eq!(v[0]["kind"], "skill");
-        assert_eq!(v[0]["status"], "not-installed");
-        assert_eq!(v[0]["repo"], "localhost:5000/acme/x");
+        assert!(v.is_object());
+        assert!(v["items"].is_array());
+        assert_eq!(v["items"][0]["kind"], "skill");
+        assert_eq!(v["items"][0]["status"], "not-installed");
+        assert_eq!(v["items"][0]["repo"], "localhost:5000/acme/x");
     }
 
     #[test]
@@ -359,11 +354,11 @@ mod tests {
         let mut buf = Vec::new();
         SearchReport::new(vec![e]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v[0]["summary"], "short");
-        assert_eq!(v[0]["description"], "the full long description");
+        assert_eq!(v["items"][0]["summary"], "short");
+        assert_eq!(v["items"][0]["description"], "the full long description");
         // Both the concrete version and the representative tag round-trip.
-        assert_eq!(v[0]["version"], "1.2.0");
-        assert_eq!(v[0]["latest_tag"], "latest");
+        assert_eq!(v["items"][0]["version"], "1.2.0");
+        assert_eq!(v["items"][0]["latest_tag"], "latest");
     }
 
     #[test]
@@ -373,14 +368,14 @@ mod tests {
         let mut buf = Vec::new();
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v[0]["repository"], "https://github.com/acme/x");
+        assert_eq!(v["items"][0]["repository"], "https://github.com/acme/x");
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v[0]["repository"].is_null());
+        assert!(v["items"][0]["repository"].is_null());
         // The plain table stays five columns — no URL leaks into it.
         let mut buf = Vec::new();
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
@@ -396,16 +391,16 @@ mod tests {
         let mut buf = Vec::new();
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v[0]["revision"], "abc123def456-dirty");
-        assert_eq!(v[0]["created"], "2026-06-29T12:00:00+00:00");
+        assert_eq!(v["items"][0]["revision"], "abc123def456-dirty");
+        assert_eq!(v["items"][0]["created"], "2026-06-29T12:00:00+00:00");
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v[0]["revision"].is_null());
-        assert!(v[0]["created"].is_null());
+        assert!(v["items"][0]["revision"].is_null());
+        assert!(v["items"][0]["created"].is_null());
         // The plain table stays five columns — provenance never leaks into it.
         let mut buf = Vec::new();
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
@@ -433,14 +428,17 @@ mod tests {
         let mut buf = Vec::new();
         SearchReport::new(vec![e]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v[0]["deprecated"], "use acme/x-2");
+        assert_eq!(v["items"][0]["deprecated"], "use acme/x-2");
         // A non-deprecated row carries no suffix and a null field.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v[0]["deprecated"].is_null(), "key present, null when not deprecated");
+        assert!(
+            v["items"][0]["deprecated"].is_null(),
+            "key present, null when not deprecated"
+        );
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
             .print_plain(&mut buf)
@@ -450,11 +448,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_results_serialize_as_empty_array() {
+    fn empty_results_serialize_as_empty_items() {
         let r = SearchReport::new(vec![]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v, serde_json::json!([]));
+        assert_eq!(v, serde_json::json!({"items": []}));
     }
 }

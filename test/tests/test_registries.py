@@ -117,7 +117,7 @@ def test_search_multi_registry_browses_all_declared(
         f"multi-registry search must exit 0, got {result.returncode}; "
         f"stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
 
     repos = [r.get("repo", "") for r in rows]
@@ -181,7 +181,7 @@ def test_search_multi_registry_flag_browses_all(
         f"multi-registry --registry ({style}) must exit 0, got {result.returncode}; "
         f"stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
 
     assert any("flag-skill-ns1" in repo for repo in repos), (
@@ -313,7 +313,7 @@ def test_search_single_default_registry_cold_cache(
         f"legacy single-registry search must exit 0 on cold cache, "
         f"got {result.returncode}; stderr: {result.stderr}"
     )
-    arr = json.loads(result.stdout)
+    arr = json.loads(result.stdout)["items"]
     assert isinstance(arr, list), f"search must return a JSON array, got {arr!r}"
 
     # The scoped namespace was used as the default_registry, so the skill
@@ -379,7 +379,7 @@ def test_search_partial_registry_failure_degrades_to_reachable(
         f"search with one unreachable registry must still exit 0, "
         f"got {result.returncode}; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
 
     repos = [r.get("repo", "") for r in rows]
@@ -432,7 +432,7 @@ def test_search_same_repo_in_two_registries_is_not_deduped(
     assert result.returncode == 0, (
         f"multi-registry search must exit 0, got {result.returncode}; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
 
     shared_repos = [r.get("repo", "") for r in rows if shared in r.get("repo", "")]

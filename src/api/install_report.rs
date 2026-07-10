@@ -5,9 +5,9 @@
 //!
 //! Plain format: 4-column table (Kind | Name | Target | Status).
 //!
-//! JSON format: an array of `{kind, name, target, status}` objects (the
-//! report wraps a `Vec`, serialized to the bare array — no wrapper
-//! object, per subsystem-cli-api.md).
+//! JSON format: `{"items": [...]}` where each item is a
+//! `{kind, name, target, status}` object (uniform `items` envelope, per
+//! subsystem-cli-api.md).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -34,28 +34,22 @@ fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::
 }
 
 /// The result of an install pass: one row per locked artifact.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct InstallReport {
-    entries: Vec<InstallEntry>,
+    items: Vec<InstallEntry>,
 }
 
 impl InstallReport {
     /// Build from operation results.
-    pub fn new(entries: Vec<InstallEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for InstallReport {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<InstallEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for InstallReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         let rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| {
                 vec![
@@ -96,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn json_is_bare_array() {
+    fn json_is_items_envelope() {
         let r = InstallReport::new(vec![InstallEntry {
             kind: ArtifactKind::Rule,
             name: "rust-style".to_string(),
@@ -106,8 +100,9 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array());
-        assert_eq!(v[0]["kind"], "rule");
-        assert_eq!(v[0]["status"], "refused");
+        assert!(v.is_object());
+        assert!(v["items"].is_array());
+        assert_eq!(v["items"][0]["kind"], "rule");
+        assert_eq!(v["items"][0]["status"], "refused");
     }
 }

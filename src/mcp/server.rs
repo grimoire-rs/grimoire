@@ -58,7 +58,7 @@ impl GrimMcpServer {
     /// query and annotated with each repository's install status. Returns the
     /// same JSON payload as `grim search --format json`.
     #[tool(
-        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON array of matches with kind, repo, summary, version, and install status."
+        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status."
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
@@ -83,7 +83,7 @@ impl GrimMcpServer {
     /// Report the install status of every declared artifact in the requested
     /// scope. Returns the same JSON payload as `grim status --format json`.
     #[tool(
-        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Returns a JSON array."
+        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Returns a JSON object with an `items` array."
     )]
     async fn grim_status(&self, Parameters(args): Parameters<StatusToolArgs>) -> Result<String, ErrorData> {
         let status_args = crate::command::status::StatusArgs {

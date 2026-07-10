@@ -66,7 +66,7 @@ def test_install_materializes_bundle_members(
     runner = grim_at(project_dir)
 
     runner.run("lock")
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     assert_dir_exists(project_dir / ".claude/skills/code-review")
@@ -87,7 +87,7 @@ def test_status_shows_bundle_provenance(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     member = next(r for r in rows if r["name"] == "code-review")
     assert member["source"].startswith("bundle:")
     assert f"{unique_repo}/stack" in member["source"]
@@ -123,7 +123,7 @@ def test_direct_declaration_wins_over_bundle(
     runner.run("lock")
 
     # The direct pin wins; the lock entry is NOT marked as a bundle member.
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     cr = next(r for r in rows if r["kind"] == "skill" and r["name"] == "code-review")
     assert cr["source"] == "direct"
     assert direct_member.digest in cr["pinned"]
@@ -147,7 +147,7 @@ def test_agreeing_bundles_coalesce(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     members = [r for r in rows if r["kind"] == "skill" and r["name"] == "code-review"]
     assert len(members) == 1, "identical members from two bundles coalesce"
 
@@ -347,7 +347,7 @@ def test_status_shows_all_bundle_provenances_for_shared_member(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     member = next(r for r in rows if r["name"] == "shared-skill")
     assert member["source"].startswith("bundle:")
     assert f"{unique_repo}/stack-a" in member["source"], "first contributor listed"
@@ -411,13 +411,13 @@ def test_remove_direct_keeps_artifact_held_by_bundle(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     before = next(r for r in rows if r["name"] == "code-review")
     assert before["source"] == "direct", "direct declaration wins while declared"
 
     runner.json("remove", "skill", "code-review")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     after = next((r for r in rows if r["name"] == "code-review"), None)
     assert after is not None, "the artifact survives — the bundle still holds it"
     assert after["source"].startswith("bundle:"), "provenance flips to the bundle"
@@ -464,13 +464,13 @@ def test_remove_direct_with_bundle_id_mismatch_goes_stale(
 
     # The lock is honestly stale: status surfaces it instead of reporting a
     # fresh lock that silently lost the bundle's variant.
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     states = {r["name"]: r["state"] for r in rows}
     assert states.get("stack") == "stale", f"bundle row must surface staleness: {states}"
 
     # `grim lock` heals: the bundle's variant resolves in.
     runner.run("lock")
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     healed = next(r for r in rows if r["name"] == "code-review")
     assert healed["source"].startswith("bundle:")
     assert bundled.digest in healed["pinned"]
@@ -519,7 +519,7 @@ def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     before = next(r for r in rows if r["name"] == "grim-authoring")
     assert before["source"] == "direct", "standalone wins while declared at :latest"
 
@@ -541,7 +541,7 @@ def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_
 
     # Step 6: the artifact is NOT lost — the bundle row is stale (awaiting
     # re-resolve), but status still surfaces the bundle row, not silence.
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     states = {r["name"]: r["state"] for r in rows}
     assert states.get("grim-essentials") == "stale", (
         f"bundle row must surface staleness: {states}"
@@ -549,7 +549,7 @@ def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_
 
     # Step 7: `grim lock` heals — the artifact resolves in from the bundle.
     runner.run("lock")
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     healed = next((r for r in rows if r["name"] == "grim-authoring"), None)
     assert healed is not None, (
         "artifact must reappear after `grim lock` re-resolves the bundle member"
@@ -594,7 +594,7 @@ def test_uninstall_standalone_skill_held_by_bundle_keeps_files(
 
     # The files survive — the bundle still provides the artifact.
     assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     after = next((r for r in rows if r["name"] == "code-review"), None)
     assert after is not None, "the artifact survives — the bundle still holds it"
     assert after["source"].startswith("bundle:"), "provenance flips to the bundle"
@@ -646,7 +646,7 @@ def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
 
     # The bundle row is stale (its :0 variant awaits a re-resolve).
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     states = {r["name"]: r["state"] for r in rows}
     assert states.get("grim-essentials") == "stale", (
         f"bundle row must surface staleness: {states}"
@@ -655,7 +655,7 @@ def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     # `grim lock` heals, and the file is still present (never deleted).
     runner.run("lock")
     assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     healed = next((r for r in rows if r["name"] == "grim-authoring"), None)
     assert healed is not None, "the artifact reappears, healed from the bundle"
     assert healed["source"].startswith("bundle:"), "provenance flips to the bundle"
@@ -692,7 +692,7 @@ def test_uninstall_bundle_only_member_keeps_files(
 
     # Files survive — the bundle still provides the member.
     assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     after = next((r for r in rows if r["name"] == "code-review"), None)
     assert after is not None, "the member survives — the bundle still holds it"
     assert after["source"].startswith("bundle:"), "still provided by the bundle"
@@ -728,7 +728,7 @@ def test_release_bundle_with_agent_member(
     crunner = grim_at(consumer)
     crunner.run("lock")
 
-    rows = crunner.json("status")
+    rows = crunner.json("status")["items"]
     agent_row = next((r for r in rows if r["kind"] == "agent" and r["name"] == "reviewer"), None)
     assert agent_row is not None, "the authored [agents] member must expand into the lock"
     assert agent_row["source"].startswith("bundle:")
@@ -759,7 +759,7 @@ def test_update_prunes_dropped_bundle_member(
     # skill-b.
     make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
 
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     dropped = next(r for r in rows if r["name"] == "skill-b")
     assert dropped["action"] == "removed"
     assert dropped["new"] is None, "a pruned row has no new pin"
@@ -797,7 +797,7 @@ def test_update_installs_added_bundle_member(
         tag="rolling",
     )
 
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     added = next(r for r in rows if r["name"] == "skill-b")
     assert added["action"] == "updated"
     assert added["old"] is None, "a freshly added member had no previous pin"
@@ -844,7 +844,7 @@ def test_update_adds_and_removes_in_one_upgrade(
         tag="rolling",
     )
 
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["skill-c"]["action"] == "updated"
     assert by_name["skill-c"]["old"] is None, "skill-c is a fresh addition"
@@ -888,7 +888,7 @@ def test_update_keeps_modified_dropped_member_without_force(
     make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
 
     # A plain update preserves the modified orphan and flags it.
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     kept = next(r for r in rows if r["name"] == "skill-b")
     assert kept["action"] == "kept-modified"
     assert_path_exists(edited)
@@ -928,7 +928,7 @@ def test_update_force_prunes_modified_dropped_member(
     make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
 
     # --force prunes the modified orphan despite the local edit.
-    rows = runner.json("update", "--force")
+    rows = runner.json("update", "--force")["items"]
     pruned = next(r for r in rows if r["name"] == "skill-b")
     assert pruned["action"] == "removed"
     assert_not_exists(project_dir / ".claude/skills/skill-b")

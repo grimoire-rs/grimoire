@@ -779,8 +779,8 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
 
 fn run_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let entries = collect_entries(&scope.options, &scope.registries);
-    Ok((ConfigReport::List(ConfigListReport { entries }), ExitCode::Success))
+    let items = collect_entries(&scope.options, &scope.registries);
+    Ok((ConfigReport::List(ConfigListReport { items }), ExitCode::Success))
 }
 
 fn run_registry_add(
@@ -922,7 +922,7 @@ fn run_registry_show(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport
 
 fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let rows = scope
+    let items = scope
         .registries
         .iter()
         .map(|rc| RegistryRow {
@@ -933,7 +933,7 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
         })
         .collect();
     Ok((
-        ConfigReport::RegistryList(RegistryListReport { rows }),
+        ConfigReport::RegistryList(RegistryListReport { items }),
         ExitCode::Success,
     ))
 }

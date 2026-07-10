@@ -40,7 +40,7 @@ def test_lock_then_install_materializes_files(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     assert_dir_exists(project_dir / ".claude/skills/code-review")

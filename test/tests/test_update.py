@@ -35,7 +35,7 @@ def test_update_rewrites_lock_and_rematerializes(
     retag(repo, "stable", v2.digest)
     assert v1.digest != v2.digest
 
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     assert rows[0]["action"] == "updated"
     assert installed.read_text() == "v2\n"
     assert v2.digest in (project_dir / "grimoire.lock").read_text()
@@ -62,7 +62,7 @@ def test_update_named_only_touches_that_artifact(
     a2 = make_artifact(a_repo, "rule", {"a.md": "a2\n"}, tag="latest")
     assert a2  # a's floating tag advanced; b unchanged
 
-    rows = runner.json("update", "a")
+    rows = runner.json("update", "a")["items"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["a"]["action"] == "updated"
     assert by_name["b"]["action"] == "unchanged"
@@ -105,7 +105,7 @@ def test_update_installs_newly_declared_rule(
     # The new rule is locked but not yet on disk — only `update` materializes it.
     assert not (project_dir / ".claude/rules/b.md").exists()
 
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     by_name = {r["name"]: r for r in rows}
     # The newly declared rule appears in the update report with a real pin.
     # Its action is `unchanged` (the re-lock above already established the

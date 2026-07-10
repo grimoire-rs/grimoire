@@ -14,8 +14,9 @@
 //! JSON format:
 //! - `Get`: `{"key":"…","value":"…"|null,"set":bool,"scope":"…"}`.
 //! - `Write`: single object matching struct fields.
-//! - `List`: flat array of `{"key","value"}` objects.
-//! - `RegistryList`: flat array of `{"alias","oci"|"index","default"}` objects.
+//! - `List`: `{"items": [...]}` of `{"key","value"}` objects.
+//! - `RegistryList`: `{"items": [...]}` of `{"alias","oci","index","default"}`
+//!   objects.
 //! - `RegistryShow`: single object matching struct fields.
 
 use std::fmt;
@@ -187,28 +188,19 @@ impl Printable for ConfigWriteReport {
 /// scope per invocation, so an Origin column would be constant-valued and
 /// is omitted.
 ///
-/// JSON format: flat array of `{"key":"…","value":"…"}` objects. Never
-/// wrapped in a parent object — per `subsystem-cli-api.md` custom-Serialize
-/// rule.
-#[derive(Debug)]
+/// JSON format: `{"items": [...]}` of `{"key":"…","value":"…"}` objects —
+/// uniform `items` envelope per `subsystem-cli-api.md`.
+#[derive(Debug, Serialize)]
 pub struct ConfigListReport {
     /// All effective key=value pairs for the scope.
-    pub entries: Vec<ConfigEntry>,
-}
-
-impl Serialize for ConfigListReport {
-    /// Flatten to a bare array per `subsystem-cli-api.md`.
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // ponytail: delegate directly — entries already derive Serialize
-        self.entries.serialize(serializer)
-    }
+    pub items: Vec<ConfigEntry>,
 }
 
 impl Printable for ConfigListReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
         let rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| vec![e.key.clone(), e.value.clone()])
             .collect();
@@ -256,27 +248,20 @@ impl fmt::Display for Origin {
 ///
 /// Plain format: one table — `Alias | URL | Default`.
 ///
-/// JSON format: flat array of `{"alias":"…"|null,"oci"|"index":"…","default":bool}`
-/// objects. Never wrapped in a parent object — per `subsystem-cli-api.md`
-/// custom-Serialize rule.
-#[derive(Debug)]
+/// JSON format: `{"items": [...]}` of
+/// `{"alias":"…"|null,"oci":"…"|null,"index":"…"|null,"default":bool}`
+/// objects — uniform `items` envelope per `subsystem-cli-api.md`.
+#[derive(Debug, Serialize)]
 pub struct RegistryListReport {
     /// All registries declared in the scope's `[[registries]]`.
-    pub rows: Vec<RegistryRow>,
-}
-
-impl Serialize for RegistryListReport {
-    /// Flatten to a bare array per `subsystem-cli-api.md`.
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.rows.serialize(serializer)
-    }
+    pub items: Vec<RegistryRow>,
 }
 
 impl Printable for RegistryListReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
         let rows: Vec<Vec<String>> = self
-            .rows
+            .items
             .iter()
             .map(|r| {
                 let (ty, source) = type_and_source(r.oci.as_deref(), r.index.as_deref());
@@ -487,7 +472,7 @@ mod tests {
     fn config_list_report_plain_shows_key_value_entries() {
         // ADR: list plain format — key=value lines, one table per invocation.
         let r = ConfigListReport {
-            entries: vec![ConfigEntry {
+            items: vec![ConfigEntry {
                 key: "options.clients".to_string(),
                 value: "claude".to_string(),
             }],
@@ -506,10 +491,9 @@ mod tests {
     }
 
     #[test]
-    fn config_list_report_json_is_flat_array() {
-        // W2: Serialize must flatten to bare array, not wrap in {"entries":[...]}.
+    fn config_list_report_json_is_items_envelope() {
         let r = ConfigListReport {
-            entries: vec![ConfigEntry {
+            items: vec![ConfigEntry {
                 key: "options.clients".to_string(),
                 value: "claude".to_string(),
             }],
@@ -517,16 +501,17 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array(), "JSON list must be a bare array; got: {v}");
-        assert_eq!(v[0]["key"], "options.clients");
-        assert_eq!(v[0]["value"], "claude");
+        assert!(v.is_object(), "JSON list must be an items envelope; got: {v}");
+        assert!(v["items"].is_array());
+        assert_eq!(v["items"][0]["key"], "options.clients");
+        assert_eq!(v["items"][0]["value"], "claude");
     }
 
     #[test]
     fn registry_list_report_plain_shows_alias_oci_default() {
         // ADR: registry list — one table (Alias | Type | Source | Default).
         let r = RegistryListReport {
-            rows: vec![RegistryRow {
+            items: vec![RegistryRow {
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -541,10 +526,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_list_report_json_is_flat_array() {
-        // W2: Serialize must flatten to bare array, not wrap in {"rows":[...]}.
+    fn registry_list_report_json_is_items_envelope() {
         let r = RegistryListReport {
-            rows: vec![RegistryRow {
+            items: vec![RegistryRow {
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -554,9 +538,10 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array(), "registry list JSON must be a bare array; got: {v}");
-        assert_eq!(v[0]["alias"], "acme");
-        assert_eq!(v[0]["oci"], "ghcr.io/acme");
+        assert!(v.is_object(), "registry list JSON must be an items envelope; got: {v}");
+        assert!(v["items"].is_array());
+        assert_eq!(v["items"][0]["alias"], "acme");
+        assert_eq!(v["items"][0]["oci"], "ghcr.io/acme");
     }
 
     #[test]

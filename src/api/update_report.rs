@@ -5,10 +5,10 @@
 //!
 //! Plain format: 5-column table (Kind | Name | Old | New | Action).
 //!
-//! JSON format: an array of `{kind, name, old, new, action}` objects (the
-//! report wraps a `Vec`, serialized to the bare array — no wrapper
-//! object, per subsystem-cli-api.md). `old` is `null` for an artifact
-//! that had no previous lock entry.
+//! JSON format: `{"items": [...]}` where each item is a
+//! `{kind, name, old, new, action}` object (uniform `items` envelope, per
+//! subsystem-cli-api.md). `old` is `null` for an artifact that had no
+//! previous lock entry.
 
 use std::io::{self, Write};
 
@@ -46,28 +46,22 @@ fn serialize_opt_digest<S: Serializer>(digest: &Option<Digest>, s: S) -> Result<
 }
 
 /// The result of an update pass: one row per re-resolved/carried artifact.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct UpdateReport {
-    entries: Vec<UpdateEntry>,
+    items: Vec<UpdateEntry>,
 }
 
 impl UpdateReport {
     /// Build from operation results.
-    pub fn new(entries: Vec<UpdateEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for UpdateReport {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<UpdateEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for UpdateReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         let rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| {
                 vec![
@@ -139,9 +133,10 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert!(v.is_array());
-        assert!(v[0]["old"].is_null());
-        assert!(v[1]["old"].as_str().unwrap().starts_with("sha256:"));
-        assert_eq!(v[1]["action"], "unchanged");
+        assert!(v.is_object());
+        assert!(v["items"].is_array());
+        assert!(v["items"][0]["old"].is_null());
+        assert!(v["items"][1]["old"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(v["items"][1]["action"], "unchanged");
     }
 }

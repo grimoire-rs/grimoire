@@ -409,7 +409,7 @@ def test_list_json_format_is_parseable_array(
 
     runner.run("config", "set", "options.clients", "claude")
 
-    result = runner.json("config", "list")
+    result = runner.json("config", "list")["items"]
 
     assert isinstance(result, list), (
         f"list --format json must return a JSON array; got: {type(result)}"
@@ -655,7 +655,7 @@ def test_list_on_empty_config_exits_0_with_empty_output(
     write_config(project_dir)  # minimal config, no [options] table
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    result = runner.json("config", "list")
+    result = runner.json("config", "list")["items"]
 
     assert result == [], f"list on empty config must be empty array; got {result!r}"
     assert len(result) == 0, (

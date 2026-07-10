@@ -136,8 +136,8 @@ Add `--format json` to any subcommand for machine-readable output. The shapes ar
 | `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
-| `list` | array of `{"key":"…","value":"…"}` |
-| `registry list` | array of `{"alias":string or null,"oci"\|"index":"…","default":bool}` |
+| `list` | `{"items": [...]}` of `{"key":"…","value":"…"}` |
+| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci"\|"index":"…","default":bool}` |
 | `registry show` | `{"alias":"…","oci"\|"index":"…","default":bool}` |
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
@@ -270,13 +270,17 @@ detail and may change.
 
 ```json
 {
-  "kind": "skill",
-  "name": "code-review",
-  "source": "direct",
-  "pinned": "ghcr.io/acme/code-review@sha256:1f2e...",
-  "state": "installed",
-  "outputs": [
-    { "client": "claude", "path": "/repo/.claude/skills/code-review" }
+  "items": [
+    {
+      "kind": "skill",
+      "name": "code-review",
+      "source": "direct",
+      "pinned": "ghcr.io/acme/code-review@sha256:1f2e...",
+      "state": "installed",
+      "outputs": [
+        { "client": "claude", "path": "/repo/.claude/skills/code-review" }
+      ]
+    }
   ]
 }
 ```

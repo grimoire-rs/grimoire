@@ -158,7 +158,7 @@ def test_claude_skill_lifts_namespaced_keys_to_native_typed_fields(
     write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "claude")
+    rows = runner.json("install", "--client", "claude")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     skill_md = project_dir / ".claude/skills/my-skill/SKILL.md"
@@ -194,7 +194,7 @@ def test_opencode_skill_is_clean_universal_no_tool_keys(
     write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     skill_md = project_dir / ".opencode/skills/my-skill/SKILL.md"
@@ -224,7 +224,7 @@ def test_copilot_skill_is_clean_universal_no_tool_keys(
     write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "copilot")
+    rows = runner.json("install", "--client", "copilot")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     skill_md = project_dir / ".github/skills/my-skill/SKILL.md"
@@ -256,7 +256,7 @@ def test_opencode_and_copilot_skill_renders_are_byte_identical(
     write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode,copilot")
+    rows = runner.json("install", "--client", "opencode,copilot")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     oc_skill = project_dir / ".opencode/skills/my-skill/SKILL.md"
@@ -294,7 +294,7 @@ def test_sibling_files_install_verbatim_for_all_clients(
     write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "claude,opencode,copilot")
+    rows = runner.json("install", "--client", "claude,opencode,copilot")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     for client, root in (
@@ -366,7 +366,7 @@ def test_claude_rule_is_verbatim_paths_frontmatter_intact(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "claude")
+    rows = runner.json("install", "--client", "claude")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     rule_md = project_dir / ".claude/rules/rust-style.md"
@@ -395,7 +395,7 @@ def test_claude_rule_with_vendor_metadata_is_cleaned(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "claude")
+    rows = runner.json("install", "--client", "claude")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     rule_md = project_dir / ".claude/rules/rust-style.md"
@@ -429,7 +429,7 @@ def test_copilot_rule_maps_paths_to_apply_to(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "copilot")
+    rows = runner.json("install", "--client", "copilot")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
@@ -469,7 +469,7 @@ def test_copilot_rule_with_exclude_agent_emits_exclude_agent_frontmatter(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "copilot")
+    rows = runner.json("install", "--client", "copilot")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
@@ -491,7 +491,7 @@ def test_opencode_rule_strips_frontmatter_adds_provenance(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     rule_md = project_dir / ".opencode/rules/rust-style.md"
@@ -520,7 +520,7 @@ def test_opencode_rule_install_registers_glob_in_opencode_json(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     cfg_path = project_dir / "opencode.json"
@@ -548,7 +548,7 @@ def test_opencode_rule_install_preserves_existing_opencode_json_keys(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     cfg = json.loads((project_dir / "opencode.json").read_text())
@@ -625,7 +625,7 @@ def test_update_prune_with_client_subset_removes_opencode_glob(
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install", "--client", "opencode")
+    rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
     cfg = json.loads((project_dir / "opencode.json").read_text())
     assert ".opencode/rules/*.md" in cfg["instructions"]
@@ -635,7 +635,7 @@ def test_update_prune_with_client_subset_removes_opencode_glob(
     # config sync must converge opencode.json even though opencode was not
     # in this run's client set.
     write_config(project_dir)
-    rows = runner.json("update", "--client", "claude")
+    rows = runner.json("update", "--client", "claude")["items"]
     assert any(r["action"] == "removed" for r in rows), rows
     assert not (project_dir / ".opencode/rules/rust-style.md").exists(), (
         "pruned rule file must be deleted"

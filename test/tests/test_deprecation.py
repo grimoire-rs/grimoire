@@ -142,7 +142,7 @@ def test_search_highlights_deprecated_entry(
         "--registry",
         f"{REGISTRY_HOST}/{unique_repo}",
         "--refresh",
-    )
+    )["items"]
     entry = next(r for r in rows if r["repo"].endswith(f"{unique_repo}/old-skill"))
     assert entry["deprecated"] == "use new-skill instead"
 
@@ -170,7 +170,7 @@ def test_search_hides_deprecated_entry_by_default(
     )
     rows = grim_at(project_dir).json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     assert not any(r["repo"].endswith(f"{unique_repo}/old-skill") for r in rows), (
         f"deprecated + uninstalled entry must be hidden by default; got {rows}"
     )
@@ -198,7 +198,7 @@ def test_search_shows_installed_deprecated_without_flag(
     # Installed ⇒ shown even though it is deprecated and no flag was passed.
     rows = runner.json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     entry = next(
         (r for r in rows if r["repo"].endswith(f"{unique_repo}/old-rule")), None
     )
@@ -218,7 +218,7 @@ def test_search_non_deprecated_entry_has_null_field(
     )
     rows = grim_at(project_dir).json(
         "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     entry = next(r for r in rows if r["repo"].endswith(f"{unique_repo}/fresh-skill"))
     assert entry["deprecated"] is None
 

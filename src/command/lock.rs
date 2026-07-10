@@ -149,7 +149,7 @@ mod tests {
             },
         );
         let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(v[0]["action"], "locked");
+        assert_eq!(v["items"][0]["action"], "locked");
         let _ = Algorithm::Sha256;
     }
 
@@ -170,6 +170,6 @@ mod tests {
         };
         let r = build_report(&lock, Some(&prev), &scope);
         let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(v[0]["action"], "unchanged");
+        assert_eq!(v["items"][0]["action"], "unchanged");
     }
 }

@@ -123,9 +123,9 @@ def test_release_pushes_with_cascade_tags(
         },
     )
     runner.run("lock", check=False)
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     # `grim lock` pins every declared tag; they must all share one digest.
-    locked = runner.json("lock")
+    locked = runner.json("lock")["items"]
     pins = {r["name"]: r["pinned"] for r in locked}
     assert len(set(pins.values())) == 1, (
         f"all cascade tags must pin the same digest, got {pins}"
@@ -188,7 +188,7 @@ def test_rerelease_moves_preexisting_floating_tags(
     # End-to-end rolling release: the project pinned the floating :1 tag
     # at digest A above; a plain `grim update` (no names) must roll it
     # forward to B now that the cascade moved :1.
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["code-review"]["action"] == "updated", (
         "plain `grim update` must roll the floating :1 pin forward"
@@ -268,7 +268,7 @@ def test_release_rule_file(
     # Install the released rule and assert the canonical file lands.
     write_config(project_dir, rules={"rust-style": f"{repo}:3.4.5"})
     runner.run("lock", check=False)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     assert (project_dir / ".claude/rules/rust-style.md").is_file()
 

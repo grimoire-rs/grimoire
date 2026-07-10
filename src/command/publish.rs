@@ -2731,13 +2731,13 @@ mod tests {
         // First run: skill must be pushed
         let (report1, exit1) = run(&ctx, &args).await.expect("first run must succeed");
         assert_eq!(exit1, crate::cli::exit_code::ExitCode::Success, "first run must exit 0");
-        assert_eq!(report1.entries().len(), 1, "first run must produce 1 entry");
+        assert_eq!(report1.items().len(), 1, "first run must produce 1 entry");
         assert_eq!(
-            report1.entries()[0].status,
+            report1.items()[0].status,
             PublishStatus::Pushed,
             "first run must push the skill"
         );
-        let first_digest = report1.entries()[0]
+        let first_digest = report1.items()[0]
             .digest
             .clone()
             .expect("pushed entry must have digest");
@@ -2751,9 +2751,9 @@ mod tests {
             crate::cli::exit_code::ExitCode::Success,
             "second run must exit 0"
         );
-        assert_eq!(report2.entries().len(), 1, "second run must produce 1 entry");
+        assert_eq!(report2.items().len(), 1, "second run must produce 1 entry");
         assert_eq!(
-            report2.entries()[0].status,
+            report2.items()[0].status,
             PublishStatus::Skipped,
             "second run must skip (existing version, skip_existing=true by default)"
         );
@@ -2787,8 +2787,8 @@ mod tests {
         let args = make_publish_args(manifest_path.clone(), vec![], Some("canary".to_string()), false, false);
         let (report1, exit1) = run(&ctx, &args).await.expect("first canary run must succeed");
         assert_eq!(exit1, crate::cli::exit_code::ExitCode::Success);
-        assert_eq!(report1.entries()[0].status, PublishStatus::Pushed);
-        let first_digest = report1.entries()[0]
+        assert_eq!(report1.items()[0].status, PublishStatus::Pushed);
+        let first_digest = report1.items()[0]
             .digest
             .clone()
             .expect("pushed entry must have digest");
@@ -2805,11 +2805,11 @@ mod tests {
         let (report2, exit2) = run(&ctx2, &args2).await.expect("second canary run must succeed");
         assert_eq!(exit2, crate::cli::exit_code::ExitCode::Success);
         assert_eq!(
-            report2.entries()[0].status,
+            report2.items()[0].status,
             PublishStatus::Pushed,
             "channel tag re-publish must push (move), not skip"
         );
-        let second_digest = report2.entries()[0]
+        let second_digest = report2.items()[0]
             .digest
             .clone()
             .expect("pushed entry must have digest");
@@ -2839,9 +2839,9 @@ mod tests {
 
         let (report, exit) = run(&ctx, &args).await.expect("dry-run must not error");
         assert_eq!(exit, crate::cli::exit_code::ExitCode::Success, "dry-run must exit 0");
-        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.items().len(), 1);
         assert_eq!(
-            report.entries()[0].status,
+            report.items()[0].status,
             PublishStatus::DryRun,
             "dry-run must produce DryRun status"
         );
@@ -2887,11 +2887,7 @@ mod tests {
         let args = make_publish_args(manifest_path.clone(), vec![], None, false, false);
         let (report1, exit1) = run(&ctx, &args).await.expect("first run must succeed");
         assert_eq!(exit1, crate::cli::exit_code::ExitCode::Success);
-        assert_eq!(
-            report1.entries()[0].status,
-            PublishStatus::Pushed,
-            "first run must push"
-        );
+        assert_eq!(report1.items()[0].status, PublishStatus::Pushed, "first run must push");
 
         // Step 2: dry-run on the same (already-pushed) entry.
         // skip-existing runs before the dry-run branch in release::run, so the
@@ -2901,7 +2897,7 @@ mod tests {
         let (report2, exit2) = run(&ctx2, &args2).await.expect("dry-run after push must not error");
         assert_eq!(exit2, crate::cli::exit_code::ExitCode::Success);
         assert_eq!(
-            report2.entries()[0].status,
+            report2.items()[0].status,
             PublishStatus::Skipped,
             "dry-run on already-pushed entry must report Skipped, not DryRun (ADR D3 amendment)"
         );
@@ -2977,17 +2973,17 @@ mod tests {
         let args = make_publish_args(manifest_path, vec![], None, false, false);
         let (report, exit) = run(&ctx, &args).await.expect("run with flag registry must succeed");
         assert_eq!(exit, crate::cli::exit_code::ExitCode::Success);
-        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.items().len(), 1);
         // The reference must start with the flag registry, not manifest.example.
         assert!(
-            report.entries()[0].reference.starts_with("localhost:5000/"),
+            report.items()[0].reference.starts_with("localhost:5000/"),
             "--registry flag must override manifest registry; got: {}",
-            report.entries()[0].reference
+            report.items()[0].reference
         );
         assert!(
-            !report.entries()[0].reference.contains("manifest.example"),
+            !report.items()[0].reference.contains("manifest.example"),
             "manifest registry must not appear when --registry flag is set; got: {}",
-            report.entries()[0].reference
+            report.items()[0].reference
         );
     }
 
@@ -3020,7 +3016,7 @@ mod tests {
             .expect("run with prefixed flag registry must succeed");
         assert_eq!(exit, crate::cli::exit_code::ExitCode::Success);
         assert_eq!(
-            report.entries()[0].reference,
+            report.items()[0].reference,
             "localhost:5000/enforced/ns/skills/test-skill:0.1.0",
             "pushed reference must nest under the --registry prefix"
         );

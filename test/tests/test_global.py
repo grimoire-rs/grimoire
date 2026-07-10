@@ -48,12 +48,12 @@ def test_global_scope_is_independent_of_project(
     )
     runner = GrimRunner(grim_binary, grim_home)
 
-    lock_rows = runner.json("lock", "--global")
+    lock_rows = runner.json("lock", "--global")["items"]
     assert lock_rows[0]["name"] == "global-rule"
     assert (grim_home / "grimoire.lock").is_file()
     assert "@sha256:" in (grim_home / "grimoire.lock").read_text()
 
-    install_rows = runner.json("install", "--global")
+    install_rows = runner.json("install", "--global")["items"]
     assert install_rows[0]["status"] == "installed"
     # Global Claude rules land in the vendor-native ~/.claude/rules/ path,
     # not under $GRIM_HOME/.claude/.
@@ -64,7 +64,7 @@ def test_global_scope_is_independent_of_project(
         "global rule must NOT land under $GRIM_HOME/.claude/ (old layout)"
     )
 
-    status_rows = runner.json("status", "--global")
+    status_rows = runner.json("status", "--global")["items"]
     assert status_rows[0]["state"] == "installed"
 
 
@@ -98,7 +98,7 @@ def test_global_install_claude_skill_lands_in_home_dot_claude(
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global")
+    install_rows = runner.json("install", "--global")["items"]
     assert install_rows[0]["status"] == "installed"
 
     skill_dir = runner.home / ".claude/skills/my-skill"
@@ -127,7 +127,7 @@ def test_global_install_claude_rule_lands_in_home_dot_claude(
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global")
+    install_rows = runner.json("install", "--global")["items"]
     assert install_rows[0]["status"] == "installed"
 
     rule_file = runner.home / ".claude/rules/my-rule.md"
@@ -153,7 +153,7 @@ def test_global_install_opencode_skill_lands_in_xdg_config(
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "opencode")
+    install_rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert install_rows[0]["status"] == "installed"
 
     # Skills go to $XDG_CONFIG_HOME/opencode/skills/ (set to $HOME/.config by runner)
@@ -181,7 +181,7 @@ def test_global_install_opencode_rule_stays_in_grim_home_and_registers_glob(
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "opencode")
+    install_rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert install_rows[0]["status"] == "installed"
 
     # Rule file stays under $GRIM_HOME/.opencode/rules/ (loaded via absolute glob)
@@ -220,7 +220,7 @@ def test_global_install_copilot_skill_lands_in_home_dot_copilot(
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "copilot")
+    install_rows = runner.json("install", "--global", "--client", "copilot")["items"]
     assert install_rows[0]["status"] == "installed"
 
     skill_dir = runner.home / ".copilot/skills/cp-skill"
@@ -263,7 +263,7 @@ def test_global_claude_install_honors_claude_config_dir(
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global")
+    install_rows = runner.json("install", "--global")["items"]
     assert all(r["status"] == "installed" for r in install_rows)
 
     assert (config_dir / "skills/env-skill/SKILL.md").is_file(), (
@@ -295,7 +295,7 @@ def test_global_opencode_skill_honors_opencode_config_dir(
     runner.env["OPENCODE_CONFIG_DIR"] = str(config_dir)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "opencode")
+    install_rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert install_rows[0]["status"] == "installed"
 
     assert (config_dir / "skills/oc-env-skill/SKILL.md").is_file(), (
@@ -323,7 +323,7 @@ def test_global_copilot_skill_honors_copilot_home(
     runner.env["COPILOT_HOME"] = str(copilot_home)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "copilot")
+    install_rows = runner.json("install", "--global", "--client", "copilot")["items"]
     assert install_rows[0]["status"] == "installed"
 
     assert (copilot_home / "skills/cp-env-skill/SKILL.md").is_file(), (
@@ -380,7 +380,7 @@ def test_global_empty_env_override_is_treated_as_unset(
     runner.env["CLAUDE_CONFIG_DIR"] = ""
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global")
+    install_rows = runner.json("install", "--global")["items"]
     assert install_rows[0]["status"] == "installed"
 
     assert (runner.home / ".claude/skills/empty-env-skill/SKILL.md").is_file(), (
@@ -419,7 +419,7 @@ def test_global_update_rematerializes_into_env_override_dir(
     )
     retag(repo, "stable", v2.digest)
 
-    rows = runner.json("update", "--global")
+    rows = runner.json("update", "--global")["items"]
     assert rows[0]["action"] == "updated"
     assert "v2" in installed.read_text(), (
         "update must rematerialize into $CLAUDE_CONFIG_DIR, not the $HOME default"
@@ -449,7 +449,7 @@ def test_global_opencode_rule_honors_opencode_config_file(
     runner.env["OPENCODE_CONFIG"] = str(custom_cfg)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "opencode")
+    install_rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert install_rows[0]["status"] == "installed"
 
     assert custom_cfg.is_file(), (
@@ -500,7 +500,7 @@ def test_global_opencode_honors_custom_xdg_config_home(
     runner.env["XDG_CONFIG_HOME"] = str(xdg)
     runner.json("lock", "--global")
 
-    install_rows = runner.json("install", "--global", "--client", "opencode")
+    install_rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert all(r["status"] == "installed" for r in install_rows)
 
     assert (xdg / "opencode/skills/xdg-skill/SKILL.md").is_file(), (

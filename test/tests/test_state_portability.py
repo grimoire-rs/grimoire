@@ -145,8 +145,8 @@ def test_no_collision_two_projects_share_grim_home(
     assert state_a != state_b, "the two state files must be at different paths"
 
     # Both projects report installed correctly.
-    rows_a = runner_a.json("status")
-    rows_b = runner_b.json("status")
+    rows_a = runner_a.json("status")["items"]
+    rows_b = runner_b.json("status")["items"]
     assert rows_a[0]["state"] == "installed", (
         f"project-a must report installed after install, got {rows_a}"
     )
@@ -186,7 +186,7 @@ def test_status_resolves_after_project_dir_move(
     runner_orig.run("install", check=False)
 
     # Verify installed in original location.
-    rows_before = runner_orig.json("status")
+    rows_before = runner_orig.json("status")["items"]
     assert rows_before[0]["state"] == "installed", (
         f"must be installed before move, got {rows_before}"
     )
@@ -197,7 +197,7 @@ def test_status_resolves_after_project_dir_move(
 
     # grim status from the moved location must still resolve correctly.
     runner_moved = GrimRunner(grim_binary, grim_home, cwd=moved)
-    rows_after = runner_moved.json("status")
+    rows_after = runner_moved.json("status")["items"]
 
     assert rows_after[0]["state"] == "installed", (
         f"after moving the workspace, grim status must still report "
@@ -228,7 +228,7 @@ def test_status_reports_modified_after_support_dir_edit(
     runner = _install_multifile_rule(grim_at, project_dir, art)
 
     # Verify initially installed.
-    rows_before = runner.json("status")
+    rows_before = runner.json("status")["items"]
     by_name_before = {r["name"]: r for r in rows_before}
     assert by_name_before["my-rule"]["state"] == "installed", (
         f"must be installed before edit, got {rows_before}"
@@ -242,7 +242,7 @@ def test_status_reports_modified_after_support_dir_edit(
     support_file.write_text("tampered by test\n")
 
     # grim status must detect the drift even though it was a support-dir file.
-    rows_after = runner.json("status")
+    rows_after = runner.json("status")["items"]
     by_name_after = {r["name"]: r for r in rows_after}
     assert by_name_after["my-rule"]["state"] == "modified", (
         f"editing a support-dir file must be detected as drift via "
@@ -348,7 +348,7 @@ def test_corrupt_relative_traversal_status_degrades_to_missing(
         f"got {result.returncode}; stderr: {result.stderr}"
     )
 
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert len(rows) >= 1, "status must return at least one row"
     # The corrupted record must degrade to missing (not raise an error, not
     # silently disappear, not remain installed).
@@ -587,7 +587,7 @@ def test_status_resolves_through_symlinked_workspace(
     runner = _install_rule(grim_at, project_dir, art)
 
     # Verify it is installed from the real directory first.
-    rows_before = runner.json("status")
+    rows_before = runner.json("status")["items"]
     assert rows_before[0]["state"] == "installed", (
         f"must be installed in original workspace before symlink test, got {rows_before}"
     )
@@ -610,7 +610,7 @@ def test_status_resolves_through_symlinked_workspace(
         f"got {result.returncode}; stderr: {result.stderr}"
     )
 
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert len(rows) >= 1, "status via symlinked config must return at least one row"
     # The artifact must resolve as installed (§1.5: store-time non-canonicalized
     # abs round-trips cleanly regardless of how the config is discovered).

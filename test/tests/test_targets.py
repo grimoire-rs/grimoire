@@ -40,7 +40,7 @@ def test_install_claude_and_copilot_layouts(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
-    rows = runner.json("install", "--client", "claude,copilot")
+    rows = runner.json("install", "--client", "claude,copilot")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     # Claude: canonical skill + rule.
@@ -86,7 +86,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
 
     # The integrity hash for a generated file is over its *expected*
     # bytes, so a user edit is detected exactly like a canonical file.
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     rule_row = next(r for r in rows if r["name"] == "rust-style")
     assert rule_row["state"] == "modified", (
         f"editing a generated copilot file must report modified, got "

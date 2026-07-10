@@ -30,7 +30,7 @@ def test_lock_writes_sha256_pins(
     )
     runner = grim_at(project_dir)
 
-    rows = runner.json("lock")
+    rows = runner.json("lock")["items"]
     assert {r["name"] for r in rows} == {"code-review", "rust-style"}
     assert all(r["action"] == "locked" for r in rows)
 
@@ -54,7 +54,7 @@ def test_relock_is_byte_identical_and_preserves_generated_at(
 
     runner.run("lock", check=False)
     first = (project_dir / "grimoire.lock").read_bytes()
-    rows = runner.json("lock")
+    rows = runner.json("lock")["items"]
     second = (project_dir / "grimoire.lock").read_bytes()
 
     assert first == second, "a no-op relock must be byte-identical"

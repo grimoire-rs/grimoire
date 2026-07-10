@@ -55,7 +55,7 @@ def test_status_reports_modified(
     )
     installed.write_text("tampered\n")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     row = next(r for r in rows if r["name"] == "rust-style")
     assert row["state"] == "modified"
     # status is read-only data: it must always exit 0.

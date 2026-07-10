@@ -79,7 +79,7 @@ def test_force_overwrites_untracked_and_uninstall_cleans_up(
 
     runner = grim_at(project_dir)
     runner.run("lock")
-    rows = runner.json("install", "--force")
+    rows = runner.json("install", "--force")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     assert hand.read_text() == SKILL_MD
 
@@ -96,13 +96,13 @@ def test_install_adopts_identical_untracked_footprint(
     _setup_skill(project_dir, unique_repo)
     runner = grim_at(project_dir)
     runner.run("lock")
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     # Simulate a lost state file: files intact, record gone. The config
     # and lock live beside grimoire.toml and survive.
     shutil.rmtree(project_dir / ".grimoire")
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"unchanged"}, rows
     assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
 
@@ -145,7 +145,7 @@ def test_mcp_install_refuses_untracked_member(
         "refusal must leave the user's member untouched"
     )
 
-    rows = runner.json("install", "--force")
+    rows = runner.json("install", "--force")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     claude = json.loads((project_dir / ".mcp.json").read_text())
     assert claude["mcpServers"]["grim-mcp"]["command"] == "grim"
@@ -161,9 +161,9 @@ def test_mcp_install_adopts_identical_member(
     (project_dir / ".claude").mkdir()
     write_config(project_dir)
     runner.json("add", "--no-install", ref)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
 
     shutil.rmtree(project_dir / ".grimoire")
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"unchanged"}, rows

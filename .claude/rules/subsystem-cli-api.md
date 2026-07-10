@@ -28,9 +28,10 @@ Every report file in `src/api/` follow this structure:
 3. **`Printable` impl** with single `print_table` call — no conditional empty-checks, no multiple tables
 4. **Static `&str` headers** in `print_table` — never `format!()` for dynamic headers; add data columns instead
 
-Reference impls: `src/api/install_report.rs` (multi-item, bare-array
-JSON), `src/api/release_report.rs` (single-item),
-`src/api/publish_report.rs` (multi-item batch with typed status enum).
+Reference impls: `src/api/install_report.rs` (multi-item, `items`
+envelope), `src/api/release_report.rs` (single-item),
+`src/api/publish_report.rs` (multi-item batch with typed status enum and
+a sibling `announce` key).
 
 ## Single-Table Rule
 
@@ -75,9 +76,21 @@ pub enum RemovedStatus {
 
 ## JSON Serialization
 
-- Types wrapping `Vec<Entry>` implement custom `Serialize` to flatten to inner array (no wrapper object). Documented exception: `publish_report.rs` carries a second dimension (the `--announce` outcome) and serializes as `{"entries": [...], "announce": ...}`.
-- Types using `HashMap` with `#[serde(flatten)]` produce top-level keyed objects — correct pattern for package-keyed results.
+- **Multi-item reports use the uniform `{"items": [...]}` envelope.** Name
+  the inner `Vec` field `items` and `#[derive(Serialize)]` on the report —
+  no hand-written `Serialize` impl, no bare top-level array. Bare arrays
+  can never grow a sibling field under the 1.0 additive-field policy; the
+  envelope can. `publish_report.rs` is no longer an exception — it derives
+  `{"items": [...], "announce": ...}` the same way.
+- **Optional fields are always-present-null.** `skip_serializing_if` is
+  banned in `src/api/` — an absent-key optional breaks consumers that
+  distinguish "not applicable" from "older grim". MCP-only payloads
+  (`src/mcp/fetch.rs`, `src/mcp/render.rs`) are exempt.
+- Single-object reports serialize as one flat object (e.g.
+  `init_report.rs`, `release_report.rs`).
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
+- Consumer contract, error document, and per-command shapes:
+  `docs/src/json-interface.md`.
 
 ## Adding a New Report Type
 

@@ -6,12 +6,11 @@
 //! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status);
 //! the announce outcome stays human prose on stderr.
 //!
-//! JSON format: a wrapper object `{"entries": [...], "announce": ...}`.
-//! `entries` is the per-entry array (`{kind, ref, digest, tags, status}`);
-//! `announce` is `{outcome, branch, url?}` when the `--announce` step
-//! completed, else `null` (no `--announce`, dry run, fail-fast, or
-//! announce failure). Documented exception to the bare-array rule in
-//! subsystem-cli-api.md — the report carries a second dimension.
+//! JSON format: `{"items": [...], "announce": ...}` (uniform `items`
+//! envelope, per subsystem-cli-api.md). `items` is the per-entry array
+//! (`{kind, ref, digest, tags, status}`); `announce` is
+//! `{outcome, branch, url}` when the `--announce` step completed, else
+//! `null` (no `--announce`, dry run, fail-fast, or announce failure).
 
 use std::io::{self, Write};
 
@@ -127,10 +126,10 @@ fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::
 /// The result of a `grim publish` run: one row per manifest entry
 /// processed (including the failed entry on fail-fast; entries not
 /// reached are absent from the report).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct PublishReport {
     /// Per-entry outcomes, in publish order.
-    entries: Vec<PublishEntry>,
+    items: Vec<PublishEntry>,
     /// The completed `--announce` outcome; `None` when announce did not
     /// run to completion (not requested, dry run, fail-fast, failure).
     announce: Option<PublishAnnounce>,
@@ -138,11 +137,8 @@ pub struct PublishReport {
 
 impl PublishReport {
     /// Build from operation results (no completed announce).
-    pub fn new(entries: Vec<PublishEntry>) -> Self {
-        Self {
-            entries,
-            announce: None,
-        }
+    pub fn new(items: Vec<PublishEntry>) -> Self {
+        Self { items, announce: None }
     }
 
     /// Attach the completed `--announce` outcome (consuming builder).
@@ -158,18 +154,8 @@ impl PublishReport {
         dead_code,
         reason = "exercised directly by command/publish.rs tests; rendering goes through Serialize"
     )]
-    pub fn entries(&self) -> &[PublishEntry] {
-        &self.entries
-    }
-}
-
-impl Serialize for PublishReport {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry("entries", &self.entries)?;
-        map.serialize_entry("announce", &self.announce)?;
-        map.end()
+    pub fn items(&self) -> &[PublishEntry] {
+        &self.items
     }
 }
 
@@ -191,7 +177,7 @@ fn truncate_digest(digest: &str) -> String {
 impl Printable for PublishReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         let rows: Vec<Vec<String>> = self
-            .entries
+            .items
             .iter()
             .map(|e| {
                 vec![
@@ -286,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn json_wraps_entries_with_null_announce() {
+    fn json_wraps_items_with_null_announce() {
         let r = PublishReport::new(vec![PublishEntry {
             reference: "registry.example/acme/my-rule:0.1.0".to_string(),
             kind: ArtifactKind::Rule,
@@ -299,9 +285,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v.is_object());
         assert!(v["announce"].is_null());
-        assert_eq!(v["entries"][0]["ref"], "registry.example/acme/my-rule:0.1.0");
-        assert_eq!(v["entries"][0]["status"], "dry-run");
-        assert!(v["entries"][0]["digest"].is_null());
+        assert!(v.get("entries").is_none(), "legacy `entries` key must be gone");
+        assert_eq!(v["items"][0]["ref"], "registry.example/acme/my-rule:0.1.0");
+        assert_eq!(v["items"][0]["status"], "dry-run");
+        assert!(v["items"][0]["digest"].is_null());
     }
 
     #[test]

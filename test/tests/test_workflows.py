@@ -77,24 +77,24 @@ def test_quickstart_walkthrough(
     assert "Code Review v1" in installed_index.read_text()
 
     # 3. A follow-up `install` is a clean no-op — already materialized.
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"unchanged"}
 
     # 4. Check the state.
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     assert [r["state"] for r in rows] == ["installed"]
 
     # 5. Upgrade: the publisher ships 1.1.0 behind the same floating :1;
     #    a plain `grim update` rolls the lock forward and rematerializes.
     _write(skill / "SKILL.md", _skill_md("v2"))
     runner.json("release", str(skill), f"{repo}:1.1.0")
-    rows = runner.json("update")
+    rows = runner.json("update")["items"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["code-review"]["action"] == "updated", (
         f"floating :1 must roll forward on update, got {by_name}"
     )
     assert "Code Review v2" in installed_index.read_text()
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     assert [r["state"] for r in rows] == ["installed"]
 
     # Undo: uninstall removes files, install record, and declaration.
@@ -128,7 +128,7 @@ def test_quickstart_multiclient_install(
     # the default install-on-add (which would target the detected set).
     runner.json("add", "--no-install", f"{repo}:1")
 
-    rows = runner.json("install", "--client", "claude,copilot")
+    rows = runner.json("install", "--client", "claude,copilot")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     assert (project_dir / ".claude/rules/rust-style.md").is_file()
     assert (

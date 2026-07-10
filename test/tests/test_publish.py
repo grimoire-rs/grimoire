@@ -177,7 +177,7 @@ def test_publish_all_kinds_reports_pushed_and_exit_0(
         f"stderr: {result.stderr.strip()}"
     )
 
-    rows = json.loads(result.stdout)["entries"]
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list), "entries must be a JSON array"
     assert len(rows) == 3, f"expected 3 rows (skill+rule+agent), got {rows}"
 
@@ -198,7 +198,7 @@ def test_publish_all_kinds_row_shape_has_required_keys(
         prefix,
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert isinstance(rows, list), "entries must be a JSON array"
     assert len(rows) >= 1
 
@@ -225,7 +225,7 @@ def test_publish_kind_order_is_skills_rules_agents_bundles(
         include_agent=True,
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 3
 
     kinds = [r["kind"] for r in rows]
@@ -249,7 +249,7 @@ def test_publish_rerun_skips_existing_and_exits_0(
     )
 
     # First run: push
-    first = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    first = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert all(r["status"] == "pushed" for r in first), "first run must push"
 
     # Second run: skip
@@ -264,7 +264,7 @@ def test_publish_rerun_skips_existing_and_exits_0(
         f"stderr: {result.stderr.strip()}"
     )
 
-    second = json.loads(result.stdout)["entries"]
+    second = json.loads(result.stdout)["items"]
     statuses = {r["status"] for r in second}
     assert statuses == {"skipped"}, (
         f"all rows must be 'skipped' on re-run (ADR D3), got {statuses}"
@@ -296,7 +296,7 @@ def test_publish_dry_run_pushes_nothing(
         f"--dry-run must exit 0, got {result.returncode}; stderr: {result.stderr.strip()}"
     )
 
-    rows = json.loads(result.stdout)["entries"]
+    rows = json.loads(result.stdout)["items"]
     statuses = {r["status"] for r in rows}
     assert statuses == {"dry-run"}, (
         f"all rows must be 'dry-run' with --dry-run, got {statuses}"
@@ -340,7 +340,7 @@ def test_publish_force_moves_existing_tag(
     )
 
     # First publish
-    first = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    first = runner.json("publish", "--manifest", str(manifest_path))["items"]
     first_digest = first[0]["digest"]
     assert first[0]["status"] == "pushed", (
         f"first publish must be 'pushed', got {first[0]['status']}"
@@ -366,7 +366,7 @@ def test_publish_force_moves_existing_tag(
         f"stderr: {result.stderr.strip()}"
     )
 
-    second = json.loads(result.stdout)["entries"]
+    second = json.loads(result.stdout)["items"]
     assert all(r["status"] == "pushed" for r in second), (
         f"--force must push (not skip), got statuses {[r['status'] for r in second]}"
     )
@@ -398,7 +398,7 @@ def test_publish_only_single_entry(
         "publish",
         "--manifest", str(manifest_path),
         "--only", skill_name,
-    )["entries"]
+    )["items"]
 
     assert len(rows) == 1, f"--only {skill_name} must yield 1 row, got {rows}"
     assert rows[0]["kind"] == "skill"
@@ -451,7 +451,7 @@ def test_publish_tag_canary_uses_movable_tag_version_absent(
         "publish",
         "--manifest", str(manifest_path),
         "--tag", "canary",
-    )["entries"]
+    )["items"]
     assert len(rows) >= 1
     assert rows[0]["status"] == "pushed", (
         f"--tag canary must push, got status {rows[0]['status']}"
@@ -581,7 +581,7 @@ def test_publish_format_json_wrapper_object(
     assert isinstance(parsed, dict), (
         f"--format json must produce a wrapper object, got {type(parsed).__name__}"
     )
-    assert isinstance(parsed["entries"], list)
+    assert isinstance(parsed["items"], list)
     assert parsed["announce"] is None, "announce must be null without --announce"
 
 
@@ -640,7 +640,7 @@ def test_publish_bundle_after_member_skill_is_resolvable(
     )
 
     # Publish skill + bundle in one batch
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 2, f"expected 2 rows (skill+bundle), got {rows}"
 
     skill_row = next((r for r in rows if r["kind"] == "skill"), None)
@@ -750,7 +750,7 @@ def test_publish_mid_batch_fail_fast(
         f"push failure; stderr: {result.stderr.strip()!r}"
     )
 
-    rows = json.loads(result.stdout)["entries"]
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list), "entries must be a JSON array even on partial failure"
     assert len(rows) >= 1, f"report must contain at least the failed entry, got {rows}"
 
@@ -808,7 +808,7 @@ def test_publish_only_and_tag_combined(
         f"--only+--tag must exit 0, got {result.returncode}; stderr: {result.stderr.strip()}"
     )
 
-    rows = json.loads(result.stdout)["entries"]
+    rows = json.loads(result.stdout)["items"]
     assert len(rows) == 1, (
         f"--only {skill_name} must yield exactly 1 row, got {rows}"
     )
@@ -863,7 +863,7 @@ def test_publish_pin_true_bundle_member_references_digest(
     manifest_path = project_dir / "publish.toml"
     manifest_path.write_text("\n".join(manifest_lines) + "\n")
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 2, f"expected skill+bundle, got {rows}"
     bundle_row = next((r for r in rows if r["kind"] == "bundle"), None)
     assert bundle_row is not None, "bundle must appear in report"
@@ -922,7 +922,7 @@ def test_publish_nested_repository_prefix(
         f'version = "0.1.0"\n'
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 1, f"expected 1 row, got {rows}"
     assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
 
@@ -960,7 +960,7 @@ def test_publish_per_entry_repository(
         f'repository = "{full_repo}"\n'
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 1, f"expected 1 row, got {rows}"
     assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
 
@@ -1009,7 +1009,7 @@ def test_publish_registry_flag_prefix_nests_all_entries(
         f"{registry}/{cli_prefix}",
         "--manifest",
         str(manifest_path),
-    )["entries"]
+    )["items"]
     assert len(rows) == 2, f"expected 2 rows, got {rows}"
     row_a, row_b = rows  # alpha within kind: {prefix}-a before {prefix}-b
 
@@ -1055,7 +1055,7 @@ def test_publish_wire_shape_empty_config(
         f'version = "0.1.0"\n'
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path))["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert rows[0]["status"] == "pushed", f"skill must be pushed, got {rows[0]}"
 
     manifest = fetch_manifest(f"skills/{skill_name}", "0.1.0")
@@ -1104,7 +1104,7 @@ def test_publish_top_level_version_inherited_and_placeholder(
         f'version = "0.2.0"\n'
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"]
     by_ref = {r["ref"]: r for r in rows}
     assert any(ref.endswith(f"skills/{skill_name}:0.9.0") for ref in by_ref), (
         f"omitted version must inherit the top-level 0.9.0, got {list(by_ref)}"
@@ -1136,7 +1136,7 @@ def test_publish_cli_version_overrides_and_strips_v_prefix(
 
     rows = runner.json(
         "publish", "--manifest", str(manifest_path), "--dry-run", "--version", "v0.2.0"
-    )["entries"]
+    )["items"]
     assert rows[0]["ref"].endswith(":0.2.0"), (
         f"--version v0.2.0 must publish tag 0.2.0, got {rows[0]['reference']}"
     )
@@ -1159,7 +1159,7 @@ def test_publish_custom_version_prefix(
         f"[skills.{skill_name}]\n"
     )
 
-    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["entries"]
+    rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"]
     assert rows[0]["ref"].endswith(":1.2.3"), (
         f"'release-' prefix must be stripped, got {rows[0]['reference']}"
     )

@@ -25,7 +25,7 @@ def _install_one(grim_at, project_dir: Path, unique_repo: str):
     write_config(project_dir, skills={"code-review": sk.fq})
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}
     return runner, sk
 
@@ -50,7 +50,7 @@ def test_uninstall_deletes_files_record_and_declaration(
         assert "code-review" not in lock.read_text()
 
     # status no longer knows the artifact (record dropped).
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     assert all(r["name"] != "code-review" for r in status)
 
 

@@ -103,7 +103,7 @@ def test_tui_seam_two_registries_repo_field_is_fully_qualified(
     assert result.returncode == 0, (
         f"multi-registry search must exit 0; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
 
     # Collect the `repo` fields from both artifacts
     skill_a_rows = [r for r in rows if "skill-a" in r.get("repo", "")]
@@ -181,7 +181,7 @@ def test_tui_seam_partial_registry_failure_exit_zero_and_healthy_surfaces(
         f"partial failure must exit 0 (healthy registry still surfaces); "
         f"got rc={result.returncode}; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
     assert any("healthy-skill" in repo for repo in repos), (
         f"healthy registry must surface its artifact despite the unreachable one; "
@@ -227,7 +227,7 @@ def test_tui_seam_same_repo_name_in_two_registries_not_deduped(
     assert result.returncode == 0, (
         f"multi-registry search must exit 0; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     dup_repos = [r.get("repo", "") for r in rows if shared in r.get("repo", "")]
     assert len(dup_repos) == 2, (
         f"same repo name in two registries must surface twice (no dedup); "
@@ -288,7 +288,7 @@ def test_tui_seam_registry_flag_collapses_to_single(
     assert result.returncode == 0, (
         f"search with --registry collapse must exit 0; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
 
     assert any("only-reg1" in repo for repo in repos), (
@@ -345,7 +345,7 @@ def test_tui_seam_grim_default_registry_env_does_not_override_registries(
     assert result.returncode == 0, (
         f"search with GRIM_DEFAULT_REGISTRY set must exit 0; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
 
     assert any("env-reg1" in repo for repo in repos), (
@@ -404,7 +404,7 @@ def test_tui_seam_grim_default_registry_env_selects_single_when_no_registries(
         f"search with GRIM_DEFAULT_REGISTRY and no [[registries]] must exit 0; "
         f"stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
 
     assert any("env-only-reg1" in repo for repo in repos), (
@@ -461,7 +461,7 @@ def test_tui_seam_registry_result_order_matches_declaration_order(
     assert result.returncode == 0, (
         f"multi-registry search must exit 0; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     repos = [r.get("repo", "") for r in rows]
 
     # Find the position of each registry's artifact in the result list

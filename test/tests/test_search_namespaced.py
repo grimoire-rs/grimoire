@@ -35,7 +35,7 @@ def test_search_namespaced_registry_finds_repo_in_namespace(
     # Use the full namespace path as the --registry value.
     rows = runner.json(
         "search", "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
-    )
+    )["items"]
     assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
 
     matching = [r for r in rows if "code-review" in r.get("repo", "")]
@@ -64,7 +64,7 @@ def test_search_namespaced_registry_empty_when_no_repos(
         f"got {result.returncode}; stderr: {result.stderr}"
     )
     import json
-    arr = json.loads(result.stdout)
+    arr = json.loads(result.stdout)["items"]
     assert isinstance(arr, list)
     # May be empty or may contain repos from other tests on the shared registry;
     # the key assertion is exit 0 and a valid array.

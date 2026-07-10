@@ -173,7 +173,7 @@ def test_install_registers_entries_in_every_client_config(
     # `--no-install` isolates the `install` step under test (which registers
     # the entry into every detected client) from the default install-on-add.
     runner.json("add", "--no-install", ref)
-    rows = runner.json("install")
+    rows = runner.json("install")["items"]
     assert rows[0]["status"] == "installed", rows
 
     claude = json.loads((project_dir / ".mcp.json").read_text())
@@ -192,7 +192,7 @@ def test_install_registers_entries_in_every_client_config(
     assert vscode["servers"]["grim-mcp"]["type"] == "stdio"
     assert vscode["servers"]["grim-mcp"]["env"]["GRIM_TOKEN"] == "${env:GITHUB_TOKEN}"
 
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     row = next(r for r in status if r["name"] == "grim-mcp")
     assert row["kind"] == "mcp"
     assert row["state"] == "installed"
@@ -217,14 +217,14 @@ def test_reformatting_the_config_is_not_modified_but_a_value_change_is(
     entry = doc["mcpServers"]["grim-mcp"]
     reordered = {"mcpServers": {"grim-mcp": dict(reversed(list(entry.items())))}}
     cfg.write_text(json.dumps(reordered, indent=None, separators=(",", ": ")))
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "installed"
 
     # A real value change: modified + refused without --force.
     doc = json.loads(cfg.read_text())
     doc["mcpServers"]["grim-mcp"]["command"] = "evil"
     cfg.write_text(json.dumps(doc))
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "modified"
     refused = runner.run("install", check=False)
     assert refused.returncode == 65, refused.stderr
@@ -237,7 +237,7 @@ def test_reformatting_the_config_is_not_modified_but_a_value_change_is(
 
     # Deleting the managed entry (file survives) reads as missing.
     cfg.write_text('{"mcpServers": {"other": {"command": "x"}}}')
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "missing"
 
 
@@ -296,7 +296,7 @@ def test_global_claude_splice_preserves_user_state(
 
     (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
     runner.json("lock", "--global")
-    rows = runner.json("install", "--global")
+    rows = runner.json("install", "--global")["items"]
     assert rows[0]["status"] == "installed", rows
 
     text = claude_json.read_text()
@@ -359,7 +359,7 @@ def test_global_copilot_registers_env_free_descriptors(
 
     (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
     runner.json("lock", "--global")
-    rows = runner.json("install", "--global")
+    rows = runner.json("install", "--global")["items"]
     assert rows[0]["status"] == "installed", rows
 
     copilot = json.loads((runner.home / ".copilot" / "mcp-config.json").read_text())

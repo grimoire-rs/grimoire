@@ -173,14 +173,14 @@ def test_mcp_status_tool_returns_payload(
         f"grim_status tool must not return an error, got: {call!r}"
     )
     # Content is a JSON string wrapping the status array.
-    mcp_payload = json.loads(call["content"][0]["text"])
+    mcp_payload = json.loads(call["content"][0]["text"])["items"]
     assert isinstance(mcp_payload, list), (
         f"grim_status payload must be a JSON array, got: {mcp_payload!r}"
     )
 
     # The MCP payload must exactly match the CLI's --format json output for
     # the same scope. Both go through command::status::run; one source of truth.
-    cli_payload = runner.json("status")
+    cli_payload = runner.json("status")["items"]
     assert mcp_payload == cli_payload, (
         f"MCP grim_status payload must equal CLI grim status --format json;\n"
         f"  MCP: {mcp_payload!r}\n"
@@ -308,7 +308,7 @@ def _call_status(runner: GrimRunner, cwd: Path, arguments: dict) -> list:
     )
     call = responses[2]["result"]
     assert call["isError"] is False, f"grim_status must not error, got: {call!r}"
-    payload = json.loads(call["content"][0]["text"])
+    payload = json.loads(call["content"][0]["text"])["items"]
     assert isinstance(payload, list), f"grim_status payload must be a JSON array, got {payload!r}"
     return payload
 
@@ -332,7 +332,7 @@ def test_mcp_status_config_param_redirects_scope(
 
     payload = _call_status(runner, project_dir, {"config": str(other_cfg)})
 
-    cli_payload = runner.json("status", "--config", str(other_cfg))
+    cli_payload = runner.json("status", "--config", str(other_cfg))["items"]
     assert payload == cli_payload, (
         f"MCP grim_status with config param must equal CLI --config output;\n"
         f"  MCP: {payload!r}\n  CLI: {cli_payload!r}"
@@ -379,7 +379,7 @@ def test_mcp_status_global_param_selects_global_scope(
 
     payload = _call_status(runner, project_dir, {"global": True})
 
-    cli_payload = runner.json("status", "--global")
+    cli_payload = runner.json("status", "--global")["items"]
     assert payload == cli_payload, (
         f"MCP grim_status with global param must equal CLI --global output;\n"
         f"  MCP: {payload!r}\n  CLI: {cli_payload!r}"
@@ -509,7 +509,7 @@ def test_mcp_search_browses_all_declared_registries(
     assert call["isError"] is False, (
         f"multi-registry grim_search must not error, got: {call!r}"
     )
-    rows = json.loads(call["content"][0]["text"])
+    rows = json.loads(call["content"][0]["text"])["items"]
     assert isinstance(rows, list), f"grim_search payload must be a JSON array, got {rows!r}"
 
     repos = [r.get("repo", "") for r in rows]
@@ -561,7 +561,7 @@ def test_mcp_search_partial_registry_failure_degrades(
     assert call["isError"] is False, (
         f"grim_search must not error when one registry is unreachable, got: {call!r}"
     )
-    rows = json.loads(call["content"][0]["text"])
+    rows = json.loads(call["content"][0]["text"])["items"]
     assert isinstance(rows, list), f"grim_search payload must be a JSON array, got {rows!r}"
 
     repos = [r.get("repo", "") for r in rows]

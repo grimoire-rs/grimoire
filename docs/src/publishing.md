@@ -664,7 +664,7 @@ wrapper object on stdout:
 
 ```json
 {
-  "entries": [
+  "items": [
     {
       "ref": "ghcr.io/acme/skills/code-review:1.2.0",
       "kind": "skill",
@@ -681,7 +681,7 @@ wrapper object on stdout:
 }
 ```
 
-`entries` carries one object per manifest entry processed, in publish
+`items` carries one object per manifest entry processed, in publish
 order. `announce` carries the completed `--announce` outcome: `outcome`
 is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
 deterministic topic branch on the index repository — is always present;

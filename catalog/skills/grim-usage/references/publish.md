@@ -202,8 +202,8 @@ Announce also tolerates GitLab's `HOME`-less step environments.
 *misconfiguration* (missing `host`/`namespace`/`owner_id`) exits 64.
 
 The outcome is machine-readable: `grim publish --format json` emits a
-wrapper object `{"entries": [...], "announce": ...}` where `announce`
-carries `{outcome, branch, url?}` — `outcome` is `pull-request`,
+wrapper object `{"items": [...], "announce": ...}` where `announce`
+carries `{outcome, branch, url}` — `outcome` is `pull-request`,
 `branch-pushed`, or `up-to-date`, and `branch` (the deterministic topic
 branch) is always present, so CI reads it from stdout instead of grepping
 stderr. `announce` is `null` when the step did not complete (no

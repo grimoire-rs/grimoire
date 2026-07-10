@@ -68,7 +68,7 @@ def test_registry_add_then_list_shows_entry(
 
     runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
-    result = runner.json("config", "registry", "list")
+    result = runner.json("config", "registry", "list")["items"]
 
     assert isinstance(result, list), (
         f"registry list --format json must return a JSON array; got: {type(result)}"
@@ -164,7 +164,7 @@ def test_registry_use_transfers_default_at_most_one(
 
     runner.run("config", "registry", "use", "corp")
 
-    result = runner.json("config", "registry", "list")
+    result = runner.json("config", "registry", "list")["items"]
     assert isinstance(result, list), "registry list must return a JSON array"
 
     defaults = [r for r in result if r.get("default") is True]
@@ -574,7 +574,7 @@ def test_unset_registry_alias_removes_whole_entry(
 
     runner.run("config", "unset", "registry.acme")
 
-    result = runner.json("config", "registry", "list")
+    result = runner.json("config", "registry", "list")["items"]
     aliases = [r.get("alias") for r in result if isinstance(r, dict)]
     assert "acme" not in aliases, (
         f"unset registry.acme must remove the entry; remaining aliases: {aliases}"
@@ -667,7 +667,7 @@ def test_set_registry_alias_default_true(
 
     runner.run("config", "set", "registry.acme.default", "true")
 
-    result = runner.json("config", "registry", "list")
+    result = runner.json("config", "registry", "list")["items"]
     defaults = [r for r in result if r.get("default") is True]
     assert len(defaults) == 1, (
         f"exactly one registry must be the default; got: {defaults!r}"

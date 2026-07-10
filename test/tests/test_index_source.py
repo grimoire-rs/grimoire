@@ -99,7 +99,7 @@ def _search_rows(runner) -> list[dict]:
     assert result.returncode == 0, (
         f"index-backed search must exit 0, got {result.returncode}; stderr: {result.stderr}"
     )
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert isinstance(rows, list)
     return rows
 
@@ -148,7 +148,7 @@ def test_search_http_index_filters_by_query(grim_at, project_dir: Path, http_ind
     runner = grim_at(project_dir)
     result = runner.run("--format", "json", "search", "--refresh", "alpha", check=False)
     assert result.returncode == 0, result.stderr
-    repos = [r.get("repo", "") for r in json.loads(result.stdout)]
+    repos = [r.get("repo", "") for r in json.loads(result.stdout)["items"]]
     assert repos == ["ghcr.io/acme/skills/alpha-skill"], f"got {repos}"
 
 

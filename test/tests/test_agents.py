@@ -252,7 +252,7 @@ def test_install_agent_exits_cleanly_and_lock_has_agent_entry(
     assert "my-agent" in lock
     assert "@sha256:" in lock
 
-    rows = _json.loads(result.stdout)
+    rows = _json.loads(result.stdout)["items"]
     assert any(r["status"] in ("installed", "unchanged") for r in rows), rows
     claude_file = project_dir / ".claude/agents/my-agent.md"
     assert claude_file.is_file()
@@ -282,7 +282,7 @@ def test_install_agent_per_client_rendering_when_materializer_available(
     runner.run("lock")
 
     result = runner.run("install", format="json")
-    rows = _json.loads(result.stdout)
+    rows = _json.loads(result.stdout)["items"]
     assert any(r["status"] in ("installed", "unchanged") for r in rows), (
         f"install must succeed for at least one client, got: {rows}"
     )
@@ -426,7 +426,7 @@ def test_status_shows_agent_row_with_kind_agent(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    rows = runner.json("status")
+    rows = runner.json("status")["items"]
     agent_rows = [r for r in rows if r.get("kind") == "agent"]
     assert agent_rows, (
         f"status must include at least one row with kind='agent', got: {rows}"
@@ -475,7 +475,7 @@ def test_uninstall_agent_undeclares_and_exits_cleanly(
         )
 
     # status no longer knows the artifact.
-    status = runner.json("status")
+    status = runner.json("status")["items"]
     assert all(r.get("name") != "del-agent" for r in status)
 
 
@@ -733,7 +733,7 @@ def test_bundle_with_agent_member_locks_and_lock_has_provenance(
     runner.run("install", format="json")
 
     # Verify bundle provenance in status.
-    status_rows = runner.json("status")
+    status_rows = runner.json("status")["items"]
     agent_row = next(
         (r for r in status_rows if r.get("kind") == "agent" and r["name"] == "bundle-agent"),
         None,

@@ -244,8 +244,8 @@ mod tests {
         let (report, code) = finish(outcomes).expect("clean run is success");
         assert_eq!(code, ExitCode::Success);
         let v = serde_json::to_value(&report).unwrap();
-        assert_eq!(v[0]["status"], "installed");
-        assert_eq!(v[1]["status"], "unchanged");
+        assert_eq!(v["items"][0]["status"], "installed");
+        assert_eq!(v["items"][1]["status"], "unchanged");
     }
 
     #[test]

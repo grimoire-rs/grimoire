@@ -284,8 +284,18 @@ mod tests {
         let new = lock_of(vec![locked("a", 'a'), locked("b", 'c')]);
         let r = build_report(&new, Some(&prev), &[]);
         let v = serde_json::to_value(&r).unwrap();
-        let a = v.as_array().unwrap().iter().find(|e| e["name"] == "a").unwrap();
-        let b = v.as_array().unwrap().iter().find(|e| e["name"] == "b").unwrap();
+        let a = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "a")
+            .unwrap();
+        let b = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "b")
+            .unwrap();
         assert_eq!(a["action"], "unchanged");
         assert_eq!(b["action"], "updated");
         assert!(b["old"].as_str().unwrap().contains("sha256:"));
@@ -296,8 +306,8 @@ mod tests {
         let new = lock_of(vec![locked("fresh", 'f')]);
         let r = build_report(&new, None, &[]);
         let v = serde_json::to_value(&r).unwrap();
-        assert!(v[0]["old"].is_null());
-        assert_eq!(v[0]["action"], "updated");
+        assert!(v["items"][0]["old"].is_null());
+        assert_eq!(v["items"][0]["action"], "updated");
     }
 
     #[test]
@@ -323,7 +333,7 @@ mod tests {
         ];
         let r = build_report(&new, None, &pruned);
         let v = serde_json::to_value(&r).unwrap();
-        let arr = v.as_array().unwrap();
+        let arr = v["items"].as_array().unwrap();
         assert_eq!(arr.len(), 3, "1 locked + 2 pruned rows");
         let gone = arr.iter().find(|e| e["name"] == "gone").unwrap();
         assert_eq!(gone["action"], "removed");
