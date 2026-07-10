@@ -14,6 +14,7 @@ pub mod config_error;
 pub mod declaration;
 pub mod global_config;
 pub mod hash;
+pub mod path_source;
 pub mod project_config;
 pub mod registry_resolve;
 pub mod scope;
@@ -21,11 +22,13 @@ pub mod scope;
 #[allow(unused_imports)]
 pub use config_error::{ConfigError, ConfigErrorKind};
 #[allow(unused_imports)]
-pub use declaration::{ConfigOptions, DesiredSet, RegistryConfig};
+pub use declaration::{ConfigOptions, DeclaredSource, DesiredSet, RegistryConfig};
 #[allow(unused_imports)]
 pub use global_config::GlobalConfig;
 #[allow(unused_imports)]
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
+#[allow(unused_imports)]
+pub use path_source::{PathSource, PathSourceError, is_path_value};
 #[allow(unused_imports)]
 pub use project_config::{DiscoveredConfig, ProjectConfig};
 #[allow(unused_imports)]

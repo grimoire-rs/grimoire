@@ -16,7 +16,67 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::hash;
+use crate::config::path_source::PathSource;
 use crate::oci::Identifier;
+
+/// Where a declared artifact comes from: an OCI registry reference or a
+/// local path source.
+///
+/// The `Display` form is exactly the declared config value — an
+/// identifier's canonical string or the raw `./…` path — so
+/// `write_config` re-serialization and the declaration hash are both
+/// byte-stable against the authored declaration.
+// TODO(local-path-sources): staging allow — `DesiredSet` re-types to this
+// enum in the next phase; remove when that ripple lands.
+#[allow(dead_code, reason = "phase-1 core type; DesiredSet re-type lands next")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredSource {
+    /// A fully-qualified OCI reference (floating tag or pinned digest).
+    Registry(Identifier),
+    /// A local path relative to the config file's directory (or absolute).
+    Path(PathSource),
+}
+
+// TODO(local-path-sources): staging allow — see the enum note above.
+#[allow(dead_code, reason = "phase-1 core type; DesiredSet re-type lands next")]
+impl DeclaredSource {
+    /// The OCI identifier, when this source is a registry reference.
+    pub fn identifier(&self) -> Option<&Identifier> {
+        match self {
+            Self::Registry(id) => Some(id),
+            Self::Path(_) => None,
+        }
+    }
+
+    /// The path source, when this source is a local one.
+    pub fn path(&self) -> Option<&PathSource> {
+        match self {
+            Self::Registry(_) => None,
+            Self::Path(path) => Some(path),
+        }
+    }
+}
+
+impl std::fmt::Display for DeclaredSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Registry(id) => id.fmt(f),
+            Self::Path(path) => path.fmt(f),
+        }
+    }
+}
+
+impl From<Identifier> for DeclaredSource {
+    fn from(id: Identifier) -> Self {
+        Self::Registry(id)
+    }
+}
+
+impl From<PathSource> for DeclaredSource {
+    fn from(path: PathSource) -> Self {
+        Self::Path(path)
+    }
+}
 
 /// The view mode the catalog browser opens in, as set in `[options.tui]`.
 ///

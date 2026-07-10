@@ -10,6 +10,7 @@
 //! <https://agentskills.io/specification>.
 
 pub mod agent_frontmatter;
+pub mod local_pack;
 pub mod rule_frontmatter;
 pub mod skill_description;
 pub mod skill_error;
@@ -19,6 +20,8 @@ pub mod skill_package;
 
 #[allow(unused_imports)]
 pub use agent_frontmatter::{AgentFrontmatter, ParsedAgent};
+#[allow(unused_imports)]
+pub use local_pack::pack_local_artifact;
 #[allow(unused_imports)]
 pub use rule_frontmatter::{ParsedRule, RuleFrontmatter};
 #[allow(unused_imports)]

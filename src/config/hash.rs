@@ -79,13 +79,16 @@ pub fn declaration_hash(set: &DesiredSet) -> String {
     }
 }
 
-/// Emit `{name:idstr,...}` with keys sorted lexicographically and values
-/// JSON-escaped via `serde_json` (RFC 8785-compatible string encoding).
+/// Emit `{name:valuestr,...}` with keys sorted lexicographically and
+/// values JSON-escaped via `serde_json` (RFC 8785-compatible string
+/// encoding). Generic over the value's `Display`: a registry identifier
+/// emits its canonical string (byte-identical to the pre-path-sources
+/// algorithm), a path source emits the raw declared `./…` string.
 ///
 /// `BTreeMap` already iterates in sorted key order, but the sort is made
 /// explicit (collect + sort) so the canonical form does not silently
 /// depend on the input collection's ordering guarantees.
-fn push_canonical_table(out: &mut String, table: &std::collections::BTreeMap<String, crate::oci::Identifier>) {
+fn push_canonical_table<V: std::fmt::Display>(out: &mut String, table: &std::collections::BTreeMap<String, V>) {
     let mut pairs: Vec<(&str, String)> = table.iter().map(|(k, v)| (k.as_str(), v.to_string())).collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
 

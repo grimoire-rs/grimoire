@@ -18,6 +18,7 @@ pub mod lock_io;
 pub mod lock_version;
 pub mod locked_artifact;
 pub mod locked_bundle;
+pub mod locked_source;
 
 #[allow(unused_imports)]
 pub use file_lock::ConfigFileLock;
@@ -29,3 +30,5 @@ pub use lock_error::{LockError, LockErrorKind};
 pub use lock_version::LockVersion;
 #[allow(unused_imports)]
 pub use locked_artifact::LockedArtifact;
+#[allow(unused_imports)]
+pub use locked_source::LockedSource;
