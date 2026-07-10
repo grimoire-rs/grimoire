@@ -51,8 +51,10 @@ use super::scope_resolution;
 /// `grim add` arguments.
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// The artifact reference (`registry/repo:tag` or `@digest`). A short
-    /// name is expanded against the effective default registry.
+    /// The artifact reference (`registry/repo:tag` or `@digest`), or a
+    /// local path source (`./…`, `../…`, or absolute). A short name is
+    /// expanded against the effective default registry; a path declares
+    /// the artifact verbatim and pins it by content hash.
     pub reference: String,
 
     /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, or `mcp`).
@@ -112,6 +114,12 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+
+    // A `./`/`../`-prefixed or absolute reference is a local path source —
+    // declared verbatim, pinned by content hash, no registry round-trip.
+    if crate::config::is_path_value(&args.reference) {
+        return add_path_source(ctx, &scope, args).await;
+    }
 
     // Resolve the reference against the scope's registry set: a qualified
     // `alias/repo` substitutes that alias's url, an explicit registry parses
@@ -252,6 +260,163 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
             .map(|a| a.source.provenance())
             .unwrap_or_else(|| id.to_string())
     };
+
+    Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// Declare a local path source: detect the kind by shape (or honor
+/// `--kind`), validate + pack once (early failure, intrinsic name),
+/// rewrite a relative CLI path to be config-dir-relative, then reuse the
+/// declare → write-config → relock → install pipeline.
+async fn add_path_source(
+    ctx: &Context,
+    scope: &super::scope_resolution::ResolvedScope,
+    args: &AddArgs,
+) -> anyhow::Result<(AddReport, ExitCode)> {
+    use crate::config::path_source::{PathSource, relative_to};
+
+    let raw = args.reference.as_str();
+    let cli_path = std::path::Path::new(raw);
+    let abs = if cli_path.is_absolute() {
+        cli_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| {
+                crate::error::Error::from(crate::skill::SkillError::new(
+                    cli_path,
+                    crate::skill::SkillErrorKind::Io(e),
+                ))
+            })?
+            .join(cli_path)
+    };
+    let abs = dunce::canonicalize(&abs).map_err(|e| {
+        anyhow::Error::from(crate::error::Error::from(crate::skill::SkillError::new(
+            &abs,
+            crate::skill::SkillErrorKind::Io(e),
+        )))
+    })?;
+
+    // Kind by shape (mirrors `grim build`): a dir with SKILL.md is a
+    // skill, a `.md` file a rule; `--kind agent` overrides (an agent is
+    // rule-shaped). Bundle/mcp path sources are not supported here.
+    let kind = match args.kind.as_deref() {
+        Some("skill") => ArtifactKind::Skill,
+        Some("rule") => ArtifactKind::Rule,
+        Some("agent") => ArtifactKind::Agent,
+        Some(other) => {
+            return Err(anyhow::Error::from(crate::error::Error::from(
+                CommandError::ConfigUsage(format!("path sources are not supported for {other} artifacts")),
+            )));
+        }
+        None => {
+            if abs.is_dir() && abs.join("SKILL.md").is_file() {
+                ArtifactKind::Skill
+            } else if abs.is_file() && abs.extension().is_some_and(|e| e == "md") {
+                ArtifactKind::Rule
+            } else {
+                return Err(anyhow::Error::from(crate::error::Error::from(
+                    CommandError::ConfigUsage(format!(
+                        "cannot infer a kind for '{raw}': expected a skill directory (SKILL.md) or a rule .md file; pass --kind agent for an agent"
+                    )),
+                )));
+            }
+        }
+    };
+
+    // Validate + pack once up front: an invalid source fails before any
+    // config write, and the intrinsic name feeds the default binding name.
+    let (intrinsic_name, _layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
+    let name = args.name.clone().unwrap_or(intrinsic_name);
+
+    // Binding-name charset guard (same as the registry path).
+    if let Err(reason) = crate::skill::SkillName::parse(&name) {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            CommandError::InvalidBindingName { kind, reason },
+        )));
+    }
+
+    // Declared value: a relative CLI path is rewritten config-dir-relative
+    // (the anchor every consumer resolves against); an absolute CLI path
+    // is declared verbatim (project scope warns about portability).
+    let source = if cli_path.is_absolute() {
+        super::grim(PathSource::parse(raw).map_err(|e| {
+            crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::ArtifactValuePathInvalid {
+                    name: name.clone(),
+                    value: raw.to_string(),
+                    reason: e.to_string(),
+                },
+            )
+        }))?
+    } else {
+        let config_dir = dunce::canonicalize(scope.config_dir()).map_err(|e| {
+            anyhow::Error::from(crate::error::Error::from(crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::Io(e),
+            )))
+        })?;
+        super::grim(relative_to(&config_dir, &abs).map_err(|e| {
+            crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::ArtifactValuePathInvalid {
+                    name: name.clone(),
+                    value: raw.to_string(),
+                    reason: e.to_string(),
+                },
+            )
+        }))?
+    };
+    let declared = crate::config::declaration::DeclaredSource::Path(source);
+
+    // Same-name conflict guard as the registry path: re-declaring the
+    // identical source is idempotent, anything else refuses loudly.
+    let mut set = scope.set.clone();
+    if let Some(existing) = declare(&mut set, kind, name.clone(), declared.clone())
+        && existing != declared
+    {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            CommandError::DeclareConflict {
+                kind,
+                name,
+                existing: existing.to_string(),
+                requested: declared.to_string(),
+            },
+        )));
+    }
+
+    super::grim(write_config(
+        &scope.config_path,
+        &scope.options,
+        &scope.registries,
+        &set,
+    ))?;
+
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+    let previous = lock_io::load(&scope.lock_path).ok();
+    let new_lock = super::grim(
+        relock_declared(
+            &set,
+            previous.as_ref(),
+            kind,
+            &name,
+            &access,
+            scope.scope,
+            scope.config_dir(),
+        )
+        .await,
+    )?;
+    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
+
+    if args.install.enabled() {
+        install_added(ctx, scope, kind, &name, &new_lock, &access).await?;
+    }
+
+    let pinned = new_lock
+        .iter_artifacts()
+        .find(|a| a.kind == kind && a.name == name)
+        .map(|a| a.source.provenance())
+        .unwrap_or_else(|| declared.to_string());
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
 }
