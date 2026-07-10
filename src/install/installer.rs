@@ -253,37 +253,35 @@ async fn install_one<M: ArtifactMaterializer>(
     let materialized_root = staging.path().join("content");
     materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
 
-    let canonical = match kind {
-        ArtifactKind::Skill => materialized_root.join(&artifact.name),
-        ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", artifact.name)),
-        // Bundles expand into members at resolve time and never enter the
-        // lock, so the installer never sees one.
-        ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
-        // MCP installs diverge into config registration before this point.
-        ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
-    };
-    if !canonical.exists() {
-        return Err(
-            InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
-                "artifact '{}' ({kind}) did not produce the expected '{}' entry",
-                artifact.name,
-                canonical.display()
-            )))
-            .into(),
-        );
-    }
+    let canonical = locate_canonical(&materialized_root, kind, &artifact.name)?;
 
     // A rule may carry a sibling support directory staged beside the index
-    // file (`<root>/<name>/…`); a plain single-file rule has none. Skills
+    // file (`<root>/<stem>/…`); a plain single-file rule has none. The
+    // sibling is keyed by the INDEX file's stem (the wire layout), which
+    // under a `--name` rebinding differs from the binding name. Skills
     // are a single directory tree, never a support dir; agents are a
     // single file with no support-directory contract.
     let staged_support: Option<std::path::PathBuf> = match kind {
-        ArtifactKind::Rule => {
-            let dir = materialized_root.join(&artifact.name);
+        ArtifactKind::Rule => canonical.file_stem().and_then(|stem| {
+            let dir = materialized_root.join(stem);
             dir.is_dir().then_some(dir)
-        }
+        }),
         _ => None,
     };
+    // A rebound multi-file rule installs its support dir under the BINDING
+    // name (consistent footprint for uninstall), but the index body's
+    // relative links still point at the original stem — warn, don't fail.
+    if staged_support.is_some()
+        && let Some(stem) = canonical.file_stem()
+        && stem != std::ffi::OsStr::new(&artifact.name)
+    {
+        tracing::warn!(
+            "rule '{}' was renamed from '{}': its support directory installs as '{}/' and relative links inside the index may not resolve",
+            artifact.name,
+            stem.to_string_lossy(),
+            artifact.name
+        );
+    }
 
     // Effective materialize set: the explicit `--client` targets PLUS — only
     // when the pin changed — every still-active recorded client. Version is an
@@ -844,6 +842,71 @@ async fn install_mcp(
     })
 }
 
+/// Locate the canonical entry of an extracted artifact tree.
+///
+/// The wire tar is keyed by the artifact's ORIGINAL name (`<name>/…` for a
+/// skill, `<name>.md` for a rule/agent), while `name` here is the config
+/// BINDING name — under a `--name` rebinding the two differ. Fast path:
+/// the binding-keyed entry exists (no rename). Fallback: scan the staging
+/// root for exactly one candidate of the kind's shape — a single top-level
+/// directory (skill) or a single top-level `.md` file (rule/agent). Zero
+/// or several candidates is a corrupt artifact.
+///
+/// # Errors
+///
+/// [`InstallErrorKind::MaterializeFailed`] when no unambiguous entry
+/// exists; [`InstallErrorKind::TargetIo`] for a filesystem failure.
+// The async siblings on this path return the same large error type without
+// tripping `result_large_err` (their signature is a `Future`, which the
+// lint does not inspect); this is a sync helper, so the suppression lives
+// here rather than reshaping the shared error type — same precedent as
+// `resolve::resolver::merge_bundle_members`.
+#[allow(clippy::result_large_err)]
+fn locate_canonical(
+    materialized_root: &std::path::Path,
+    kind: ArtifactKind,
+    name: &str,
+) -> Result<std::path::PathBuf, crate::error::Error> {
+    let exact = match kind {
+        ArtifactKind::Skill => materialized_root.join(name),
+        ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{name}.md")),
+        // Bundles expand into members at resolve time and never enter the
+        // lock, so the installer never sees one.
+        ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
+        // MCP installs diverge into config registration before this point.
+        ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
+    };
+    if exact.exists() {
+        return Ok(exact);
+    }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(materialized_root).map_err(|e| target_io(materialized_root, e))? {
+        let path = entry.map_err(|e| target_io(materialized_root, e))?.path();
+        let matches = match kind {
+            ArtifactKind::Skill => path.is_dir(),
+            ArtifactKind::Rule | ArtifactKind::Agent => {
+                path.is_file() && path.extension() == Some(std::ffi::OsStr::new("md"))
+            }
+            ArtifactKind::Bundle | ArtifactKind::Mcp => false,
+        };
+        if matches {
+            candidates.push(path);
+        }
+    }
+    match candidates.as_slice() {
+        [single] => Ok(single.clone()),
+        _ => Err(
+            InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+                "artifact '{name}' ({kind}) did not produce the expected '{}' entry ({} candidate(s) found)",
+                exact.display(),
+                candidates.len()
+            )))
+            .into(),
+        ),
+    }
+}
+
 /// Remove `path` whether it is a file or a directory.
 fn remove_path(path: &std::path::Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
@@ -913,6 +976,49 @@ mod tests {
     }
 
     use super::super::materializer::DefaultMaterializer;
+
+    // ── locate_canonical ───────────────────────────────────────────
+
+    #[test]
+    fn locate_canonical_prefers_binding_keyed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("cr")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("other")).unwrap();
+        let found = locate_canonical(tmp.path(), ArtifactKind::Skill, "cr").unwrap();
+        assert_eq!(found, tmp.path().join("cr"));
+    }
+
+    #[test]
+    fn locate_canonical_falls_back_to_single_dir_for_rebound_skill() {
+        // The wire tar is keyed by the ORIGINAL name; a `--name` rebinding
+        // must still find the tree.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("code-review")).unwrap();
+        let found = locate_canonical(tmp.path(), ArtifactKind::Skill, "cr").unwrap();
+        assert_eq!(found, tmp.path().join("code-review"));
+    }
+
+    #[test]
+    fn locate_canonical_falls_back_to_single_md_for_rebound_rule() {
+        // A multi-file rule stages `<stem>.md` plus a sibling dir — the
+        // dir must not confuse the index lookup.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("rust-style.md"), "# r\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("rust-style")).unwrap();
+        let found = locate_canonical(tmp.path(), ArtifactKind::Rule, "rs").unwrap();
+        assert_eq!(found, tmp.path().join("rust-style.md"));
+    }
+
+    #[test]
+    fn locate_canonical_rejects_ambiguous_and_empty_trees() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty: no candidates.
+        assert!(locate_canonical(tmp.path(), ArtifactKind::Skill, "cr").is_err());
+        // Ambiguous: two top-level dirs, none binding-keyed.
+        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("b")).unwrap();
+        assert!(locate_canonical(tmp.path(), ArtifactKind::Skill, "cr").is_err());
+    }
 
     /// A single-layer manifest whose layer digest = sha256(`blob`).
     fn manifest_for(blob: &[u8]) -> OciManifest {
@@ -1996,11 +2102,20 @@ mod tests {
     #[tokio::test]
     async fn progress_sink_notified_once_per_artifact_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        let blob = rule_tar("a", b"# a\n");
-        let lock = lock_of(vec![
-            locked_rule("a", &blob),
-            locked_rule("b", &rule_tar("b", b"# b\n")),
-        ]);
+        // A two-index tar: rule "a" resolves its exact `a.md`; rule "b" has
+        // no `b.md` and the rename fallback finds TWO `.md` candidates —
+        // ambiguous, so "b" errors (a lone foreign index would be adopted
+        // as a legitimate `--name` rebinding).
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, body) in [("a.md", b"# a\n"), ("x.md", b"# x\n")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            builder.append_data(&mut h, path, body.as_slice()).unwrap();
+        }
+        let blob = builder.into_inner().unwrap();
+        let lock = lock_of(vec![locked_rule("a", &blob), locked_rule("b", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
@@ -2010,9 +2125,9 @@ mod tests {
 
         let r = install_all_with_progress(&lock, &access, &m, &target, &mut state, &roots, false, &recorder).await;
         assert_eq!(r.len(), 2);
-        // Exercise the error path this test narrates: the single-blob mock
-        // serves `a.md` for both, so "b" materializes no `b.md` and errors —
-        // yet its `advance` still fired (advance precedes install_one).
+        // Exercise the error path this test narrates: "b" errors on the
+        // ambiguous tree — yet its `advance` still fired (advance precedes
+        // install_one).
         assert!(r[0].result.is_ok(), "first rule installs cleanly");
         assert!(r[1].result.is_err(), "second rule errors, but its advance still fired");
 

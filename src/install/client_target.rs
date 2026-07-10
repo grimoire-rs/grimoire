@@ -169,7 +169,7 @@ impl ClientTarget {
         support_dir: Option<&Path>,
     ) -> Result<Vec<MaterializedFile>, InstallError> {
         match kind {
-            ArtifactKind::Skill => self.materialize_skill(artifact_root, dest),
+            ArtifactKind::Skill => self.materialize_skill(name, artifact_root, dest),
             ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned, support_dir),
             ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
             // Bundles never materialize; they expand into members.
@@ -183,10 +183,20 @@ impl ClientTarget {
     /// Copy a skill tree into `dest`. Every file copies verbatim except
     /// `SKILL.md` when it carries tool-namespaced metadata: that index is
     /// rendered per client (and marked `generated`, so the integrity hash
-    /// anchors on the *expected rendered* bytes). A plain skill — or a
-    /// `SKILL.md` that does not parse — installs byte-identical to the
-    /// canonical tree, preserving the historical verbatim contract.
-    fn materialize_skill(self, artifact_root: &Path, dest: &Path) -> Result<Vec<MaterializedFile>, InstallError> {
+    /// anchors on the *expected rendered* bytes). A `--name` rebinding
+    /// (binding `name` ≠ frontmatter name) rewrites the frontmatter
+    /// `name` to the binding first — the Agent Skills directory-equality
+    /// rule must hold at the destination — and that index is generated
+    /// even for a vendor that would otherwise copy verbatim. A plain
+    /// skill under its own name — or a `SKILL.md` that does not parse —
+    /// installs byte-identical to the canonical tree, preserving the
+    /// historical verbatim contract.
+    fn materialize_skill(
+        self,
+        name: &str,
+        artifact_root: &Path,
+        dest: &Path,
+    ) -> Result<Vec<MaterializedFile>, InstallError> {
         let mut out = Vec::new();
         copy_tree(artifact_root, dest, &mut out)?;
 
@@ -194,16 +204,28 @@ impl ClientTarget {
         if index_src.is_file() {
             let doc_bytes = std::fs::read(&index_src).map_err(|e| target_io(&index_src, e))?;
             let doc = String::from_utf8_lossy(&doc_bytes);
+            // Rebind BEFORE the vendor render so every vendor projects
+            // from the corrected document.
+            let rebound = super::render::rebind_skill_name(&doc, name);
+            let effective = rebound.as_deref().unwrap_or(&doc);
             let rendered = self
                 .vendor()
-                .skill_index(&doc)
+                .skill_index(effective)
                 .map_err(|e| materialize_failed(e.to_string()))?;
-            if let Some(rendered) = rendered {
-                for warning in &rendered.warnings {
-                    tracing::warn!("{warning}");
+            let generated_doc = match rendered {
+                Some(rendered) => {
+                    for warning in &rendered.warnings {
+                        tracing::warn!("{warning}");
+                    }
+                    Some(rendered.document)
                 }
+                // No vendor transform — but a rebound index is still a
+                // generated file, never the canonical bytes.
+                None => rebound,
+            };
+            if let Some(text) = generated_doc {
                 let index_dest = dest.join("SKILL.md");
-                std::fs::write(&index_dest, rendered.document.as_bytes()).map_err(|e| target_io(&index_dest, e))?;
+                std::fs::write(&index_dest, text.as_bytes()).map_err(|e| target_io(&index_dest, e))?;
                 for file in &mut out {
                     if file.path == index_dest {
                         file.generated = true;
@@ -676,6 +698,46 @@ mod tests {
                 std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
                 canonical,
                 "{client}: byte-identical install"
+            );
+        }
+    }
+
+    #[test]
+    fn materialize_skill_rebound_binding_rewrites_frontmatter_name() {
+        // Regression: a `--name` rebinding (binding ≠ frontmatter name)
+        // must keep the Agent Skills directory-equality rule true at the
+        // destination — the installed SKILL.md carries the binding as its
+        // `name`, is marked generated, and every other key plus the body
+        // survives. Siblings stay verbatim.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("foo");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: foo\ndescription: d\nmetadata:\n  keywords: a,b\n---\n# body\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
+
+        for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
+            let dest = tmp.path().join(format!("out-{client}/bar"));
+            let files = client
+                .materialize(ArtifactKind::Skill, "bar", &root, &dest, "p", None)
+                .unwrap();
+            let index = dest.join("SKILL.md");
+            assert!(
+                files.iter().any(|f| f.path == index && f.generated),
+                "{client}: rebound SKILL.md must be generated"
+            );
+            let doc = std::fs::read_to_string(&index).unwrap();
+            assert!(doc.contains("name: bar"), "{client}: name rewritten to binding: {doc}");
+            assert!(!doc.contains("name: foo"), "{client}: stale name gone: {doc}");
+            assert!(doc.contains("keywords: a,b"), "{client}: plain metadata kept: {doc}");
+            assert!(doc.ends_with("# body\n"), "{client}: body preserved: {doc}");
+            assert_eq!(
+                std::fs::read_to_string(dest.join("scripts/run.sh")).unwrap(),
+                "echo hi\n",
+                "{client}: siblings stay verbatim"
             );
         }
     }

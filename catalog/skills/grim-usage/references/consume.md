@@ -70,7 +70,10 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   already declared for that kind under a *different* reference refuses
   (exit 64) instead of silently replacing it — pass `--name` to bind the
   new reference under another name. Re-adding the same reference is a
-  no-op.
+  no-op. A renamed skill installs under the binding name with its
+  `SKILL.md` frontmatter `name` rewritten to match (no client-level name
+  collision); a renamed multi-file rule may break the index's relative
+  links (grim warns).
 - `--no-install` stops at declare + lock — no materialization. Use it to
   add several artifacts before one `grim install`, or to pick clients with
   `grim install --client`. Only the added entry installs otherwise; the

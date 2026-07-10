@@ -435,6 +435,39 @@ pub fn render_skill_doc(doc: &str, vendor: &dyn Vendor) -> Result<Option<Rendere
     }))
 }
 
+/// Rewrite the frontmatter `name` of a skill document to `binding`, or
+/// `None` when nothing needs rewriting: the names already agree, or the
+/// document does not parse as a skill at all (a foreign artifact is
+/// copied untouched).
+///
+/// Why: a `--name` rebinding installs under `skills/<binding>/`, and the
+/// Agent Skills directory-equality rule (enforced at build time in
+/// `skill_package`) requires the frontmatter `name` to equal that
+/// directory name — without the rewrite, a rebound skill ships a stale
+/// `name` that can collide with the original at the client level.
+///
+/// Operates on the raw frontmatter mapping so every other key — known,
+/// metadata, unknown — survives; only the `name` value changes.
+/// Deterministic (identical input yields identical output), so the
+/// installer's untracked-clobber preview and the real install agree.
+pub fn rebind_skill_name(doc: &str, binding: &str) -> Option<String> {
+    let path = std::path::Path::new("SKILL.md");
+    let (fm_yaml, body) = SkillFrontmatter::split(doc, path).ok()?;
+    let fm = SkillFrontmatter::from_yaml(&fm_yaml, path).ok()?;
+    if fm.name.as_str() == binding {
+        return None;
+    }
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&fm_yaml).ok()?;
+    mapping.insert(Value::String("name".to_string()), Value::String(binding.to_string()));
+
+    let mut document = String::with_capacity(doc.len() + 16);
+    document.push_str("---\n");
+    document.push_str(&serialize_mapping(&mapping));
+    document.push_str("---\n");
+    document.push_str(&body);
+    Some(document)
+}
+
 /// Serialize a struct to a YAML mapping (a struct always serializes to a
 /// mapping; the fallback keeps the arm total without panicking).
 fn to_mapping<T: serde::Serialize>(value: &T) -> serde_yaml::Mapping {
@@ -590,6 +623,42 @@ mod tests {
 
     fn fm(doc: &str) -> SkillFrontmatter {
         SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).expect("parse")
+    }
+
+    // ── rebind_skill_name ──────────────────────────────────────────
+
+    #[test]
+    fn rebind_rewrites_only_the_name_key() {
+        let doc =
+            "---\nname: foo\ndescription: d\nlicense: MIT\nmetadata:\n  keywords: a,b\nfuture-key: kept\n---\n# body\n";
+        let out = rebind_skill_name(doc, "bar").expect("mismatch must rebind");
+        assert!(out.contains("name: bar"), "{out}");
+        assert!(!out.contains("name: foo"), "{out}");
+        assert!(out.contains("license: MIT"), "known key kept: {out}");
+        assert!(out.contains("keywords: a,b"), "metadata kept: {out}");
+        assert!(out.contains("future-key: kept"), "unknown key kept: {out}");
+        assert!(out.ends_with("# body\n"), "body preserved: {out}");
+    }
+
+    #[test]
+    fn rebind_is_none_when_names_agree() {
+        let doc = "---\nname: foo\ndescription: d\n---\n";
+        assert!(rebind_skill_name(doc, "foo").is_none());
+    }
+
+    #[test]
+    fn rebind_is_none_for_a_foreign_document() {
+        // No frontmatter / not a skill — copied untouched, never rewritten.
+        assert!(rebind_skill_name("# plain markdown\n", "bar").is_none());
+        assert!(rebind_skill_name("---\ndescription: no name\n---\n", "bar").is_none());
+    }
+
+    #[test]
+    fn rebind_is_deterministic() {
+        let doc = "---\nname: foo\ndescription: d\nmetadata:\n  keywords: a\n---\nbody\n";
+        let a = rebind_skill_name(doc, "bar").unwrap();
+        let b = rebind_skill_name(doc, "bar").unwrap();
+        assert_eq!(a, b, "rebind must be byte-identical across runs");
     }
 
     fn rule(doc: &str) -> ParsedRule {

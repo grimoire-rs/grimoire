@@ -190,6 +190,14 @@ reference in the error. Pass `--name` to bind the new reference under a
 different name. Re-declaring the exact same reference stays a no-op
 overwrite.
 
+A renamed skill installs under the binding name, and the installed
+`SKILL.md` frontmatter `name` is rewritten to match it (the Agent Skills
+standard requires the two to agree), so a rename never leaves two
+installed skills claiming the same name. A renamed multi-file rule keeps
+its support directory under the binding name too — relative links inside
+the index that point at the original name may not resolve; grim warns
+when that applies.
+
 ```sh
 grim add ghcr.io/acme/code-review:1
 grim add --kind rule --name rust-style ghcr.io/acme/rust-style:2

@@ -90,9 +90,9 @@ def test_add_name_override_replaces_inferred_name(
     write_config(project_dir)
     runner = grim_at(project_dir)
 
-    # `--no-install`: a `--name` that differs from the skill's tar root
-    # cannot be materialized (the installer keys the extracted tree off the
-    # binding name), so this stays a declaration-only check.
+    # `--no-install`: declaration-only check (the install path of a
+    # rebound skill is covered by
+    # test_add_name_override_installs_rebound_skill below).
     out = runner.json("add", "--no-install", sk.fq, "--name", "cr")
     assert out["name"] == "cr", (
         f"--name 'cr' must override the default segment name, got {out['name']!r}"
@@ -110,6 +110,40 @@ def test_add_name_override_replaces_inferred_name(
     assert not skills_section.strip().startswith("code-review"), (
         "config skills key must be 'cr', not 'code-review'"
     )
+
+
+def test_add_name_override_installs_rebound_skill(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `--name` rebinding installs: the tree lands under the binding
+    directory and the installed SKILL.md frontmatter `name` is rewritten
+    to the binding (Agent Skills directory-equality rule)."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {
+            "code-review/SKILL.md": (
+                "---\nname: code-review\ndescription: d\n---\n# CR\n"
+            ),
+            "code-review/scripts/run.sh": "echo hi\n",
+        },
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    out = runner.json("add", sk.fq, "--name", "cr")
+    assert out["name"] == "cr"
+
+    index = project_dir / ".claude/skills/cr/SKILL.md"
+    assert index.is_file(), "rebound skill must materialize under the binding dir"
+    doc = index.read_text()
+    assert "name: cr" in doc, f"frontmatter name must be rewritten to the binding:\n{doc}"
+    assert "name: code-review" not in doc, f"stale artifact name must be gone:\n{doc}"
+    assert doc.endswith("# CR\n"), f"body must be preserved:\n{doc}"
+    assert (
+        project_dir / ".claude/skills/cr/scripts/run.sh"
+    ).read_text() == "echo hi\n", "sibling files stay verbatim"
 
 
 def test_add_kind_override_still_works(
