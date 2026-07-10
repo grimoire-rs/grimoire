@@ -102,8 +102,15 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
         self.inner.fetch_manifest(id).await
     }
 
-    async fn fetch_blob(&self, repo: &Identifier, digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
-        // Content-addressed: a present blob is authoritative.
+    async fn fetch_blob(
+        &self,
+        repo: &Identifier,
+        digest: &Digest,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, AccessError> {
+        // Content-addressed: a present blob is authoritative. A cached blob
+        // is already bounded and digest-verified, so the cap only needs to
+        // gate the network delegate below.
         match self.blobs.get(digest) {
             Ok(Some(bytes)) => return Ok(Some(bytes)),
             Ok(None) => {}
@@ -114,7 +121,7 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
             return Err(AccessError::with_identifier(repo.clone(), AccessErrorKind::OfflineMiss));
         }
 
-        let Some(bytes) = self.inner.fetch_blob(repo, digest).await? else {
+        let Some(bytes) = self.inner.fetch_blob(repo, digest, max_bytes).await? else {
             return Ok(None);
         };
 
@@ -209,7 +216,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             *self.calls.lock().unwrap() += 1;
             Ok(Some(self.blob.clone()))
         }
@@ -376,7 +388,10 @@ mod tests {
             blob: payload.clone(),
         };
         let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
-        assert_eq!(access.fetch_blob(&id(), &digest).await.unwrap(), Some(payload));
+        assert_eq!(
+            access.fetch_blob(&id(), &digest, u64::MAX).await.unwrap(),
+            Some(payload)
+        );
         assert_eq!(*calls.lock().unwrap(), 0, "warm blob cache must not call inner");
     }
 
@@ -393,7 +408,7 @@ mod tests {
         };
         let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
         let err = access
-            .fetch_blob(&id(), &requested)
+            .fetch_blob(&id(), &requested, u64::MAX)
             .await
             .expect_err("mismatched blob must error");
         assert!(matches!(err.kind, AccessErrorKind::DigestMismatch { .. }));
@@ -411,7 +426,7 @@ mod tests {
         };
         let access = CachedAccess::new(inner, tags, blobs, AccessMode::Offline);
         let err = access
-            .fetch_blob(&id(), &digest)
+            .fetch_blob(&id(), &digest, u64::MAX)
             .await
             .expect_err("cold offline blob must fail");
         assert!(matches!(err.kind, AccessErrorKind::OfflineMiss));

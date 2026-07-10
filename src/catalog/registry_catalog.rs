@@ -1176,9 +1176,10 @@ mod tests {
             &self,
             repo: &Identifier,
             digest: &crate::oci::Digest,
+            max_bytes: u64,
         ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
             *self.blob_pulled.lock().unwrap() = true;
-            self.inner.fetch_blob(repo, digest).await
+            self.inner.fetch_blob(repo, digest, max_bytes).await
         }
         async fn list_tags(
             &self,
@@ -1521,6 +1522,7 @@ mod tests {
             &self,
             _: &Identifier,
             _: &crate::oci::Digest,
+            _max_bytes: u64,
         ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
             unreachable!()
         }

@@ -83,6 +83,12 @@ pub enum AccessErrorKind {
     #[error("digest mismatch: expected {expected}, got {actual}")]
     DigestMismatch { expected: Digest, actual: Digest },
 
+    /// The blob body exceeded the caller's byte ceiling mid-stream — the
+    /// registry served more bytes than the descriptor declared (CWE-770).
+    /// Terminal.
+    #[error("blob exceeds the {limit}-byte size cap")]
+    OversizeBlob { limit: u64 },
+
     /// A local I/O error (tag cache, blob store) with optional path.
     #[error("I/O error{}", .path.as_ref().map(|p| format!(" for {}", p.display())).unwrap_or_default())]
     Io {

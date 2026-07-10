@@ -585,7 +585,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _r: &Identifier, _d: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _r: &Identifier,
+            _d: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(None)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
@@ -873,7 +878,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _r: &Identifier, _d: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _r: &Identifier,
+            _d: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(None)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {

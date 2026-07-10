@@ -67,7 +67,14 @@ impl OciAccess for MemoryRegistry {
         Ok(store.manifests.get(&id.digest().to_string()).cloned())
     }
 
-    async fn fetch_blob(&self, _repo: &Identifier, digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+    async fn fetch_blob(
+        &self,
+        _repo: &Identifier,
+        digest: &Digest,
+        _max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, AccessError> {
+        // The in-memory double stores exact bytes by digest — no streaming,
+        // so the cap is inert here (the CWE-770 vector is transport-only).
         let store = self.inner.lock().unwrap();
         Ok(store.blobs.get(&digest.to_string()).cloned())
     }

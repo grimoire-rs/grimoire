@@ -496,7 +496,10 @@ async fn fetch_bundle_layer(
     }
 
     let blob = access
-        .fetch_blob(bundle_id, &layer.digest)
+        // The streamed body is bounded at the descriptor's declared size:
+        // a body exceeding it aborts mid-stream (CWE-770). The bundle cap
+        // is re-checked on the actual bytes below.
+        .fetch_blob(bundle_id, &layer.digest, layer.size)
         .await
         .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::RegistryUnreachable(e)))?
         .ok_or_else(|| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleNotFound))?;
@@ -627,9 +630,13 @@ async fn retry_chain(
                     AccessErrorKind::Authentication(_) => {
                         return Err(ResolveError::new(reference.clone(), ResolveErrorKind::AuthFailure(err)));
                     }
+                    // `OversizeBlob` cannot arise from `resolve_digest` (only
+                    // a blob fetch streams a body), but it is terminal data —
+                    // never retried — so it joins the terminal group.
                     AccessErrorKind::OfflineMiss
                     | AccessErrorKind::InvalidManifest(_)
-                    | AccessErrorKind::DigestMismatch { .. } => {
+                    | AccessErrorKind::DigestMismatch { .. }
+                    | AccessErrorKind::OversizeBlob { .. } => {
                         return Err(ResolveError::new(
                             reference.clone(),
                             ResolveErrorKind::RegistryUnreachable(err),
@@ -783,7 +790,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(None)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
@@ -1296,7 +1308,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(self.manifest.clone())
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(self.blob.clone())
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {

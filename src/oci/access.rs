@@ -83,7 +83,20 @@ pub trait OciAccess: Send + Sync {
     ///
     /// Implementations verify the bytes hash to `digest`. `Ok(None)` when
     /// the blob does not exist.
-    async fn fetch_blob(&self, repo: &Identifier, digest: &Digest) -> Result<Option<Vec<u8>>, AccessError>;
+    ///
+    /// Aborts mid-stream and errors ([`AccessErrorKind::OversizeBlob`]) if
+    /// the body exceeds `max_bytes` — a registry that serves more bytes than
+    /// the descriptor declared cannot stream an unbounded body into memory
+    /// (CWE-770). Callers pass the layer descriptor's declared `size`, the
+    /// natural ceiling verified against policy caps before the call.
+    ///
+    /// [`AccessErrorKind::OversizeBlob`]: error::AccessErrorKind::OversizeBlob
+    async fn fetch_blob(
+        &self,
+        repo: &Identifier,
+        digest: &Digest,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, AccessError>;
 
     /// List the tags for `id`'s repository. `Ok(None)` when the
     /// repository is unknown to the registry.

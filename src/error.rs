@@ -164,7 +164,9 @@ fn classify_access(err: &AccessError) -> ExitCode {
         AccessErrorKind::Authentication(_) => ExitCode::AuthError,
         AccessErrorKind::Registry(_) => ExitCode::Unavailable,
         AccessErrorKind::OfflineMiss => ExitCode::OfflineBlocked,
-        AccessErrorKind::DigestMismatch { .. } | AccessErrorKind::InvalidManifest(_) => ExitCode::DataError,
+        AccessErrorKind::DigestMismatch { .. }
+        | AccessErrorKind::InvalidManifest(_)
+        | AccessErrorKind::OversizeBlob { .. } => ExitCode::DataError,
         AccessErrorKind::Io { source, .. } => classify_io(source),
     }
 }
@@ -479,6 +481,19 @@ mod tests {
             SkillErrorKind::GitProvenance(GitProvenanceError::GitNotFound),
         );
         let err: anyhow::Error = Error::from(inner).into();
+        assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn oversize_blob_classifies_as_data_error() {
+        // A registry serving more bytes than its descriptor declared is
+        // hostile/malformed data (CWE-770) — same tier as a digest mismatch.
+        let id = Identifier::parse("ghcr.io/acme/x:stable").unwrap();
+        let err: anyhow::Error = Error::from(AccessError::with_identifier(
+            id,
+            AccessErrorKind::OversizeBlob { limit: 8 * 1024 * 1024 },
+        ))
+        .into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
     }
 

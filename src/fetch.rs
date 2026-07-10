@@ -211,8 +211,12 @@ pub async fn fetch_artifact(
 
     let repo: Identifier = pinned.as_identifier().without_tag();
     let layer_digest = layer.digest.clone();
+    // Cap the streamed body at the descriptor's declared size: the abort
+    // trips on ACTUAL bytes, so a registry serving more than it declared
+    // errors mid-stream instead of exhausting memory (CWE-770).
+    let layer_size = layer.size;
     let blob = access
-        .fetch_blob(&repo, &layer_digest)
+        .fetch_blob(&repo, &layer_digest, layer_size)
         .await
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
         .ok_or_else(|| anyhow!("layer blob for '{pinned}' not found on the registry"))?;

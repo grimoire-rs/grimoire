@@ -304,7 +304,12 @@ mod tests {
         async fn fetch_manifest(&self, _: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             unreachable!()
         }
-        async fn fetch_blob(&self, _: &Identifier, _: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _: &Identifier,
+            _: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             unreachable!()
         }
         async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {

@@ -16,7 +16,12 @@
 //! only add bounded pagination over the spec `last` cursor; an unsupported
 //! or forbidden endpoint degrades to an empty list rather than an error.
 
+use std::io;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
+
 use async_trait::async_trait;
+use tokio::io::AsyncWrite;
 
 use super::error::{AccessError, AccessErrorKind};
 use crate::oci::manifest::OciManifest;
@@ -268,6 +273,42 @@ impl RegistryClient {
     }
 }
 
+/// An [`AsyncWrite`] sink that accumulates into a `Vec` up to `limit`
+/// bytes, then refuses further writes so a registry serving more bytes than
+/// its descriptor declared cannot stream an unbounded body into memory
+/// (CWE-770). The abort is on ACTUAL streamed bytes, independent of the
+/// descriptor's self-report — `oci-client`'s `pull_blob` streams the body
+/// chunk-by-chunk into this sink, so the refusal trips mid-transfer before
+/// any post-read digest re-hash.
+struct CappedSink {
+    buf: Vec<u8>,
+    limit: u64,
+    exceeded: bool,
+}
+
+impl AsyncWrite for CappedSink {
+    fn poll_write(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+        // `CappedSink` is `Unpin` (all fields are), so `get_mut` is sound.
+        let sink = self.get_mut();
+        // Check BEFORE appending: `buf` never grows past `limit`, so a
+        // hostile body is bounded in memory by the declared size.
+        if sink.buf.len() as u64 + data.len() as u64 > sink.limit {
+            sink.exceeded = true;
+            return Poll::Ready(Err(io::Error::other("blob exceeds size cap")));
+        }
+        sink.buf.extend_from_slice(data);
+        Poll::Ready(Ok(data.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[async_trait]
 impl OciAccess for RegistryClient {
     async fn resolve_digest(&self, id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
@@ -315,7 +356,12 @@ impl OciAccess for RegistryClient {
         Ok(Some(parsed))
     }
 
-    async fn fetch_blob(&self, repo: &Identifier, digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+    async fn fetch_blob(
+        &self,
+        repo: &Identifier,
+        digest: &Digest,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, AccessError> {
         let reference = reference_for(repo);
         let auth = Self::auth_for(repo.registry());
         // Ensure auth is primed before the (internally-authenticated)
@@ -324,20 +370,37 @@ impl OciAccess for RegistryClient {
             .store_auth_if_needed(reference.resolve_registry(), &auth)
             .await;
 
-        let mut bytes: Vec<u8> = Vec::new();
+        // `pull_blob` streams the body chunk-by-chunk into the sink. The
+        // bounded sink aborts the instant the ACTUAL bytes would exceed
+        // `max_bytes`, so a registry serving more than its descriptor
+        // declared never accumulates an unbounded body in memory (CWE-770).
         let digest_str = digest.to_string();
-        match self.client.pull_blob(&reference, digest_str.as_str(), &mut bytes).await {
-            Ok(()) => {}
-            Err(e) => {
-                return match lookup_failure(e) {
-                    None => Ok(None),
-                    Some(kind) => Err(AccessError::with_identifier(repo.clone(), kind)),
-                };
+        let mut sink = CappedSink {
+            buf: Vec::new(),
+            limit: max_bytes,
+            exceeded: false,
+        };
+        if let Err(e) = self.client.pull_blob(&reference, digest_str.as_str(), &mut sink).await {
+            // The cap trip is checked first so a lying (small) descriptor
+            // with an oversized body yields `OversizeBlob`, never the
+            // transport error that the write-error surfaces as.
+            if sink.exceeded {
+                return Err(AccessError::with_identifier(
+                    repo.clone(),
+                    AccessErrorKind::OversizeBlob { limit: max_bytes },
+                ));
             }
+            return match lookup_failure(e) {
+                None => Ok(None),
+                Some(kind) => Err(AccessError::with_identifier(repo.clone(), kind)),
+            };
         }
+        let bytes = sink.buf;
 
         // Defence in depth: verify the bytes hash to the requested digest
-        // before handing them up. Reuses the Phase-1 `Algorithm`.
+        // before handing them up. Reuses the Phase-1 `Algorithm`. The cap
+        // abort above runs first, so an oversized body never reaches this
+        // re-hash — no false `DigestMismatch` on a lying descriptor.
         let actual = digest.algorithm().hash(&bytes);
         if &actual != digest {
             return Err(AccessError::with_identifier(
@@ -776,6 +839,100 @@ mod tests {
         let client = RegistryClient::with_plain_http(&host);
         let repos = client.list_catalog(&host).await.expect("catalog listing");
         assert_eq!(repos, vec!["glab".to_string(), "acme/code-review".to_string()]);
+        handle.abort();
+    }
+
+    // ── CWE-770: bounded blob download against a lying descriptor ─────────
+
+    /// A throwaway HTTP/1.1 registry that mints a bearer token (like
+    /// [`spawn_token_gated_registry`]) and answers any blob GET with a body
+    /// of `body_len` bytes — regardless of the digest requested or the size
+    /// the caller expects — so a "lying descriptor" (small declared size,
+    /// oversized body) can be simulated.
+    async fn spawn_oversize_blob_registry(body_len: usize) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let realm = format!("http://{host}/token");
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                let first = req.lines().next().unwrap_or("").to_string();
+                let has_bearer = req.contains("authorization: bearer ");
+                if first.contains("/token") {
+                    let body = r#"{"token":"test-token"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                } else if first.contains("/blobs/") && has_bearer {
+                    // Stream a body far larger than the caller's cap. The
+                    // header is written first, then the oversized payload —
+                    // the client accumulates into the bounded sink and must
+                    // abort before the whole body lands.
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {body_len}\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&vec![b'x'; body_len]).await;
+                } else {
+                    let resp = format!(
+                        "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{realm}\",service=\"reg\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+        (host, handle)
+    }
+
+    /// Regression (CWE-770): a registry that serves a body far larger than
+    /// the requested cap must abort mid-stream with
+    /// [`AccessErrorKind::OversizeBlob`], NOT swallow the whole body into
+    /// memory. Before the `CappedSink` fix the unbounded `Vec` sink accepted
+    /// every byte, so the oversized body was fully buffered (unbounded
+    /// memory) and the run ended in `pull_blob`'s own internal digest check
+    /// — surfaced by grim as a *retryable* `Registry` error (Unavailable/69),
+    /// or plain memory exhaustion for a genuinely huge body — never the
+    /// terminal `OversizeBlob` (DataError/65). Confirmed empirically: with a
+    /// non-limiting `u64::MAX` cap (the pre-fix sink) this same server yields
+    /// `AccessErrorKind::Registry`, not `OversizeBlob`, so the assertion
+    /// below fails without the bounded sink.
+    #[tokio::test]
+    async fn fetch_blob_aborts_on_lying_descriptor() {
+        // Declared/expected digest is over a tiny payload; the server serves
+        // 64 KiB regardless, so the actual body dwarfs the 1 KiB cap.
+        let declared = crate::oci::Algorithm::Sha256.hash(b"small declared blob");
+        let (host, handle) = spawn_oversize_blob_registry(64 * 1024).await;
+        let repo = Identifier::parse(&format!("{host}/acme/x:latest")).unwrap();
+        let client = RegistryClient::with_plain_http(&host);
+
+        let err = client
+            .fetch_blob(&repo, &declared, 1024)
+            .await
+            .expect_err("oversized body must abort");
+        assert!(
+            matches!(err.kind, AccessErrorKind::OversizeBlob { limit: 1024 }),
+            "expected OversizeBlob, got {:?}",
+            err.kind
+        );
         handle.abort();
     }
 }

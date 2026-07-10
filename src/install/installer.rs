@@ -604,7 +604,9 @@ async fn fetch_verified_layer(
     };
     let layer_digest = layer.digest.clone();
 
-    let blob = access.fetch_blob(&repo, &layer_digest).await?;
+    // Bound the streamed body at the descriptor's declared size so a
+    // registry serving more than it declared aborts mid-stream (CWE-770).
+    let blob = access.fetch_blob(&repo, &layer_digest, layer.size).await?;
     let Some(blob) = blob else {
         return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
     };
@@ -913,7 +915,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(Some(manifest_for(&self.blob)))
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(Some(self.blob.clone()))
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
@@ -946,7 +953,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(Some(manifest_for(&self.blob)))
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(None)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
@@ -981,7 +993,12 @@ mod tests {
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(Some(manifest_for(&self.manifest_blob)))
         }
-        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(Some(self.served_blob.clone()))
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
