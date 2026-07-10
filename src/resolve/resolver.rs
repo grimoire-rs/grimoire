@@ -50,12 +50,81 @@ pub async fn resolve_lock(
     access: &Arc<dyn OciAccess>,
     scope: ConfigScope,
     options: &ResolveOptions,
+    anchor: &std::path::Path,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
     let (work, bundles) = build_work(set, access, options).await?;
     let mut resolved = resolve_work(work, access, options).await?;
+    // Path-sourced entries pin locally (validate + pack + hash) — no
+    // registry round-trip, so they resolve even fully offline.
+    resolved.extend(resolve_path_entries(set, anchor, None).await?);
     sort_locked(&mut resolved);
     Ok(build_lock(resolved, set, bundles))
+}
+
+/// Pin every path-sourced skill/rule/agent declaration by validating and
+/// packing its local source and hashing the canonical layer bytes.
+///
+/// `only` restricts the pass to the given binding names (the partial
+/// relock); `None` pins every path entry. Packing is blocking file I/O,
+/// so each entry runs on the blocking pool.
+///
+/// # Errors
+///
+/// [`ResolveErrorKind::LocalSource`] when a source is missing or fails
+/// validation/packing.
+async fn resolve_path_entries(
+    set: &DesiredSet,
+    anchor: &std::path::Path,
+    only: Option<&[String]>,
+) -> Result<Vec<LockedArtifact>, ResolveError> {
+    let mut out = Vec::new();
+    let tables = [
+        (&set.skills, ArtifactKind::Skill),
+        (&set.rules, ArtifactKind::Rule),
+        (&set.agents, ArtifactKind::Agent),
+    ];
+    for (table, kind) in tables {
+        for (name, source) in table.iter() {
+            let DeclaredSource::Path(path) = source else { continue };
+            if let Some(names) = only
+                && !names.iter().any(|n| n == name)
+            {
+                continue;
+            }
+            let reference = ArtifactRef {
+                kind,
+                name: name.clone(),
+                source: source.clone(),
+            };
+            let abs = path.resolve(anchor);
+            let join = tokio::task::spawn_blocking(move || crate::skill::pack_local_artifact(kind, &abs)).await;
+            // quality-rust.md permits `.expect()` at the join boundary; the
+            // message names the panicking context.
+            #[allow(clippy::expect_used)]
+            let packed = join.expect("path-source packing task panicked");
+            let (_intrinsic_name, layer) =
+                packed.map_err(|e| ResolveError::new(reference.clone(), ResolveErrorKind::LocalSource(Box::new(e))))?;
+            let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+            out.push(LockedArtifact {
+                name: name.clone(),
+                kind,
+                source: crate::lock::locked_source::LockedSource::Path {
+                    path: path.clone(),
+                    hash,
+                },
+                bundles: Vec::new(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `set` declares a path-sourced skill/rule/agent under `name`.
+fn has_path_entry(set: &DesiredSet, name: &str) -> bool {
+    [&set.skills, &set.rules, &set.agents]
+        .into_iter()
+        .any(|table| table.get(name).is_some_and(|s| s.path().is_some()))
 }
 
 /// Re-resolve only the named subset, carrying every other previous entry
@@ -78,6 +147,7 @@ pub async fn resolve_lock_partial(
     names: &[String],
     scope: ConfigScope,
     options: &ResolveOptions,
+    anchor: &std::path::Path,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
 
@@ -99,10 +169,10 @@ pub async fn resolve_lock_partial(
     // Expand bundles + merge so a requested name can be a bundle member.
     let (all_work, bundles) = build_work(set, access, options).await?;
 
-    // Validate every requested name is an effective artifact (direct or a
-    // bundle member).
+    // Validate every requested name is an effective artifact (direct,
+    // path-sourced, or a bundle member).
     for name in names {
-        if !all_work.iter().any(|w| &w.reference.name == name) {
+        if !all_work.iter().any(|w| &w.reference.name == name) && !has_path_entry(set, name) {
             // A placeholder identifier: the name is undeclared, so no
             // real id exists. `parse` cannot fail on this literal.
             let reference = ArtifactRef::registry(
@@ -119,7 +189,9 @@ pub async fn resolve_lock_partial(
         .into_iter()
         .filter(|w| names.iter().any(|n| n == &w.reference.name))
         .collect();
-    let resolved = resolve_work(selected, access, options).await?;
+    let mut resolved = resolve_work(selected, access, options).await?;
+    // Re-pin the named path-sourced entries (re-pack + re-hash).
+    resolved.extend(resolve_path_entries(set, anchor, Some(names)).await?);
 
     // Carry forward every previous entry not in the re-resolved set,
     // keyed by (kind, name); then merge and sort.
@@ -837,9 +909,15 @@ mod tests {
         let set = single_skill_set();
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
         let access = arc(mock.clone());
-        let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect("happy path resolves");
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("happy path resolves");
         assert_eq!(lock.skills.len(), 1);
         assert_eq!(lock.skills[0].name, "code-review");
         assert_eq!(lock.skills[0].source.content_digest(), digest());
@@ -854,9 +932,15 @@ mod tests {
             Scripted::Ok(Some(digest())),
         ]);
         let access = arc(mock.clone());
-        let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect("recovers on second attempt");
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("recovers on second attempt");
         assert_eq!(lock.skills[0].source.content_digest(), digest());
         assert_eq!(mock.calls(), 2);
     }
@@ -869,9 +953,15 @@ mod tests {
             .collect();
         let mock = MockAccess::new(script);
         let access = arc(mock.clone());
-        let err = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect_err("exhaustion must surface");
+        let err = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("exhaustion must surface");
         assert!(matches!(err.kind, ResolveErrorKind::RegistryUnreachable(_)));
         assert_eq!(mock.calls(), 4, "1 initial + 3 retries");
     }
@@ -883,9 +973,15 @@ mod tests {
             std::io::Error::other("401"),
         )))]);
         let access = arc(mock.clone());
-        let err = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect_err("auth must surface");
+        let err = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("auth must surface");
         assert!(matches!(err.kind, ResolveErrorKind::AuthFailure(_)));
         assert_eq!(mock.calls(), 1, "auth must not retry");
     }
@@ -895,9 +991,15 @@ mod tests {
         let set = single_skill_set();
         let mock = MockAccess::new(vec![Scripted::Ok(None)]);
         let access = arc(mock.clone());
-        let err = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect_err("None must surface as an error");
+        let err = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("None must surface as an error");
         assert!(matches!(err.kind, ResolveErrorKind::TagNotFound));
         assert_eq!(mock.calls(), 1, "not-found must not retry");
     }
@@ -913,7 +1015,7 @@ mod tests {
             base_backoff: Duration::from_millis(1),
         };
         let start = std::time::Instant::now();
-        let err = resolve_lock(&set, &access, ConfigScope::Project, &options)
+        let err = resolve_lock(&set, &access, ConfigScope::Project, &options, std::path::Path::new("."))
             .await
             .expect_err("hang must time out");
         assert!(start.elapsed() < Duration::from_millis(400), "timeout fired early");
@@ -948,9 +1050,15 @@ mod tests {
             Scripted::Ok(Some(digest())),
         ]);
         let access = arc(mock.clone());
-        let err = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect_err("a failing sibling must fail the whole resolve");
+        let err = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("a failing sibling must fail the whole resolve");
         assert!(matches!(err.kind, ResolveErrorKind::AuthFailure(_)));
     }
 
@@ -977,9 +1085,15 @@ mod tests {
             Scripted::Ok(Some(digest())),
         ]);
         let access = arc(mock);
-        let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect("resolves");
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("resolves");
         let skill_names: Vec<&str> = lock.skills.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(skill_names, vec!["alpha", "zeta"], "skills sorted by name");
         assert_eq!(lock.rules.len(), 1);
@@ -996,9 +1110,15 @@ mod tests {
         let set = DesiredSet::from_maps(BTreeMap::new(), BTreeMap::new(), agents, BTreeMap::new());
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
         let access = arc(mock.clone());
-        let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
-            .await
-            .expect("agent resolves");
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("agent resolves");
         assert!(lock.skills.is_empty());
         assert!(lock.rules.is_empty());
         assert_eq!(lock.agents.len(), 1);
@@ -1035,6 +1155,7 @@ mod tests {
             &["code-review".to_string()],
             ConfigScope::Project,
             &fast_options(),
+            std::path::Path::new("."),
         )
         .await
         .expect_err("stale predecessor must be rejected");
@@ -1100,6 +1221,7 @@ mod tests {
             &["a".to_string()],
             ConfigScope::Project,
             &fast_options(),
+            std::path::Path::new("."),
         )
         .await
         .expect("partial resolve succeeds");
@@ -1142,6 +1264,7 @@ mod tests {
             &["does-not-exist".to_string()],
             ConfigScope::Project,
             &fast_options(),
+            std::path::Path::new("."),
         )
         .await
         .expect_err("undeclared name must be rejected");

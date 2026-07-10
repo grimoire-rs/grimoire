@@ -90,6 +90,12 @@ pub enum ResolveErrorKind {
     )]
     BundleConflict { sources: String },
 
+    /// A local path source failed to validate or pack at lock time: the
+    /// path does not exist, the artifact fails kind validation, or a
+    /// tool-namespaced metadata literal is invalid.
+    #[error("local source invalid")]
+    LocalSource(#[source] Box<crate::skill::SkillError>),
+
     /// Partial-resolve refused: the predecessor lock's declaration hash
     /// does not match the current declaration. Both are surfaced so an
     /// operator can diff the lock against the live config.

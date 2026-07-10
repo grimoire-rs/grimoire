@@ -45,6 +45,15 @@ pub struct ResolvedScope {
     pub roots: AnchorRoots,
 }
 
+impl ResolvedScope {
+    /// The directory holding this scope's config file — the anchor every
+    /// relative path source resolves against (project: the `grimoire.toml`
+    /// dir; global: `$GRIM_HOME`).
+    pub fn config_dir(&self) -> &Path {
+        self.config_path.parent().unwrap_or_else(|| Path::new("."))
+    }
+}
+
 /// Resolve the scope from the global/config flags.
 ///
 /// Global scope reads `$GRIM_HOME/grimoire.toml` (absent ⇒ empty
@@ -96,6 +105,7 @@ pub fn resolve_in(
         })
     } else {
         let discovered = ProjectConfig::discover_from(config, workspace)?;
+        warn_absolute_path_sources(&discovered.config.set);
         let config_path = discovered.config_path().to_path_buf();
         let lock_path = discovered.lock_path();
         let workspace = config_path
@@ -114,6 +124,25 @@ pub fn resolve_in(
             roots,
             config_path,
         })
+    }
+}
+
+/// Warn about absolute path sources in a PROJECT-scope config: a
+/// committed `grimoire.toml` carrying a machine-local absolute path is
+/// not portable to co-workers' checkouts. Global scope stays silent —
+/// `$GRIM_HOME/grimoire.toml` is machine-local by nature.
+fn warn_absolute_path_sources(set: &DesiredSet) {
+    for table in [&set.skills, &set.rules, &set.agents, &set.bundles] {
+        for (name, source) in table.iter() {
+            if let Some(path) = source.path()
+                && path.is_absolute()
+            {
+                tracing::warn!(
+                    "artifact '{name}' declares the absolute path source '{path}'; \
+                     a committed grimoire.toml with absolute paths is not portable to other machines"
+                );
+            }
+        }
     }
 }
 

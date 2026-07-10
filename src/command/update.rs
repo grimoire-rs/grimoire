@@ -73,7 +73,16 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let previous = lock_io::load(&scope.lock_path).ok();
 
     let new_lock = if args.names.is_empty() {
-        super::grim(resolve_lock(&scope.set, &access, scope.scope, &ResolveOptions::default()).await)?
+        super::grim(
+            resolve_lock(
+                &scope.set,
+                &access,
+                scope.scope,
+                &ResolveOptions::default(),
+                scope.config_dir(),
+            )
+            .await,
+        )?
     } else {
         // Partial requires a predecessor; absent ⇒ behave like a full
         // resolve (nothing to be stale against). The stale guard fires
@@ -87,10 +96,20 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
                     &args.names,
                     scope.scope,
                     &ResolveOptions::default(),
+                    scope.config_dir(),
                 )
                 .await,
             )?,
-            None => super::grim(resolve_lock(&scope.set, &access, scope.scope, &ResolveOptions::default()).await)?,
+            None => super::grim(
+                resolve_lock(
+                    &scope.set,
+                    &access,
+                    scope.scope,
+                    &ResolveOptions::default(),
+                    scope.config_dir(),
+                )
+                .await,
+            )?,
         }
     };
 
@@ -118,6 +137,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &target,
         &mut state,
         &scope.roots,
+        scope.config_dir(),
         true,
         progress.as_ref(),
     )
@@ -139,6 +159,12 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         crate::install::prune::PruneError::Anchor { source, .. } => crate::error::Error::Anchor(source),
         crate::install::prune::PruneError::Io { path, source } => state_io(&path, source),
     })?;
+
+    // Refresh dev-installed artifacts (`grim install <path>`): re-pack
+    // each recorded local source; on drift, re-materialize through the
+    // standard install seam (a synthetic single-entry lock) and keep the
+    // dev marker. Report rows stay lock-driven; refreshes surface as logs.
+    refresh_dev_installs(&scope, &new_lock, &access, &target, &mut state).await;
 
     // The single `persist` seam handles project-scope dir creation, the
     // atomic write, and the conditional legacy-file reap in one place.
@@ -207,6 +233,91 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::error::Err
 
 /// Build the report by diffing the new lock against the previous one, then
 /// appending one row per pruned/kept orphan.
+/// Re-pack every dev-install record's local source and re-materialize the
+/// ones whose content hash drifted. Failures degrade to warnings — a dev
+/// install must never fail a declared update.
+async fn refresh_dev_installs(
+    scope: &scope_resolution::ResolvedScope,
+    new_lock: &GrimoireLock,
+    access: &std::sync::Arc<dyn crate::oci::access::OciAccess>,
+    target: &crate::install::target::InstallTarget,
+    state: &mut crate::install::install_state::InstallState,
+) {
+    use crate::lock::locked_source::LockedSource;
+
+    let dev_records: Vec<crate::install::install_state::InstallRecord> =
+        state.iter_records().filter(|r| r.dev).cloned().collect();
+    for rec in dev_records {
+        let LockedSource::Path { path, hash } = &rec.source else {
+            continue;
+        };
+        let packed = crate::skill::pack_local_artifact(rec.kind, &path.resolve(scope.config_dir()));
+        let (_, layer) = match packed {
+            Ok(packed) => packed,
+            Err(e) => {
+                tracing::warn!(
+                    "dev-installed {} '{}': local source '{path}' is missing or invalid, skipping refresh: {e:#}",
+                    rec.kind,
+                    rec.name
+                );
+                continue;
+            }
+        };
+        let new_hash = crate::oci::Algorithm::Sha256.hash(&layer);
+        if &new_hash == hash {
+            continue;
+        }
+        let mut synth = GrimoireLock {
+            metadata: new_lock.metadata.clone(),
+            skills: Vec::new(),
+            rules: Vec::new(),
+            agents: Vec::new(),
+            mcp: Vec::new(),
+            bundles: Vec::new(),
+        };
+        let entry = LockedArtifact {
+            name: rec.name.clone(),
+            kind: rec.kind,
+            source: LockedSource::Path {
+                path: path.clone(),
+                hash: new_hash,
+            },
+            bundles: Vec::new(),
+        };
+        match rec.kind {
+            ArtifactKind::Skill => synth.skills.push(entry),
+            ArtifactKind::Rule => synth.rules.push(entry),
+            ArtifactKind::Agent => synth.agents.push(entry),
+            ArtifactKind::Mcp | ArtifactKind::Bundle => continue,
+        }
+        let outcomes = install_all_with_progress(
+            &synth,
+            access,
+            &DefaultMaterializer,
+            target,
+            state,
+            &scope.roots,
+            scope.config_dir(),
+            true,
+            &crate::install::progress::SilentProgress,
+        )
+        .await;
+        for outcome in &outcomes {
+            match &outcome.result {
+                Ok(_) => tracing::info!("dev-installed {} '{}': refreshed from '{path}'", rec.kind, rec.name),
+                Err(err) => {
+                    tracing::warn!("dev-installed {} '{}': refresh failed: {err:#}", rec.kind, rec.name);
+                }
+            }
+        }
+        // The lock-driven install path writes `dev: false`; restore the
+        // marker so the record stays prune-exempt.
+        if let Some(refreshed) = state.get(rec.kind, &rec.name).cloned() {
+            state.record(crate::install::install_state::InstallRecord { dev: true, ..refreshed });
+        }
+    }
+}
+
 fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned: &[PrunedArtifact]) -> UpdateReport {
     let prev_index: BTreeMap<(ArtifactKind, &str), &LockedArtifact> = previous
         .map(|p| p.iter_artifacts().map(|a| ((a.kind, a.name.as_str()), a)).collect())

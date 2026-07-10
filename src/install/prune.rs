@@ -164,7 +164,9 @@ pub fn prune_orphans(
     }
     let orphans: Vec<Orphan> = state
         .iter_records()
-        .filter(|r| !declared.contains(&(r.kind, r.name.clone())))
+        // A dev-install record (`grim install <path>`) is intentionally
+        // undeclared — never an orphan.
+        .filter(|r| !r.dev && !declared.contains(&(r.kind, r.name.clone())))
         .map(|r| Orphan {
             kind: r.kind,
             name: r.name.clone(),

@@ -218,7 +218,18 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // partial stale guard fires — caught and retried as a full resolve so
     // `add` always leaves a consistent lock).
     let previous = lock_io::load(&scope.lock_path).ok();
-    let new_lock = super::grim(relock_declared(&set, previous.as_ref(), kind, &name, &access, scope.scope).await)?;
+    let new_lock = super::grim(
+        relock_declared(
+            &set,
+            previous.as_ref(),
+            kind,
+            &name,
+            &access,
+            scope.scope,
+            scope.config_dir(),
+        )
+        .await,
+    )?;
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
     // Default: materialize the freshly-declared artifact into the detected
@@ -422,11 +433,12 @@ pub(crate) async fn relock_declared(
     name: &str,
     access: &Arc<dyn OciAccess>,
     scope: crate::config::scope::ConfigScope,
+    anchor: &std::path::Path,
 ) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
     if kind == ArtifactKind::Bundle {
-        resolve_lock(set, access, scope, &ResolveOptions::default()).await
+        resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await
     } else {
-        relock_entry(set, previous, name, access, scope).await
+        relock_entry(set, previous, name, access, scope, anchor).await
     }
 }
 
@@ -446,11 +458,12 @@ pub(crate) async fn relock_entry(
     name: &str,
     access: &Arc<dyn OciAccess>,
     scope: crate::config::scope::ConfigScope,
+    anchor: &std::path::Path,
 ) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
     let names = [name.to_string()];
     match previous {
         Some(prev) => {
-            match resolve_lock_partial(set, prev, access, &names, scope, &ResolveOptions::default()).await {
+            match resolve_lock_partial(set, prev, access, &names, scope, &ResolveOptions::default(), anchor).await {
                 Ok(lock) => Ok(lock),
                 Err(e)
                     if matches!(
@@ -460,12 +473,12 @@ pub(crate) async fn relock_entry(
                 {
                     // The edited entry made the predecessor stale; resolve
                     // everything fresh.
-                    resolve_lock(set, access, scope, &ResolveOptions::default()).await
+                    resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await
                 }
                 Err(e) => Err(e),
             }
         }
-        None => resolve_lock(set, access, scope, &ResolveOptions::default()).await,
+        None => resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await,
     }
 }
 

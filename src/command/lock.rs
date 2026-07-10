@@ -52,7 +52,16 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = lock_io::load(&scope.lock_path).ok();
 
-    let lock = super::grim(resolve_lock(&scope.set, &access, scope.scope, &ResolveOptions::default()).await)?;
+    let lock = super::grim(
+        resolve_lock(
+            &scope.set,
+            &access,
+            scope.scope,
+            &ResolveOptions::default(),
+            scope.config_dir(),
+        )
+        .await,
+    )?;
     super::grim(lock_io::save(&scope.lock_path, &lock, previous.as_ref()))?;
 
     let report = build_report(&lock, previous.as_ref(), &scope);

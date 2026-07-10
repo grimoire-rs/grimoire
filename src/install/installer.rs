@@ -96,6 +96,7 @@ pub struct ArtifactInstall {
     dead_code,
     reason = "test convenience wrapper — production callers select a progress sink via install_all_with_progress"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn install_all<M: ArtifactMaterializer>(
     lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
@@ -103,9 +104,21 @@ pub async fn install_all<M: ArtifactMaterializer>(
     target: &InstallTarget,
     state: &mut InstallState,
     roots: &AnchorRoots,
+    anchor: &Path,
     force: bool,
 ) -> Vec<ArtifactInstall> {
-    install_all_with_progress(lock, access, materializer, target, state, roots, force, &SilentProgress).await
+    install_all_with_progress(
+        lock,
+        access,
+        materializer,
+        target,
+        state,
+        roots,
+        anchor,
+        force,
+        &SilentProgress,
+    )
+    .await
 }
 
 /// Install every locked artifact, driving `progress` once per artifact.
@@ -123,6 +136,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     target: &InstallTarget,
     state: &mut InstallState,
     roots: &AnchorRoots,
+    anchor: &Path,
     force: bool,
     progress: &dyn InstallProgress,
 ) -> Vec<ArtifactInstall> {
@@ -148,7 +162,18 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             .copied()
             .unwrap_or(crate::install::client_target::ClientTarget::Claude);
         let report_target = target.path_for(primary, kind, &artifact.name);
-        let result = install_one(artifact, kind, access, materializer, target, state, roots, force).await;
+        let result = install_one(
+            artifact,
+            kind,
+            access,
+            materializer,
+            target,
+            state,
+            roots,
+            anchor,
+            force,
+        )
+        .await;
         if result.is_ok()
             && let Some(other) = &other_scope
         {
@@ -243,7 +268,20 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     force: bool,
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
-    let outcomes = install_all_with_progress(lock, access, materializer, target, state, roots, force, progress).await;
+    // Path sources resolve against the config file's directory.
+    let anchor = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let outcomes = install_all_with_progress(
+        lock,
+        access,
+        materializer,
+        target,
+        state,
+        roots,
+        anchor,
+        force,
+        progress,
+    )
+    .await;
 
     // Persist whatever installed (some artifacts may land before another
     // fails) before surfacing any per-item error. One `persist` seam handles
@@ -283,6 +321,7 @@ async fn install_one<M: ArtifactMaterializer>(
     target: &InstallTarget,
     state: &mut InstallState,
     roots: &AnchorRoots,
+    anchor: &Path,
     force: bool,
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::ClientOutput;
@@ -300,7 +339,12 @@ async fn install_one<M: ArtifactMaterializer>(
         return Ok(outcome);
     }
 
-    let blob = fetch_verified_layer(artifact, kind, access).await?;
+    let blob = match &artifact.source {
+        crate::lock::locked_source::LockedSource::Registry(_) => fetch_verified_layer(artifact, kind, access).await?,
+        crate::lock::locked_source::LockedSource::Path { path, hash } => {
+            pack_verified_local(artifact, kind, path, hash, anchor)?
+        }
+    };
 
     // Materialize the canonical tree once into a temp dir; every client
     // target then transforms/copies from that single extracted tree.
@@ -633,6 +677,42 @@ fn integrity_gate(
     Ok(None)
 }
 
+/// Validate + pack a locked path source and verify the bytes hash to the
+/// locked content pin — the local counterpart of [`fetch_verified_layer`]
+/// (fail-closed: a drifted source refuses to install stale lock content).
+///
+/// Packing is synchronous file I/O on small artifact trees, matching the
+/// existing sync-fs precedent in this module.
+#[allow(clippy::result_large_err)]
+fn pack_verified_local(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    path: &crate::config::path_source::PathSource,
+    locked_hash: &crate::oci::Digest,
+    anchor: &Path,
+) -> Result<Vec<u8>, crate::error::Error> {
+    let aref = || ArtifactRef {
+        kind,
+        name: artifact.name.clone(),
+        source: artifact.source.to_declared(),
+    };
+    let abs = path.resolve(anchor);
+    let (_intrinsic_name, layer) = crate::skill::pack_local_artifact(kind, &abs)
+        .map_err(|e| InstallError::with_reference(aref(), InstallErrorKind::LocalSource(format!("{e:#}"))))?;
+    let actual = crate::oci::Algorithm::Sha256.hash(&layer);
+    if &actual != locked_hash {
+        return Err(InstallError::with_reference(
+            aref(),
+            InstallErrorKind::LocalSource(format!(
+                "content changed since the lock was written (locked {locked_hash}, found {actual}); run `grim update {}` or `grim lock`",
+                artifact.name
+            )),
+        )
+        .into());
+    }
+    Ok(layer)
+}
+
 /// Fetch and digest-verify an artifact's single layer blob.
 ///
 /// `artifact.pinned` is the *manifest* digest: resolve the manifest to its
@@ -647,9 +727,8 @@ async fn fetch_verified_layer(
     kind: ArtifactKind,
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<u8>, crate::error::Error> {
-    // TODO(local-path-sources): the path-source blob branch (pack the
-    // local dir instead of fetching) lands with the install phase; until
-    // then a path lock entry fails loudly here rather than fetching.
+    // Defensive: the caller's source match routes path entries to
+    // `pack_verified_local`; only registry pins reach a fetch.
     let Some(pinned) = artifact.source.pinned() else {
         return Err(InstallError::with_reference(
             ArtifactRef {
@@ -657,7 +736,7 @@ async fn fetch_verified_layer(
                 name: artifact.name.clone(),
                 source: artifact.source.to_declared(),
             },
-            InstallErrorKind::MaterializeFailed("local path sources are not installable yet".to_string()),
+            InstallErrorKind::LocalSource("path sources never fetch from a registry".to_string()),
         )
         .into());
     };
@@ -1337,7 +1416,17 @@ mod tests {
         let m = DefaultMaterializer;
         let roots = roots(dir.path());
 
-        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let r1 = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(r1.len(), 1);
         assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
         assert!(dir.path().join(".claude/rules/rust-style.md").is_file());
@@ -1355,7 +1444,17 @@ mod tests {
         );
 
         // Second pass with same lock + intact content ⇒ no-op.
-        let r2 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let r2 = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
     }
 
@@ -1370,19 +1469,49 @@ mod tests {
         let m = DefaultMaterializer;
         let roots = roots(dir.path());
 
-        install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         // Tamper with the installed file.
         let installed = dir.path().join(".claude/rules/rust-style.md");
         std::fs::write(&installed, b"hand edited\n").unwrap();
 
-        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let refused = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert!(matches!(
             refused[0].result.as_ref().unwrap(),
             InstallOutcome::Refused { .. }
         ));
         assert_eq!(std::fs::read(&installed).unwrap(), b"hand edited\n");
 
-        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
+        let forced = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            true,
+        )
+        .await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&installed).unwrap(), b"# rust\n");
     }
@@ -1404,6 +1533,7 @@ mod tests {
             &target,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1417,6 +1547,7 @@ mod tests {
             &target,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1456,6 +1587,7 @@ mod tests {
             &target,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1483,7 +1615,17 @@ mod tests {
             served_blob: wrong,
         };
         let roots = roots(dir.path());
-        let r = install_all(&lock, &arc(mock), &m, &target, &mut state, &roots, false).await;
+        let r = install_all(
+            &lock,
+            &arc(mock),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         let err = r[0].result.as_ref().expect_err("digest mismatch must error");
         assert!(matches!(
             err,
@@ -1510,7 +1652,17 @@ mod tests {
         let m = DefaultMaterializer;
         let roots = roots(dir.path());
 
-        let r = install_all(&lock, &arc(mock), &m, &target, &mut state, &roots, false).await;
+        let r = install_all(
+            &lock,
+            &arc(mock),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         let err = r[0].result.as_ref().expect_err("oversize declared layer must error");
         assert!(
             matches!(
@@ -1538,7 +1690,17 @@ mod tests {
         let roots = roots(dir.path());
 
         // Fresh install lands the index and the support file beside it.
-        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let r1 = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
         let index = dir.path().join(".claude/rules/my-rule.md");
         let support = dir.path().join(".claude/rules/my-rule/examples.md");
@@ -1546,12 +1708,32 @@ mod tests {
         assert!(support.is_file());
 
         // Intact footprint ⇒ no-op.
-        let r2 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let r2 = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
 
         // Editing a *support* file (not the index) is detected as drift.
         std::fs::write(&support, b"hand edited\n").unwrap();
-        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let refused = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert!(matches!(
             refused[0].result.as_ref().unwrap(),
             InstallOutcome::Refused { .. }
@@ -1559,7 +1741,17 @@ mod tests {
         assert_eq!(std::fs::read(&support).unwrap(), b"hand edited\n");
 
         // Forcing restores the canonical support content.
-        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
+        let forced = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            true,
+        )
+        .await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
     }
@@ -1575,7 +1767,17 @@ mod tests {
         let m = DefaultMaterializer;
         let roots = roots(dir.path());
 
-        install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         let support = dir.path().join(".claude/rules/my-rule");
         assert!(support.is_dir());
 
@@ -1583,7 +1785,17 @@ mod tests {
         std::fs::remove_dir_all(&support).unwrap();
 
         // Reinstall must see *drift* (Refused), never a hard I/O error.
-        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let refused = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert!(
             matches!(refused[0].result.as_ref().unwrap(), InstallOutcome::Refused { .. }),
             "a deleted support dir is drift, got {:?}",
@@ -1591,7 +1803,17 @@ mod tests {
         );
 
         // Forcing restores the support tree.
-        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
+        let forced = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            true,
+        )
+        .await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(support.join("examples.md")).unwrap(), b"# ex\n");
     }
@@ -1613,6 +1835,7 @@ mod tests {
             &target,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1629,6 +1852,7 @@ mod tests {
             &target,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1697,7 +1921,17 @@ mod tests {
         });
 
         let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
-        let r = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
+        let r = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         // Without the fix, the gate's `?` on the unresolvable copilot output
         // makes this an Err; with the fix it tolerates and the install runs.
         assert!(
@@ -1731,7 +1965,17 @@ mod tests {
 
         // 1. Install copilot-only ⇒ the record covers only copilot.
         let t_copilot = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
-        install_all(&lock, &access, &m, &t_copilot, &mut state, &roots, false).await;
+        install_all(
+            &lock,
+            &access,
+            &m,
+            &t_copilot,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert!(
             dir.path()
                 .join(".github/instructions/rust-style.instructions.md")
@@ -1747,7 +1991,17 @@ mod tests {
             ConfigScope::Project,
             vec![ClientTarget::Claude, ClientTarget::Copilot],
         );
-        let r = install_all(&lock, &access, &m, &t_both, &mut state, &roots, false).await;
+        let r = install_all(
+            &lock,
+            &access,
+            &m,
+            &t_both,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert!(
             dir.path().join(".claude/rules/rust-style.md").is_file(),
@@ -1795,6 +2049,7 @@ mod tests {
             &t_both,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1822,7 +2077,17 @@ mod tests {
         let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
         let access_b = arc(BlobMock { blob: blob_b.clone() });
         let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
-        let r = install_all(&lock_b, &access_b, &m, &t_claude, &mut state, &roots, false).await;
+        let r = install_all(
+            &lock_b,
+            &access_b,
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
         assert_eq!(
             *r[0].result.as_ref().unwrap(),
             InstallOutcome::Updated,
@@ -1898,6 +2163,7 @@ mod tests {
             &t_claude,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1937,6 +2203,7 @@ mod tests {
             &t_claude,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -1995,6 +2262,7 @@ mod tests {
             &t_both,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -2020,6 +2288,7 @@ mod tests {
             &t_claude,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -2085,6 +2354,7 @@ mod tests {
             &t_both,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -2100,6 +2370,7 @@ mod tests {
             &t_claude,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -2119,6 +2390,7 @@ mod tests {
             &t_copilot,
             &mut state,
             &roots,
+            std::path::Path::new("."),
             false,
         )
         .await;
@@ -2195,7 +2467,18 @@ mod tests {
         let roots = roots(dir.path());
         let recorder = RecordingProgress::default();
 
-        let r = install_all_with_progress(&lock, &access, &m, &target, &mut state, &roots, false, &recorder).await;
+        let r = install_all_with_progress(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+            &recorder,
+        )
+        .await;
         assert_eq!(r.len(), 2);
         // Exercise the error path this test narrates: "b" errors on the
         // ambiguous tree — yet its `advance` still fired (advance precedes

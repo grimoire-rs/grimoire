@@ -1961,7 +1961,12 @@ async fn perform(
     grim(write_config(&ctx.config_path, &options, &registries, &set))?;
 
     let previous = lock_io::load(&ctx.lock_path).ok();
-    let new_lock = grim(relock_declared(&set, previous.as_ref(), kind, &name, &ctx.access, ctx.scope).await)?;
+    let anchor = ctx
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let new_lock = grim(relock_declared(&set, previous.as_ref(), kind, &name, &ctx.access, ctx.scope, &anchor).await)?;
     grim(lock_io::save(&ctx.lock_path, &new_lock, previous.as_ref()))?;
 
     // Materialize only the acted-on artifact — the rest of the (now

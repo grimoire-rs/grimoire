@@ -108,6 +108,12 @@ pub enum InstallErrorKind {
     /// The configured client target is not supported by this build.
     #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
     UnsupportedClient(String),
+
+    /// A local path source failed at install time: it is missing, fails
+    /// validation, or its packed content no longer hashes to the locked
+    /// pin (edit the source, then `grim update <name>` / `grim lock`).
+    #[error("local source unusable: {0}")]
+    LocalSource(String),
 }
 
 #[cfg(test)]

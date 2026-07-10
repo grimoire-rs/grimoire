@@ -120,7 +120,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
         let record = state.get(decl.kind, &decl.name);
         let outputs = record_outputs(record, &active, &scope.roots);
-        let entry_state = derive_state(
+        let mut entry_state = derive_state(
             decl.kind,
             &decl.name,
             locked,
@@ -129,11 +129,43 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             &active,
             lock_matches_config,
         );
+        // A path-sourced entry whose local source drifted from the locked
+        // content hash is outdated — the remediation is the same as for a
+        // moved registry tag: `grim update <name>`.
+        if entry_state == ArtifactStatus::Installed
+            && let Some(l) = locked
+            && path_source_drifted(l, scope.config_dir())
+        {
+            entry_state = ArtifactStatus::Outdated;
+        }
+        let source = match decl.source.path() {
+            Some(path) => format!("path: {path}"),
+            None => "direct".to_string(),
+        };
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
-            source: "direct".to_string(),
+            source,
             pinned: locked.and_then(|l| l.source.pinned().cloned()),
+            state: entry_state,
+            outputs,
+        });
+    }
+
+    // Dev-installed artifacts (`grim install <path>`): recorded but
+    // deliberately undeclared, so they appear after the declared rows.
+    for record in state.iter_records().filter(|r| r.dev) {
+        let outputs = record_outputs(Some(record), &active, &scope.roots);
+        let entry_state = derive_dev_state(record, &scope.roots, &active, scope.config_dir());
+        let source = match record.source.path() {
+            Some(path) => format!("path: {path} (dev)"),
+            None => "(dev)".to_string(),
+        };
+        entries.push(StatusEntry {
+            kind: record.kind,
+            name: record.name.clone(),
+            source,
+            pinned: None,
             state: entry_state,
             outputs,
         });
@@ -277,6 +309,71 @@ fn derive_state(
         ArtifactStatus::Installed
     } else {
         ArtifactStatus::Outdated
+    }
+}
+
+/// Whether a path-sourced lock entry's local source no longer packs to
+/// the locked content hash. A missing/invalid source degrades to a
+/// warning — status is a read-only report and stays exit-0.
+fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> bool {
+    let crate::lock::locked_source::LockedSource::Path { path, hash } = &locked.source else {
+        return false;
+    };
+    // ponytail: re-packs the source on every status call; cache by mtime
+    // if artifact trees ever grow large enough for this to matter.
+    match crate::skill::pack_local_artifact(locked.kind, &path.resolve(anchor)) {
+        Ok((_, layer)) => &crate::oci::Algorithm::Sha256.hash(&layer) != hash,
+        Err(e) => {
+            tracing::warn!(
+                "local source '{path}' for {} '{}' is missing or invalid: {e:#}",
+                locked.kind,
+                locked.name
+            );
+            false
+        }
+    }
+}
+
+/// State for a dev-install record (no declaration, no lock entry):
+/// footprint checks first, then a re-pack of the recorded path against
+/// the recorded hash (drift ⇒ outdated, refreshed by `grim update`).
+fn derive_dev_state(
+    record: &crate::install::install_state::InstallRecord,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    anchor: &std::path::Path,
+) -> ArtifactStatus {
+    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    if outputs.is_empty() {
+        return ArtifactStatus::Missing;
+    }
+    for out in &outputs {
+        match out.is_present(roots) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return ArtifactStatus::Missing,
+        }
+    }
+    for out in &outputs {
+        match out.current_hash(roots) {
+            Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
+            Ok(_) => {}
+            Err(_) => return ArtifactStatus::Missing,
+        }
+    }
+    let crate::lock::locked_source::LockedSource::Path { path, hash } = &record.source else {
+        return ArtifactStatus::Installed;
+    };
+    match crate::skill::pack_local_artifact(record.kind, &path.resolve(anchor)) {
+        Ok((_, layer)) if &crate::oci::Algorithm::Sha256.hash(&layer) != hash => ArtifactStatus::Outdated,
+        Ok(_) => ArtifactStatus::Installed,
+        Err(e) => {
+            tracing::warn!(
+                "local source '{path}' for dev-installed {} '{}' is missing or invalid: {e:#}",
+                record.kind,
+                record.name
+            );
+            ArtifactStatus::Installed
+        }
     }
 }
 

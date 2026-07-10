@@ -179,7 +179,9 @@ fn classify_resolve(err: &ResolveError) -> ExitCode {
         ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound => ExitCode::NotFound,
         ResolveErrorKind::AuthFailure(_) => ExitCode::AuthError,
         ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => ExitCode::Unavailable,
-        ResolveErrorKind::StaleLock { .. } | ResolveErrorKind::BundleInvalid(_) => ExitCode::DataError,
+        ResolveErrorKind::StaleLock { .. } | ResolveErrorKind::BundleInvalid(_) | ResolveErrorKind::LocalSource(_) => {
+            ExitCode::DataError
+        }
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
         ResolveErrorKind::BundleConflict { .. } => ExitCode::ConfigError,
@@ -194,7 +196,8 @@ fn classify_install(err: &InstallError) -> ExitCode {
         | InstallErrorKind::UntrackedDestination { .. }
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::OversizeLayer { .. }
-        | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
+        | InstallErrorKind::MaterializeFailed(_)
+        | InstallErrorKind::LocalSource(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
     }
