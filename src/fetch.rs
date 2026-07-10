@@ -61,6 +61,17 @@ pub const FETCH_DOC_SIZE_LIMIT: usize = 256 * 1024;
 const TRUNCATION_MARKER: &str = "\n[grim: content truncated at the 256 KiB tool-result cap; use grim_render to write the \
      full files to disk, or install with grim install]";
 
+/// Wrap a subsystem error through [`crate::error::Error`] into
+/// [`anyhow::Error`] so its exit-code classification survives. This module
+/// cannot route errors through `command::grim` (that would reintroduce the
+/// `command ↔ fetch` cycle), so it converts directly.
+fn wrap<T, E>(result: Result<T, E>) -> anyhow::Result<T>
+where
+    crate::error::Error: From<E>,
+{
+    result.map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))
+}
+
 /// Resolved scope inputs for a fetch, computed once by the caller.
 ///
 /// Mirrors `catalog::BadgeContext` — the caller does scope/registry
@@ -167,8 +178,11 @@ pub async fn fetch_artifact(
     // (e.g. a degraded scope falling back to the flag/env/global chain).
     let warnings = scope.warnings.clone();
 
-    let id = crate::config::resolve_reference(reference, &scope.registries, &scope.short_id_default)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    let id = wrap(crate::config::resolve_reference(
+        reference,
+        &scope.registries,
+        &scope.short_id_default,
+    ))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {
@@ -177,18 +191,12 @@ pub async fn fetch_artifact(
     let name = id.name().to_string();
 
     // Pure read: `Query` never write-throughs the tag cache.
-    let digest = access
-        .resolve_digest(&id, Operation::Query)
-        .await
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    let digest = wrap(access.resolve_digest(&id, Operation::Query).await)?
         .ok_or_else(|| anyhow!("reference '{id}' not found on the registry"))?;
     let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest))
         .map_err(|e| anyhow!("resolved digest did not pin '{id}': {e}"))?;
 
-    let manifest = access
-        .fetch_manifest(&pinned)
-        .await
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    let manifest = wrap(access.fetch_manifest(&pinned).await)?
         .ok_or_else(|| anyhow!("manifest for '{pinned}' not found on the registry"))?;
     let kind = crate::oci::annotations::kind_from_manifest(&manifest)
         .ok_or_else(|| anyhow!("'{pinned}' is not a Grimoire artifact (no kind on the manifest)"))?;
@@ -221,10 +229,7 @@ pub async fn fetch_artifact(
     // trips on ACTUAL bytes, so a registry serving more than it declared
     // errors mid-stream instead of exhausting memory (CWE-770).
     let layer_size = layer.size;
-    let blob = access
-        .fetch_blob(&repo, &layer_digest, layer_size)
-        .await
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    let blob = wrap(access.fetch_blob(&repo, &layer_digest, layer_size).await)?
         .ok_or_else(|| anyhow!("layer blob for '{pinned}' not found on the registry"))?;
     let actual = layer_digest.algorithm().hash(&blob);
     if actual != layer_digest {
@@ -266,15 +271,12 @@ pub async fn fetch_with_limit(
     doc_limit: usize,
 ) -> anyhow::Result<FetchReport> {
     let vendor_client: Option<ClientTarget> = match vendor {
-        Some(v) => Some(
-            v.parse::<ClientTarget>()
-                .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?,
-        ),
+        Some(v) => Some(wrap(v.parse::<ClientTarget>())?),
         None => None,
     };
 
-    let fetched = fetch_artifact(scope, access, reference, Some(FETCH_BLOB_SIZE_LIMIT)).await?;
-    let mut warnings = fetched.warnings.clone();
+    let mut fetched = fetch_artifact(scope, access, reference, Some(FETCH_BLOB_SIZE_LIMIT)).await?;
+    let mut warnings = std::mem::take(&mut fetched.warnings);
 
     let mut report = FetchReport {
         reference: fetched.identifier.to_string(),
@@ -292,8 +294,7 @@ pub async fn fetch_with_limit(
 
     match fetched.kind {
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
-            let entries = unpack_tar_in_memory(&fetched.blob, doc_limit as u64)
-                .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+            let entries = wrap(unpack_tar_in_memory(&fetched.blob, doc_limit as u64))?;
             report.files = entries
                 .iter()
                 .map(|e| FetchFileEntry {

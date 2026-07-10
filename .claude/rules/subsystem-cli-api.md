@@ -84,8 +84,9 @@ pub enum RemovedStatus {
   `{"items": [...], "announce": ...}` the same way.
 - **Optional fields are always-present-null.** `skip_serializing_if` is
   banned in `src/api/` — an absent-key optional breaks consumers that
-  distinguish "not applicable" from "older grim". MCP-only payloads
-  (`src/mcp/fetch.rs`, `src/mcp/render.rs`) are exempt.
+  distinguish "not applicable" from "older grim". The MCP-shaped
+  `FetchReport` (`src/fetch.rs`, shared by the CLI `grim fetch` and the MCP
+  `grim_fetch`/`grim_render` tools) is exempt.
 - Single-object reports serialize as one flat object (e.g.
   `init_report.rs`, `release_report.rs`).
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
