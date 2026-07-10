@@ -389,6 +389,33 @@ grim search --show-deprecated review
 grim search --refresh --registry ghcr.io/acme
 ```
 
+## grim fetch {#fetch}
+
+`grim fetch <ref>` resolves an artifact and prints its content — **use ≠
+install**: nothing is materialized, no state is touched. It is the CLI
+port of the MCP [`grim_fetch` tool](#mcp): canonical (as-authored) content
+by default, a `--vendor <claude|opencode|copilot>` projection, or one
+`--path <tree-path>` support file (UTF-8 text only).
+
+Plain output is the **raw content payload** — exact bytes, no table, no
+added trailing newline — so it pipes:
+
+```sh
+grim fetch skills/code-review > SKILL.md
+grim fetch skills/code-review --path code-review/references/checklist.md
+grim fetch skills/code-review --format json | jq '.files[].path'
+```
+
+`--format json` emits the full fetch report: `{ref, digest, kind, name,
+vendor, path?, content, truncated?, files?, pointer?, warnings?}` (the
+MCP payload shape — empty/default fields omitted). Warnings print to
+stderr, keeping stdout a pure payload.
+
+Unlike the MCP tool — which truncates documents at 256 KiB for tool-result
+budgets — the CLI **never truncates**: the only ceiling is the 8 MiB
+pre-download layer gate, and any layer that passes it prints
+byte-complete.
+
 ## grim tui {#tui}
 
 `grim tui` opens an interactive browser over your declared registries'

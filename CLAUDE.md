@@ -15,7 +15,7 @@ prompts) distributed through standard OCI registries. The binary is named
 
 ## Current State
 
-Shipping: full CLI (18 subcommands), OCI registry pipeline, catalog
+Shipping: full CLI (20 subcommands), OCI registry pipeline, catalog
 publishing, MCP server, TUI. One binary crate, subsystem modules under
 `src/`. No stable *library* API — the binary is the only consumer.
 

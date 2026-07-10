@@ -100,6 +100,19 @@ pub enum RemovedStatus {
 3. Return the report from `command/{name}.rs` built from operation
    results; render it in the matching dispatch arm in `src/app.rs`
 
+## Payload-Plain Reports
+
+Two exemption tiers from the table-plain norm:
+
+- **Fully exempt** (`schema`, `tui`, `mcp`): no report module at all — the
+  command emits a document / owns the terminal / speaks JSON-RPC, wired
+  directly in `app.rs`.
+- **Payload-plain, JSON-standard** (`fetch`): the report module exists and
+  `print_json` is a normal report, but `print_plain` writes the raw
+  content payload — exact bytes, no table, no added trailing newline — so
+  the output pipes (`grim fetch ref --path X > file`). Anything
+  human-facing (warnings) goes to stderr via `tracing`, never stdout.
+
 ## Commands That Exec a Child Process
 
 A command whose job is to replace/spawn a child process is exempt from the

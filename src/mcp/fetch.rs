@@ -236,13 +236,28 @@ pub async fn fetch_artifact(
 }
 
 /// Run the `grim_fetch` tool: fetch the artifact and shape its content
-/// per kind/vendor/path.
+/// per kind/vendor/path. Documents cap at [`FETCH_DOC_SIZE_LIMIT`].
+///
+/// # Errors
+///
+/// See [`fetch_with_limit`].
+pub async fn fetch(ctx: &Context, args: &FetchToolArgs) -> anyhow::Result<FetchReport> {
+    fetch_with_limit(ctx, args, FETCH_DOC_SIZE_LIMIT).await
+}
+
+/// [`fetch`] with a caller-chosen per-document cap.
+///
+/// The MCP tool passes [`FETCH_DOC_SIZE_LIMIT`] (a truncated doc is still
+/// useful in a tool result); the `grim fetch` CLI passes the 8 MiB
+/// [`FETCH_BLOB_SIZE_LIMIT`], which the pre-download layer gate already
+/// enforces — so CLI truncation is unreachable and the payload pipes
+/// byte-complete.
 ///
 /// # Errors
 ///
 /// [`fetch_artifact`] failures, an unknown `vendor`, a `vendor` on a
 /// bundle, a missing index/`path` entry, or non-UTF-8 content.
-pub async fn fetch(ctx: &Context, args: &FetchToolArgs) -> anyhow::Result<FetchReport> {
+pub async fn fetch_with_limit(ctx: &Context, args: &FetchToolArgs, doc_limit: usize) -> anyhow::Result<FetchReport> {
     let vendor: Option<ClientTarget> = match args.vendor.as_deref() {
         Some(v) => Some(crate::command::grim(v.parse::<ClientTarget>())?),
         None => None,
@@ -267,7 +282,7 @@ pub async fn fetch(ctx: &Context, args: &FetchToolArgs) -> anyhow::Result<FetchR
 
     match fetched.kind {
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
-            let entries = unpack_tar_in_memory(&fetched.blob, FETCH_DOC_SIZE_LIMIT as u64)
+            let entries = unpack_tar_in_memory(&fetched.blob, doc_limit as u64)
                 .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
             report.files = entries
                 .iter()
@@ -357,7 +372,7 @@ pub async fn fetch(ctx: &Context, args: &FetchToolArgs) -> anyhow::Result<FetchR
 
     // Cap whatever content shape was produced (vendor projections and
     // descriptor documents can exceed the per-entry cap path).
-    let (content, capped) = cap_content(std::mem::take(&mut report.content));
+    let (content, capped) = cap_content(std::mem::take(&mut report.content), doc_limit);
     report.content = content;
     if capped {
         report.truncated = true;
@@ -432,12 +447,12 @@ fn entry_content(entry: &TarEntryData) -> anyhow::Result<(String, bool)> {
     }
 }
 
-/// Truncate `content` at [`FETCH_DOC_SIZE_LIMIT`] on a char boundary.
-fn cap_content(content: String) -> (String, bool) {
-    if content.len() <= FETCH_DOC_SIZE_LIMIT {
+/// Truncate `content` at `limit` bytes on a char boundary.
+fn cap_content(content: String, limit: usize) -> (String, bool) {
+    if content.len() <= limit {
         return (content, false);
     }
-    let mut cut = FETCH_DOC_SIZE_LIMIT;
+    let mut cut = limit;
     while !content.is_char_boundary(cut) {
         cut -= 1;
     }
@@ -602,6 +617,39 @@ mod tests {
         assert!(err.to_string().contains("fetch limit"));
     }
 
+    #[tokio::test]
+    async fn fetch_with_limit_controls_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let body = format!("---\nname: demo\ndescription: d\n---\n{}", "x".repeat(512));
+        let blob = tar_of(&[("demo/SKILL.md", body.as_bytes())]);
+        publish(&reg, "test.registry/acme/skills/demo:latest", "skill", &blob).await;
+        let (ctx, scope) = ctx_and_scope(&reg, tmp.path(), tmp.path());
+        let args = |scope| FetchToolArgs {
+            reference: "test.registry/acme/skills/demo:latest".to_string(),
+            vendor: None,
+            path: None,
+            scope,
+        };
+
+        // A tiny cap truncates (with the marker appended)...
+        let small = fetch_with_limit(&ctx, &args(scope), 64).await.expect("fetch");
+        assert!(small.truncated);
+        assert!(small.content.ends_with(TRUNCATION_MARKER));
+
+        // ...while a large cap (the CLI's blob-gate limit) returns the
+        // exact bytes — truncation unreachable below the layer gate.
+        let scope = ScopeToolArgs {
+            workspace: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let full = fetch_with_limit(&ctx, &args(scope), FETCH_BLOB_SIZE_LIMIT as usize)
+            .await
+            .expect("fetch");
+        assert!(!full.truncated);
+        assert_eq!(full.content, body);
+    }
+
     #[test]
     fn fetch_args_ref_rename_and_unknown_key_tolerance() {
         let args: FetchToolArgs =
@@ -616,12 +664,12 @@ mod tests {
         // A multi-byte char straddling the cap must not split.
         let mut s = "a".repeat(FETCH_DOC_SIZE_LIMIT - 1);
         s.push('€'); // 3 bytes: crosses the cap boundary
-        let (capped, truncated) = cap_content(s);
+        let (capped, truncated) = cap_content(s, FETCH_DOC_SIZE_LIMIT);
         assert!(truncated);
         assert_eq!(capped.len(), FETCH_DOC_SIZE_LIMIT - 1);
         assert!(capped.chars().all(|c| c == 'a'));
 
-        let (untouched, truncated) = cap_content("short".to_string());
+        let (untouched, truncated) = cap_content("short".to_string(), FETCH_DOC_SIZE_LIMIT);
         assert!(!truncated);
         assert_eq!(untouched, "short");
     }

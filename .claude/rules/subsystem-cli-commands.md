@@ -25,6 +25,7 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim status` | Report each declared artifact's state (installed, outdated, modified, …) with bundle provenance |
 | `grim context` | Read-only introspection of the resolved invocation context: scope, config/lock/state paths (+ existence), effective client set (names only), registry browse set, default registry, offline (+ source). Exits 79 outside a project without `--global` |
 | `grim search [query]` | Substring search over the registry catalog (repo, summary, description, keywords); empty query lists all |
+| `grim fetch <ref> [--vendor …] [--path …]` | Print an artifact's content without installing (CLI port of the MCP `grim_fetch` tool). Plain = raw payload (pipe-able, no trailing newline; warnings on stderr); JSON = full fetch report. Never truncates below the 8 MiB layer gate (MCP keeps its 256 KiB doc cap) |
 | `grim tui` | Interactive catalog browser with live install state (flat list / tree toggle) |
 | `grim update [names…]` | Re-resolve floating tags, roll the lock forward, re-materialize what changed; prunes clean orphans that dropped out of the lock. No names = everything; names are config binding names, not refs |
 | `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |

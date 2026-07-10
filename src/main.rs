@@ -42,6 +42,7 @@ use crate::command::add::AddArgs;
 use crate::command::build::BuildArgs;
 use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
+use crate::command::fetch::FetchArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
@@ -105,6 +106,8 @@ pub enum Command {
     Uninstall(UninstallArgs),
     /// Search the registry catalog for skills and rules.
     Search(SearchArgs),
+    /// Print an artifact's content without installing it.
+    Fetch(FetchArgs),
     /// Print the JSON Schema for grimoire.toml or publish.toml.
     Schema(SchemaArgs),
     /// Browse the registry catalog in an interactive TUI.
