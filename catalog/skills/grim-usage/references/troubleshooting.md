@@ -53,6 +53,12 @@ Common causes, roughly in order of frequency:
   string; exact-version tag already exists at a different digest
   (re-release with `--force` only if you mean to rewrite it).
 - **Integrity mismatch** on installed content (see below).
+- **Oversize blob.** A registry serving more bytes than its manifest
+  declared for a layer aborts the download mid-transfer rather than
+  buffering an unbounded body. Reachable from `grim fetch` (also gated by
+  an 8 MiB pre-download check on the declared size) and from
+  `grim install`/`grim update` (no separate flag — any locked artifact's
+  download can hit this on a lying descriptor).
 - **Git provenance unavailable.** Building or releasing with `--git`
   (opt-in commit provenance) from a path that is not a git repository,
   or with `git` missing from `PATH`, is a data error — the flag
