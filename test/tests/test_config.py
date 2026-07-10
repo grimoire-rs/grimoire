@@ -739,3 +739,30 @@ def test_concurrent_config_set_produces_valid_toml(
     assert has_registry or has_clients, (
         f"the winning writer's value must appear in the config; options={options!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #:schema directive preservation
+# ---------------------------------------------------------------------------
+
+
+def test_schema_directive_survives_config_rewrites(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A leading ``#:schema`` editor directive survives every rewrite
+    through the shared write_config seam (set, unset)."""
+    directive = "#:schema https://grimoire.rs/schemas/grimoire-config.schema.json"
+    (project_dir / "grimoire.toml").write_text(
+        f"{directive}\n\n[skills]\n\n[rules]\n"
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.clients", "claude")
+    body = (project_dir / "grimoire.toml").read_text()
+    assert body.startswith(directive), f"set must keep the directive first: {body}"
+
+    runner.run("config", "unset", "options.clients")
+    body = (project_dir / "grimoire.toml").read_text()
+    assert body.startswith(directive), f"unset must keep the directive first: {body}"
+    tomllib.loads(body)  # still valid TOML

@@ -499,12 +499,41 @@ async fn fetch_manifest_best_effort(
     access.fetch_manifest(&pinned).await.ok()?
 }
 
+/// The first `#:schema` editor directive in `path`'s *leading comment
+/// block* (blank and `#` lines before the first content line), if any.
+///
+/// Preserve-only seam for [`write_config`]: the lossy re-serialize drops
+/// comments, but the schema directive is machine-meaningful (taplo/editor
+/// validation), so it survives a rewrite. Never invents a directive; a
+/// directive below the first content line is out of the leading block and
+/// is dropped like any other comment. Read failures (fresh file) yield
+/// `None`.
+fn preserved_schema_directive(path: &std::path::Path) -> Option<String> {
+    let existing = std::fs::read_to_string(path).ok()?;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            if trimmed.starts_with("#:schema") {
+                return Some(trimmed.to_string());
+            }
+            continue;
+        }
+        // First content line ends the leading comment block.
+        return None;
+    }
+    None
+}
+
 /// Re-serialize the declaration to `path` as the shared
 /// `[options]`/`[bundles]`/`[skills]`/`[rules]` schema. Atomic via the
 /// store primitive so a crash never truncates the config. The `[bundles]`
 /// table is emitted only when at least one bundle is declared, so a
 /// bundle-free config is byte-identical to one written before bundles
-/// existed.
+/// existed. A `#:schema` directive in the existing file's leading comment
+/// block is preserved at the top of the rewritten file.
 pub(crate) fn write_config(
     path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
@@ -514,6 +543,9 @@ pub(crate) fn write_config(
     use std::fmt::Write as _;
 
     let mut out = String::new();
+    if let Some(directive) = preserved_schema_directive(path) {
+        let _ = writeln!(out, "{directive}");
+    }
     let has_base_options = options.default_registry.is_some() || !options.clients.is_empty() || options.show_deprecated;
     let has_tui_options = !options.tui.is_empty();
     if has_base_options || has_tui_options {
@@ -985,6 +1017,58 @@ tree_separators_typo = 1
             cfg.options.default_registry.as_deref(),
             Some("ghcr.io/acme"),
             "re-parsed config must carry the legacy default_registry"
+        );
+    }
+
+    /// Minimal write_config round-trip against an existing file body.
+    fn rewrite_over(existing: Option<&str>) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        if let Some(body) = existing {
+            std::fs::write(&path, body).unwrap();
+        }
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+        std::fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn write_config_preserves_leading_schema_directive() {
+        const D: &str = "#:schema https://grimoire.rs/schemas/grimoire-config.schema.json";
+        let body = rewrite_over(Some(&format!("{D}\n\n[skills]\n")));
+        assert!(
+            body.starts_with(D),
+            "the #:schema directive must survive a rewrite as the first line: {body}"
+        );
+        ProjectConfig::from_toml_str(&body).expect("rewritten config still parses");
+    }
+
+    #[test]
+    fn write_config_never_invents_schema_directive() {
+        // Fresh file (no previous config) and directive-less config both
+        // stay directive-less — preserve-only, never invent.
+        assert!(!rewrite_over(None).contains("#:schema"));
+        assert!(!rewrite_over(Some("[skills]\n")).contains("#:schema"));
+    }
+
+    #[test]
+    fn write_config_drops_schema_directive_below_content() {
+        // A directive after the first content line is not in the leading
+        // block — it is dropped like any other comment.
+        let body = rewrite_over(Some("[skills]\n#:schema https://x.example/s.json\n"));
+        assert!(
+            !body.contains("#:schema"),
+            "mid-file directive must not be hoisted: {body}"
+        );
+    }
+
+    #[test]
+    fn write_config_preserves_directive_under_ordinary_comment() {
+        const D: &str = "#:schema https://x.example/s.json";
+        let body = rewrite_over(Some(&format!("# hand-written header\n{D}\n[skills]\n")));
+        assert!(
+            body.starts_with(D),
+            "directive below an ordinary leading comment still survives: {body}"
         );
     }
 

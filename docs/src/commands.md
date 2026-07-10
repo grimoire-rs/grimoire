@@ -67,7 +67,7 @@ The command covers two areas of the file: **settings** (the `[options]` and `[op
 
 Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
 
-Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The serializer is shared with [`grim add`](#add) and [`grim remove`](#remove) — **comments and the `#:schema` directive are not preserved on any write**.
+Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The serializer is shared with [`grim add`](#add) and [`grim remove`](#remove) — **comments are not preserved on any write**, with one exception: a leading `#:schema` editor directive survives every rewrite.
 
 ### Settings {#config-settings}
 

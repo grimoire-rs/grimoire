@@ -6,8 +6,9 @@ variables. Settings (`[options]`, `[options.tui]`) and named registries
 (`[skills]`, `[rules]`, `[agents]`, `[bundles]`) stay under [`grim add`][grim-add]
 and [`grim remove`][grim-remove]. You can also hand-edit either file directly,
 but note that **any `grim` write — `grim config`, `grim add`, `grim remove` — uses a
-lossy serializer: comments and the `#:schema` directive are removed** on every
-write.
+lossy serializer: comments are removed** on every write. The one exception
+is a leading [`#:schema` editor directive](#editor-schema), which every
+rewrite preserves at the top of the file.
 
 ## `grimoire.toml`
 
