@@ -64,12 +64,16 @@ One row object per item inside `{"items": [...]}`:
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
 | `status` | `{kind, name, source, pinned, state, outputs}` — `pinned` null until locked; `outputs` is `[{client, path}]` (see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action}` — `old` null for a first lock, `new` null for a pruned row | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
-| `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, status}` — see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
+| `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, status}` — `kind` is `null` when the catalog row's manifest declares none; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value}` | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
 | `publish` | `{ref, kind, digest, tags, status}` + sibling envelope key `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
-`kind` is always one of `skill`, `rule`, `agent`, `bundle`, `mcp`.
+`kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
+enveloped report except `search`: the other reports resolve a locked or
+otherwise real artifact, so their `kind` is always one of those five
+values, while `search` reports a catalog row whose manifest may declare
+no kind at all, in which case `kind` is `null`.
 
 ### Single-object reports {#shapes-single}
 
@@ -132,10 +136,10 @@ dispatch uses `code` and `exit`:
 | `unavailable` | 69 | Required resource unreachable: registry down, announce failure |
 | `io` | 74 | Filesystem I/O failure |
 | `temp-fail` | 75 | Transient failure — retry may succeed |
-| `no-permission` | 77 | Insufficient permission: registry 403, filesystem `EPERM` |
+| `no-permission` | 77 | Insufficient permission: filesystem `EPERM` |
 | `config` | 78 | Config file invalid or unparseable |
 | `not-found` | 79 | Resource not found: missing package, absent explicit config path |
-| `auth` | 80 | Authentication failure: registry 401, missing credential |
+| `auth` | 80 | Authentication failure: registry 401 or 403, missing credential |
 | `offline-blocked` | 81 | `--offline` (or `GRIM_OFFLINE`) blocked a network operation |
 
 The numeric values follow BSD [`sysexits.h`][sysexits] (64–78) with
@@ -177,12 +181,15 @@ report at all. A robust consumer therefore branches on the top-level
 ## MCP parity {#mcp-parity}
 
 The [MCP server][commands-mcp] tools return the same payloads:
-`grim_search` and `grim_status` results are byte-identical to
-`grim search --format json` / `grim status --format json` for the same
-scope (envelope included), and `grim_fetch` returns the same shape as
-`grim fetch --format json` — except the MCP tool truncates `content` at
-256 KiB for tool-result budgets, while the CLI never truncates below its
-8 MiB layer gate.
+`grim_search` and `grim_status` results have the same shape, envelope,
+and field values as `grim search --format json` / `grim status --format
+json` for the same scope — parsed, the two documents compare equal. They
+are **not byte-identical**: the MCP server serializes compact JSON
+(`serde_json::to_string`) while the CLI pretty-prints
+(`to_string_pretty`), so whitespace differs. `grim_fetch` returns the
+same shape as `grim fetch --format json` — except the MCP tool truncates
+`content` at 256 KiB for tool-result budgets, while the CLI never
+truncates below its 8 MiB layer gate.
 
 ## No self-identifying reports {#no-discriminator}
 

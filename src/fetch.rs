@@ -19,8 +19,11 @@
 //! for multi-file kinds.
 //!
 //! Two ceilings with different failure modes: the layer descriptor size is
-//! gated at [`FETCH_BLOB_SIZE_LIMIT`] *before* download (error — bounds
-//! memory and network against a hostile registry, CWE-770), while returned
+//! checked against [`FETCH_BLOB_SIZE_LIMIT`] *before* download (a cheap
+//! reject for an honestly-declared oversize layer), and the same limit
+//! caps the actual streamed bytes during the blob fetch — a registry that
+//! serves more than it declared aborts mid-transfer into `OversizeBlob`
+//! rather than growing an unbounded body in memory (CWE-770). Returned
 //! documents truncate at [`FETCH_DOC_SIZE_LIMIT`] with a marker naming
 //! `grim_render` / `grim install` as the escape hatch (a truncated doc is
 //! still useful in-context).
@@ -40,10 +43,13 @@ use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
 use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 
-/// Upper bound on a fetched layer blob, checked against the manifest's
-/// layer-descriptor `size` *before* the download. Skill/rule/agent layers
-/// have no publish-side cap and the blob fetch reads the whole layer into
-/// memory, so the gate bounds both memory and transfer (CWE-770).
+/// Upper bound on a fetched layer blob. Checked against the manifest's
+/// layer-descriptor `size` before download (a cheap reject for an
+/// honestly-declared oversize layer), then passed to `fetch_blob` as the
+/// cap on the actual streamed bytes — a registry serving more than it
+/// declared aborts mid-stream into `OversizeBlob` instead of growing an
+/// unbounded body in memory (CWE-770). Skill/rule/agent layers have no
+/// publish-side cap of their own, so this is their only ceiling.
 pub const FETCH_BLOB_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// Upper bound on any single document returned in a tool result. Content

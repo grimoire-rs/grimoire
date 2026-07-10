@@ -37,7 +37,8 @@ pub enum ExitCode {
     /// Temporary failure that may succeed on retry: rate limit, transient network.
     /// Mirrors `EX_TEMPFAIL` (75).
     TempFail = 75,
-    /// Insufficient permissions: registry 403, filesystem `EPERM`.
+    /// Insufficient permissions: filesystem `EPERM`. Registry auth failures
+    /// (401/403) classify as `AuthError`, not this variant.
     /// Mirrors `EX_NOPERM` (77).
     NoPermission = 77,
     /// Configuration error: bad config file, missing required field, parse failure.
@@ -46,7 +47,7 @@ pub enum ExitCode {
     /// Resource not found: package 404, explicit config path absent.
     /// Grimoire-specific; first slot above `EX_CONFIG`.
     NotFound = 79,
-    /// Authentication failure: registry 401, missing credentials.
+    /// Authentication failure: registry 401 or 403, missing credentials.
     /// Grimoire-specific.
     AuthError = 80,
     /// Offline mode blocked a network operation.
