@@ -40,6 +40,7 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim --version` | Print the compiled version (clap built-in; no subcommand) |
 
 Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
+`--progress <auto|json|none>` (experimental; NDJSON events on stderr),
 `--offline`, `--log-level`, `--config <path>`, `--global`,
 `--registry <ref>` (repeatable / comma-separated).
 

@@ -83,6 +83,10 @@ pub struct ArtifactInstall {
 /// is recorded against that artifact; siblings still process so the report
 /// reflects the whole set. Each artifact is materialized into every
 /// client target the [`InstallTarget`] selects.
+#[allow(
+    dead_code,
+    reason = "test convenience wrapper — production callers select a progress sink via install_all_with_progress"
+)]
 pub async fn install_all<M: ArtifactMaterializer>(
     lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,

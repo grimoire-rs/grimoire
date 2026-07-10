@@ -33,6 +33,23 @@ impl std::fmt::Display for OutputFormat {
     }
 }
 
+/// Progress rendering mode for long-running passes (install/update/add).
+///
+/// **Experimental pre-1.0** (stability.md "Unstable"): the NDJSON event
+/// shapes evolve additively and freeze at 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ProgressMode {
+    /// The current behavior: a stderr bar when stderr is a terminal,
+    /// silent otherwise (and always silent for `update`/`add`).
+    #[default]
+    Auto,
+    /// NDJSON progress events on stderr (one JSON object per line).
+    Json,
+    /// No progress output.
+    None,
+}
+
 /// Options available on every `grim` invocation.
 ///
 /// Flattened into the top-level command via `#[command(flatten)]` so the
@@ -42,6 +59,12 @@ pub struct GlobalOptions {
     /// Output format for structured results.
     #[arg(long, value_enum, default_value_t = OutputFormat::Plain, global = true)]
     pub format: OutputFormat,
+
+    /// Progress rendering for long-running passes (experimental):
+    /// `auto` = tty-gated stderr bar, `json` = NDJSON events on stderr,
+    /// `none` = silent.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, global = true)]
+    pub progress: ProgressMode,
 
     /// Disable all network access; work from the cache only and fail
     /// rather than reach a registry.

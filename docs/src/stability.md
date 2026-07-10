@@ -57,6 +57,10 @@ major version bump:
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
   exit codes and structured JSON output are contracts.
+- **NDJSON progress events** (`--progress json`) are **experimental
+  pre-1.0**: the event shapes evolve additively only (new fields may
+  appear, existing ones keep their meaning), and the surface freezes at
+  1.0 once external consumers have validated it.
 
 ### The supported discovery channel {#unstable-discovery}
 

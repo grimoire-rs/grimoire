@@ -59,6 +59,80 @@ impl InstallProgress for StderrBar {
     }
 }
 
+/// NDJSON progress events on stderr — one JSON object per line.
+///
+/// **Experimental pre-1.0** (stability.md "Unstable"): the event shapes
+/// evolve additively and freeze at 1.0. Events:
+/// `{"event":"start","total":N}` /
+/// `{"event":"advance","position":i,"total":N,"label":"skill code-review"}`
+/// (`label` is display-only — not a parse contract) / `{"event":"finish"}`.
+/// Best-effort like the bar: write failures never fail an install.
+#[derive(Default)]
+pub struct NdjsonProgress {
+    /// Total artifact count, learned from [`InstallProgress::start`].
+    total: Cell<usize>,
+}
+
+impl InstallProgress for NdjsonProgress {
+    fn start(&self, total: usize) {
+        self.total.set(total);
+        emit_line(&start_event(total));
+    }
+
+    fn advance(&self, position: usize, label: &str) {
+        emit_line(&advance_event(position, self.total.get(), label));
+    }
+
+    fn finish(&self) {
+        emit_line(&finish_event());
+    }
+}
+
+/// The `start` event line (no trailing newline).
+fn start_event(total: usize) -> String {
+    serde_json::json!({"event": "start", "total": total}).to_string()
+}
+
+/// The `advance` event line (no trailing newline). `label` is display-only.
+fn advance_event(position: usize, total: usize, label: &str) -> String {
+    serde_json::json!({"event": "advance", "position": position, "total": total, "label": label}).to_string()
+}
+
+/// The `finish` event line (no trailing newline).
+fn finish_event() -> String {
+    serde_json::json!({"event": "finish"}).to_string()
+}
+
+/// Write one event line to locked stderr, best-effort.
+fn emit_line(line: &str) {
+    let mut err = io::stderr().lock();
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
+}
+
+/// The progress sink for `mode` — the single place the three-way
+/// `--progress` match lives.
+///
+/// `auto_bar` is what `Auto` means for the calling command: `grim install`
+/// passes `true` (tty-gated stderr bar — the pre-flag behavior); `update`
+/// and `add` pass `false` (they were always silent; `Auto` must not change
+/// behavior).
+pub fn select_progress(mode: crate::cli::options::ProgressMode, auto_bar: bool) -> Box<dyn InstallProgress> {
+    use crate::cli::options::ProgressMode;
+    use std::io::IsTerminal as _;
+    match mode {
+        ProgressMode::Json => Box::new(NdjsonProgress::default()),
+        ProgressMode::None => Box::new(crate::install::progress::SilentProgress),
+        ProgressMode::Auto => {
+            if auto_bar && io::stderr().is_terminal() {
+                Box::new(StderrBar::default())
+            } else {
+                Box::new(crate::install::progress::SilentProgress)
+            }
+        }
+    }
+}
+
 /// Build the progress line `[####----] p/total label`, clamped to `cols`
 /// so it never wraps (a wrapped line breaks the carriage-return redraw).
 fn render_bar(position: usize, total: usize, label: &str, cols: usize) -> String {
@@ -116,5 +190,40 @@ mod tests {
         // An empty lock yields total 0; treat as 1 so the divide is safe.
         let line = render_bar(0, 0, "", 80);
         assert!(line.starts_with("[--------------------] 0/1 "), "got: {line}");
+    }
+
+    #[test]
+    fn ndjson_event_lines_are_exact() {
+        // The event shapes are a (pre-1.0 experimental) machine contract —
+        // lock them literally.
+        assert_eq!(start_event(3), r#"{"event":"start","total":3}"#);
+        assert_eq!(
+            advance_event(1, 3, "skill code-review"),
+            r#"{"event":"advance","label":"skill code-review","position":1,"total":3}"#
+        );
+        assert_eq!(finish_event(), r#"{"event":"finish"}"#);
+        // Every line parses back as one JSON object.
+        for line in [start_event(0), advance_event(2, 2, "rule x"), finish_event()] {
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert!(v["event"].is_string());
+        }
+    }
+
+    #[test]
+    fn select_progress_maps_modes() {
+        use crate::cli::options::ProgressMode;
+        // Json and None are terminal-independent; Auto with auto_bar=false
+        // is always silent. (Auto+tty can't be asserted under a test
+        // harness — stderr is captured.) Selection compiles and returns a
+        // usable sink either way.
+        for (mode, auto_bar) in [
+            (ProgressMode::Json, false),
+            (ProgressMode::None, true),
+            (ProgressMode::Auto, false),
+        ] {
+            let sink = select_progress(mode, auto_bar);
+            sink.start(0);
+            sink.finish();
+        }
     }
 }

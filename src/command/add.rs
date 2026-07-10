@@ -36,7 +36,6 @@ use crate::command::command_error::CommandError;
 use crate::context::Context;
 use crate::install::installer::install_and_persist;
 use crate::install::materializer::DefaultMaterializer;
-use crate::install::progress::SilentProgress;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -214,7 +213,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // acted-on entry (or, for a bundle, its members) is projected out and
     // installed, so the rest of a shared lock stays for `grim install`.
     if args.install.enabled() {
-        install_added(&scope, kind, &name, &new_lock, &access).await?;
+        install_added(ctx, &scope, kind, &name, &new_lock, &access).await?;
     }
 
     // A bundle has no single pinned member to report; surface the bundle
@@ -247,6 +246,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 /// Target parse (65), install-state I/O (74), integrity refusal / registry
 /// / I/O failures propagate via the typed chain.
 async fn install_added(
+    ctx: &Context,
     scope: &super::scope_resolution::ResolvedScope,
     kind: ArtifactKind,
     name: &str,
@@ -293,7 +293,9 @@ async fn install_added(
             &scope.workspace,
             &scope.config_path,
             false,
-            &SilentProgress,
+            // `--progress auto` stays silent here (add never rendered a
+            // bar); `--progress json` emits the NDJSON events on stderr.
+            crate::cli::progress::select_progress(ctx.progress(), false).as_ref(),
         )
         .await,
     )?;

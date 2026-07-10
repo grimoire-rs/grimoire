@@ -1277,6 +1277,7 @@ mod tests {
     fn opts(registry: Option<&str>) -> GlobalOptions {
         GlobalOptions {
             format: OutputFormat::Plain,
+            progress: crate::cli::options::ProgressMode::Auto,
             offline: false,
             log_level: None,
             config: None,

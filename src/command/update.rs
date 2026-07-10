@@ -20,7 +20,7 @@ use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::installer::install_all;
+use crate::install::installer::install_all_with_progress;
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, prune_orphans};
 use crate::install::target::InstallTarget;
@@ -108,7 +108,10 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     ))?;
     let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
-    let outcomes = install_all(
+    // `--progress auto` stays silent here (update never rendered a bar);
+    // `--progress json` emits the NDJSON events on stderr.
+    let progress = crate::cli::progress::select_progress(ctx.progress(), false);
+    let outcomes = install_all_with_progress(
         &new_lock,
         &access,
         &materializer,
@@ -116,6 +119,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &mut state,
         &scope.roots,
         true,
+        progress.as_ref(),
     )
     .await;
 

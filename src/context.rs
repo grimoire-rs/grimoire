@@ -40,6 +40,8 @@ pub struct Context {
     /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
     registry_env: Option<String>,
     offline: bool,
+    /// The `--progress` mode for long-running passes.
+    progress: crate::cli::options::ProgressMode,
     /// The `--global` flag: operate on the global scope rather than the
     /// discovered project. Consumed by scope-aware commands via
     /// [`Self::global`] instead of a per-command redeclaration.
@@ -75,6 +77,7 @@ impl Clone for Context {
             registry_flag: self.registry_flag.clone(),
             registry_env: self.registry_env.clone(),
             offline: self.offline,
+            progress: self.progress,
             global: self.global,
             config: self.config.clone(),
             #[cfg(test)]
@@ -97,6 +100,7 @@ impl Context {
             registry_flag: options.registry.clone(),
             registry_env: env::default_registry(),
             offline: options.offline || env::offline(),
+            progress: options.progress,
             global: options.global,
             config: options.config.clone(),
             #[cfg(test)]
@@ -143,6 +147,11 @@ impl Context {
     /// Whether all network access is disabled for this invocation.
     pub fn offline(&self) -> bool {
         self.offline
+    }
+
+    /// The `--progress` mode for long-running passes.
+    pub fn progress(&self) -> crate::cli::options::ProgressMode {
+        self.progress
     }
 
     /// The `--global` flag: operate on the global scope rather than the
@@ -226,6 +235,7 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
             test_access: None,
@@ -259,6 +269,7 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
             test_access: Some(Arc::new(access)),
@@ -278,6 +289,7 @@ impl Context {
             registry_flag: vec![registry_flag],
             registry_env: None,
             offline: false,
+            progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
             test_access: Some(Arc::new(access)),
@@ -293,6 +305,7 @@ mod tests {
     fn opts() -> GlobalOptions {
         GlobalOptions {
             format: OutputFormat::Plain,
+            progress: crate::cli::options::ProgressMode::Auto,
             offline: false,
             log_level: None,
             config: None,
