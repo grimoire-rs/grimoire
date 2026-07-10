@@ -100,6 +100,53 @@ def test_uninstall_removes_dev_install(grim_at, project_dir: Path) -> None:
     assert not [e for e in items if e["name"] == "dev-skill"]
 
 
+def test_global_dev_install_renders_to_native_home(
+    grim_at, grim_home: Path, tmp_path: Path
+) -> None:
+    # Global dev-install writes into the vendor-native user-level dir
+    # (isolated $HOME here), records dev state in global.json, and the
+    # full lifecycle (status, uninstall) works at global scope.
+    src = tmp_path / "dev-skill"
+    _write(
+        src / "SKILL.md",
+        "---\nname: dev-skill\ndescription: Dev.\n---\n# Global dev\n",
+    )
+    runner = _offline(grim_at(tmp_path))
+    runner.run("--global", "install", str(src), "--client", "claude")
+
+    rendered = runner.home / ".claude" / "skills" / "dev-skill" / "SKILL.md"
+    assert rendered.is_file()
+    assert "# Global dev" in rendered.read_text()
+
+    state = (grim_home / "state" / "global.json").read_text()
+    assert '"dev"' in state
+
+    items = runner.json("--global", "status")["items"]
+    dev = [e for e in items if e["name"] == "dev-skill"]
+    assert dev and dev[0]["source"].endswith("(dev)")
+
+    runner.run("--global", "uninstall", "skill", "dev-skill")
+    assert not (runner.home / ".claude" / "skills" / "dev-skill").exists()
+
+
+def test_global_dev_install_honors_claude_config_dir(
+    grim_at, tmp_path: Path
+) -> None:
+    # CLAUDE_CONFIG_DIR replaces ~/.claude as the global install root.
+    src = tmp_path / "dev-skill"
+    _write(
+        src / "SKILL.md",
+        "---\nname: dev-skill\ndescription: Dev.\n---\n# Override\n",
+    )
+    override = tmp_path / "claude-config"
+    runner = _offline(grim_at(tmp_path))
+    runner.env["CLAUDE_CONFIG_DIR"] = str(override)
+    runner.run("--global", "install", str(src), "--client", "claude")
+
+    assert (override / "skills" / "dev-skill" / "SKILL.md").is_file()
+    assert not (runner.home / ".claude" / "skills" / "dev-skill").exists()
+
+
 def test_bare_word_positional_is_64(grim_at, project_dir: Path) -> None:
     _project(project_dir)
     runner = _offline(grim_at(project_dir))
