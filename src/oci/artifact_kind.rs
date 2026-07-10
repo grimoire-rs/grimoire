@@ -20,7 +20,9 @@ pub const KIND_ANNOTATION: &str = "com.grimoire.kind";
 ///
 /// Closed internal enum: the binary is the only consumer, so matches stay
 /// total — no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     /// An Agent Skill: a `SKILL.md` directory with YAML frontmatter.

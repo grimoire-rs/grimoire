@@ -20,6 +20,22 @@ pub enum LockVersion {
     V1 = 1,
 }
 
+impl schemars::JsonSchema for LockVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LockVersion".into()
+    }
+
+    /// Manual impl: the wire form is a bare integer (`serde_repr`), but a
+    /// derive would describe a string enum of variant names.
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "description": "Lock-file format version (currently always 1)",
+            "enum": [1]
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -110,6 +110,23 @@ impl<'de> Deserialize<'de> for PinnedIdentifier {
     }
 }
 
+impl schemars::JsonSchema for PinnedIdentifier {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PinnedIdentifier".into()
+    }
+
+    /// On the wire a pin is a single string that must carry a digest —
+    /// mirror that with a `string` schema plus a digest pattern instead of
+    /// deriving from the private struct field.
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; an advisory `:tag` may precede the digest)",
+            "pattern": "@sha256:[0-9a-f]{64}$"
+        })
+    }
+}
+
 /// A pinned identifier requires a digest but none was present.
 #[derive(Debug, thiserror::Error)]
 #[error("pinned identifier requires a digest: {identifier}")]

@@ -285,6 +285,7 @@ are generated from grim's own parser, so they accept exactly what grim accepts.
 |------|------------|
 | `grimoire.toml` | `https://grimoire.rs/schemas/grimoire-config.schema.json` |
 | `publish.toml` | `https://grimoire.rs/schemas/grim-publish.schema.json` |
+| `grimoire.lock` | `https://grimoire.rs/schemas/grimoire-lock.schema.json` |
 
 [Taplo](https://taplo.tamasfe.dev/) and the
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)

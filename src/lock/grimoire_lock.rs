@@ -19,7 +19,7 @@ use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::ArtifactKind;
 
 /// Lock metadata header.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockMetadata {
     /// On-disk schema version (currently always [`LockVersion::V1`]).
@@ -65,20 +65,35 @@ pub struct GrimoireLock {
 }
 
 /// Raw on-disk shape used for deserialization.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawLock {
+    /// Metadata header (`[metadata]`).
     metadata: LockMetadata,
+    /// Locked skills (`[[skill]]`).
     #[serde(default, rename = "skill")]
     skills: Vec<LockedArtifact>,
+    /// Locked rules (`[[rule]]`).
     #[serde(default, rename = "rule")]
     rules: Vec<LockedArtifact>,
+    /// Locked agents (`[[agent]]`).
     #[serde(default, rename = "agent")]
     agents: Vec<LockedArtifact>,
+    /// Locked MCP server descriptors (`[[mcp]]`).
     #[serde(default, rename = "mcp")]
     mcp: Vec<LockedArtifact>,
+    /// Cached bundle expansions (`[[bundle]]`).
     #[serde(default, rename = "bundle")]
     bundles: Vec<crate::lock::locked_bundle::LockedBundle>,
+}
+
+/// The JSON Schema (schemars) for the on-disk `grimoire.lock` shape.
+///
+/// Built from the private [`RawLock`] parse target — mirroring
+/// `config_json_schema()` — so the published schema and the parser can
+/// never describe different shapes.
+pub fn lock_json_schema() -> schemars::Schema {
+    schemars::schema_for!(RawLock)
 }
 
 impl GrimoireLock {

@@ -34,7 +34,7 @@ pub const BUNDLE_LAYER_SIZE_LIMIT: u64 = 512 * 1024;
 pub const MAX_BUNDLE_MEMBERS: usize = 512;
 
 /// One member of a bundle: a skill or rule reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BundleMember {
     /// The member kind. Only `skill` and `rule` are valid; a nested

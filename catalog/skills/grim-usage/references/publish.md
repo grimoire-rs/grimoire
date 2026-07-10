@@ -219,9 +219,9 @@ falls to manual maintainer review. Full spec: [The Package Index][package-index]
 
 ## Editor schema support {#editor-schema}
 
-`grim schema --kind config|publish` prints a JSON Schema for `grimoire.toml`
-or `publish.toml` (generated from grim's own parser, so it accepts exactly
-what grim accepts). The same schemas are published to the docs site; adding a
+`grim schema --kind config|publish|lock` prints a JSON Schema for
+`grimoire.toml`, `publish.toml`, or `grimoire.lock` (generated from grim's
+own parser, so it accepts exactly what grim accepts). The same schemas are published to the docs site; adding a
 `#:schema` directive on the first line of a TOML file gives a supporting editor
 (Taplo, Even Better TOML) autocomplete and typo-flagging. Confirm the flags
 with `grim schema --help`; see the [Editor schema support][editor-schema] docs

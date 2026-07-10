@@ -19,7 +19,7 @@ use crate::oci::bundle::BundleMember;
 ///
 /// `pinned` records the bundle manifest digest, which also gives the TUI a
 /// baseline for floating-tag "outdated" re-checks on bundle rows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockedBundle {
     /// Config binding name (TOML key from `[bundles]`).

@@ -4,7 +4,7 @@ version: '3'
 
 tasks:
   generate:
-    desc: Generate the JSON Schemas for grimoire.toml and publish.toml into docs/src/schemas/
+    desc: Generate the JSON Schemas for grimoire.toml, publish.toml, and grimoire.lock into docs/src/schemas/
     summary: |
       Runs the compiled `grim schema` for each kind and writes the pretty
       JSON into docs/src/schemas/. mdBook copies those files verbatim into
@@ -13,7 +13,7 @@ tasks:
       The schemas are generated artifacts, NOT committed: they are
       gitignored and the docs build (`task docs:build`) regenerates them on
       every run, so the published site can never drift from the parser.
-      Caching is deliberately omitted here — the two `grim schema` calls are
+      Caching is deliberately omitted here — the `grim schema` calls are
       sub-millisecond once the binary is built, and always running them is
       what guarantees freshness.
     deps:
@@ -21,7 +21,9 @@ tasks:
     generates:
       - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
       - '{{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'
+      - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-lock.schema.json'
     cmds:
       - mkdir -p {{.ROOT_DIR}}/docs/src/schemas
       - '{{.ROOT_DIR}}/target/release/grim schema --kind config > {{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
       - '{{.ROOT_DIR}}/target/release/grim schema --kind publish > {{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind lock > {{.ROOT_DIR}}/docs/src/schemas/grimoire-lock.schema.json'

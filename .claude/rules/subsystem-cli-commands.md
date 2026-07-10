@@ -33,7 +33,7 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim publish` | Batch-release all packages declared in a `publish.toml` manifest; validates whole manifest before any push; fixed kind order (skills → rules → agents → mcp → bundles), skip-existing by default |
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |
 | `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
-| `grim schema --kind <config\|publish>` | Print the JSON Schema for `grimoire.toml` or `publish.toml` to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
+| `grim schema --kind <config\|publish\|lock>` | Print the JSON Schema for `grimoire.toml`, `publish.toml`, or `grimoire.lock` to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
 | `grim mcp [--allow-writes]` | Run a local STDIO Model Context Protocol server (rmcp SDK). Long-running, `Printable`-exempt (returns `ExitCode` directly, like `tui`/`schema`); stdout is the JSON-RPC channel. Read tools (`grim_search`, `grim_status`, `grim_fetch`) always on; the write tool `grim_render` gated behind `--allow-writes` (rmcp `disable_route`: hidden + rejected). Scope per tool call (`global`/`config`/`workspace` args; precedence in that order, default cwd walk-up) — launch scope flags removed, `--global`/`--config` exit 64 |
 | `grim --version` | Print the compiled version (clap built-in; no subcommand) |
 

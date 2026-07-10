@@ -9,7 +9,7 @@ use crate::oci::{ArtifactKind, PinnedIdentifier};
 
 /// One bundle that contributed a lock member: the bundle's
 /// `registry/repo` plus the tag the declaration resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BundleProvenance {
     /// The bundle's `registry/repo`.
@@ -62,17 +62,50 @@ pub struct LockedArtifact {
 /// Wire shape accepted when deserializing a lock entry: the legacy
 /// single-provenance `bundle` + `bundle_tag` pair, or the multi-provenance
 /// `bundles` array. Mixing both shapes on one entry is a parse error.
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawLockedArtifact {
+    /// Config binding name (TOML key from `grimoire.toml`).
     name: String,
+    /// Resolved registry/repo pinned to a content digest.
     pinned: PinnedIdentifier,
+    /// Legacy single-provenance pair: the contributing bundle's
+    /// `registry/repo`. Set together with `bundle_tag`; mutually exclusive
+    /// with `bundles`.
     #[serde(default)]
     bundle: Option<String>,
+    /// Legacy single-provenance pair: the declared bundle tag. Set
+    /// together with `bundle`; mutually exclusive with `bundles`.
     #[serde(default)]
     bundle_tag: Option<String>,
+    /// Multi-provenance array: every declared bundle that contributed
+    /// this member. Mutually exclusive with the `bundle`/`bundle_tag` pair.
     #[serde(default)]
     bundles: Vec<BundleProvenance>,
+}
+
+impl schemars::JsonSchema for LockedArtifact {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LockedArtifact".into()
+    }
+
+    /// Delegates to the private [`RawLockedArtifact`] parse target so the
+    /// schema describes exactly what the parser accepts. The pair-vs-array
+    /// provenance exclusion (`bundle`/`bundle_tag` XOR `bundles`) is
+    /// enforced by `TryFrom` and noted in the description — it is not
+    /// expressible as plain properties.
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = RawLockedArtifact::json_schema(generator);
+        schema.insert(
+            "description".to_string(),
+            serde_json::Value::String(
+                "One locked artifact. Bundle provenance is either the legacy `bundle` + `bundle_tag` pair \
+                 (set together) or the `bundles` array — never both on one entry"
+                    .to_string(),
+            ),
+        );
+        schema
+    }
 }
 
 impl TryFrom<RawLockedArtifact> for LockedArtifact {
