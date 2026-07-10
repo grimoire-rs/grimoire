@@ -38,6 +38,7 @@ use crate::config::ResolvedRegistry;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
 use crate::install::materializer::{TarEntryData, unpack_tar_in_memory};
+use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
@@ -214,16 +215,19 @@ pub async fn fetch_artifact(
         ArtifactKind::Bundle => Some(BUNDLE_LAYER_SIZE_LIMIT),
         _ => max_layer_size,
     };
+    let repo: Identifier = pinned.as_identifier().without_tag();
     if let Some(cap) = cap
         && layer.size > cap
     {
-        return Err(anyhow!(
-            "layer blob of {} bytes exceeds the {cap}-byte fetch limit; install with grim install instead",
-            layer.size
-        ));
+        // Same `AccessErrorKind::OversizeBlob` the streamed path uses, so
+        // both the pre-download reject and the mid-stream abort classify to
+        // `DataError` (65) — a bare `anyhow!` here would fall through to the
+        // generic `Failure` (1) instead.
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            AccessError::with_identifier(repo, AccessErrorKind::OversizeBlob { limit: cap }),
+        )));
     }
 
-    let repo: Identifier = pinned.as_identifier().without_tag();
     let layer_digest = layer.digest.clone();
     // Cap the streamed body at the descriptor's declared size: the abort
     // trips on ACTUAL bytes, so a registry serving more than it declared
@@ -516,15 +520,95 @@ mod tests {
     /// A hermetic context + empty-workspace scope so resolution never
     /// depends on the developer machine's ambient configs. Resolves the
     /// neutral [`FetchScope`] + access seam the core takes.
+    fn scope_and_access_from(
+        access: impl OciAccess + 'static,
+        home: &std::path::Path,
+        workspace: &std::path::Path,
+    ) -> (FetchScope, Arc<dyn OciAccess>) {
+        let ctx = Context::with_access(home.to_path_buf(), access);
+        let scope = crate::command::resolve_fetch_scope(&ctx, false, None, Some(workspace));
+        let access = crate::command::access_seam(&ctx).expect("access");
+        (scope, access)
+    }
+
     fn scope_and_access(
         reg: &MemoryRegistry,
         home: &std::path::Path,
         workspace: &std::path::Path,
     ) -> (FetchScope, Arc<dyn OciAccess>) {
-        let ctx = Context::with_access(home.to_path_buf(), reg.clone());
-        let scope = crate::command::resolve_fetch_scope(&ctx, false, None, Some(workspace));
-        let access = crate::command::access_seam(&ctx).expect("access");
-        (scope, access)
+        scope_and_access_from(reg.clone(), home, workspace)
+    }
+
+    /// Serves a manifest whose declared layer `size` lies about the actual
+    /// blob size, so the pre-download oversize gate can be exercised without
+    /// streaming an actually-oversize body. Mirrors the
+    /// `OversizeDescriptorMock` pattern in `install/installer.rs`.
+    struct OversizeDescriptorMock {
+        blob: Vec<u8>,
+        declared_size: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for OversizeDescriptorMock {
+        async fn resolve_digest(
+            &self,
+            _id: &Identifier,
+            _op: Operation,
+        ) -> Result<Option<crate::oci::Digest>, AccessError> {
+            Ok(Some(crate::oci::Algorithm::Sha256.hash(&self.blob)))
+        }
+
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(Some(OciManifest {
+                media_type: None,
+                artifact_type: Some("application/vnd.grimoire.skill.v1".to_string()),
+                config_media_type: None,
+                layers: vec![Descriptor {
+                    digest: crate::oci::Algorithm::Sha256.hash(&self.blob),
+                    media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                    size: self.declared_size,
+                }],
+                annotations: std::collections::BTreeMap::new(),
+            }))
+        }
+
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &crate::oci::Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            unreachable!("the pre-download oversize gate must reject before any blob fetch")
+        }
+
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<crate::oci::Digest, AccessError> {
+            Ok(crate::oci::Algorithm::Sha256.hash(bytes))
+        }
+
+        async fn push_manifest(
+            &self,
+            _repo: &Identifier,
+            _manifest: &OciManifest,
+        ) -> Result<crate::oci::Digest, AccessError> {
+            Ok(crate::oci::Algorithm::Sha256.hash(b"m"))
+        }
+
+        async fn put_tag(
+            &self,
+            _repo: &Identifier,
+            _tag: &str,
+            _digest: &crate::oci::Digest,
+        ) -> Result<(), AccessError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -620,11 +704,47 @@ mod tests {
         let big = vec![b'x'; 32];
         let blob = tar_of(&[("huge/SKILL.md", big.as_slice())]);
         publish(&reg, "test.registry/acme/skills/huge:latest", "skill", &blob).await;
-        // Cap far below the blob size to trip the pre-download gate.
+        // Cap far below the blob size to trip the pre-download gate. The
+        // gate now returns the same `AccessErrorKind::OversizeBlob` the
+        // streamed path uses (see `fetch_pre_download_oversize_gate_classifies_as_data_error`
+        // for the exit-code contract this message change enables).
         let err = fetch_artifact(&scope, &access, "test.registry/acme/skills/huge:latest", Some(8))
             .await
             .expect_err("gate");
-        assert!(err.to_string().contains("fetch limit"));
+        assert!(err.to_string().contains("size cap"));
+    }
+
+    #[tokio::test]
+    async fn fetch_pre_download_oversize_gate_classifies_as_data_error() {
+        // Regression test for the Codex cross-model gate finding: the
+        // pre-download oversize reject used to be a bare `anyhow!(...)`,
+        // which `classify_error` cannot special-case, so it fell through to
+        // `ExitCode::Failure` (1) — contradicting the frozen 1.0 contract
+        // (`docs/src/commands.md`, `docs/src/json-interface.md`, the ADR)
+        // that says a pre-download oversize reject exits 65 (DataError),
+        // the same tier as the streamed `OversizeBlob` path and the install
+        // `OversizeLayer` path. Pre-fix, this assertion would have failed:
+        // `classify_error` would have returned `ExitCode::Failure`, not
+        // `ExitCode::DataError`.
+        let tmp = tempfile::tempdir().unwrap();
+        let mock = OversizeDescriptorMock {
+            blob: vec![b'x'; 32],
+            // Declared size lies far above the cap below; the actual body
+            // (32 bytes) never gets close to it — the mock's `fetch_blob`
+            // panics if reached, proving the gate fires before any transfer.
+            declared_size: 1024,
+        };
+        let (scope, access) = scope_and_access_from(mock, tmp.path(), tmp.path());
+
+        let err = fetch_artifact(&scope, &access, "test.registry/acme/skills/huge2:latest", Some(8))
+            .await
+            .expect_err("oversize descriptor must be pre-rejected");
+
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError,
+            "pre-download oversize gate must classify as DataError (65)"
+        );
     }
 
     #[tokio::test]
