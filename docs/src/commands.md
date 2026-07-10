@@ -130,7 +130,9 @@ registry.<alias>.oci <new-ref>`, or remove and re-add.
 
 ### JSON output {#config-json}
 
-Add `--format json` to any subcommand for machine-readable output. The shapes are:
+Add `--format json` to any subcommand for machine-readable output (full
+cross-command contract: [the JSON interface](./json-interface.md)). The
+shapes are:
 
 | Subcommand | JSON shape |
 |-----------|------------|

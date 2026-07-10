@@ -16,4 +16,5 @@
 - [MCP Server Artifacts](./mcp-servers.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)
+- [The JSON Interface](./json-interface.md)
 - [Stability and Versioning](./stability.md)

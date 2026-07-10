@@ -20,7 +20,7 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | Area | Guarantee |
 |------|-----------|
 | CLI surface | Subcommand names, arguments, flags, and [documented exit codes][config-exit-codes] |
-| `--format json` reports | The report shape for every command that offers one — see [Additive fields](#frozen-additive-fields) |
+| `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration] |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
 | OCI wire format | [Artifact kinds][artifacts-kinds] and the [release/push mechanics][publishing-release] |
@@ -85,6 +85,7 @@ holding that promise is recorded in the project's ADR on render-layout
 stability (`.claude/artifacts/adr_render_layout_stability.md`).
 
 <!-- internal -->
+[json-interface]: ./json-interface.md
 [status]: ./commands.md#status
 [config-exit-codes]: ./commands.md#config-exit-codes
 [configuration]: ./configuration.md
