@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::context::Context;
 use crate::fetch::fetch_artifact;
 use crate::install::client_target::ClientTarget;
+use crate::install::installer::INSTALL_LAYER_SIZE_LIMIT;
 use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer};
 use crate::oci::ArtifactKind;
 
@@ -62,9 +63,11 @@ pub struct RenderReport {
 pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<RenderReport> {
     let client: ClientTarget = crate::command::grim(args.vendor.parse::<ClientTarget>())?;
 
-    // No blob cap: output goes to disk, install parity (the mcp/bundle
-    // kind caps inside fetch_artifact still apply, but both kinds are
-    // rejected below anyway).
+    // Render writes to disk like install, so it uses the same generous
+    // install layer cap — a single ceiling is correct regardless of kind
+    // (the mcp/bundle publish-side caps inside fetch_artifact still apply,
+    // but both kinds are rejected below anyway). The gate rejects a hostile
+    // declared size before download (CWE-770).
     let scope = crate::command::resolve_fetch_scope(
         ctx,
         args.scope.global(),
@@ -72,7 +75,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         args.scope.workspace.as_deref(),
     );
     let access = crate::command::access_seam(ctx)?;
-    let fetched = fetch_artifact(&scope, &access, &args.reference, None).await?;
+    let fetched = fetch_artifact(&scope, &access, &args.reference, Some(INSTALL_LAYER_SIZE_LIMIT)).await?;
     match fetched.kind {
         ArtifactKind::Mcp => {
             return Err(anyhow!(

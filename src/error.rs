@@ -191,6 +191,7 @@ fn classify_install(err: &InstallError) -> ExitCode {
         InstallErrorKind::IntegrityMismatch { .. }
         | InstallErrorKind::UntrackedDestination { .. }
         | InstallErrorKind::BlobDigestMismatch { .. }
+        | InstallErrorKind::OversizeLayer { .. }
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
@@ -406,6 +407,13 @@ mod tests {
             ),
             (
                 InstallErrorKind::MaterializeFailed("bad tar".to_string()),
+                ExitCode::DataError,
+            ),
+            (
+                InstallErrorKind::OversizeLayer {
+                    limit: 512 * 1024 * 1024,
+                    actual: 512 * 1024 * 1024 + 1,
+                },
                 ExitCode::DataError,
             ),
             (

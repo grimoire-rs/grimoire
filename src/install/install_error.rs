@@ -92,6 +92,12 @@ pub enum InstallErrorKind {
     #[error("blob digest mismatch: expected {expected}, got {actual}")]
     BlobDigestMismatch { expected: Digest, actual: Digest },
 
+    /// The manifest declares a layer larger than the install policy cap.
+    /// Rejected before download so a hostile declared size cannot become
+    /// the fetch memory cap and OOM the install (CWE-770).
+    #[error("layer size {actual} exceeds the install limit of {limit} bytes")]
+    OversizeLayer { limit: u64, actual: u64 },
+
     /// An install destination exists on disk but is not recorded for
     /// that client: grim refuses to overwrite files it did not create.
     #[error(

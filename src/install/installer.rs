@@ -22,6 +22,7 @@ use crate::config::scope::ConfigScope;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
+use crate::oci::mcp::MCP_LAYER_SIZE_LIMIT;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
@@ -32,6 +33,14 @@ use super::materializer::ArtifactMaterializer;
 use super::path_anchor::{AnchorError, AnchorRoots};
 use super::progress::{InstallProgress, SilentProgress};
 use super::target::InstallTarget;
+
+/// Upper bound on a materialized (skill/rule/agent) layer blob at install.
+/// Checked against the manifest's layer-descriptor `size` *before* download
+/// so a registry declaring an absurd size is rejected before that size
+/// becomes the memory cap handed to `fetch_blob` (CWE-770). Generous — 512
+/// MiB never rejects a real artifact; it only bounds a hostile declared
+/// size. MCP layers use the tighter [`MCP_LAYER_SIZE_LIMIT`].
+pub const INSTALL_LAYER_SIZE_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// What happened to one artifact during an install pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,6 +613,26 @@ async fn fetch_verified_layer(
     };
     let layer_digest = layer.digest.clone();
 
+    // Pre-download policy gate on the (untrusted) descriptor size: a
+    // hostile multi-GB declared size would otherwise become the memory cap
+    // handed to `fetch_blob` and OOM this path (CWE-770). MCP uses its own
+    // tight publish-side cap; every materialized kind uses the generous
+    // install ceiling.
+    let cap = match kind {
+        ArtifactKind::Mcp => MCP_LAYER_SIZE_LIMIT,
+        _ => INSTALL_LAYER_SIZE_LIMIT,
+    };
+    if layer.size > cap {
+        return Err(InstallError::with_reference(
+            aref(),
+            InstallErrorKind::OversizeLayer {
+                limit: cap,
+                actual: layer.size,
+            },
+        )
+        .into());
+    }
+
     // Bound the streamed body at the descriptor's declared size so a
     // registry serving more than it declared aborts mid-stream (CWE-770).
     let blob = access.fetch_blob(&repo, &layer_digest, layer.size).await?;
@@ -1018,6 +1047,50 @@ mod tests {
         }
     }
 
+    /// Mock whose manifest declares an oversized layer descriptor while
+    /// serving a small blob. The pre-download policy gate must reject on the
+    /// descriptor size alone, before any bytes transfer — proving a hostile
+    /// declared size cannot become the `fetch_blob` memory cap (CWE-770).
+    struct OversizeDescriptorMock {
+        blob: Vec<u8>,
+        declared_size: u64,
+    }
+
+    #[async_trait]
+    impl OciAccess for OversizeDescriptorMock {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            let mut manifest = manifest_for(&self.blob);
+            manifest.layers[0].size = self.declared_size;
+            Ok(Some(manifest))
+        }
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            Ok(Some(self.blob.clone()))
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
     fn rule_tar(name: &str, body: &[u8]) -> Vec<u8> {
         let mut b = tar::Builder::new(Vec::new());
         let mut h = tar::Header::new_gnu();
@@ -1240,6 +1313,41 @@ mod tests {
             err,
             crate::error::Error::Install(ie) if matches!(ie.kind, InstallErrorKind::BlobDigestMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn oversize_declared_layer_is_rejected_before_download() {
+        // CWE-770: a manifest declaring a layer larger than the install
+        // policy cap must be pre-rejected on the descriptor alone — the
+        // declared size never becomes the `fetch_blob` memory cap, so no
+        // OOM. Mirrors the resolver's
+        // `fetch_bundle_members_rejects_oversize_layer_by_descriptor_size`.
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let mock = OversizeDescriptorMock {
+            blob: blob.clone(),
+            declared_size: INSTALL_LAYER_SIZE_LIMIT + 1,
+        };
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        let r = install_all(&lock, &arc(mock), &m, &target, &mut state, &roots, false).await;
+        let err = r[0].result.as_ref().expect_err("oversize declared layer must error");
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Install(ie)
+                    if matches!(
+                        ie.kind,
+                        InstallErrorKind::OversizeLayer { limit, actual }
+                            if limit == INSTALL_LAYER_SIZE_LIMIT && actual == INSTALL_LAYER_SIZE_LIMIT + 1
+                    )
+            ),
+            "expected OversizeLayer, got {err:?}"
+        );
     }
 
     #[tokio::test]
