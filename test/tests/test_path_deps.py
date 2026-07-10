@@ -270,9 +270,34 @@ def test_remove_and_uninstall_path_dep(grim_at, project_dir: Path) -> None:
     assert "my-skill" not in (project_dir / "grimoire.toml").read_text()
 
 
+def test_path_dep_installs_into_all_detected_clients(
+    grim_at, project_dir: Path
+) -> None:
+    # One local source fans out into every detected vendor's project dir —
+    # the multi-vendor render engine sits downstream of the source branch.
+    _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    (project_dir / ".opencode").mkdir()
+    _write(project_dir / ".github" / "copilot-instructions.md", "# ci\n")
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install")
+
+    for out in (
+        project_dir / ".claude" / "skills" / "my-skill" / "SKILL.md",
+        project_dir / ".opencode" / "skills" / "my-skill" / "SKILL.md",
+        project_dir / ".github" / "skills" / "my-skill" / "SKILL.md",
+    ):
+        assert out.is_file(), f"missing vendor output: {out}"
+
+
 def test_global_scope_path_dep(grim_at, grim_home: Path, tmp_path: Path) -> None:
     # A personal skill declared in the GLOBAL config via an absolute path
-    # (machine-local file — no portability warning expected there).
+    # (machine-local file — no portability warning expected there). No
+    # --client: nothing detected in the isolated home, so the install
+    # falls back to ALL clients' native user-level dirs.
     shared = tmp_path / "dotfiles" / "skills" / "my-skill"
     _write(
         shared / "SKILL.md",
@@ -284,6 +309,10 @@ def test_global_scope_path_dep(grim_at, grim_home: Path, tmp_path: Path) -> None
     runner = _offline(grim_at(tmp_path))
     result = runner.run("--global", "lock")
     assert "absolute path source" not in result.stderr
-    runner.run("--global", "install", "--client", "claude")
-    rendered = runner.home / ".claude" / "skills" / "my-skill" / "SKILL.md"
-    assert rendered.is_file()
+    runner.run("--global", "install")
+    for out in (
+        runner.home / ".claude" / "skills" / "my-skill" / "SKILL.md",
+        runner.home / ".config" / "opencode" / "skills" / "my-skill" / "SKILL.md",
+        runner.home / ".copilot" / "skills" / "my-skill" / "SKILL.md",
+    ):
+        assert out.is_file(), f"missing vendor output: {out}"

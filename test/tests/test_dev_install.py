@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -103,20 +105,25 @@ def test_uninstall_removes_dev_install(grim_at, project_dir: Path) -> None:
 def test_global_dev_install_renders_to_native_home(
     grim_at, grim_home: Path, tmp_path: Path
 ) -> None:
-    # Global dev-install writes into the vendor-native user-level dir
-    # (isolated $HOME here), records dev state in global.json, and the
-    # full lifecycle (status, uninstall) works at global scope.
+    # Global dev-install writes into every vendor's native user-level dir
+    # (isolated $HOME, nothing detected → all clients), records dev state
+    # in global.json, and the lifecycle (status, uninstall) works there.
     src = tmp_path / "dev-skill"
     _write(
         src / "SKILL.md",
         "---\nname: dev-skill\ndescription: Dev.\n---\n# Global dev\n",
     )
     runner = _offline(grim_at(tmp_path))
-    runner.run("--global", "install", str(src), "--client", "claude")
+    runner.run("--global", "install", str(src))
 
-    rendered = runner.home / ".claude" / "skills" / "dev-skill" / "SKILL.md"
-    assert rendered.is_file()
-    assert "# Global dev" in rendered.read_text()
+    outputs = (
+        runner.home / ".claude" / "skills" / "dev-skill" / "SKILL.md",
+        runner.home / ".config" / "opencode" / "skills" / "dev-skill" / "SKILL.md",
+        runner.home / ".copilot" / "skills" / "dev-skill" / "SKILL.md",
+    )
+    for out in outputs:
+        assert out.is_file(), f"missing vendor output: {out}"
+        assert "# Global dev" in out.read_text()
 
     state = (grim_home / "state" / "global.json").read_text()
     assert '"dev"' in state
@@ -126,25 +133,37 @@ def test_global_dev_install_renders_to_native_home(
     assert dev and dev[0]["source"].endswith("(dev)")
 
     runner.run("--global", "uninstall", "skill", "dev-skill")
-    assert not (runner.home / ".claude" / "skills" / "dev-skill").exists()
+    for out in outputs:
+        assert not out.exists(), f"vendor output must be removed: {out}"
 
 
-def test_global_dev_install_honors_claude_config_dir(
-    grim_at, tmp_path: Path
+@pytest.mark.parametrize(
+    ("client", "env_var", "default_root"),
+    [
+        ("claude", "CLAUDE_CONFIG_DIR", ".claude"),
+        ("copilot", "COPILOT_HOME", ".copilot"),
+        ("opencode", "OPENCODE_CONFIG_DIR", ".config/opencode"),
+    ],
+)
+def test_global_dev_install_honors_vendor_env_override(
+    grim_at, tmp_path: Path, client: str, env_var: str, default_root: str
 ) -> None:
-    # CLAUDE_CONFIG_DIR replaces ~/.claude as the global install root.
+    # Each vendor's env override replaces its native global root; the
+    # default $HOME location must stay untouched when the override is set.
     src = tmp_path / "dev-skill"
     _write(
         src / "SKILL.md",
         "---\nname: dev-skill\ndescription: Dev.\n---\n# Override\n",
     )
-    override = tmp_path / "claude-config"
+    override = tmp_path / f"{client}-config"
     runner = _offline(grim_at(tmp_path))
-    runner.env["CLAUDE_CONFIG_DIR"] = str(override)
-    runner.run("--global", "install", str(src), "--client", "claude")
+    runner.env[env_var] = str(override)
+    runner.run("--global", "install", str(src), "--client", client)
 
     assert (override / "skills" / "dev-skill" / "SKILL.md").is_file()
-    assert not (runner.home / ".claude" / "skills" / "dev-skill").exists()
+    assert not (
+        runner.home / default_root / "skills" / "dev-skill"
+    ).exists(), f"default {default_root} must stay untouched with {env_var} set"
 
 
 def test_bare_word_positional_is_64(grim_at, project_dir: Path) -> None:
