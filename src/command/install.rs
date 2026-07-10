@@ -27,6 +27,19 @@ use super::scope_resolution::{self, ResolvedScope};
 /// `grim install` arguments.
 #[derive(Debug, Args)]
 pub struct InstallArgs {
+    /// Dev-install: a local path source (`./…`, `../…`, or absolute) to
+    /// render into the clients WITHOUT declaring it — `grimoire.toml` and
+    /// `grimoire.lock` stay untouched. The install record is marked `dev`
+    /// (listed by `grim status`, refreshed by `grim update`, removed by
+    /// `grim uninstall`, never pruned). Use `grim add <path>` to declare
+    /// it instead.
+    pub path: Option<String>,
+
+    /// The artifact kind for a dev-install path (`skill`, `rule`,
+    /// `agent`); inferred from the path's shape when omitted.
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent"], requires = "path")]
+    pub kind: Option<String>,
+
     /// Overwrite a locally modified artifact instead of refusing it.
     #[arg(long)]
     pub force: bool,
@@ -52,6 +65,12 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+
+    // Dev-install: a positional path renders a local source one-off, with
+    // no config/lock involvement (and no lock freshness requirement).
+    if let Some(raw) = args.path.as_deref() {
+        return dev_install(ctx, &scope, args, raw).await;
+    }
 
     let lock = require_fresh_lock(&scope)?;
 
@@ -90,6 +109,182 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         )
         .await,
     )?;
+
+    finish(outcomes)
+}
+
+/// One-off render of a local path source into the clients: validate +
+/// pack, synthesize a single-entry in-memory lock, reuse the shared
+/// install pipeline, and mark the resulting record `dev` so it survives
+/// pruning while staying undeclared.
+async fn dev_install(
+    ctx: &Context,
+    scope: &ResolvedScope,
+    args: &InstallArgs,
+    raw: &str,
+) -> anyhow::Result<(InstallReport, ExitCode)> {
+    use crate::config::path_source::{PathSource, relative_to};
+    use crate::lock::locked_source::LockedSource;
+    use crate::oci::ArtifactKind;
+
+    if !crate::config::is_path_value(raw) {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::command::command_error::CommandError::ConfigUsage(format!(
+                "'{raw}' is not a path source; dev-install paths start with ./ or ../ (did you mean `grim add {raw}`?)"
+            )),
+        )));
+    }
+
+    let cli_path = std::path::Path::new(raw);
+    let abs = if cli_path.is_absolute() {
+        cli_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| {
+                crate::error::Error::from(crate::skill::SkillError::new(
+                    cli_path,
+                    crate::skill::SkillErrorKind::Io(e),
+                ))
+            })?
+            .join(cli_path)
+    };
+    let abs = dunce::canonicalize(&abs).map_err(|e| {
+        anyhow::Error::from(crate::error::Error::from(crate::skill::SkillError::new(
+            &abs,
+            crate::skill::SkillErrorKind::Io(e),
+        )))
+    })?;
+
+    let kind = match args.kind.as_deref() {
+        Some("skill") => ArtifactKind::Skill,
+        Some("rule") => ArtifactKind::Rule,
+        Some("agent") => ArtifactKind::Agent,
+        // value_parser constrains the set; anything else is unreachable.
+        Some(_) | None if abs.is_dir() && abs.join("SKILL.md").is_file() => ArtifactKind::Skill,
+        Some(_) | None if abs.is_file() && abs.extension().is_some_and(|e| e == "md") => ArtifactKind::Rule,
+        _ => {
+            return Err(anyhow::Error::from(crate::error::Error::from(
+                crate::command::command_error::CommandError::ConfigUsage(format!(
+                    "cannot infer a kind for '{raw}': expected a skill directory (SKILL.md) or a rule .md file; pass --kind agent for an agent"
+                )),
+            )));
+        }
+    };
+
+    let (name, layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
+    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+
+    // Record the source config-dir-relative (like `grim add`) so status
+    // and update resolve it against the same anchor; an absolute CLI path
+    // is recorded verbatim.
+    let source_path = if cli_path.is_absolute() {
+        super::grim(PathSource::parse(raw).map_err(|e| {
+            crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::ArtifactValuePathInvalid {
+                    name: name.clone(),
+                    value: raw.to_string(),
+                    reason: e.to_string(),
+                },
+            )
+        }))?
+    } else {
+        let config_dir = dunce::canonicalize(scope.config_dir()).map_err(|e| {
+            anyhow::Error::from(crate::error::Error::from(crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::Io(e),
+            )))
+        })?;
+        super::grim(relative_to(&config_dir, &abs).map_err(|e| {
+            crate::config::ConfigError::new(
+                scope.config_path.clone(),
+                crate::config::ConfigErrorKind::ArtifactValuePathInvalid {
+                    name: name.clone(),
+                    value: raw.to_string(),
+                    reason: e.to_string(),
+                },
+            )
+        }))?
+    };
+
+    // Synthetic single-entry lock — never written to disk.
+    let entry = crate::lock::locked_artifact::LockedArtifact {
+        name: name.clone(),
+        kind,
+        source: LockedSource::Path {
+            path: source_path,
+            hash,
+        },
+        bundles: Vec::new(),
+    };
+    let mut synth = crate::lock::grimoire_lock::GrimoireLock {
+        metadata: crate::lock::grimoire_lock::LockMetadata {
+            lock_version: crate::lock::lock_version::LockVersion::V1,
+            declaration_hash_version: crate::config::DECLARATION_HASH_VERSION,
+            declaration_hash: String::new(),
+            generated_by: crate::lock::grimoire_lock::LockMetadata::generated_by_current(),
+            generated_at: String::new(),
+        },
+        skills: Vec::new(),
+        rules: Vec::new(),
+        agents: Vec::new(),
+        mcp: Vec::new(),
+        bundles: Vec::new(),
+    };
+    match kind {
+        ArtifactKind::Skill => synth.skills.push(entry),
+        ArtifactKind::Rule => synth.rules.push(entry),
+        ArtifactKind::Agent => synth.agents.push(entry),
+        // Path sources never produce these kinds (shape/--kind gate above).
+        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("dev-install is limited to skill/rule/agent"),
+    }
+
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &args.client,
+        &scope.options.clients,
+    ))?;
+    let access = super::access_seam(ctx)?;
+    let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;
+    let materializer = DefaultMaterializer;
+    let progress = crate::cli::progress::select_progress(ctx.progress(), true);
+
+    let outcomes = super::grim(
+        install_and_persist(
+            &synth,
+            &access,
+            &materializer,
+            &target,
+            &mut state,
+            &scope.roots,
+            scope.scope,
+            &scope.workspace,
+            &scope.config_path,
+            args.force,
+            progress.as_ref(),
+        )
+        .await,
+    )?;
+
+    // The lock-driven pipeline records `dev: false`; restore the marker
+    // and persist once more so the record stays prune-exempt.
+    if let Some(record) = state.get(kind, &name).cloned() {
+        state.record(crate::install::install_state::InstallRecord { dev: true, ..record });
+        super::grim(
+            state
+                .persist(
+                    scope.scope,
+                    &scope.workspace,
+                    &scope.roots.grim_home,
+                    &scope.config_path,
+                )
+                .map_err(|e| match e {
+                    crate::install::install_state::PersistError::EnsureDir { path, source }
+                    | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+                }),
+        )?;
+    }
 
     finish(outcomes)
 }
