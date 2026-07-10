@@ -23,6 +23,7 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim config registry add\|rm\|use\|show\|list` | Registry lifecycle for `[[registries]]` entries: `add <alias> --url <url> [--default]`, `rm <alias>`, `use <alias>` (at-most-one-default, clears prior), `show <alias>`, `list`. Alias not found or dup on `add` → 64. |
 | `grim install` | Materialize every locked artifact into the configured AI client(s); no positional — declare via `add`, scope clients via `--client`. Refuses to overwrite an untracked pre-existing destination (65) unless `--force`; adopts identical content into the record |
 | `grim status` | Report each declared artifact's state (installed, outdated, modified, …) with bundle provenance |
+| `grim context` | Read-only introspection of the resolved invocation context: scope, config/lock/state paths (+ existence), effective client set (names only), registry browse set, default registry, offline (+ source). Exits 79 outside a project without `--global` |
 | `grim search [query]` | Substring search over the registry catalog (repo, summary, description, keywords); empty query lists all |
 | `grim tui` | Interactive catalog browser with live install state (flat list / tree toggle) |
 | `grim update [names…]` | Re-resolve floating tags, roll the lock forward, re-materialize what changed; prunes clean orphans that dropped out of the lock. No names = everything; names are config binding names, not refs |

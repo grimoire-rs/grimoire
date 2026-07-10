@@ -12,6 +12,7 @@ pub mod add;
 pub mod build;
 pub mod command_error;
 pub mod config;
+pub mod context;
 pub mod init;
 pub mod install;
 pub mod lock;

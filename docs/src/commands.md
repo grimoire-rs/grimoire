@@ -288,6 +288,34 @@ detail and may change.
 }
 ```
 
+## grim context {#context}
+
+`grim context` reports the **resolved invocation context** — read-only,
+offline, no side effects. It answers "what would grim act on from here?"
+without a consumer reimplementing the config walk-up, client detection, or
+registry precedence rules: the resolved scope, the config/lock/state paths
+(with existence flags for config and lock), the effective
+[client](./concepts.md#clients) target set, the resolved
+[registry browse set](./configuration.md#multiple-registries), the primary
+registry, and whether the run is [offline](#global-options) (and why:
+`flag` or `env`).
+
+```sh
+grim context --format json | jq .clients
+```
+
+The JSON document is a single object: `{version, scope, workspace,
+config_path, config_exists, lock_path, lock_exists, state_path, grim_home,
+offline, offline_source, clients, registries, default_registry}`.
+`registries` entries are `{alias, url, kind, default}` with `kind` either
+`registry` or `index`. `clients` carries **names only** — the vendor
+on-disk layout is not a contract; script installed locations via
+[`grim status --format json`](#status) `outputs` instead.
+
+Scope follows the usual rules: project walk-up by default, `--global` for
+the global scope, `--config <path>` for an explicit file. Outside a
+project without `--global` it exits `79` like every other scope command.
+
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,

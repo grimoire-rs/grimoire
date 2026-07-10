@@ -13,6 +13,7 @@ pub mod add_report;
 pub mod artifact_status;
 pub mod build_report;
 pub mod config_report;
+pub mod context_report;
 pub mod init_report;
 pub mod install_report;
 pub mod lock_report;
@@ -36,6 +37,8 @@ pub use config_report::{
     ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryListReport,
     RegistryRow, RegistryShowReport, WriteAction,
 };
+#[allow(unused_imports)]
+pub use context_report::{ContextRegistry, ContextRegistryKind, ContextReport, OfflineSource};
 #[allow(unused_imports)]
 pub use init_report::InitReport;
 #[allow(unused_imports)]

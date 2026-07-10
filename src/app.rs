@@ -45,6 +45,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             render(&r, format)?;
             c
         }
+        Command::Context(args) => {
+            let (r, c) = crate::command::context::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
         Command::Init(args) => {
             let (r, c) = crate::command::init::run(&ctx, &args).await?;
             render(&r, format)?;
