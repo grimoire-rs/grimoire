@@ -415,9 +415,13 @@ MCP payload shape — empty/default fields omitted). Warnings print to
 stderr, keeping stdout a pure payload.
 
 Unlike the MCP tool — which truncates documents at 256 KiB for tool-result
-budgets — the CLI **never truncates**: the only ceiling is the 8 MiB
-pre-download layer gate, and any layer that passes it prints
-byte-complete.
+budgets — the CLI **never truncates** a printed payload. Two ceilings guard
+the download instead, with different failure modes: the manifest's
+declared layer size is checked against the 8 MiB limit *before* download
+(a cheap reject for an honestly-oversized layer, exit 65), and that same
+declared size then bounds the *actual* streamed bytes — a registry that
+serves more than it declared aborts mid-transfer into a data error (exit
+65) rather than growing an unbounded body in memory.
 
 ## grim tui {#tui}
 
@@ -724,9 +728,9 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Payload equals `grim search --format json`. | always |
-| `grim_status` | Install status of every declared artifact in the requested scope. Args: scope. Payload equals `grim status --format json`. | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file; a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download. Args: `ref`, `vendor?`, `path?`, scope. | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_status` | Install status of every declared artifact in the requested scope. Args: scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file; a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
 The scope arguments on each tool are `global` (boolean), `config` (explicit
@@ -770,6 +774,7 @@ registers the same entry — in every detected client, not just Claude Code
 <!-- internal -->
 [global-options]: #global-options
 [options-tui]: ./configuration.md#options-tui
+[json-mcp-parity]: ./json-interface.md#mcp-parity
 
 <!-- external -->
 [git-config]: https://git-scm.com/docs/git-config

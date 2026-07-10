@@ -189,7 +189,11 @@ are **not byte-identical**: the MCP server serializes compact JSON
 (`to_string_pretty`), so whitespace differs. `grim_fetch` returns the
 same shape as `grim fetch --format json` — except the MCP tool truncates
 `content` at 256 KiB for tool-result budgets, while the CLI never
-truncates below its 8 MiB layer gate.
+truncates a printed payload. Both share the same two download ceilings:
+the manifest's declared layer size is checked against the 8 MiB limit
+before download, and that declared size then bounds the actual streamed
+bytes — a registry serving more than it declared aborts mid-transfer into
+a data error (exit 65) on either interface.
 
 ## No self-identifying reports {#no-discriminator}
 
