@@ -133,7 +133,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             kind: decl.kind,
             name: decl.name,
             source: "direct".to_string(),
-            pinned: locked.map(|l| l.pinned.clone()),
+            pinned: locked.and_then(|l| l.source.pinned().cloned()),
             state: entry_state,
             outputs,
         });
@@ -163,7 +163,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 kind: member.kind,
                 name: member.name.clone(),
                 source: format!("bundle: {}", repos.join(", ")),
-                pinned: Some(member.pinned.clone()),
+                pinned: member.source.pinned().cloned(),
                 state: st,
                 outputs,
             });
@@ -273,7 +273,7 @@ fn derive_state(
             Err(_) => return ArtifactStatus::Missing,
         }
     }
-    if record.pinned.eq_content(&locked.pinned) {
+    if record.source.eq_content(&locked.source) {
         ArtifactStatus::Installed
     } else {
         ArtifactStatus::Outdated
@@ -373,7 +373,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
-            pinned: pinned('a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -445,7 +446,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
-            pinned: pinned('a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -496,7 +498,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
-            pinned: pinned('a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
             outputs: vec![
                 ClientOutput {
                     client: "claude".to_string(),
@@ -575,7 +578,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
-            pinned: pinned('a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "opencode".to_string(),
                 target: AnchoredPath {
@@ -621,7 +625,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
-            pinned: pinned('a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {

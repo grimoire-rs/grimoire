@@ -120,7 +120,7 @@ fn lists_content_equal(a: &[LockedArtifact], b: &[LockedArtifact]) -> bool {
     a_sorted
         .iter()
         .zip(b_sorted.iter())
-        .all(|(x, y)| x.name == y.name && x.pinned.eq_content(&y.pinned))
+        .all(|(x, y)| x.name == y.name && x.source.eq_content(&y.source))
 }
 
 /// `iso` + 1 second, preserving the `%Y-%m-%dT%H:%M:%SZ` shape. `None`
@@ -189,7 +189,11 @@ mod tests {
         save(&path, &lock, None).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.skills.len(), 1);
-        assert_eq!(loaded.skills[0].pinned.tag(), None, "advisory tag stripped on disk");
+        assert_eq!(
+            loaded.skills[0].source.pinned().unwrap().tag(),
+            None,
+            "advisory tag stripped on disk"
+        );
     }
 
     #[test]

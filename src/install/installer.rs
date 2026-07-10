@@ -136,7 +136,11 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     let mut results = Vec::with_capacity(work.len());
     for (index, (artifact, kind)) in work.into_iter().enumerate() {
         progress.advance(index + 1, &format!("{kind} {}", artifact.name));
-        let reference = ArtifactRef::registry(kind, artifact.name.clone(), artifact.pinned.as_identifier().clone());
+        let reference = ArtifactRef {
+            kind,
+            name: artifact.name.clone(),
+            source: artifact.source.to_declared(),
+        };
         // The primary client's path is the report target (back-compat).
         let primary = target
             .clients()
@@ -290,9 +294,9 @@ async fn install_one<M: ArtifactMaterializer>(
     }
 
     let recorded = state.get(kind, &artifact.name).cloned();
-    let pinned_str = artifact.pinned.strip_advisory().to_string();
+    let pinned_str = artifact.source.provenance();
 
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.pinned, target, roots, force)? {
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force)? {
         return Ok(outcome);
     }
 
@@ -347,7 +351,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // their existing (same-pin, non-stale) hash by the merge step below.
     let pin_changed = recorded
         .as_ref()
-        .is_some_and(|rec| !rec.pinned.eq_content(&artifact.pinned));
+        .is_some_and(|rec| !rec.source.eq_content(&artifact.source));
     let mut materialize_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
     if pin_changed && let Some(rec) = &recorded {
         for out in &rec.outputs {
@@ -548,7 +552,8 @@ async fn install_one<M: ArtifactMaterializer>(
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
-        pinned: artifact.pinned.clone(),
+        source: artifact.source.clone(),
+        dev: false,
         outputs,
     });
 
@@ -578,7 +583,7 @@ async fn install_one<M: ArtifactMaterializer>(
 #[allow(clippy::result_large_err)]
 fn integrity_gate(
     recorded: Option<&InstallRecord>,
-    pinned: &crate::oci::PinnedIdentifier,
+    source: &crate::lock::locked_source::LockedSource,
     target: &InstallTarget,
     roots: &AnchorRoots,
     force: bool,
@@ -622,7 +627,7 @@ fn integrity_gate(
         .clients()
         .iter()
         .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
-    if all_intact && covers_targets && rec.pinned.eq_content(pinned) {
+    if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
     Ok(None)
@@ -642,10 +647,24 @@ async fn fetch_verified_layer(
     kind: ArtifactKind,
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<u8>, crate::error::Error> {
-    let repo: Identifier = artifact.pinned.as_identifier().without_tag();
-    let aref = || ArtifactRef::registry(kind, artifact.name.clone(), artifact.pinned.as_identifier().clone());
+    // TODO(local-path-sources): the path-source blob branch (pack the
+    // local dir instead of fetching) lands with the install phase; until
+    // then a path lock entry fails loudly here rather than fetching.
+    let Some(pinned) = artifact.source.pinned() else {
+        return Err(InstallError::with_reference(
+            ArtifactRef {
+                kind,
+                name: artifact.name.clone(),
+                source: artifact.source.to_declared(),
+            },
+            InstallErrorKind::MaterializeFailed("local path sources are not installable yet".to_string()),
+        )
+        .into());
+    };
+    let repo: Identifier = pinned.as_identifier().without_tag();
+    let aref = || ArtifactRef::registry(kind, artifact.name.clone(), pinned.as_identifier().clone());
 
-    let manifest = access.fetch_manifest(&artifact.pinned).await?;
+    let manifest = access.fetch_manifest(pinned).await?;
     let Some(manifest) = manifest else {
         return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
     };
@@ -724,7 +743,7 @@ async fn install_mcp(
     let kind = ArtifactKind::Mcp;
     let recorded = state.get(kind, &artifact.name).cloned();
 
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.pinned, target, roots, force)? {
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force)? {
         return Ok(outcome);
     }
 
@@ -740,7 +759,7 @@ async fn install_mcp(
     // the new pin together (the same invariant as materialized kinds).
     let pin_changed = recorded
         .as_ref()
-        .is_some_and(|rec| !rec.pinned.eq_content(&artifact.pinned));
+        .is_some_and(|rec| !rec.source.eq_content(&artifact.source));
     let mut register_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
     if pin_changed && let Some(rec) = &recorded {
         for out in &rec.outputs {
@@ -877,7 +896,8 @@ async fn install_mcp(
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
-        pinned: artifact.pinned.clone(),
+        source: artifact.source.clone(),
+        dev: false,
         outputs,
     });
 
@@ -1650,7 +1670,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "rust-style".to_string(),
-            pinned: prior_pin,
+            source: crate::lock::locked_source::LockedSource::Registry(prior_pin),
+            dev: false,
             outputs: vec![
                 ClientOutput {
                     client: "claude".to_string(),
@@ -1887,7 +1908,7 @@ mod tests {
         let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
         let claude_out = rec.outputs.iter().find(|o| o.client == "claude").unwrap().clone();
         let hash_a = claude_out.content_hash.clone();
-        let pinned = rec.pinned.clone();
+        let source = rec.source.clone();
         let legacy = ClientOutput {
             client: "legacy-vendor".to_string(),
             target: AnchoredPath {
@@ -1901,7 +1922,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "rust-style".to_string(),
-            pinned,
+            source,
+            dev: false,
             outputs: vec![claude_out, legacy],
         });
 

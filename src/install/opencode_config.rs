@@ -459,7 +459,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "r".to_string(),
-            pinned,
+            source: crate::lock::locked_source::LockedSource::Registry(pinned),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "opencode".to_string(),
                 target: AnchoredPath {

@@ -63,6 +63,29 @@ impl LockedSource {
         }
     }
 
+    /// The content digest identifying this pin: the registry manifest
+    /// digest, or the path source's packed-layer content hash. Both are
+    /// digests over content, so reports can show them uniformly.
+    pub fn content_digest(&self) -> Digest {
+        match self {
+            Self::Registry(pinned) => pinned.digest(),
+            Self::Path { hash, .. } => hash.clone(),
+        }
+    }
+
+    /// Project back to the config-layer [`DeclaredSource`]: the pinned
+    /// identifier (digest included) for a registry source, the declared
+    /// path for a local one. Used where an [`crate::oci::ArtifactRef`] is
+    /// built from a lock entry or install record.
+    pub fn to_declared(&self) -> crate::config::declaration::DeclaredSource {
+        match self {
+            Self::Registry(pinned) => {
+                crate::config::declaration::DeclaredSource::Registry(pinned.as_identifier().clone())
+            }
+            Self::Path { path, .. } => crate::config::declaration::DeclaredSource::Path(path.clone()),
+        }
+    }
+
     /// Provenance string for reports and render comments:
     /// `registry/repo@sha256:…` (advisory tag stripped) or
     /// `./path@sha256:…`.

@@ -217,16 +217,82 @@ pub fn active_outputs<'a>(
 /// never empty for any consumer: `load` always converts a legacy V1 record
 /// in memory so a synthesized output is present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawInstallRecord", into = "RawInstallRecord")]
 pub struct InstallRecord {
     /// Skill or rule.
     pub kind: ArtifactKind,
     /// Config binding name.
     pub name: String,
-    /// The pin the artifact was installed from.
-    pub pinned: PinnedIdentifier,
+    /// The source the artifact was installed from: a registry pin
+    /// (`pinned` on the wire) or a local path + content hash
+    /// (`path` + `hash`).
+    pub source: crate::lock::locked_source::LockedSource,
+    /// Dev-install marker: the record was written by `grim install <path>`
+    /// without a declaration; `prune_orphans` never reaps it.
+    pub dev: bool,
     /// Per-client materialized outputs (the single source of truth).
     pub outputs: Vec<ClientOutput>,
+}
+
+/// Wire shape of an [`InstallRecord`]: exactly one of `pinned` XOR the
+/// `path` + `hash` pair. Field order keeps a registry record's JSON
+/// byte-identical to the pre-path-sources format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallRecord {
+    kind: ArtifactKind,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pinned: Option<PinnedIdentifier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<crate::config::path_source::PathSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash: Option<crate::oci::Digest>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    dev: bool,
+    outputs: Vec<ClientOutput>,
+}
+
+impl TryFrom<RawInstallRecord> for InstallRecord {
+    type Error = String;
+
+    fn try_from(raw: RawInstallRecord) -> Result<Self, Self::Error> {
+        use crate::lock::locked_source::LockedSource;
+        let source = match (raw.pinned, raw.path, raw.hash) {
+            (Some(pinned), None, None) => LockedSource::Registry(pinned),
+            (None, Some(path), Some(hash)) => LockedSource::Path { path, hash },
+            (Some(_), _, _) => {
+                return Err("an install record carries either `pinned` or `path`/`hash`, not both".to_string());
+            }
+            _ => return Err("`path` and `hash` must be set together".to_string()),
+        };
+        Ok(Self {
+            kind: raw.kind,
+            name: raw.name,
+            source,
+            dev: raw.dev,
+            outputs: raw.outputs,
+        })
+    }
+}
+
+impl From<InstallRecord> for RawInstallRecord {
+    fn from(record: InstallRecord) -> Self {
+        use crate::lock::locked_source::LockedSource;
+        let (pinned, path, hash) = match record.source {
+            LockedSource::Registry(pinned) => (Some(pinned), None, None),
+            LockedSource::Path { path, hash } => (None, Some(path), Some(hash)),
+        };
+        Self {
+            kind: record.kind,
+            name: record.name,
+            pinned,
+            path,
+            hash,
+            dev: record.dev,
+            outputs: record.outputs,
+        }
+    }
 }
 
 /// Versioned envelope persisted at the scope's state file.
@@ -883,7 +949,8 @@ fn convert_v1_records(
         converted.push(InstallRecord {
             kind: v1.kind,
             name: v1.name,
-            pinned: v1.pinned,
+            source: crate::lock::locked_source::LockedSource::Registry(v1.pinned),
+            dev: false,
             outputs,
         });
     }
@@ -951,7 +1018,8 @@ mod tests {
         InstallRecord {
             kind,
             name: name.to_string(),
-            pinned: pinned(name, 'a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name, 'a')),
+            dev: false,
             outputs: vec![client_output_workspace("claude", name, kind)],
         }
     }
@@ -1067,7 +1135,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "my-skill".to_string(),
-            pinned: pinned("my-skill", 'b'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("my-skill", 'b')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -1106,7 +1175,8 @@ mod tests {
         let make_forward = |name: &str| InstallRecord {
             kind: ArtifactKind::Skill,
             name: name.to_string(),
-            pinned: pinned(name, 'c'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name, 'c')),
+            dev: false,
             outputs: vec![
                 client_output_anchored("claude", PathAnchor::Workspace, &format!(".claude/skills/{name}")),
                 client_output_anchored("opencode", PathAnchor::Workspace, &format!(".opencode/skills/{name}")),
@@ -1122,7 +1192,8 @@ mod tests {
         let make_reversed = |name: &str| InstallRecord {
             kind: ArtifactKind::Skill,
             name: name.to_string(),
-            pinned: pinned(name, 'c'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name, 'c')),
+            dev: false,
             outputs: vec![
                 client_output_anchored("opencode", PathAnchor::Workspace, &format!(".opencode/skills/{name}")),
                 client_output_anchored("claude", PathAnchor::Workspace, &format!(".claude/skills/{name}")),
@@ -1581,7 +1652,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "trap".to_string(),
-            pinned: pinned("trap", '5'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("trap", '5')),
+            dev: false,
             outputs: vec![client_output_anchored("claude", PathAnchor::ClaudeRoot, "skills/trap")],
         });
         st.save().unwrap();
@@ -1834,7 +1906,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "multi-file-rule".to_string(),
-            pinned: pinned("multi-file-rule", 'c'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("multi-file-rule", 'c')),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -2209,7 +2282,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "tri".to_string(),
-            pinned: pinned("tri", 'a'),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("tri", 'a')),
+            dev: false,
             outputs: vec![
                 ClientOutput {
                     client: "claude".to_string(),

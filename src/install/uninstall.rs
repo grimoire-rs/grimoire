@@ -263,7 +263,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "hello".to_string(),
-            pinned: pinned("acme/hello"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/hello")),
+            dev: false,
             outputs: vec![client_output_at(
                 ".claude/skills/hello",
                 content_hash(&skill_dir).unwrap(),
@@ -272,7 +273,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "style".to_string(),
-            pinned: pinned("acme/style"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/style")),
+            dev: false,
             outputs: vec![client_output_at(
                 ".claude/rules/style.md",
                 content_hash(&rule_file).unwrap(),
@@ -311,7 +313,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "my-rule".to_string(),
-            pinned: pinned("acme/my-rule"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/my-rule")),
+            dev: false,
             outputs: vec![client_output_with_support(
                 ".claude/rules/my-rule.md",
                 ".claude/rules/my-rule",
@@ -353,7 +356,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "ghost".to_string(),
-            pinned: pinned("acme/ghost"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/ghost")),
+            dev: false,
             outputs: vec![client_output_at(".claude/skills/ghost", Digest::Sha256("b".repeat(64)))],
         });
         // Files never existed on disk; record still drops cleanly.
@@ -385,7 +389,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "orphan".to_string(),
-            pinned: pinned("acme/orphan"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/orphan")),
+            dev: false,
             outputs: vec![
                 ClientOutput {
                     client: "claude".to_string(),
@@ -446,7 +451,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Mcp,
             name: "grim".to_string(),
-            pinned: pinned("mcp/grim"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
             outputs: vec![out],
         });
 
@@ -473,7 +479,8 @@ mod tests {
         let record = InstallRecord {
             kind: ArtifactKind::Mcp,
             name: "grim".to_string(),
-            pinned: pinned("mcp/grim"),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
             outputs: vec![out],
         };
 

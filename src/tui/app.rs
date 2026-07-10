@@ -652,9 +652,11 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     if registry.is_empty() || repository.is_empty() {
         return None;
     }
-    let locked = lock
-        .iter_artifacts()
-        .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)?;
+    let locked = lock.iter_artifacts().find(|a| {
+        a.source
+            .pinned()
+            .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+    })?;
     // Issue #21: carry the tagless `registry/repository` identifier, not the
     // cached catalog tag. The background check re-discovers the registry's
     // current latest tag fresh (see `update_check::resolve_latest_digest`), so a
@@ -664,7 +666,7 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     Some(RowCheck {
         repo: row.repo.clone(),
         id,
-        locked_digest: locked.pinned.digest(),
+        locked_digest: locked.source.pinned()?.digest(),
     })
 }
 
@@ -1271,17 +1273,23 @@ fn derive_artifact_state(
     // so a stale/retagged snapshot whose bundle is no longer declared does not
     // count. Without either signal, it is not installed.
     let locked = lock.and_then(|l| {
-        l.iter_artifacts()
-            .find(|a| a.kind == kind && a.pinned.registry() == registry && a.pinned.repository() == repository)
+        l.iter_artifacts().find(|a| {
+            a.kind == kind
+                && a.source
+                    .pinned()
+                    .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+        })
     });
     let via_snapshot = locked.is_none() && snapshot_repos.contains(&(kind, format!("{registry}/{repository}")));
     if locked.is_none() && !via_snapshot {
         return ArtifactState::NotInstalled;
     }
-    let Some(record) = state
-        .iter_records()
-        .find(|r| r.kind == kind && r.pinned.registry() == registry && r.pinned.repository() == repository)
-    else {
+    let Some(record) = state.iter_records().find(|r| {
+        r.kind == kind
+            && r.source
+                .pinned()
+                .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+    }) else {
         return ArtifactState::NotInstalled;
     };
 
@@ -1314,7 +1322,7 @@ fn derive_artifact_state(
     }
     match locked {
         // A top-level lock entry: compare the pinned digest to flag Outdated.
-        Some(locked) if record.pinned.eq_content(&locked.pinned) => ArtifactState::Installed,
+        Some(locked) if record.source.eq_content(&locked.source) => ArtifactState::Installed,
         Some(_) => ArtifactState::Outdated,
         // Snapshot-provided only (no top-level entry): no pinned identifier to
         // compare, so plain Installed — `member_display_state` promotes it to

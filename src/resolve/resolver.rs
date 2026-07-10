@@ -589,7 +589,7 @@ async fn resolve_one(
     Ok(LockedArtifact {
         name: reference.name,
         kind: reference.kind,
-        pinned,
+        source: crate::lock::locked_source::LockedSource::Registry(pinned),
         bundles,
     })
 }
@@ -842,7 +842,7 @@ mod tests {
             .expect("happy path resolves");
         assert_eq!(lock.skills.len(), 1);
         assert_eq!(lock.skills[0].name, "code-review");
-        assert_eq!(lock.skills[0].pinned.digest(), digest());
+        assert_eq!(lock.skills[0].source.content_digest(), digest());
         assert_eq!(mock.calls(), 1);
     }
 
@@ -857,7 +857,7 @@ mod tests {
         let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
             .await
             .expect("recovers on second attempt");
-        assert_eq!(lock.skills[0].pinned.digest(), digest());
+        assert_eq!(lock.skills[0].source.content_digest(), digest());
         assert_eq!(mock.calls(), 2);
     }
 
@@ -1004,7 +1004,7 @@ mod tests {
         assert_eq!(lock.agents.len(), 1);
         assert_eq!(lock.agents[0].name, "code-reviewer");
         assert_eq!(lock.agents[0].kind, ArtifactKind::Agent);
-        assert_eq!(lock.agents[0].pinned.digest(), digest());
+        assert_eq!(lock.agents[0].source.content_digest(), digest());
     }
 
     // ── Partial ──────────────────────────────────────────────────────────
@@ -1107,8 +1107,12 @@ mod tests {
         assert_eq!(mock.calls(), 1, "only the named subset is re-resolved");
         let a = lock.skills.iter().find(|s| s.name == "a").expect("a present");
         let b = lock.skills.iter().find(|s| s.name == "b").expect("b carried forward");
-        assert_eq!(a.pinned.digest(), new_a_digest, "a re-resolved to the new digest");
-        assert_eq!(b.pinned.digest(), old_b_digest, "b carried forward verbatim");
+        assert_eq!(
+            a.source.content_digest(),
+            new_a_digest,
+            "a re-resolved to the new digest"
+        );
+        assert_eq!(b.source.content_digest(), old_b_digest, "b carried forward verbatim");
     }
 
     #[tokio::test]

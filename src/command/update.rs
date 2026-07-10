@@ -215,17 +215,16 @@ fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned
     let mut entries: Vec<UpdateEntry> = new_lock
         .iter_artifacts()
         .map(|a| {
-            let old = prev_index.get(&(a.kind, a.name.as_str())).map(|p| p.pinned.digest());
-            let new = a.pinned.digest();
-            let action = match &old {
-                Some(o) if *o == new => UpdateAction::Unchanged,
+            let old = prev_index.get(&(a.kind, a.name.as_str())).map(|p| &p.source);
+            let action = match old {
+                Some(o) if o.eq_content(&a.source) => UpdateAction::Unchanged,
                 _ => UpdateAction::Updated,
             };
             UpdateEntry {
                 kind: a.kind,
                 name: a.name.clone(),
-                old,
-                new: Some(new),
+                old: old.map(|o| o.content_digest()),
+                new: Some(a.source.content_digest()),
                 action,
             }
         })

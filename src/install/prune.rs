@@ -168,7 +168,7 @@ pub fn prune_orphans(
         .map(|r| Orphan {
             kind: r.kind,
             name: r.name.clone(),
-            old: r.pinned.digest(),
+            old: r.source.content_digest(),
             // Best-effort path for error attribution: the first output's
             // resolved target, falling back to the workspace root when the
             // record is unresolvable.
@@ -349,7 +349,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: name.to_string(),
-            pinned: pinned(name),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name)),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -373,7 +374,8 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: name.to_string(),
-            pinned: pinned(name),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name)),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -561,11 +563,12 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "absent-root".to_string(),
-            pinned: {
+            source: crate::lock::locked_source::LockedSource::Registry({
                 let id = Identifier::new_registry("absent-root", "localhost:5000")
                     .clone_with_digest(Digest::Sha256("a".repeat(64)));
                 PinnedIdentifier::try_from(id).unwrap()
-            },
+            }),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -614,11 +617,12 @@ mod tests {
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "evil".to_string(),
-            pinned: {
+            source: crate::lock::locked_source::LockedSource::Registry({
                 let id = Identifier::new_registry("evil", "localhost:5000")
                     .clone_with_digest(Digest::Sha256("a".repeat(64)));
                 PinnedIdentifier::try_from(id).unwrap()
-            },
+            }),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {

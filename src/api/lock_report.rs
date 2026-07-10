@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use serde::{Serialize, Serializer};
 
 use crate::cli::printer::{Printable, print_table};
-use crate::oci::{ArtifactKind, PinnedIdentifier};
+use crate::oci::ArtifactKind;
 
 use super::artifact_status::LockAction;
 
@@ -24,17 +24,12 @@ pub struct LockEntry {
     #[serde(serialize_with = "serialize_kind")]
     pub kind: ArtifactKind,
     pub name: String,
-    #[serde(serialize_with = "serialize_pinned")]
-    pub pinned: PinnedIdentifier,
+    pub pinned: String,
     pub action: LockAction,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&kind.to_string())
-}
-
-fn serialize_pinned<S: Serializer>(pinned: &PinnedIdentifier, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&pinned.strip_advisory().to_string())
 }
 
 /// The result of a lock pass: one row per locked artifact.
@@ -59,7 +54,7 @@ impl Printable for LockReport {
                 vec![
                     e.kind.to_string(),
                     e.name.clone(),
-                    e.pinned.strip_advisory().to_string(),
+                    e.pinned.clone(),
                     e.action.to_string(),
                 ]
             })
@@ -78,11 +73,11 @@ mod tests {
     use super::*;
     use crate::oci::{Digest, Identifier};
 
-    fn pinned(repo: &str) -> PinnedIdentifier {
+    fn pinned(repo: &str) -> crate::oci::PinnedIdentifier {
         let id = Identifier::new_registry(repo, "localhost:5000")
             .clone_with_tag("stable")
             .clone_with_digest(Digest::Sha256("a".repeat(64)));
-        PinnedIdentifier::try_from(id).unwrap()
+        crate::oci::PinnedIdentifier::try_from(id).unwrap()
     }
 
     #[test]
@@ -90,7 +85,7 @@ mod tests {
         let r = LockReport::new(vec![LockEntry {
             kind: ArtifactKind::Skill,
             name: "code-review".to_string(),
-            pinned: pinned("code-review"),
+            pinned: pinned("code-review").strip_advisory().to_string(),
             action: LockAction::Locked,
         }]);
         let mut buf = Vec::new();
@@ -108,7 +103,7 @@ mod tests {
         let r = LockReport::new(vec![LockEntry {
             kind: ArtifactKind::Rule,
             name: "rust-style".to_string(),
-            pinned: pinned("rust-style"),
+            pinned: pinned("rust-style").strip_advisory().to_string(),
             action: LockAction::Unchanged,
         }]);
         let mut buf = Vec::new();

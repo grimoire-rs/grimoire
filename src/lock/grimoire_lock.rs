@@ -259,7 +259,17 @@ struct SerializableView<'a> {
 #[derive(Serialize)]
 struct LockedArtifactView<'a> {
     name: &'a str,
-    pinned: crate::oci::PinnedIdentifier,
+    /// Registry pin (`registry/repo@sha256:…`); absent for a path entry
+    /// so a registry-only lock stays byte-identical to the pre-path
+    /// format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned: Option<crate::oci::PinnedIdentifier>,
+    /// Path-source arm: the declared path plus its content hash. Both
+    /// absent for a registry entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a crate::config::path_source::PathSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<&'a crate::oci::Digest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,13 +282,20 @@ fn serialize_artifact_views<S>(items: &&[&LockedArtifact], serializer: S) -> Res
 where
     S: serde::Serializer,
 {
+    use crate::lock::locked_source::LockedSource;
     use serde::ser::SerializeSeq;
     let mut seq = serializer.serialize_seq(Some(items.len()))?;
     for a in *items {
         let single = (a.bundles.len() == 1).then(|| &a.bundles[0]);
+        let (pinned, path, hash) = match &a.source {
+            LockedSource::Registry(pinned) => (Some(pinned.strip_advisory()), None, None),
+            LockedSource::Path { path, hash } => (None, Some(path), Some(hash)),
+        };
         seq.serialize_element(&LockedArtifactView {
             name: &a.name,
-            pinned: a.pinned.strip_advisory(),
+            pinned,
+            path,
+            hash,
             bundle: single.map(|b| b.repo.as_str()),
             bundle_tag: single.map(|b| b.tag.as_str()),
             bundles: if a.bundles.len() > 1 { &a.bundles } else { &[] },
@@ -571,7 +588,11 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             skills: vec![LockedArtifact {
                 name: "code-review".to_string(),
                 kind: ArtifactKind::Skill,
-                pinned: pinned("acme/code-review", Some("stable"), 'a'),
+                source: crate::lock::locked_source::LockedSource::Registry(pinned(
+                    "acme/code-review",
+                    Some("stable"),
+                    'a',
+                )),
                 bundles: vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")],
             }],
             rules: vec![],
@@ -652,7 +673,11 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             skills: vec![LockedArtifact {
                 name: "code-review".to_string(),
                 kind: ArtifactKind::Skill,
-                pinned: pinned("acme/code-review", Some("stable"), 'a'),
+                source: crate::lock::locked_source::LockedSource::Registry(pinned(
+                    "acme/code-review",
+                    Some("stable"),
+                    'a',
+                )),
                 bundles: provenance.clone(),
             }],
             rules: vec![],

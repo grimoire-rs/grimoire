@@ -62,10 +62,11 @@ pub fn derive_badge(
     let Some(locked) = lock.and_then(|l| find_by_repo(l, registry, repository)) else {
         return StatusBadge::NotInstalled;
     };
-    let Some(record) = state
-        .iter_records()
-        .find(|r| r.pinned.registry() == registry && r.pinned.repository() == repository)
-    else {
+    let Some(record) = state.iter_records().find(|r| {
+        r.source
+            .pinned()
+            .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+    }) else {
         return StatusBadge::NotInstalled;
     };
 
@@ -94,7 +95,7 @@ pub fn derive_badge(
             Err(_) => return StatusBadge::NotInstalled,
         }
     }
-    if record.pinned.eq_content(&locked.pinned) {
+    if record.source.eq_content(&locked.source) {
         StatusBadge::Installed
     } else {
         StatusBadge::Outdated
@@ -110,7 +111,11 @@ fn find_by_repo<'a>(lock: &'a GrimoireLock, registry: &str, repository: &str) ->
         .iter()
         .chain(lock.rules.iter())
         .chain(lock.agents.iter())
-        .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)
+        .find(|a| {
+            a.source
+                .pinned()
+                .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+        })
 }
 
 #[cfg(test)]
@@ -173,7 +178,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "x".to_string(),
-            pinned: pinned(repo, byte),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(repo, byte)),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -293,7 +299,8 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Agent,
             name: "my-agent".to_string(),
-            pinned: p.clone(),
+            source: crate::lock::locked_source::LockedSource::Registry(p.clone()),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
@@ -351,11 +358,12 @@ mod tests {
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "x".to_string(),
-            pinned: {
+            source: crate::lock::locked_source::LockedSource::Registry({
                 let id = Identifier::new_registry("acme/x", "localhost:5000")
                     .clone_with_digest(Digest::Sha256("a".repeat(64)));
                 PinnedIdentifier::try_from(id).unwrap()
-            },
+            }),
+            dev: false,
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {

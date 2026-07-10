@@ -73,7 +73,7 @@ fn build_report(lock: &GrimoireLock, previous: Option<&GrimoireLock>, _scope: &R
             LockEntry {
                 kind: a.kind,
                 name: a.name.clone(),
-                pinned: a.pinned.clone(),
+                pinned: a.source.provenance(),
                 action,
             }
         })
@@ -84,7 +84,7 @@ fn build_report(lock: &GrimoireLock, previous: Option<&GrimoireLock>, _scope: &R
 fn previous_has_same(previous: Option<&GrimoireLock>, artifact: &LockedArtifact) -> bool {
     let Some(prev) = previous else { return false };
     prev.iter_artifacts()
-        .any(|p| p.kind == artifact.kind && p.name == artifact.name && p.pinned.eq_content(&artifact.pinned))
+        .any(|p| p.kind == artifact.kind && p.name == artifact.name && p.source.eq_content(&artifact.source))
 }
 
 #[cfg(test)]

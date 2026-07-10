@@ -238,7 +238,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         new_lock
             .iter_artifacts()
             .find(|a| a.kind == kind && a.name == name)
-            .map(|a| a.pinned.strip_advisory().to_string())
+            .map(|a| a.source.provenance())
             .unwrap_or_else(|| id.to_string())
     };
 

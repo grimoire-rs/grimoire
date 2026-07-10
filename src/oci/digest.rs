@@ -236,6 +236,21 @@ impl<'de> Deserialize<'de> for Digest {
     }
 }
 
+impl schemars::JsonSchema for Digest {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Digest".into()
+    }
+
+    /// On the wire a digest is its canonical `algorithm:hex` string.
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A content digest in canonical `algorithm:hex` form (e.g. `sha256:<64 hex>`)",
+            "pattern": "^(sha256|sha384|sha512):[0-9a-f]+$"
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
