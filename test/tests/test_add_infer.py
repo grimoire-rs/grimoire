@@ -146,6 +146,34 @@ def test_add_name_override_installs_rebound_skill(
     ).read_text() == "echo hi\n", "sibling files stay verbatim"
 
 
+def test_add_rejects_invalid_binding_name(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A binding name outside the artifact-name charset refuses (exit 64):
+    the binding becomes an install directory/file name, and mixed-case
+    bindings collide on case-insensitive filesystems."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    result = runner.run("add", sk.fq, "--name", "Code-Review", check=False)
+    assert result.returncode == 64, (
+        f"mixed-case binding must exit 64, got {result.returncode}; "
+        f"stderr: {result.stderr}"
+    )
+    assert "lowercase" in result.stderr, (
+        f"error must explain the charset; stderr:\n{result.stderr}"
+    )
+    # Nothing declared, nothing installed.
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert "Code-Review" not in cfg, "refused add must not write the config"
+
+
 def test_add_kind_override_still_works(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

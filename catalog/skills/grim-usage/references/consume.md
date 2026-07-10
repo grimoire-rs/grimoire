@@ -73,7 +73,9 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   no-op. A renamed skill installs under the binding name with its
   `SKILL.md` frontmatter `name` rewritten to match (no client-level name
   collision); a renamed multi-file rule may break the index's relative
-  links (grim warns).
+  links (grim warns). Skill/rule/agent binding names must be 1–64 chars
+  of `[a-z0-9-]` (exit 64 otherwise); installing a name already installed
+  at the other scope for the same client warns about the shadow.
 - `--no-install` stops at declare + lock — no materialization. Use it to
   add several artifacts before one `grim install`, or to pick clients with
   `grim install --client`. Only the added entry installs otherwise; the

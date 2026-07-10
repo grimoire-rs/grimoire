@@ -162,6 +162,20 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         }
     };
 
+    // A skill/rule/agent binding becomes the install directory / file
+    // name: enforce the artifact-name charset before any write.
+    // Lowercase-only also keeps bindings collision-free on
+    // case-insensitive filesystems (macOS/Windows), where `Foo` and `foo`
+    // are the same physical install path. Bundle and mcp bindings never
+    // materialize a path of their own and stay unrestricted.
+    if matches!(kind, ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent)
+        && let Err(reason) = crate::skill::SkillName::parse(&name)
+    {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            CommandError::InvalidBindingName { kind, reason },
+        )));
+    }
+
     // Acquisition-time deprecation notice: warn once when the resolved
     // artifact's manifest carries a non-empty `com.grimoire.deprecated`.
     if let Some(message) = manifest

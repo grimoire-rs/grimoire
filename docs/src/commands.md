@@ -190,6 +190,14 @@ reference in the error. Pass `--name` to bind the new reference under a
 different name. Re-declaring the exact same reference stays a no-op
 overwrite.
 
+A skill, rule, or agent binding name becomes the install directory or
+file name, so it must satisfy the Agent Skills name rules: 1–64
+characters of lowercase letters, digits, and hyphens. A name outside
+that charset — whether passed via `--name` or derived from the
+reference — refuses with exit 64 (lowercase-only also keeps bindings
+collision-free on case-insensitive filesystems). Bundle and MCP binding
+names are unrestricted.
+
 A renamed skill installs under the binding name, and the installed
 `SKILL.md` frontmatter `name` is rewritten to match it (the Agent Skills
 standard requires the two to agree), so a rename never leaves two
@@ -197,6 +205,11 @@ installed skills claiming the same name. A renamed multi-file rule keeps
 its support directory under the binding name too — relative links inside
 the index that point at the original name may not resolve; grim warns
 when that applies.
+
+Installing an artifact whose `(kind, name)` is already installed at the
+**other** scope for one of the same clients prints a warning: both
+copies are visible to that client, and the client's own precedence
+decides which wins.
 
 ```sh
 grim add ghcr.io/acme/code-review:1

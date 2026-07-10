@@ -60,6 +60,18 @@ pub enum CommandError {
         requested: String,
     },
 
+    /// `add` received a binding name outside the artifact-name charset
+    /// for a file-materializing kind (skill/rule/agent). The binding
+    /// becomes the install directory / file name, so it must satisfy the
+    /// Agent Skills name rules — in particular lowercase-only, which
+    /// keeps bindings collision-free on case-insensitive filesystems.
+    /// Exit 64.
+    #[error("invalid {kind} binding name: {reason} (allowed: lowercase letters, digits, hyphens)")]
+    InvalidBindingName {
+        kind: crate::oci::ArtifactKind,
+        reason: String,
+    },
+
     /// `config` received an unknown dotted key, a duplicate alias, or
     /// another input that violates the command contract (exit 64).
     #[error("{0}")]
