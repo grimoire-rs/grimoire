@@ -12,6 +12,12 @@
 //! `--dry-run` validates and plans without pushing. `--force` moves
 //! existing exact-version tags. Default behavior skips entries whose
 //! exact-version tag already exists (`skip_existing`).
+//!
+//! `--version` is the single version source: a semver value overrides the
+//! manifest top-level version and cascades (`--cascade`/`--no-cascade`
+//! control it); a non-semver value is a movable channel tag applied to
+//! every entry uniformly, with no cascade. A channel obeys the same
+//! skip-existing / `--force` rule as everything else.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,6 +32,7 @@ use crate::context::Context;
 use crate::error::classify_error;
 use crate::oci::ArtifactKind;
 use crate::oci::identifier::{MAX_REPOSITORY_LENGTH, RepositoryPathIssue, repository_path_issue};
+use crate::oci::release::resolve_cascade;
 
 /// `grim publish` arguments.
 #[derive(Debug, Args)]
@@ -39,21 +46,36 @@ pub struct PublishArgs {
     #[arg(long, value_name = "NAME")]
     pub only: Vec<String>,
 
-    /// Override the published tag with a movable channel tag (e.g.
-    /// `canary`). Must be non-semver — semver values are rejected so that
-    /// semver releases always come from the manifest and the repo records
-    /// exactly what was published. A channel tag always moves: re-publishing
-    /// with --tag overwrites the existing tag (no skip-existing, no --force
-    /// needed).
-    #[arg(long, value_name = "TAG", conflicts_with = "force")]
-    pub tag: Option<String>,
-
-    /// Override the manifest's top-level `version` for this run (e.g. a CI
-    /// git tag). The manifest `version_prefix` (default `v`) is stripped
-    /// before validation, so `--version v1.2.3` publishes tag `1.2.3`.
-    /// Entries with an explicit `version` keep it.
+    /// The version to publish this run. A semver value (e.g. `v1.2.3`)
+    /// overrides the manifest's top-level `version` — entries with their own
+    /// `version` keep it — and each entry cascades (see `--cascade`). A
+    /// non-semver value (e.g. `canary`, `edge`) is a movable channel tag
+    /// applied to *every* entry uniformly, with no cascade — the batch
+    /// equivalent of a channel release. The manifest `version_prefix`
+    /// (default `v`) is stripped first, so `--version v1.2.3` publishes tag
+    /// `1.2.3`. Like every publish, a channel tag skips-existing by default
+    /// and needs `--force` to move.
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
+
+    /// Removed: replaced by `--version`. Hidden from help and accepted only
+    /// so a CI job still pinned to the old flag gets a guiding migration
+    /// error instead of clap's opaque "unexpected argument". A non-semver
+    /// value is now a movable channel tag; a semver value cascades.
+    #[arg(long, hide = true)]
+    pub tag: Option<String>,
+
+    /// Assert the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for every
+    /// entry. Requires semver versions — combining it with a non-semver
+    /// `--version` channel is a data error (65). Default (neither flag):
+    /// cascade automatically for semver, single tag for a channel.
+    #[arg(long, overrides_with = "no_cascade")]
+    pub cascade: bool,
+
+    /// Publish only each entry's exact version tag; suppress the
+    /// `X.Y`/`X`/`latest` cascade.
+    #[arg(long, overrides_with = "cascade")]
+    pub no_cascade: bool,
 
     /// Print the push plan without pushing anything.
     #[arg(long)]
@@ -61,7 +83,7 @@ pub struct PublishArgs {
 
     /// Move existing exact-version tags that point at a different digest
     /// (default: skip entries whose exact-version tag already exists).
-    #[arg(long, conflicts_with = "tag")]
+    #[arg(long)]
     pub force: bool,
 
     /// Embed git provenance (commit revision, commit date, and the `origin`
@@ -252,6 +274,125 @@ fn is_strict_semver(s: &str) -> bool {
     }
 }
 
+/// How a run-level `--version` value is interpreted (after the manifest's
+/// `version_prefix` is stripped).
+///
+/// The value's shape selects the scope: a strict semver overrides only the
+/// manifest's top-level version (per-entry pinned versions still win) and
+/// cascades; a non-semver channel replaces the tag for *every* entry
+/// uniformly with no cascade — the batch analogue of `grim release`'s
+/// channel path.
+#[derive(Debug, PartialEq, Eq)]
+enum VersionMode<'a> {
+    /// No `--version` given.
+    Absent,
+    /// A strict semver. Carries the **original** (unstripped) value because
+    /// [`resolve_versions`] strips the prefix itself.
+    Semver(&'a str),
+    /// A non-semver channel tag. Carries the **stripped** value, used
+    /// verbatim as the published tag for every entry.
+    Channel(&'a str),
+}
+
+/// Classify a `--version` value against `prefix`. See [`VersionMode`].
+fn version_mode<'a>(version: Option<&'a str>, prefix: &str) -> VersionMode<'a> {
+    match version {
+        None => VersionMode::Absent,
+        Some(v) => {
+            let stripped = v.strip_prefix(prefix).unwrap_or(v);
+            if is_strict_semver(stripped) {
+                VersionMode::Semver(v)
+            } else {
+                VersionMode::Channel(stripped)
+            }
+        }
+    }
+}
+
+/// Validate a non-semver `--version` channel value before it becomes a
+/// pushed tag. Rejects three classes up front (65, attributed to the
+/// manifest) rather than letting them surface as a late, opaque registry or
+/// reference error partway through a batch:
+///
+/// 1. **Semver but not strict `X.Y.Z`** — a prerelease (`1.2.3-rc.1`) or
+///    build-metadata (`1.2.3+build`) value. Publish's manifest forbids
+///    prerelease/build entry versions, so a `--version` override of that
+///    shape is a mistake, not a channel; reject it instead of silently
+///    tagging every entry with the literal string. (`grim release` differs:
+///    its ref-tag is a single explicit version, so a prerelease there is a
+///    legal exact-only release — see `adr_unified_publish_version_cascade.md`.)
+/// 2. **Reserved cascade-float shape** — `latest`, a bare major (`^\d+$`), or
+///    a `major.minor` (`^\d+\.\d+$`). A real semver release manages these
+///    automatically ([`crate::oci::release::publish_tags`]); a channel that
+///    aliases one would silently collide with the machine-owned float
+///    namespace. Mirrors npm rejecting a dist-tag shaped like a version.
+/// 3. **Not a legal OCI tag** — e.g. a slash-bearing CI ref `feature/foo`.
+///    Reject here with a clean, attributed message instead of a confusing
+///    repository-grammar error deep in the release path.
+fn validate_channel_value(channel: &str, manifest_path: &std::path::Path) -> anyhow::Result<()> {
+    if semver::Version::parse(channel).is_ok() {
+        return Err(data_error_at(
+            manifest_path,
+            format!(
+                "--version '{channel}': a prerelease or build-metadata version is not a valid \
+                 publish channel or cascade version; use a strict semver (X.Y.Z) or a plain \
+                 channel name (e.g. 'canary')"
+            ),
+        ));
+    }
+    if is_reserved_float_tag(channel) {
+        return Err(data_error_at(
+            manifest_path,
+            format!(
+                "--version '{channel}': 'latest', 'X', and 'X.Y' are reserved cascade tags \
+                 managed automatically; pass a strict semver (X.Y.Z) to cascade, or a distinct \
+                 channel name"
+            ),
+        ));
+    }
+    if !is_valid_oci_tag(channel) {
+        return Err(data_error_at(
+            manifest_path,
+            format!("--version '{channel}': not a valid tag; a channel must match [A-Za-z0-9_][A-Za-z0-9._-]{{0,127}}"),
+        ));
+    }
+    Ok(())
+}
+
+/// A value shaped like a reserved rolling-cascade tag: `latest`, a bare
+/// major (`^\d+$`), or a `major.minor` (`^\d+\.\d+$`).
+fn is_reserved_float_tag(s: &str) -> bool {
+    if s == "latest" {
+        return true;
+    }
+    let mut parts = s.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(a), None, None) => is_all_digits(a),
+        (Some(a), Some(b), None) => is_all_digits(a) && is_all_digits(b),
+        _ => false,
+    }
+}
+
+/// True when `s` is a non-empty run of ASCII digits.
+fn is_all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// OCI tag grammar: `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`.
+fn is_valid_oci_tag(s: &str) -> bool {
+    if s.len() > 128 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Resolve every entry's version in place (issue #29).
 ///
 /// The effective catalog-wide version is `--version` (CLI) over the
@@ -274,8 +415,8 @@ fn resolve_versions(
     cli_version: Option<&str>,
     manifest_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let prefix = manifest.version_prefix.clone().unwrap_or_else(|| "v".to_string());
-    let strip = |v: &str| v.strip_prefix(prefix.as_str()).unwrap_or(v).to_string();
+    let prefix = manifest.version_prefix.as_deref().unwrap_or("v");
+    let strip = |v: &str| v.strip_prefix(prefix).unwrap_or(v).to_string();
 
     let top = cli_version.or(manifest.version.as_deref()).map(strip);
 
@@ -416,8 +557,51 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     // validate_manifest → plan_entries → per entry compose release::run
     // (skip_existing = !force), fail-fast into the report.
 
+    // Migration guard: `--tag` was replaced by `--version` in the unified
+    // interface. It is accepted (hidden) only to emit a guiding error (64)
+    // pointing at `--version`, instead of clap's opaque "unexpected argument"
+    // that a CI job pinned to the old flag would otherwise hit.
+    if let Some(tag) = &args.tag {
+        return Err(super::config_usage(format!(
+            "--tag was removed; use --version '{tag}' instead (a non-semver value is a movable channel tag, a semver value cascades)"
+        )));
+    }
+
     let mut manifest = load_manifest(&args.manifest)?;
-    resolve_versions(&mut manifest, args.version.as_deref(), &args.manifest)?;
+
+    // Classify --version: a semver value overrides the manifest top-level
+    // version and cascades; a non-semver value is a uniform channel tag for
+    // every entry (no cascade). Prefix (default `v`) is stripped first.
+    let prefix = manifest.version_prefix.as_deref().unwrap_or("v");
+    let mode = version_mode(args.version.as_deref(), prefix);
+    let cascade = resolve_cascade(args.cascade, args.no_cascade);
+
+    // A channel `--version` is validated up front — reject a prerelease/build
+    // version, a reserved cascade-float shape (`latest`/`X`/`X.Y`), or a
+    // non-tag charset — so a mistaken CI ref (an un-tagged `$GITHUB_REF_NAME`)
+    // fails cleanly here, attributed to the manifest, instead of as a late,
+    // opaque reference error deep in the per-entry release path.
+    if let VersionMode::Channel(channel) = mode {
+        validate_channel_value(channel, &args.manifest)?;
+        // A (now-valid) channel combined with --cascade is contradictory:
+        // there is no semver to derive `X.Y`/`X`/`latest` from. Fail before
+        // any push (65).
+        if cascade == Some(true) {
+            return Err(data_error_at(
+                &args.manifest,
+                format!("--cascade requires a semver version (X.Y.Z); --version '{channel}' is a channel tag"),
+            ));
+        }
+    }
+
+    // Only a semver --version feeds the top-level override; a channel leaves
+    // the manifest's own versions in place (they still must resolve, as the
+    // channel tag is applied on top at plan time).
+    let cli_semver = match mode {
+        VersionMode::Semver(v) => Some(v),
+        _ => None,
+    };
+    resolve_versions(&mut manifest, cli_semver, &args.manifest)?;
     let manifest = manifest;
     let (registry, cli_prefix) = resolve_publish_registry(ctx, &manifest.registry);
     validate_registry_value(&registry, &args.manifest)?;
@@ -437,21 +621,20 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         manifest_dir
     };
 
-    validate_manifest(
-        &manifest,
-        &manifest_dir,
-        &args.manifest,
-        &args.only,
-        args.tag.as_deref(),
-    )?;
+    validate_manifest(&manifest, &manifest_dir, &args.manifest, &args.only)?;
 
+    // A channel --version becomes the uniform published tag for every entry.
+    let channel = match mode {
+        VersionMode::Channel(c) => Some(c),
+        _ => None,
+    };
     let entries = plan_entries(
         &manifest,
         &manifest_dir,
         &registry,
         cli_prefix.as_deref(),
         &args.only,
-        args.tag.as_deref(),
+        channel,
     );
 
     // Dry-run preview only: flag entries whose per-entry `repository` is used
@@ -473,11 +656,11 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
 
     let mut report_entries: Vec<PublishEntry> = Vec::new();
 
-    // A channel tag (`--tag canary`) is movable by definition: skip-existing
-    // would freeze it at its first digest forever, so a tag run always
-    // moves the tag (release's exact-tag overwrite guard is force-waived
-    // for the channel tag only — manifest semver tags are not in play).
-    let (force, skip_existing) = resolve_force_skip(args.tag.as_deref(), args.force);
+    // Uniform overwrite semantics for every value, channel included:
+    // skip-existing by default (idempotent CI re-runs), `--force` to move an
+    // existing exact tag onto a new digest. A channel like `canary` no longer
+    // auto-moves — re-publishing it is a no-op unless `--force`.
+    let (force, skip_existing) = resolve_force_skip(args.force);
 
     for planned in &entries {
         let release_args = super::release::ReleaseArgs {
@@ -489,6 +672,10 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             skip_existing,
             pin: planned.pin,
             git: args.git,
+            // Forward the run-level cascade choice verbatim; release computes
+            // the tag set. A channel tag never cascades regardless.
+            cascade: args.cascade,
+            no_cascade: args.no_cascade,
         };
 
         match super::release::run(ctx, &release_args).await {
@@ -710,15 +897,12 @@ fn kind_str(kind: ArtifactKind) -> &'static str {
 
 /// Derive the `(force, skip_existing)` pair for a publish run.
 ///
-/// Three cases:
-/// - `tag = Some(_)` — a channel tag always moves: force=true,
-///   skip_existing=false (ADR D3 amendment).
-/// - `tag = None, force = true` — explicit flag: force=true,
-///   skip_existing=false (flags are mutually exclusive).
-/// - `tag = None, force = false` — default: force=false,
-///   skip_existing=true (idempotent CI default, ADR D3).
-pub(crate) fn resolve_force_skip(tag: Option<&str>, force: bool) -> (bool, bool) {
-    if tag.is_some() { (true, false) } else { (force, !force) }
+/// Uniform for every value, channel included: `--force` moves an existing
+/// exact tag onto a new digest; its absence skips-existing so a re-run is
+/// idempotent (the CI default). A channel tag is no longer special-cased —
+/// re-publishing it is a no-op unless `--force`.
+fn resolve_force_skip(force: bool) -> (bool, bool) {
+    (force, !force)
 }
 
 /// Resolve the registry to publish to: the `--registry` global flag wins
@@ -867,7 +1051,6 @@ fn is_bundle_shaped(content: &str) -> bool {
 /// - Every `path` override (or conventional path) exists on disk.
 /// - `pin = true` only on bundle entries.
 /// - Every `--only` name appears in the manifest.
-/// - `--tag` is non-semver.
 ///
 /// # Errors
 ///
@@ -877,7 +1060,6 @@ fn validate_manifest(
     manifest_dir: &std::path::Path,
     manifest_path: &std::path::Path,
     only: &[String],
-    tag: Option<&str>,
 ) -> anyhow::Result<()> {
     // -- Guard: manifest must declare at least one entry (ADR D2) --
     // An entirely empty manifest (all kind tables absent or empty) is a
@@ -891,19 +1073,6 @@ fn validate_manifest(
         + manifest.mcp.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
-    }
-
-    // -- Validate --tag is non-semver (ADR D1) --
-    if let Some(t) = tag
-        && is_strict_semver(t)
-    {
-        return Err(data_error_at(
-            manifest_path,
-            format!(
-                "--tag '{t}' is a semver version; semver releases must come from the manifest version field, \
-                 not --tag (use a movable channel tag like 'canary' or 'edge')"
-            ),
-        ));
     }
 
     // -- Validate --only names exist in the manifest (ADR D1) --
@@ -1104,7 +1273,8 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
 ///
 /// Order: skills → rules → agents → mcp → bundles, alphabetical within each
 /// kind. When `--only` is non-empty only matching entries are included.
-/// When `--tag` is set it replaces the version tag for every entry.
+/// When `channel` is set (a non-semver `--version` value) it replaces the
+/// version tag for every entry uniformly.
 /// The `registry` parameter (already resolved against `--registry` flag
 /// precedence) is used to construct fully-qualified OCI references;
 /// `cli_prefix` (the path portion of a `--registry host/prefix` flag)
@@ -1115,7 +1285,7 @@ fn plan_entries(
     registry: &str,
     cli_prefix: Option<&str>,
     only: &[String],
-    tag: Option<&str>,
+    channel: Option<&str>,
 ) -> Vec<PlannedEntry> {
     let mut entries = Vec::new();
 
@@ -1131,8 +1301,9 @@ fn plan_entries(
                 }
                 let src = resolve_source_path(name, $kind, spec, manifest_dir);
                 // Invariant: run() sequences resolve_versions → validate_manifest
-                // → plan_entries, so every version is Some by now.
-                let publish_tag = tag.unwrap_or_else(|| {
+                // → plan_entries, so every version is Some by now. A channel
+                // `--version` (if any) replaces the tag for every entry.
+                let publish_tag = channel.unwrap_or_else(|| {
                     spec.version
                         .as_deref()
                         .expect("versions resolved before planning")
@@ -1355,7 +1526,7 @@ mod tests {
         );
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.my-skill]\nversion = \"1.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(err.is_err(), "partial semver '1.0' must be rejected");
         let msg = format!("{:#}", err.unwrap_err());
         assert!(
@@ -1372,7 +1543,7 @@ mod tests {
         write(&dir.join("rules/my-rule.md"), "---\npaths: ['*.rs']\n---\nbody\n");
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"v1.0.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(err.is_err(), "'v1.0.0' must be rejected (v-prefix)");
     }
 
@@ -1414,6 +1585,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_versions_cli_override_does_not_clobber_pinned_entry() {
+        // A semver --version overrides the top-level for entries that omit
+        // their own version, but an explicit per-entry version still wins
+        // (ADR: "per-entry pinned versions still win"). Crossing case:
+        // cli_version = Some AND one entry pinned, one omitted.
+        let mut manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\nversion = \"0.1.0\"\n\n[skills.pinned]\nversion = \"0.5.0\"\n\n[skills.floating]\n",
+        )
+        .unwrap();
+        resolve_versions(&mut manifest, Some("2.0.0"), Path::new("test.toml")).expect("resolves");
+        assert_eq!(
+            manifest.skills["pinned"].version.as_deref(),
+            Some("0.5.0"),
+            "an explicit per-entry version must survive a --version override"
+        );
+        assert_eq!(
+            manifest.skills["floating"].version.as_deref(),
+            Some("2.0.0"),
+            "an entry with no version inherits the --version override"
+        );
+    }
+
+    #[test]
     fn resolve_versions_strips_prefix_from_all_inputs_then_validation_passes() {
         // The v-prefix rejection above still holds for validate_manifest alone;
         // through the resolve step a prefixed input becomes valid strict semver.
@@ -1424,7 +1618,7 @@ mod tests {
             toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"v1.0.0\"\n").unwrap();
         resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
         assert_eq!(manifest.rules["my-rule"].version.as_deref(), Some("1.0.0"));
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None)
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[])
             .expect("stripped version must pass strict-semver validation");
     }
 
@@ -1467,7 +1661,7 @@ mod tests {
         let mut manifest: PublishManifest = toml::from_str("registry = \"r.example\"\n\n[skills.a]\n").unwrap();
         resolve_versions(&mut manifest, Some("vfoo"), Path::new("test.toml")).expect("resolve is shape-agnostic");
         assert!(
-            validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).is_err(),
+            validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).is_err(),
             "'foo' must fail the strict-semver gate"
         );
     }
@@ -1475,14 +1669,14 @@ mod tests {
     #[test]
     fn validate_manifest_rejects_prerelease_semver() {
         // "1.0.0-beta" is prerelease — ADR D2 requires strict X.Y.Z
-        // (prerelease marker is forbidden in the manifest; use `--tag` for
-        // channel tags)
+        // (prerelease marker is forbidden in the manifest; use a non-semver
+        // `--version` channel for channel tags)
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         write(&dir.join("skills/s/SKILL.md"), "---\nname: s\ndescription: d.\n---\n");
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.s]\nversion = \"1.0.0-beta\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(
             err.is_err(),
             "'1.0.0-beta' prerelease must be rejected (ADR D2 strict X.Y.Z)"
@@ -1493,7 +1687,7 @@ mod tests {
     fn validate_manifest_accepts_strict_xyz_semver() {
         // Happy path: "1.2.3" is valid strict X.Y.Z
         let (manifest, dir, _tmp) = make_manifest_dir();
-        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None)
+        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[])
             .expect("strictly-formed X.Y.Z versions must pass validation");
     }
 
@@ -1507,7 +1701,7 @@ mod tests {
         // Do NOT create the skill directory — path is absent
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.missing-skill]\nversion = \"1.0.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(
             err.is_err(),
             "absent source path must be rejected (ADR D2 whole-manifest validation)"
@@ -1530,7 +1724,7 @@ mod tests {
             "registry = \"r.example\"\n\n[rules.custom-rule]\nversion = \"0.2.0\"\npath = \"shared/custom-rule.md\"\n",
         )
         .unwrap();
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None)
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[])
             .expect("explicit path override that exists must pass (ADR D2)");
     }
 
@@ -1543,7 +1737,7 @@ mod tests {
             "registry = \"r.example\"\n\n[rules.custom-rule]\nversion = \"0.2.0\"\npath = \"shared/nonexistent.md\"\n",
         )
         .unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(err.is_err(), "missing explicit path override must be rejected");
     }
 
@@ -1592,7 +1786,7 @@ mod tests {
         // Manually force pin=true on the skill entry (bypasses serde
         // deny_unknown_fields since pin is a real field)
         manifest.skills.get_mut("my-skill").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(
             err.is_err(),
             "pin=true on a skill must be rejected (ADR D2 bundle-only)"
@@ -1612,7 +1806,7 @@ mod tests {
         let mut manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"1.0.0\"\n").unwrap();
         manifest.rules.get_mut("my-rule").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(err.is_err(), "pin=true on a rule must be rejected (ADR D2 bundle-only)");
     }
 
@@ -1627,7 +1821,7 @@ mod tests {
         let mut manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[agents.my-agent]\nversion = \"1.0.0\"\n").unwrap();
         manifest.agents.get_mut("my-agent").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
         assert!(
             err.is_err(),
             "pin=true on an agent must be rejected (ADR D2 bundle-only)"
@@ -1645,8 +1839,7 @@ mod tests {
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[bundles.my-bundle]\nversion = \"1.0.0\"\npin = true\n")
                 .unwrap();
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None)
-            .expect("pin=true on a bundle is valid (ADR D2)");
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("pin=true on a bundle is valid (ADR D2)");
     }
 
     // ── validate_entry_name: charset gate (CWE-20) ────────────────────────
@@ -1658,7 +1851,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.\"sub/name\"]\nversion = \"1.0.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[]).unwrap_err();
         assert!(format!("{err:#}").contains("name must start with"), "got: {err:#}");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
@@ -1669,7 +1862,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.\"../evil\"]\nversion = \"1.0.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[]).unwrap_err();
         assert!(format!("{err:#}").contains("name must start with"), "got: {err:#}");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
@@ -1681,7 +1874,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.MySkill]\nversion = \"1.0.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, tmp.path(), Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -1835,7 +2028,7 @@ mod tests {
     fn validate_manifest_rejects_bad_repository_prefix() {
         let (mut manifest, dir, _tmp) = make_manifest_dir();
         manifest.repository_prefix = Some("Bad/Prefix".to_string());
-        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -1846,7 +2039,7 @@ mod tests {
         // guard — proves the per-entry `repository` actually flows into the
         // shared OCI segment validation, not just the colon check.
         manifest.skills.get_mut("my-skill").unwrap().repository = Some("group-/my-skill".to_string());
-        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -1856,8 +2049,7 @@ mod tests {
         manifest.repository_prefix = Some("durzn-technology/hearth/skill".to_string());
         manifest.rules.get_mut("my-rule").unwrap().repository =
             Some("durzn-technology/hearth/rule/my-rule".to_string());
-        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None)
-            .expect("valid repository overrides must pass");
+        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[]).expect("valid repository overrides must pass");
     }
 
     #[test]
@@ -1999,7 +2191,6 @@ mod tests {
             &dir,
             Path::new("test.toml"),
             &["nonexistent-entry".to_string()],
-            None,
         );
         assert!(err.is_err(), "unknown --only name must be rejected");
         let msg = format!("{:#}", err.unwrap_err());
@@ -2012,47 +2203,128 @@ mod tests {
     #[test]
     fn validate_manifest_accepts_known_only_name() {
         let (manifest, dir, _tmp) = make_manifest_dir();
-        validate_manifest(&manifest, &dir, Path::new("test.toml"), &["my-skill".to_string()], None)
+        validate_manifest(&manifest, &dir, Path::new("test.toml"), &["my-skill".to_string()])
             .expect("known --only name must pass validation");
     }
 
-    // ── validate_manifest: --tag semver rejected ──────────────────────────
+    // ── version_mode: --version classification (semver vs channel) ────────
 
     #[test]
-    fn validate_manifest_rejects_semver_tag() {
-        // --tag with a semver value is a DataError (65) (ADR D1)
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], Some("1.2.3"));
-        assert!(err.is_err(), "--tag with semver value must be rejected (ADR D1)");
-        let msg = format!("{:#}", err.unwrap_err());
-        assert!(
-            msg.contains("1.2.3") || msg.contains("semver") || msg.contains("tag"),
-            "error must mention the rejected tag, got: {msg}"
+    fn version_mode_absent_when_no_version() {
+        assert_eq!(version_mode(None, "v"), VersionMode::Absent);
+    }
+
+    #[test]
+    fn version_mode_semver_carries_unstripped_value() {
+        // A semver value routes to the top-level override path; the ORIGINAL
+        // (unstripped) string is carried because resolve_versions strips.
+        assert_eq!(version_mode(Some("1.2.3"), "v"), VersionMode::Semver("1.2.3"));
+        assert_eq!(version_mode(Some("v1.2.3"), "v"), VersionMode::Semver("v1.2.3"));
+    }
+
+    #[test]
+    fn version_mode_channel_carries_stripped_value() {
+        // A non-semver value is a uniform channel tag; the prefix is stripped
+        // so the published tag is the bare channel name.
+        assert_eq!(version_mode(Some("canary"), "v"), VersionMode::Channel("canary"));
+        assert_eq!(version_mode(Some("edge"), "v"), VersionMode::Channel("edge"));
+        // A partial semver is a channel too (no cascade), matching release.
+        assert_eq!(version_mode(Some("1.2"), "v"), VersionMode::Channel("1.2"));
+        // A prerelease is not strict semver → channel (the manifest cannot
+        // carry prerelease versions anyway).
+        assert_eq!(
+            version_mode(Some("1.2.3-rc.1"), "v"),
+            VersionMode::Channel("1.2.3-rc.1")
         );
     }
 
     #[test]
-    fn validate_manifest_rejects_semver_tag_major_minor_patch() {
-        // "2.0.0" is semver and must be rejected as a --tag value
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], Some("2.0.0"));
-        assert!(err.is_err(), "--tag 2.0.0 (semver) must be rejected");
+    fn version_mode_custom_prefix_classifies_after_strip() {
+        // A non-`v` prefix strips before the strict-semver test (test-cov D):
+        // the Semver arm carries the unstripped value, Channel the stripped.
+        assert_eq!(
+            version_mode(Some("release-1.2.3"), "release-"),
+            VersionMode::Semver("release-1.2.3")
+        );
+        assert_eq!(
+            version_mode(Some("release-canary"), "release-"),
+            VersionMode::Channel("canary")
+        );
+    }
+
+    // ── validate_channel_value (Root A: channel-value gate) ───────────────
+
+    #[test]
+    fn validate_channel_value_accepts_plain_channel_names() {
+        let p = std::path::Path::new("publish.toml");
+        for c in [
+            "canary",
+            "edge",
+            "pr-123",
+            "nightly",
+            "dev",
+            "main",
+            "v2beta",
+            "release_1",
+        ] {
+            assert!(validate_channel_value(c, p).is_ok(), "'{c}' must be a valid channel");
+        }
     }
 
     #[test]
-    fn validate_manifest_accepts_nonversion_tag() {
-        // "canary" is not semver and is a valid --tag (ADR D1)
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], Some("canary"))
-            .expect("--tag canary (non-semver) must be accepted");
+    fn validate_channel_value_rejects_prerelease_and_build_metadata() {
+        // A value that parses as semver but is not strict X.Y.Z is a mistake,
+        // not a channel — publish forbids prerelease/build entry versions.
+        let p = std::path::Path::new("publish.toml");
+        for c in ["1.2.3-rc.1", "2.0.0-alpha", "1.2.3+build", "1.2.3-rc.1+b"] {
+            let err = validate_channel_value(c, p).expect_err("prerelease/build must reject");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                crate::cli::exit_code::ExitCode::DataError,
+                "'{c}' must classify to DataError (65)"
+            );
+        }
     }
 
     #[test]
-    fn validate_manifest_accepts_edge_nonversion_tag() {
-        // "edge" is not semver — valid movable channel tag
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], Some("edge"))
-            .expect("--tag edge (non-semver) must be accepted");
+    fn validate_channel_value_rejects_reserved_cascade_float_shapes() {
+        // `latest`/`X`/`X.Y` are machine-managed by a real semver cascade; a
+        // channel aliasing one would silently collide with that namespace.
+        let p = std::path::Path::new("publish.toml");
+        for c in ["latest", "1", "2", "1.2", "10", "0.10"] {
+            let err = validate_channel_value(c, p).expect_err("reserved float shape must reject");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                crate::cli::exit_code::ExitCode::DataError,
+                "'{c}' must classify to DataError (65)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_channel_value_rejects_illegal_oci_tag_charset() {
+        // A slash-bearing CI ref, embedded colon, leading '.'/'-', empty, or
+        // over-length value must fail here, not late in the release path.
+        let p = std::path::Path::new("publish.toml");
+        let long = "a".repeat(129);
+        for c in ["feature/foo", "x:evil", ".hidden", "-dash", "", long.as_str(), "a b"] {
+            let err = validate_channel_value(c, p).expect_err("illegal tag must reject");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                crate::cli::exit_code::ExitCode::DataError,
+                "'{c}' must classify to DataError (65)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_reserved_float_tag_matches_only_float_shapes() {
+        for s in ["latest", "1", "22", "1.2", "10.20"] {
+            assert!(is_reserved_float_tag(s), "'{s}' is a reserved float shape");
+        }
+        for s in ["1.2.3", "canary", "v1", "1.", ".2", "1.2.", "1.a", "a.1"] {
+            assert!(!is_reserved_float_tag(s), "'{s}' is not a reserved float shape");
+        }
     }
 
     // ── validate_manifest: empty manifest rejected (Fix #1) ──────────────
@@ -2065,7 +2337,7 @@ mod tests {
         let manifest_path = tmp.path().join("publish.toml");
         // No skills/rules/agents/bundles declared
         let manifest: PublishManifest = toml::from_str("registry = \"r.example\"\n").unwrap();
-        let err = validate_manifest(&manifest, tmp.path(), &manifest_path, &[], None);
+        let err = validate_manifest(&manifest, tmp.path(), &manifest_path, &[]);
         assert!(err.is_err(), "empty manifest must be rejected");
         let msg = format!("{:#}", err.unwrap_err());
         assert!(
@@ -2073,7 +2345,7 @@ mod tests {
             "error must say 'no packages declared in manifest', got: {msg}"
         );
         // Verify the exit code classifies to DataError (65)
-        let err2 = validate_manifest(&manifest, tmp.path(), &manifest_path, &[], None).unwrap_err();
+        let err2 = validate_manifest(&manifest, tmp.path(), &manifest_path, &[]).unwrap_err();
         assert_eq!(
             crate::error::classify_error(&err2),
             crate::cli::exit_code::ExitCode::DataError,
@@ -2142,31 +2414,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn data_error_semver_tag_formats_cleanly() {
-        // The user-visible message for --tag semver rejection must read cleanly.
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        let manifest_path = dir.join("publish.toml");
-        let err = validate_manifest(&manifest, &dir, &manifest_path, &[], Some("1.2.3")).unwrap_err();
-        let msg = format!("{:#}", err);
-        // Must NOT have "invalid tool metadata" prefix
-        assert!(
-            !msg.contains("invalid tool metadata"),
-            "semver tag error must not contain 'invalid tool metadata', got: {msg}"
-        );
-        // Must contain the meaningful rejection message
-        assert!(
-            msg.contains("1.2.3") || msg.contains("semver"),
-            "semver tag error must mention the rejected tag, got: {msg}"
-        );
-        // Must classify to DataError
-        assert_eq!(
-            crate::error::classify_error(&err),
-            crate::cli::exit_code::ExitCode::DataError,
-            "semver tag error must classify to DataError (65)"
-        );
-    }
-
     // ── classify_error assertions on existing validation tests (Fix #6) ───
 
     #[test]
@@ -2176,7 +2423,7 @@ mod tests {
         write(&dir.join("skills/s/SKILL.md"), "---\nname: s\ndescription: d.\n---\n");
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.s]\nversion = \"1.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(
             crate::error::classify_error(&err),
             crate::cli::exit_code::ExitCode::DataError
@@ -2194,7 +2441,7 @@ mod tests {
         let mut manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.my-skill]\nversion = \"1.0.0\"\n").unwrap();
         manifest.skills.get_mut("my-skill").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).unwrap_err();
+        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(
             crate::error::classify_error(&err),
             crate::cli::exit_code::ExitCode::DataError
@@ -2204,24 +2451,7 @@ mod tests {
     #[test]
     fn validate_manifest_unknown_only_name_classifies_to_data_error() {
         let (manifest, dir, _tmp) = make_manifest_dir();
-        let err = validate_manifest(
-            &manifest,
-            &dir,
-            Path::new("test.toml"),
-            &["nonexistent".to_string()],
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(
-            crate::error::classify_error(&err),
-            crate::cli::exit_code::ExitCode::DataError
-        );
-    }
-
-    #[test]
-    fn validate_manifest_semver_tag_classifies_to_data_error() {
-        let (manifest, dir, _tmp) = make_manifest_dir();
-        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], Some("1.2.3")).unwrap_err();
+        let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &["nonexistent".to_string()]).unwrap_err();
         assert_eq!(
             crate::error::classify_error(&err),
             crate::cli::exit_code::ExitCode::DataError
@@ -2470,15 +2700,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_entries_tag_override_replaces_version_in_reference() {
-        // --tag canary replaces the version tag in the OCI reference (ADR D1)
+    fn plan_entries_channel_override_replaces_version_in_reference() {
+        // A channel `--version canary` replaces the version tag for every
+        // entry's OCI reference.
         let (manifest, dir, _tmp) = make_manifest_dir();
         let entries = plan_entries(&manifest, &dir, "localhost:5000", None, &[], Some("canary"));
 
         for entry in &entries {
             assert!(
                 entry.reference.ends_with(":canary"),
-                "reference must end with :canary when --tag canary, got: {}",
+                "reference must end with :canary when --version canary, got: {}",
                 entry.reference
             );
         }
@@ -2619,8 +2850,7 @@ mod tests {
         )
         .unwrap();
 
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None)
-            .expect("manifest must be valid before batch");
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("manifest must be valid before batch");
 
         let registry = "localhost:5000";
         let entries = plan_entries(&manifest, dir, registry, None, &[], None);
@@ -2650,7 +2880,7 @@ mod tests {
         )
         .unwrap();
 
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).expect("valid manifest");
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("valid manifest");
         let entries = plan_entries(&manifest, dir, "localhost:5000", None, &[], None);
 
         assert_eq!(entries.len(), 2);
@@ -2674,7 +2904,7 @@ mod tests {
         let manifest: PublishManifest =
             toml::from_str("registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n").unwrap();
 
-        validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None).expect("valid manifest");
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("valid manifest");
         let entries = plan_entries(&manifest, dir, "localhost:5000", None, &[], None);
         assert_eq!(entries.len(), 1);
 
@@ -2686,18 +2916,22 @@ mod tests {
     // ── True MemoryRegistry e2e tests for run() (Fix #3) ─────────────────
 
     /// Build a `PublishArgs` pointing at a manifest written to `manifest_path`.
+    /// `version` is the run-level `--version` (semver override or channel tag);
+    /// `None` leaves the manifest versions in place.
     fn make_publish_args(
         manifest_path: std::path::PathBuf,
         only: Vec<String>,
-        tag: Option<String>,
+        version: Option<String>,
         dry_run: bool,
         force: bool,
     ) -> PublishArgs {
         PublishArgs {
             manifest: manifest_path,
             only,
-            tag,
-            version: None,
+            version,
+            tag: None,
+            cascade: false,
+            no_cascade: false,
             dry_run,
             force,
             git: false,
@@ -2763,12 +2997,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_channel_tag_moves_on_republish() {
-        // --tag is a movable channel tag: a second publish with changed
-        // content must MOVE the tag (no silent skip-existing freeze, no
-        // --force required) — the Codex cross-model review caught that
-        // skip-existing would otherwise pin `canary` to its first digest
-        // forever.
+    async fn run_channel_tag_skips_then_moves_with_force() {
+        // A channel `--version canary` now obeys the same uniform rule as
+        // everything else: skip-existing by default, `--force` to move. A
+        // second publish with changed content is a NO-OP (Skipped) without
+        // `--force`, and MOVES the tag with it. (Interface unification: the
+        // old always-move channel special-case is gone.)
         use crate::api::publish_report::PublishStatus;
         use crate::oci::access::memory_registry::MemoryRegistry;
 
@@ -2786,9 +3020,10 @@ mod tests {
         let registry = MemoryRegistry::new();
         let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
         let args = make_publish_args(manifest_path.clone(), vec![], Some("canary".to_string()), false, false);
-        let (report1, exit1) = run(&ctx, &args).await.expect("first canary run must succeed");
-        assert_eq!(exit1, crate::cli::exit_code::ExitCode::Success);
+        let (report1, _exit1) = run(&ctx, &args).await.expect("first canary run must succeed");
         assert_eq!(report1.items()[0].status, PublishStatus::Pushed);
+        // canary is a channel tag → no cascade, exactly one tag published.
+        assert_eq!(report1.items()[0].tags, vec!["canary".to_string()]);
         let first_digest = report1.items()[0]
             .digest
             .clone()
@@ -2801,20 +3036,71 @@ mod tests {
         )
         .unwrap();
 
-        let ctx2 = Context::with_access(tmp.path().to_path_buf(), registry);
-        let args2 = make_publish_args(manifest_path, vec![], Some("canary".to_string()), false, false);
-        let (report2, exit2) = run(&ctx2, &args2).await.expect("second canary run must succeed");
-        assert_eq!(exit2, crate::cli::exit_code::ExitCode::Success);
+        // Second publish WITHOUT --force: skip-existing → no-op.
+        let ctx2 = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let args2 = make_publish_args(manifest_path.clone(), vec![], Some("canary".to_string()), false, false);
+        let (report2, _exit2) = run(&ctx2, &args2).await.expect("second canary run must succeed");
         assert_eq!(
             report2.items()[0].status,
-            PublishStatus::Pushed,
-            "channel tag re-publish must push (move), not skip"
+            PublishStatus::Skipped,
+            "channel re-publish without --force must skip (uniform skip-existing)"
         );
-        let second_digest = report2.items()[0]
+
+        // Third publish WITH --force: move canary to the new digest.
+        let ctx3 = Context::with_access(tmp.path().to_path_buf(), registry);
+        let args3 = make_publish_args(manifest_path, vec![], Some("canary".to_string()), false, true);
+        let (report3, _exit3) = run(&ctx3, &args3).await.expect("forced canary run must succeed");
+        assert_eq!(
+            report3.items()[0].status,
+            PublishStatus::Pushed,
+            "channel re-publish with --force must move the tag"
+        );
+        let third_digest = report3.items()[0]
             .digest
             .clone()
             .expect("pushed entry must have digest");
-        assert_ne!(first_digest, second_digest, "canary must move to the new digest");
+        assert_ne!(
+            first_digest, third_digest,
+            "canary must move to the new digest under --force"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cascade_with_channel_version_errors_65() {
+        // --cascade asserts a semver release; combining it with a non-semver
+        // --version channel is a data error (65), before any push.
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), MemoryRegistry::new());
+        let args = PublishArgs {
+            manifest: manifest_path,
+            only: vec![],
+            version: Some("canary".to_string()),
+            tag: None,
+            cascade: true,
+            no_cascade: false,
+            dry_run: false,
+            force: false,
+            git: false,
+            announce: false,
+            announce_repo: None,
+        };
+        let err = run(&ctx, &args).await.expect_err("--cascade + channel must error");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(
+            format!("{err:#}").contains("cascade"),
+            "error must mention --cascade, got: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -2904,25 +3190,19 @@ mod tests {
         );
     }
 
-    // ── F2: resolve_force_skip covers all 3 branches ──────────────────────
+    // ── F2: resolve_force_skip is uniform (force xor skip-existing) ────────
 
     #[test]
-    fn resolve_force_skip_no_tag_no_force_gives_default() {
-        // (None, false) → (force=false, skip_existing=true): idempotent CI default
-        assert_eq!(resolve_force_skip(None, false), (false, true));
+    fn resolve_force_skip_default_skips_existing() {
+        // No --force → skip-existing (idempotent CI default), for every value
+        // including channels.
+        assert_eq!(resolve_force_skip(false), (false, true));
     }
 
     #[test]
-    fn resolve_force_skip_no_tag_force_true_gives_force() {
-        // (None, true) → (force=true, skip_existing=false)
-        assert_eq!(resolve_force_skip(None, true), (true, false));
-    }
-
-    #[test]
-    fn resolve_force_skip_tag_present_forces_move() {
-        // (Some("canary"), false) → (force=true, skip_existing=false)
-        // A channel tag always moves regardless of the force flag.
-        assert_eq!(resolve_force_skip(Some("canary"), false), (true, false));
+    fn resolve_force_skip_force_moves() {
+        // --force → move existing exact tags, do not skip.
+        assert_eq!(resolve_force_skip(true), (true, false));
     }
 
     // ── F3: string-valued kind table hints grim release --kind bundle ──────

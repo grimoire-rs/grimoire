@@ -563,11 +563,15 @@ stamp.
 ## grim release {#release}
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact.
-A full semver reference (e.g. `1.2.3`) applies cascade tags — `1.2.3`, `1.2`,
-`1`, and `latest` are all moved. A non-version tag (e.g. `canary`, `edge`)
-publishes only that exact tag with no cascade. A reference with no tag at all
-is an error. `--dry-run` prints the push plan without pushing; `--force`
-moves an existing exact-version tag that points at a different digest;
+By default a full semver reference (e.g. `1.2.3`) applies cascade tags —
+`1.2.3`, `1.2`, `1`, and `latest` are all moved — while a non-version tag
+(e.g. `canary`, `edge`) publishes only that exact tag with no cascade.
+`--cascade` asserts the cascade and requires a full semver: a non-semver tag
+with `--cascade` exits 65 (a typo guard). `--no-cascade` suppresses the
+floats and publishes only the exact tag, even for a full semver. A reference
+with no tag at all is an error. `--dry-run` prints the push plan without
+pushing; `--force` moves an existing exact-version tag that points at a
+different digest;
 `--skip-existing` (conflicts with `--force`) turns a release whose
 exact-version tag already exists into a success no-op that pushes nothing —
 for manifest-driven publishers that re-run blanket releases and only want
@@ -608,15 +612,22 @@ instead. The two modes are mutually exclusive.
 
 `--dry-run` validates the manifest and prints the full push plan without
 touching the registry. `--only <name>` (repeatable) filters to a single
-entry; a name absent from the manifest exits 65. `--tag <tag>` overrides
-the published tag with a movable channel tag (e.g. `canary`); semver values
-are rejected with exit 65, keeping all semver releases in the manifest. A
-channel tag always moves on re-publish — no skip, no `--force` needed.
-`--version <version>` overrides the manifest's top-level `version` (the
-catalog-wide value entries inherit); the manifest's `version_prefix`
+entry; a name absent from the manifest exits 65. `--version <version>` is
+the single version source: a **semver** value overrides the manifest's
+top-level `version` (the catalog-wide value entries inherit) and every entry
+cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag
+applied to every entry uniformly, with no cascade. Not every non-semver
+value is accepted as a channel: a prerelease or build-metadata version
+(`1.2.3-rc.1`, `1.2.3+build`), a reserved cascade-float shape (`latest`, a
+bare major such as `1`, or a `major.minor` such as `1.2`), or a value that
+is not a legal OCI tag (e.g. a slash-bearing CI ref like `feature/foo`) all
+exit 65 at validation, before any push. The manifest's `version_prefix`
 (default `v`) is stripped first, so publishing from a CI git tag is
 `--version "$GITHUB_REF_NAME"` — see
 [One version for the whole catalog](./publishing.md#batch-publish-version).
+`--cascade` / `--no-cascade` control the cascade for the whole run;
+`--cascade` combined with a channel value exits 65. Like every publish, a
+channel value skips-existing by default and needs `--force` to move.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
 `--git` embeds [git provenance](./publishing.md#git-provenance) on every
 published entry (forwarded to each `release`); a non-git path fails (65).
@@ -639,7 +650,7 @@ the first failed entry; re-run with `--only` for surgical recovery.
 grim publish --dry-run
 grim publish
 grim publish --only grim-usage
-grim publish --tag canary
+grim publish --version canary
 ```
 
 See [Batch publishing with a manifest](./publishing.md#batch-publish) for

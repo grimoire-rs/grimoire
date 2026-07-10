@@ -3,10 +3,10 @@
 """`grim publish` acceptance tests — manifest-driven batch release.
 
 Tests exercise the full publish path: manifest validation, entry ordering,
-push/skip/dry-run/force semantics, --only filtering, --tag channel tags,
+push/skip/dry-run/force semantics, --only filtering, --version channel tags,
 JSON report shape, and error cases (missing manifest, unknown --only name,
-semver --tag). Each test uses unique_repo-prefixed names to isolate on the
-shared registry.
+--cascade on a channel). Each test uses unique_repo-prefixed names to isolate
+on the shared registry.
 
 Source layout mirrors the manifest path convention (ADR D2):
   skills/<name>/SKILL.md
@@ -433,11 +433,11 @@ def test_publish_only_unknown_name_exits_65(
     )
 
 
-def test_publish_tag_canary_uses_movable_tag_version_absent(
+def test_publish_version_channel_uses_movable_tag_version_absent(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """--tag canary publishes with the canary tag; version tag is absent.
-    (ADR D1 — Testing Strategy row 6)"""
+    """A non-semver `--version canary` publishes every entry under the channel
+    tag with no cascade; the semver version tag is absent."""
     prefix = unique_repo.split("/")[-1]
     runner = grim_at(project_dir)
 
@@ -450,11 +450,15 @@ def test_publish_tag_canary_uses_movable_tag_version_absent(
     rows = runner.json(
         "publish",
         "--manifest", str(manifest_path),
-        "--tag", "canary",
+        "--version", "canary",
     )["items"]
     assert len(rows) >= 1
     assert rows[0]["status"] == "pushed", (
-        f"--tag canary must push, got status {rows[0]['status']}"
+        f"--version canary must push, got status {rows[0]['status']}"
+    )
+    # A channel is not a cascade: exactly one tag published.
+    assert rows[0]["tags"] == ["canary"], (
+        f"channel --version must publish a single tag, got {rows[0]['tags']}"
     )
 
     skill_name = f"{prefix}-skill"
@@ -473,16 +477,153 @@ def test_publish_tag_canary_uses_movable_tag_version_absent(
     try:
         version_digest = tag_digest(f"skills/{skill_name}", "0.1.0")
         pytest.fail(
-            f"--tag canary must not push the version tag; 0.1.0 resolved to {version_digest}"
+            f"--version canary must not push the version tag; 0.1.0 resolved to {version_digest}"
         )
     except urllib.error.HTTPError:
         pass  # expected: version tag absent (404)
 
 
-def test_publish_tag_semver_value_exits_65(
+def test_publish_channel_rerun_skips_then_force_moves(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """--tag with a semver value exits 65 (DataError, ADR D1 — Testing Strategy row 6)."""
+    """Headline regression (ADR unify-publish-version-cascade): a channel
+    `--version` no longer always-moves. A bare re-run (no --force) skips and
+    leaves the channel tag pointed at the first digest; only `--force` moves
+    it — the same uniform skip-existing/--force rule as every other value."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    manifest_path = _write_publish_manifest(
+        project_dir,
+        registry,
+        prefix,
+    )
+    skill_name = f"{prefix}-skill"
+
+    # First publish under the channel: pushes.
+    first = runner.json(
+        "publish", "--manifest", str(manifest_path), "--version", "canary"
+    )["items"]
+    assert first[0]["status"] == "pushed", (
+        f"first channel publish must be 'pushed', got {first[0]['status']}"
+    )
+    first_digest = tag_digest(f"skills/{skill_name}", "canary")
+
+    # Mutate SKILL.md content so a re-push (if it happened) would differ.
+    skill_md = project_dir / "skills" / skill_name / "SKILL.md"
+    original = skill_md.read_text()
+    skill_md.write_text(original + "\n## Updated\n\nChannel rerun test modification.\n")
+
+    # Re-run without --force: must skip, and the tag must stay unmoved.
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", "canary",
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"channel re-run without --force must exit 0, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    second = json.loads(result.stdout)["items"]
+    assert second[0]["status"] == "skipped", (
+        f"channel re-run without --force must be 'skipped', got {second[0]['status']}"
+    )
+    unmoved_digest = tag_digest(f"skills/{skill_name}", "canary")
+    assert unmoved_digest == first_digest, (
+        f"channel tag must NOT move on a bare re-run: "
+        f"before={first_digest!r}, after={unmoved_digest!r}"
+    )
+
+    # Re-run with --force: must push, and the tag must move.
+    forced = runner.json(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", "canary",
+        "--force",
+    )["items"]
+    assert forced[0]["status"] == "pushed", (
+        f"channel re-run with --force must be 'pushed', got {forced[0]['status']}"
+    )
+    moved_digest = tag_digest(f"skills/{skill_name}", "canary")
+    assert moved_digest != first_digest, (
+        f"--force must move the channel tag to a new digest: "
+        f"before={first_digest!r}, after={moved_digest!r}"
+    )
+
+
+def test_publish_version_semver_cascade_and_no_cascade(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A semver --version overrides the manifest top-level version and
+    cascades by default; --no-cascade suppresses the float tags entirely
+    (test-cov A/W2 — ADR unify-publish-version-cascade).
+
+    Entries omit their own `version` (unlike `_write_publish_manifest`'s
+    default) so the CLI `--version` actually feeds every entry via the
+    top-level-inherit path (`resolve_versions`) instead of being shadowed
+    by a per-entry pinned version.
+    """
+    prefix = unique_repo.split("/")[-1]
+
+    # --cascade: full rolling set for every entry.
+    cascade_prefix = f"{prefix}-cascade"
+    skill_name = f"{cascade_prefix}-skill"
+    rule_name = f"{cascade_prefix}-rule"
+    _make_skill_source(project_dir, skill_name)
+    _make_rule_source(project_dir, rule_name)
+    cascade_manifest = project_dir / "publish-cascade.toml"
+    cascade_manifest.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n\n"
+        f"[rules.{rule_name}]\n"
+    )
+    runner = grim_at(project_dir)
+    rows = runner.json(
+        "publish",
+        "--manifest", str(cascade_manifest),
+        "--version", "1.4.0",
+        "--cascade",
+    )["items"]
+    assert len(rows) == 2, f"expected 2 rows, got {rows}"
+    for row in rows:
+        assert row["tags"] == ["1.4.0", "1.4", "1", "latest"], (
+            f"--cascade must publish the full rolling set, got {row}"
+        )
+
+    # --no-cascade: exact tag only, fresh unique names on the same registry.
+    plain_prefix = f"{prefix}-plain"
+    plain_skill_name = f"{plain_prefix}-skill"
+    plain_rule_name = f"{plain_prefix}-rule"
+    _make_skill_source(project_dir, plain_skill_name)
+    _make_rule_source(project_dir, plain_rule_name)
+    plain_manifest = project_dir / "publish-plain.toml"
+    plain_manifest.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{plain_skill_name}]\n\n"
+        f"[rules.{plain_rule_name}]\n"
+    )
+    rows2 = runner.json(
+        "publish",
+        "--manifest", str(plain_manifest),
+        "--version", "1.4.0",
+        "--no-cascade",
+    )["items"]
+    assert len(rows2) == 2, f"expected 2 rows, got {rows2}"
+    for row in rows2:
+        assert row["tags"] == ["1.4.0"], (
+            f"--no-cascade must publish only the exact tag, got {row}"
+        )
+
+
+def test_publish_tag_flag_removed_exits_nonzero(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Breaking-change regression (test-cov B): `--tag` was removed from
+    `grim publish` — `--version` is the single version source now. The flag
+    is accepted (hidden) only to emit a guiding migration error (usage, 64)
+    pointing at `--version`, not clap's opaque 'unexpected argument'."""
     prefix = unique_repo.split("/")[-1]
     runner = grim_at(project_dir)
 
@@ -495,11 +636,115 @@ def test_publish_tag_semver_value_exits_65(
     result = runner.run(
         "publish",
         "--manifest", str(manifest_path),
-        "--tag", "1.2.3",
+        "--tag", "canary",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"--tag must be a usage error (64), got exit {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    # The migration error must name the removed flag AND its replacement.
+    assert "--tag" in result.stderr and "--version" in result.stderr, (
+        f"stderr must guide --tag -> --version, got: {result.stderr.strip()!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "channel_value",
+    [
+        "latest",
+        "1.2",
+        "2",
+        "1.2.3-rc.1",
+        "feature/foo",
+    ],
+)
+def test_publish_version_invalid_channel_values_exit_65(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, channel_value: str
+) -> None:
+    """Channel-value validation gate (Root A) rejects reserved cascade-float
+    shapes (`latest`, `X`, `X.Y`), a prerelease/build-metadata version, and
+    an illegal OCI tag charset (slash) — all BEFORE any push, exit 65."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    manifest_path = _write_publish_manifest(
+        project_dir,
+        registry,
+        prefix,
+    )
+
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", channel_value,
         check=False,
     )
     assert result.returncode == 65, (
-        f"--tag 1.2.3 (semver) must exit 65 (DataError), got {result.returncode}; "
+        f"--version {channel_value!r} must exit 65 (DataError), got "
+        f"{result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert channel_value in result.stderr, (
+        f"stderr must mention the offending value {channel_value!r}, "
+        f"got: {result.stderr.strip()!r}"
+    )
+
+    # Nothing must have been pushed under this channel value.
+    skill_name = f"{prefix}-skill"
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(f"skills/{skill_name}", channel_value)
+
+
+def test_publish_version_valid_channel_still_exits_0(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Sanity companion to the invalid-channel gate: a legal channel name
+    still publishes successfully (exit 0)."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    manifest_path = _write_publish_manifest(
+        project_dir,
+        registry,
+        prefix,
+    )
+
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", "canary",
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--version canary must still exit 0, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+def test_publish_cascade_with_channel_version_exits_65(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """--cascade asserts a semver release; combining it with a non-semver
+    --version channel is a DataError (65)."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    manifest_path = _write_publish_manifest(
+        project_dir,
+        registry,
+        prefix,
+    )
+
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", "canary",
+        "--cascade",
+        check=False,
+    )
+    assert result.returncode == 65, (
+        f"--version canary --cascade must exit 65 (DataError), got {result.returncode}; "
         f"stderr: {result.stderr.strip()}"
     )
 
@@ -779,11 +1024,11 @@ def test_publish_mid_batch_fail_fast(
     )
 
 
-def test_publish_only_and_tag_combined(
+def test_publish_only_and_channel_version_combined(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """--only NAME --tag canary publishes only the named entry with tag
-    canary; the ref ends with :canary (ADR D1 — Testing Strategy row 7)."""
+    """--only NAME --version canary publishes only the named entry under the
+    channel tag; the ref ends with :canary."""
     prefix = unique_repo.split("/")[-1]
     runner = grim_at(project_dir)
 
@@ -800,12 +1045,12 @@ def test_publish_only_and_tag_combined(
         "publish",
         "--manifest", str(manifest_path),
         "--only", skill_name,
-        "--tag", "canary",
+        "--version", "canary",
         format="json",
         check=False,
     )
     assert result.returncode == 0, (
-        f"--only+--tag must exit 0, got {result.returncode}; stderr: {result.stderr.strip()}"
+        f"--only + channel --version must exit 0, got {result.returncode}; stderr: {result.stderr.strip()}"
     )
 
     rows = json.loads(result.stdout)["items"]
@@ -814,7 +1059,7 @@ def test_publish_only_and_tag_combined(
     )
     assert rows[0]["kind"] == "skill", f"row kind must be skill, got {rows[0]['kind']}"
     assert rows[0]["ref"].endswith(":canary"), (
-        f"ref must end with :canary when --tag canary, got {rows[0]['ref']}"
+        f"ref must end with :canary when --version canary, got {rows[0]['ref']}"
     )
     assert rows[0]["status"] == "pushed", (
         f"row status must be pushed, got {rows[0]['status']}"

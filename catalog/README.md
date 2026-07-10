@@ -70,14 +70,17 @@ task catalog:verify                       # grim build every package (builds gri
 grim login ghcr.io -u <user>              # once, interactive
 task catalog:release -- --dry-run         # preview full publish plan, zero writes
 task catalog:release                      # publish everything per publish.toml
-task catalog:release -- --only grim-usage # publish one package by hand
-task catalog:release -- --tag canary      # ad-hoc movable tag, manifest untouched
-task catalog:release -- --announce        # publish, then announce to the package index
+task catalog:release -- --only grim-usage    # publish one package by hand
+task catalog:release -- --version canary      # ad-hoc channel tag (no cascade), manifest untouched
+task catalog:release -- --announce            # publish, then announce to the package index
 ```
 
 Semver comes from the release tag in CI (`--version`) or the top-level
 `version` in `publish.toml` locally — the repo records exactly what was
-published. `--tag` rejects semver values.
+published. `--version` is the single version source: a semver value
+cascades, a non-semver value (`canary`) is a movable channel tag applied to
+every entry. A channel obeys the same skip-existing / `--force` rule as a
+semver release.
 
 CI publishes two ways, both via the `publish-catalog.yml` workflow (pushes
 to GHCR, then announces to the public package index): the manually

@@ -18,6 +18,20 @@
 //! cascade — there is no version to derive `X.Y`/`X`/`latest` from, so the
 //! exact tag is the whole published set. Only a reference with no tag at
 //! all is rejected.
+//!
+//! **Cascade is a tri-state** ([`publish_tags`]'s `cascade` argument),
+//! driven by the `--cascade` / `--no-cascade` flag pair
+//! ([`resolve_cascade`]):
+//!
+//! - `None` (neither flag) — the convenient default above: full semver
+//!   cascades, everything else is a single literal tag.
+//! - `Some(true)` (`--cascade`) — assert intent and require semver: a
+//!   non-semver tag is a [`ReleaseErrorKind::CascadeRequiresSemver`] data
+//!   error, catching a typo where the caller meant a real version. A
+//!   prerelease is allowed but still exact-only (a prerelease is never a
+//!   floating channel).
+//! - `Some(false)` (`--no-cascade`) — publish exactly the one exact tag,
+//!   suppressing the `X.Y`/`X`/`latest` floats even for a full semver.
 
 use super::Identifier;
 
@@ -80,18 +94,41 @@ pub enum ReleaseErrorKind {
         "version tag '{tag}' already exists at a different digest (existing {existing}, new {new}); rerun with --force to move it"
     )]
     TagExists { tag: String, existing: String, new: String },
+
+    /// `--cascade` was given for a tag that is not a full semantic version,
+    /// so there is no `X.Y`/`X`/`latest` cascade to derive.
+    #[error("--cascade requires a semver version (X.Y.Z); '{tag}' is not semver")]
+    CascadeRequiresSemver { tag: String },
 }
 
-/// Compute the published tag set for `tag`.
+/// Resolve the `--cascade` / `--no-cascade` flag pair into the tri-state
+/// [`publish_tags`] consumes. The two flags are mutually `overrides_with`
+/// at the clap layer, so at most one is set; the match order is a
+/// belt-and-braces fallback if both ever arrive true.
+pub fn resolve_cascade(cascade: bool, no_cascade: bool) -> Option<bool> {
+    match (cascade, no_cascade) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// Compute the published tag set for `tag` under the `cascade` tri-state
+/// (see the module docs for how `--cascade` / `--no-cascade` map to it).
 ///
+/// With `cascade = None` (the default):
 /// - `1.2.3` → `["1.2.3", "1.2", "1", "latest"]` (full semver cascades)
 /// - `2.0.0` → `["2.0.0", "2.0", "2", "latest"]`
 /// - `1.2.3-rc.1` (prerelease) → `["1.2.3-rc.1"]` (no cascade, no latest)
 /// - `1.2.3+build` → `["1.2.3", "1.2", "1", "latest"]` (build metadata
 ///   dropped from the tag set)
 /// - `canary` / `1.2` / any non-semver → `["canary"]` / `["1.2"]` (the
-///   literal tag only — there is no version to cascade, so the cascade is
-///   disabled and exactly the requested tag is published)
+///   literal tag only — there is no version to cascade)
+///
+/// With `cascade = Some(true)` (`--cascade`): the same cascade, but a
+/// non-semver `tag` is a [`ReleaseErrorKind::CascadeRequiresSemver`] error;
+/// a prerelease is exact-only. With `cascade = Some(false)`
+/// (`--no-cascade`): exactly the one exact tag, never the floats.
 ///
 /// The exact tag is always element `0` so the caller can publish it first
 /// (crash safety: the specific tag exists before any floating tag is moved
@@ -100,88 +137,184 @@ pub enum ReleaseErrorKind {
 /// # Errors
 ///
 /// [`ReleaseErrorKind::MissingTag`] when `tag` is empty (a release
-/// reference must carry a tag).
-pub fn publish_tags(tag: &str) -> Result<Vec<String>, ReleaseError> {
+/// reference must carry a tag); [`ReleaseErrorKind::CascadeRequiresSemver`]
+/// when `--cascade` is asserted for a non-semver tag.
+pub fn publish_tags(tag: &str, cascade: Option<bool>) -> Result<Vec<String>, ReleaseError> {
     if tag.is_empty() {
         return Err(ReleaseError::without_reference(ReleaseErrorKind::MissingTag));
     }
 
-    // A non-semver tag (`canary`, `edge`, or a partial `1.2`) has no
-    // version to derive floating pointers from: publish exactly that one
-    // literal tag, no cascade. Only a full `X.Y.Z` semver cascades.
-    let Ok(parsed) = semver::Version::parse(tag) else {
-        return Ok(vec![tag.to_string()]);
-    };
+    let parsed = semver::Version::parse(tag).ok();
 
-    if !parsed.pre.is_empty() {
-        // Prerelease: only the exact tag, normalized (build metadata
-        // stripped — `major.minor.patch-pre`).
-        let exact = format!("{}.{}.{}-{}", parsed.major, parsed.minor, parsed.patch, parsed.pre);
-        return Ok(vec![exact]);
+    match cascade {
+        // Explicit --no-cascade: exactly the one exact tag, floats suppressed.
+        Some(false) => Ok(vec![exact_tag(tag, parsed.as_ref())]),
+
+        // Explicit --cascade: require semver. A non-semver value is a typo
+        // guard; a prerelease parses but stays exact-only (never floats).
+        Some(true) => {
+            let Some(v) = parsed else {
+                return Err(ReleaseError::without_reference(
+                    ReleaseErrorKind::CascadeRequiresSemver { tag: tag.to_string() },
+                ));
+            };
+            if v.pre.is_empty() {
+                Ok(cascade_set(&v))
+            } else {
+                Ok(vec![exact_tag(tag, Some(&v))])
+            }
+        }
+
+        // Default: full semver cascades; prerelease and non-semver are
+        // exact-only (the historic shape-inferred behavior).
+        None => match parsed {
+            Some(v) if v.pre.is_empty() => Ok(cascade_set(&v)),
+            other => Ok(vec![exact_tag(tag, other.as_ref())]),
+        },
     }
+}
 
-    let exact = format!("{}.{}.{}", parsed.major, parsed.minor, parsed.patch);
-    Ok(vec![
-        exact,
-        format!("{}.{}", parsed.major, parsed.minor),
-        parsed.major.to_string(),
+/// The single exact tag for `tag`: a full semver normalizes to
+/// `major.minor.patch` (build metadata dropped); a prerelease to
+/// `major.minor.patch-pre`; a non-semver value is the literal string.
+fn exact_tag(tag: &str, parsed: Option<&semver::Version>) -> String {
+    match parsed {
+        Some(v) if v.pre.is_empty() => format!("{}.{}.{}", v.major, v.minor, v.patch),
+        Some(v) => format!("{}.{}.{}-{}", v.major, v.minor, v.patch, v.pre),
+        None => tag.to_string(),
+    }
+}
+
+/// The four-tag rolling cascade for a full-release semver: exact first
+/// (crash-safety ordering), then `X.Y`, `X`, `latest`.
+fn cascade_set(v: &semver::Version) -> Vec<String> {
+    vec![
+        format!("{}.{}.{}", v.major, v.minor, v.patch),
+        format!("{}.{}", v.major, v.minor),
+        v.major.to_string(),
         "latest".to_string(),
-    ])
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ── cascade = None (default, shape-inferred) ──────────────────────────
+
     #[test]
-    fn full_version_cascades_to_four_tags() {
-        assert_eq!(publish_tags("1.2.3").unwrap(), vec!["1.2.3", "1.2", "1", "latest"]);
-        assert_eq!(publish_tags("2.0.0").unwrap(), vec!["2.0.0", "2.0", "2", "latest"]);
-        assert_eq!(publish_tags("0.10.5").unwrap(), vec!["0.10.5", "0.10", "0", "latest"]);
+    fn default_full_version_cascades_to_four_tags() {
+        assert_eq!(
+            publish_tags("1.2.3", None).unwrap(),
+            vec!["1.2.3", "1.2", "1", "latest"]
+        );
+        assert_eq!(
+            publish_tags("2.0.0", None).unwrap(),
+            vec!["2.0.0", "2.0", "2", "latest"]
+        );
+        assert_eq!(
+            publish_tags("0.10.5", None).unwrap(),
+            vec!["0.10.5", "0.10", "0", "latest"]
+        );
     }
 
     #[test]
-    fn prerelease_is_exact_only_no_cascade_no_latest() {
-        assert_eq!(publish_tags("1.2.3-rc.1").unwrap(), vec!["1.2.3-rc.1"]);
-        assert_eq!(publish_tags("2.0.0-alpha").unwrap(), vec!["2.0.0-alpha"]);
-        let t = publish_tags("1.0.0-beta.2").unwrap();
+    fn default_prerelease_is_exact_only_no_cascade_no_latest() {
+        assert_eq!(publish_tags("1.2.3-rc.1", None).unwrap(), vec!["1.2.3-rc.1"]);
+        assert_eq!(publish_tags("2.0.0-alpha", None).unwrap(), vec!["2.0.0-alpha"]);
+        let t = publish_tags("1.0.0-beta.2", None).unwrap();
         assert_eq!(t.len(), 1);
         assert!(!t.contains(&"latest".to_string()));
     }
 
     #[test]
-    fn build_metadata_dropped_from_tag_set() {
+    fn default_build_metadata_dropped_from_tag_set() {
         assert_eq!(
-            publish_tags("1.2.3+20260101").unwrap(),
+            publish_tags("1.2.3+20260101", None).unwrap(),
             vec!["1.2.3", "1.2", "1", "latest"]
         );
     }
 
     #[test]
-    fn non_version_tag_publishes_single_tag_no_cascade() {
+    fn default_non_version_tag_publishes_single_tag_no_cascade() {
         // Arbitrary names and partial semver alike: exactly one literal tag,
         // no `X.Y`/`X`/`latest` cascade (cascade is disabled for non-versions).
         for tag in ["canary", "edge", "pr-123", "nightly", "1.2", "1", "v1.2.3"] {
-            assert_eq!(publish_tags(tag).unwrap(), vec![tag.to_string()], "tag {tag}");
+            assert_eq!(publish_tags(tag, None).unwrap(), vec![tag.to_string()], "tag {tag}");
+        }
+    }
+
+    // ── cascade = Some(true) (--cascade: assert semver) ───────────────────
+
+    #[test]
+    fn explicit_cascade_on_semver_cascades() {
+        assert_eq!(
+            publish_tags("1.2.3", Some(true)).unwrap(),
+            vec!["1.2.3", "1.2", "1", "latest"]
+        );
+    }
+
+    #[test]
+    fn explicit_cascade_on_prerelease_is_exact_only() {
+        // A prerelease parses as semver, so --cascade is allowed, but it never
+        // floats: only the exact tag is published.
+        assert_eq!(publish_tags("1.2.3-rc.1", Some(true)).unwrap(), vec!["1.2.3-rc.1"]);
+    }
+
+    #[test]
+    fn explicit_cascade_on_non_semver_is_error() {
+        for tag in ["canary", "edge", "1.2", "v1.2.3"] {
+            let err = publish_tags(tag, Some(true)).expect_err("--cascade requires semver");
+            assert!(
+                matches!(err.kind, ReleaseErrorKind::CascadeRequiresSemver { .. }),
+                "tag {tag} must be a CascadeRequiresSemver error, got {err:?}"
+            );
+        }
+    }
+
+    // ── cascade = Some(false) (--no-cascade: single tag) ──────────────────
+
+    #[test]
+    fn explicit_no_cascade_semver_is_exact_only() {
+        assert_eq!(publish_tags("1.2.3", Some(false)).unwrap(), vec!["1.2.3"]);
+        // build metadata still dropped from the single tag.
+        assert_eq!(publish_tags("1.2.3+build", Some(false)).unwrap(), vec!["1.2.3"]);
+    }
+
+    #[test]
+    fn explicit_no_cascade_non_semver_is_literal() {
+        assert_eq!(publish_tags("canary", Some(false)).unwrap(), vec!["canary"]);
+    }
+
+    // ── shared invariants ─────────────────────────────────────────────────
+
+    #[test]
+    fn empty_tag_is_missing_tag_error() {
+        for cascade in [None, Some(true), Some(false)] {
+            let err = publish_tags("", cascade).expect_err("a release reference must carry a tag");
+            assert!(matches!(err.kind, ReleaseErrorKind::MissingTag));
         }
     }
 
     #[test]
-    fn empty_tag_is_missing_tag_error() {
-        let err = publish_tags("").expect_err("a release reference must carry a tag");
-        assert!(matches!(err.kind, ReleaseErrorKind::MissingTag));
-    }
-
-    #[test]
     fn exact_tag_is_first() {
-        assert_eq!(publish_tags("3.4.5").unwrap()[0], "3.4.5");
-        assert_eq!(publish_tags("3.4.5-rc.1").unwrap()[0], "3.4.5-rc.1");
-        assert_eq!(publish_tags("canary").unwrap()[0], "canary");
+        assert_eq!(publish_tags("3.4.5", None).unwrap()[0], "3.4.5");
+        assert_eq!(publish_tags("3.4.5-rc.1", None).unwrap()[0], "3.4.5-rc.1");
+        assert_eq!(publish_tags("canary", None).unwrap()[0], "canary");
     }
 
     #[test]
     fn missing_tag_error_displays_guidance() {
-        let err = publish_tags("").expect_err("reject");
+        let err = publish_tags("", None).expect_err("reject");
         assert!(err.to_string().contains("no tag"));
+    }
+
+    #[test]
+    fn resolve_cascade_maps_flag_pair() {
+        assert_eq!(resolve_cascade(false, false), None);
+        assert_eq!(resolve_cascade(true, false), Some(true));
+        assert_eq!(resolve_cascade(false, true), Some(false));
+        // Belt-and-braces: --cascade wins if both ever arrive true.
+        assert_eq!(resolve_cascade(true, true), Some(true));
     }
 }

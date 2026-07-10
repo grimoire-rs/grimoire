@@ -1,10 +1,11 @@
 # ADR: `grim publish` — manifest-driven batch release
 
-**Status:** Proposed
+**Status:** Accepted (partially superseded)
 **Date:** 2026-06-12
 **Deciders:** maintainer (command name, path convention, per-entry tables pre-decided), architect (remaining decisions)
 **Research:** [research_publish_manifest.md](./research_publish_manifest.md)
 **Supersedes:** `catalog/scripts/publish.py` (deleted on completion)
+**Superseded By (in part):** [adr_unified_publish_version_cascade.md](./adr_unified_publish_version_cascade.md) — the `--tag` flag (decision "D1") and the channel-tag always-move amendment (decision "D3") are replaced: `--tag` is removed, `--version` is the single source (semver → cascade, non-semver → uniform channel tag), and overwrite semantics are uniform (skip-existing default, `--force` to move) for every value. The manifest schema, kind ordering, source-path convention, and `--only`/`--dry-run`/`--force` remain as decided here.
 
 ## Context
 

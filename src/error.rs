@@ -229,7 +229,9 @@ fn classify_skill(err: &SkillError) -> ExitCode {
 /// overwrite is a data error (65).
 fn classify_release(err: &ReleaseError) -> ExitCode {
     match &err.kind {
-        ReleaseErrorKind::MissingTag | ReleaseErrorKind::TagExists { .. } => ExitCode::DataError,
+        ReleaseErrorKind::MissingTag
+        | ReleaseErrorKind::TagExists { .. }
+        | ReleaseErrorKind::CascadeRequiresSemver { .. } => ExitCode::DataError,
     }
 }
 
@@ -503,6 +505,28 @@ mod tests {
         ))
         .into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn release_errors_classify_as_data_error() {
+        // Every release-tier kind — missing tag, refused overwrite, and the
+        // new --cascade-on-non-semver assertion — is bad input data (65).
+        use crate::oci::release::{ReleaseError, ReleaseErrorKind};
+        let cases = [
+            ReleaseErrorKind::MissingTag,
+            ReleaseErrorKind::TagExists {
+                tag: "1.2.3".to_string(),
+                existing: "sha256:a".to_string(),
+                new: "sha256:b".to_string(),
+            },
+            ReleaseErrorKind::CascadeRequiresSemver {
+                tag: "canary".to_string(),
+            },
+        ];
+        for kind in cases {
+            let err: anyhow::Error = Error::from(ReleaseError::without_reference(kind)).into();
+            assert_eq!(classify_error(&err), ExitCode::DataError);
+        }
     }
 
     #[test]

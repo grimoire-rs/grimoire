@@ -43,7 +43,10 @@ Releasing a full semver version moves the floating tags consumers track.
 `:1` pick up `1.2.3` with a plain `grim update`.
 
 A non-version tag (`canary`, `edge`) publishes only that exact tag, no
-cascade. A reference with no tag at all is an error.
+cascade. A reference with no tag at all is an error. Two flags make the
+cascade explicit: `--cascade` asserts it and rejects a non-semver tag with
+exit 65 (a typo guard); `--no-cascade` publishes only the exact tag even for
+a full semver.
 
 ## Immutability
 
@@ -114,13 +117,18 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   resume from a specific entry.
 - **`pin = true` is bundle-only.** Setting it on a skill, rule, or agent
   entry is a validation error (exit 65).
-- **Catalog-wide version.** An optional top-level `version` covers every
-  entry that omits its own or sets the literal `${version}`; explicit
-  per-entry versions win. `grim publish --version <ref>` overrides the
-  top-level value for a run (CI git-tag case). Every version input first
-  has the manifest's `version_prefix` (default `v`) stripped, so
-  `--version v1.2.3` publishes `1.2.3`; pushed tags stay plain `X.Y.Z`.
-  An entry with no version anywhere exits 65.
+- **Catalog-wide version.** `--version` is the single version source for a
+  run. An optional top-level `version` covers every entry that omits its
+  own or sets the literal `${version}`; explicit per-entry versions
+  always win. A **semver** `--version` overrides the top-level value and
+  every entry cascades; a **non-semver** `--version` is a movable channel
+  tag applied to every entry uniformly, with no cascade. Every version
+  input first has the manifest's `version_prefix` (default `v`) stripped,
+  so `--version v1.2.3` publishes `1.2.3`; pushed tags stay plain
+  `X.Y.Z`. A prerelease or build-metadata value (`1.2.3-rc.1`), a reserved
+  cascade-float shape (`latest`, a bare major, or `major.minor`), or a
+  value that is not a legal OCI tag all exit 65 at validation, before any
+  push. An entry with no version anywhere also exits 65.
 - **Namespace overrides.** By default an entry publishes to
   `{registry}/{kind-subdir}/{name}`. A manifest-level `repository_prefix`
   replaces the `{kind-subdir}` segment (`{prefix}/{name}`); a per-entry
@@ -141,7 +149,8 @@ Common flags — confirm current spelling with `grim publish --help`:
 ```sh
 grim publish --dry-run           # plan without pushing
 grim publish --only code-review  # publish one entry
-grim publish --tag canary        # movable tag, semver rejected
+grim publish --version canary    # channel tag on every entry, no cascade
+grim publish --version 1.4.0 --no-cascade  # single exact tag, no floats moved
 grim publish --manifest staging/publish.toml  # alternate manifest
 grim publish --announce          # publish, then announce to the index
 ```

@@ -273,6 +273,14 @@ A release does more than push one tag. From a `1.2.3` version it also moves the
 digest. That is what lets a consumer who declared `:1` pick up `1.2.3` with a
 plain [`grim update`](./commands.md#update).
 
+The cascade fires automatically for a full semver and is skipped for a
+non-version tag (`canary`, `edge`, a partial `1.2`). Two flags make it
+explicit: `--cascade` asserts the cascade and rejects a non-semver tag with
+exit 65 (a typo guard for CI), and `--no-cascade` publishes only the exact
+tag even for a full semver — useful for a one-off version that should not
+move `latest`. A prerelease (`1.2.3-rc.1`) is always exact-only: a release
+candidate never becomes a floating version.
+
 ### Dry runs and overwrites
 
 Preview the exact push plan — every tag and the digest each will point at —
@@ -460,8 +468,10 @@ For CI runs that publish from a git tag, `grim publish --version <ref>`
 overrides the manifest's top-level `version` for that run. Every version
 input — the flag, the top-level value, and per-entry values — first has
 the manifest's `version_prefix` (default `"v"`) stripped when present, so
-`--version v1.2.3` (a typical tag ref) publishes tag `1.2.3`. Pushed OCI
-tags are always the plain `X.Y.Z` form. A different tagging convention
+`--version v1.2.3` (a typical tag ref) publishes tag `1.2.3`. A semver
+`--version` publishes the plain `X.Y.Z` form; a **non-semver** `--version`
+(e.g. `canary`) is instead a movable channel tag applied to every entry — see
+the [Flags](#batch-publish-flags) table. A different tagging convention
 sets its own prefix:
 
 ```toml
@@ -616,9 +626,10 @@ bumped in the manifest since the last run actually push anything.
 existing exact-version tag that points at a different digest. The two modes
 are mutually exclusive — `--force` and skip-existing cannot be combined.
 
-`--force` also cannot be combined with `--tag`: a channel-tag run always
-moves the tag, so `--force` would be redundant — passing both is rejected
-as a usage error.
+This rule is now uniform for **every** value, including a channel
+`--version` (see below): a channel like `canary` skips-existing by default
+and needs `--force` to move, exactly like a semver release. There is no
+special-cased always-moving tag.
 
 ### Flags {#batch-publish-flags}
 
@@ -626,10 +637,10 @@ as a usage error.
 |------|-------------|
 | `--manifest <path>` | Manifest file to read (default: `./publish.toml`). |
 | `--dry-run` | Validate and plan without pushing. Prints what would be pushed. |
-| `--force` | Move existing exact-version tags instead of skipping them. Cannot be combined with `--tag`. |
+| `--force` | Move existing exact-version tags instead of skipping them. |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
-| `--tag <tag>` | Override the published tag with a movable channel tag (e.g. `canary`). Must be non-semver — semver values exit 65, keeping all semver releases in the manifest where the repo can track them. A channel tag always moves: re-publishing with `--tag` overwrites the existing tag without skipping and without `--force`. |
-| `--version <version>` | Override the manifest's top-level `version` for this run — the CI git-tag case. The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. Entries with an explicit `version` keep it. See [One version for the whole catalog](#batch-publish-version). |
+| `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
+| `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
 | `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
@@ -642,13 +653,26 @@ must be strict `X.Y.Z` semver, every source path must exist, and `pin = true`
 is rejected on non-bundle entries (exit 65 for each). Only after the full
 manifest passes does the first network call happen.
 
-Two additional conditions exit 65 at validation time:
+Several additional conditions exit 65 at validation time:
 
 - **Empty manifest** — a manifest that declares no entries in any kind table
   exits 65 with "no packages declared in manifest". Grim treats this as a
   likely wrong-file mistake rather than a valid no-op.
 - **Oversized manifest** — a manifest file larger than 64 KiB is rejected
   before parsing. This is an unconditional limit, not a warning.
+- **Prerelease or build-metadata `--version`** — a value like `1.2.3-rc.1`
+  or `1.2.3+build` parses as semver but is not strict `X.Y.Z`. The
+  manifest forbids prerelease/build entry versions, so grim rejects the
+  value outright instead of silently treating it as a channel tag.
+- **Reserved cascade-float shape** — a `--version` channel value equal to
+  `latest`, a bare major (`1`), or a `major.minor` (`1.2`) is rejected.
+  Those tags are managed automatically by a real semver release
+  (`X.Y.Z` → `X.Y`, `X`, `latest`); a channel aliasing one would collide
+  with the machine-owned float namespace.
+- **Illegal OCI tag charset** — a `--version` channel value that does not
+  match `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}` — for example a slash-bearing
+  CI ref like `feature/foo` — is rejected before it ever reaches the
+  registry.
 
 During the release run the command is fail-fast: the first failing entry
 stops the batch. The report still renders — completed entries show their
@@ -704,8 +728,9 @@ grim publish
 # Release only one package
 grim publish --only grim-usage
 
-# Push a movable canary tag (manifest versions untouched)
-grim publish --tag canary
+# Push every entry under a movable canary channel tag (no cascade);
+# re-running is a no-op unless you add --force
+grim publish --version canary
 ```
 
 ### Manifest vs bundle disambiguation {#batch-publish-disambiguation}

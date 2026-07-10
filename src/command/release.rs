@@ -28,7 +28,7 @@ use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
-use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags};
+use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags, resolve_cascade};
 use crate::oci::{Algorithm, ArtifactKind, Identifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
@@ -68,6 +68,18 @@ pub struct ReleaseArgs {
     #[arg(long)]
     pub pin: bool,
 
+    /// Assert the rolling cascade: move `X.Y`, `X`, and `latest` onto this
+    /// release. Requires a full semver tag — a non-semver tag with
+    /// `--cascade` is a data error (65). Default (neither flag): cascade
+    /// automatically for full semver, publish a single tag otherwise.
+    #[arg(long, overrides_with = "no_cascade")]
+    pub cascade: bool,
+
+    /// Publish only the exact tag; suppress the `X.Y`/`X`/`latest` cascade
+    /// even for a full semver version.
+    #[arg(long, overrides_with = "cascade")]
+    pub no_cascade: bool,
+
     /// Embed git provenance (commit revision, commit date, and the `origin`
     /// remote) from the artifact's working tree as OCI annotations. Off by
     /// default so re-release stays byte-deterministic; with `--git` a
@@ -95,7 +107,7 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // rejected (a release must carry a tag). A non-version tag publishes
     // exactly itself (no cascade); full semver cascades.
     let version = id.tag().unwrap_or("").to_string();
-    let tags = super::grim(publish_tags(&version))?;
+    let tags = super::grim(publish_tags(&version, resolve_cascade(args.cascade, args.no_cascade)))?;
 
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
     let repo = id.without_tag();
@@ -622,7 +634,7 @@ mod tests {
         let repo = Identifier::parse("localhost:5000/acme/code-review").unwrap();
         let tar = b"skill tarball v1".to_vec();
         let manifest = manifest_of(&tar);
-        let tags = publish_tags("1.2.3").unwrap();
+        let tags = publish_tags("1.2.3", None).unwrap();
 
         // First release: blob + manifest + all four cascade tags.
         access.push_blob(&repo, &tar).await.unwrap();
