@@ -26,6 +26,9 @@ body = """
 - {{ commit.message | split(pat="\n") | first | upper_first | trim }}\
 {% if commit.scope %} *({{ commit.scope }})*{% endif %}\
 {% if commit.breaking %} **BREAKING**{% endif %}
+{%- if commit.breaking and commit.breaking_description and commit.breaking_description | trim != commit.message | split(pat="\n") | first | trim %}
+  - **Migration:** {{ commit.breaking_description | trim | replace(from="\n", to=" ") }}
+{%- endif %}
 {%- endfor %}
 {% endfor %}
 {%- endif -%}
