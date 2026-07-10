@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.6
 metadata:
@@ -45,6 +45,8 @@ full reference is `--help` plus the docs site linked below.
 | `grim install` | Materialize the lock into AI clients | [consume](references/consume.md) |
 | `grim update` | Re-resolve, re-materialize, prune | [consume](references/consume.md) |
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
+| `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
+| `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
@@ -52,7 +54,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
-| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` | [publish](references/publish.md) |
+| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` | [publish](references/publish.md) |
 
 > **Deprecation (0.6.x):** a publisher can retire a package without
 > unpublishing it; `add` and `status` flag it as deprecated (an `add` of a

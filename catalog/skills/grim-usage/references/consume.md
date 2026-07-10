@@ -132,6 +132,25 @@ array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
 vendor layout itself is not a stable contract).
 
+Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
+`config list`, `config registry list`, `publish`) wrap their rows in a
+uniform `{"items": [...]}` envelope under `--format json` — read the
+array from `items`, never the top level. Failures under `--format json`
+emit a structured `{"error": {code, exit, message}}` document on stdout.
+Full contract: the [JSON interface][json-interface] docs page.
+
+Two read-only companions:
+
+- `grim context` reports the resolved invocation context — scope,
+  config/lock/state paths (with existence flags), effective client set
+  (names only), registry browse set, default registry, offline mode —
+  so scripts need not reimplement walk-up or precedence rules.
+- `grim fetch <ref> [--vendor …] [--path …]` prints an artifact's
+  content without installing (use != install). Plain output is the raw
+  payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
+  adds the digest, kind, and a `files` listing. Confirm flags with
+  `grim fetch --help`.
+
 ## Removing
 
 Two commands with deliberately different depths:
@@ -186,3 +205,4 @@ the members no other declaration still holds.
 [lock]: https://grimoire.rs/concepts.html#the-lock
 [bundles]: https://grimoire.rs/concepts.html#bundles
 [config-toml]: https://grimoire.rs/configuration.html
+[json-interface]: https://grimoire.rs/json-interface.html
