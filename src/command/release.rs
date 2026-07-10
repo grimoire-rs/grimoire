@@ -393,14 +393,7 @@ async fn pin_members(
 fn member_error(member: &crate::oci::bundle::BundleMember, kind: ResolveErrorKind) -> ResolveError {
     let id = Identifier::parse(&member.id)
         .unwrap_or_else(|_| Identifier::new_registry(member.name.clone(), "invalid.localhost"));
-    ResolveError::new(
-        ArtifactRef {
-            kind: member.kind,
-            name: member.name.clone(),
-            id,
-        },
-        kind,
-    )
+    ResolveError::new(ArtifactRef::registry(member.kind, member.name.clone(), id), kind)
 }
 
 /// Parse `<ref>`, expanding a short identifier against `default_registry`

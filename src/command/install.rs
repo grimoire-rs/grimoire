@@ -211,11 +211,11 @@ mod tests {
     use crate::oci::{ArtifactKind, Identifier};
 
     fn aref(name: &str) -> ArtifactRef {
-        ArtifactRef {
-            kind: ArtifactKind::Rule,
-            name: name.to_string(),
-            id: Identifier::parse("localhost:5000/x:latest").unwrap(),
-        }
+        ArtifactRef::registry(
+            ArtifactKind::Rule,
+            name,
+            Identifier::parse("localhost:5000/x:latest").unwrap(),
+        )
     }
 
     #[test]

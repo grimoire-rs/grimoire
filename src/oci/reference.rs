@@ -3,18 +3,31 @@
 
 //! A named, kinded reference to an artifact.
 
+use crate::config::declaration::DeclaredSource;
+
 use super::{ArtifactKind, Identifier};
 
 /// An artifact as referenced from config: its kind, its config key (name),
-/// and the OCI identifier it resolves to.
+/// and the declared source (an OCI identifier or a local path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRef {
     /// Whether this is a skill or a rule.
     pub kind: ArtifactKind,
     /// The config key the artifact is declared under.
     pub name: String,
-    /// The OCI identifier the artifact resolves to.
-    pub id: Identifier,
+    /// The declared source the artifact resolves from.
+    pub source: DeclaredSource,
+}
+
+impl ArtifactRef {
+    /// Convenience constructor for a registry-sourced reference.
+    pub fn registry(kind: ArtifactKind, name: impl Into<String>, id: Identifier) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            source: DeclaredSource::Registry(id),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -24,17 +37,10 @@ mod tests {
     #[test]
     fn constructs_and_compares() {
         let id = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
-        let a = ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: "code-review".to_string(),
-            id: id.clone(),
-        };
-        let b = ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: "code-review".to_string(),
-            id,
-        };
+        let a = ArtifactRef::registry(ArtifactKind::Skill, "code-review", id.clone());
+        let b = ArtifactRef::registry(ArtifactKind::Skill, "code-review", id.clone());
         assert_eq!(a, b);
         assert_eq!(a.name, "code-review");
+        assert_eq!(a.source.identifier(), Some(&id));
     }
 }

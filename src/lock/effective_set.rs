@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::declaration::DesiredSet;
+use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::lock::locked_artifact::BundleProvenance;
 use crate::lock::locked_bundle::LockedBundle;
 use crate::oci::{ArtifactKind, Identifier};
@@ -23,8 +23,10 @@ use crate::oci::{ArtifactKind, Identifier};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     /// Declared directly in `[skills]`/`[rules]`/`[agents]` (always wins
-    /// over bundle members of the same key).
-    Direct(Identifier),
+    /// over bundle members of the same key). Carries the declared source
+    /// (registry identifier or local path); retention decisions never
+    /// inspect the payload.
+    Direct(DeclaredSource),
     /// Provided only by bundles, all agreeing on one identifier.
     Bundles {
         /// The agreed member identifier.
@@ -65,7 +67,11 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
     // unparseable) member identifier plus the contributing bundle.
     type Contribution = (Option<Identifier>, BundleProvenance);
     let mut grouped: BTreeMap<(ArtifactKind, String), Vec<Contribution>> = BTreeMap::new();
-    for (binding, declared_id) in &set.bundles {
+    for (binding, declared_source) in &set.bundles {
+        // A path-sourced bundle has no registry identity to match a cached
+        // snapshot against; membership is unknowable here, so the caller
+        // falls back to its legacy behavior (same as a missing snapshot).
+        let declared_id = declared_source.identifier()?;
         let snapshot = cached.iter().find(|b| snapshot_matches(binding, declared_id, b))?;
         for member in &snapshot.members {
             let provenance = BundleProvenance::new(snapshot.repo.clone(), snapshot.tag.clone());
@@ -207,10 +213,13 @@ mod tests {
     }
 
     fn set_with(skills: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
-        let skills: Map<String, Identifier> = skills.iter().map(|(n, i)| ((*n).to_string(), id(i))).collect();
+        let skills: Map<String, DeclaredSource> = skills
+            .iter()
+            .map(|(n, i)| ((*n).to_string(), DeclaredSource::Registry(id(i))))
+            .collect();
         let mut set = DesiredSet::from_parts(skills, Map::new());
         for (n, i) in bundles {
-            set.bundles.insert((*n).to_string(), id(i));
+            set.bundles.insert((*n).to_string(), DeclaredSource::Registry(id(i)));
         }
         set.invalidate_declaration_hash_cache();
         set
@@ -231,7 +240,7 @@ mod tests {
         let e = effective_set(&set, &cache).expect("cache complete");
         assert_eq!(
             e[&(ArtifactKind::Skill, "cr".to_string())],
-            Origin::Direct(id("ghcr.io/acme/cr:direct"))
+            Origin::Direct(DeclaredSource::Registry(id("ghcr.io/acme/cr:direct")))
         );
     }
 

@@ -214,6 +214,7 @@ pub(crate) fn drop_from_lock(
         set_after
             .bundles
             .get(&b.name)
+            .and_then(crate::config::declaration::DeclaredSource::identifier)
             .is_some_and(|id| crate::lock::effective_set::snapshot_matches(&b.name, id, b))
     });
 
@@ -236,7 +237,10 @@ fn direct_id_of(
         ArtifactKind::Mcp => &set.mcp,
         ArtifactKind::Bundle => return None,
     };
-    map.get(name).cloned()
+    // A path-sourced declaration has no registry identifier; the caller's
+    // id-mismatch branch then drops the entry with an honest-stale note,
+    // which is the correct behavior when a path dep masks a bundle member.
+    map.get(name).and_then(|source| source.identifier().cloned())
 }
 
 /// Pre-cache fallback: the surgical behavior used before the lock carried
@@ -259,6 +263,7 @@ fn legacy_drop_from_lock(
             let bundle = set_before
                 .bundles
                 .get(name)
+                .and_then(|source| source.identifier())
                 .map(|id| (id.registry_repository(), id.tag_or_latest().to_string()));
             if let Some((repo, tag)) = bundle {
                 evict_bundle_members(&mut lock, &repo, &tag, set_after);
@@ -284,6 +289,7 @@ fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &cr
     let still_declared = set
         .bundles
         .values()
+        .filter_map(crate::config::declaration::DeclaredSource::identifier)
         .any(|id| id.registry_repository() == repo && id.tag_or_latest() == tag);
     if still_declared {
         return;
@@ -348,13 +354,21 @@ mod tests {
     }
 
     fn set_of(skills: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
-        let skills: BTreeMap<String, Identifier> = skills
+        let skills: BTreeMap<String, crate::config::declaration::DeclaredSource> = skills
             .iter()
-            .map(|(n, i)| ((*n).to_string(), Identifier::parse(i).unwrap()))
+            .map(|(n, i)| {
+                (
+                    (*n).to_string(),
+                    crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
+                )
+            })
             .collect();
         let mut set = DesiredSet::from_parts(skills, BTreeMap::new());
         for (n, i) in bundles {
-            set.bundles.insert((*n).to_string(), Identifier::parse(i).unwrap());
+            set.bundles.insert(
+                (*n).to_string(),
+                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
+            );
         }
         set.invalidate_declaration_hash_cache();
         set

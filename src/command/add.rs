@@ -193,7 +193,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // refusal leaves the on-disk config and lock untouched.
     let mut set = scope.set.clone();
     if let Some(existing) = declare(&mut set, kind, name.clone(), id.clone())
-        && existing != id
+        && existing.identifier() != Some(&id)
     {
         return Err(anyhow::Error::from(crate::error::Error::from(
             CommandError::DeclareConflict {
@@ -390,14 +390,15 @@ pub(crate) fn declare(
     set: &mut crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
     name: String,
-    id: Identifier,
-) -> Option<Identifier> {
+    source: impl Into<crate::config::declaration::DeclaredSource>,
+) -> Option<crate::config::declaration::DeclaredSource> {
+    let source = source.into();
     let previous = match kind {
-        ArtifactKind::Skill => set.skills.insert(name, id),
-        ArtifactKind::Rule => set.rules.insert(name, id),
-        ArtifactKind::Agent => set.agents.insert(name, id),
-        ArtifactKind::Bundle => set.bundles.insert(name, id),
-        ArtifactKind::Mcp => set.mcp.insert(name, id),
+        ArtifactKind::Skill => set.skills.insert(name, source),
+        ArtifactKind::Rule => set.rules.insert(name, source),
+        ArtifactKind::Agent => set.agents.insert(name, source),
+        ArtifactKind::Bundle => set.bundles.insert(name, source),
+        ArtifactKind::Mcp => set.mcp.insert(name, source),
     };
     set.invalidate_declaration_hash_cache();
     previous
@@ -706,7 +707,10 @@ mod tests {
             previous.is_none(),
             "first declare of a name must return no previous value"
         );
-        assert_eq!(set.skills.get("code-review"), Some(&id));
+        assert_eq!(
+            set.skills.get("code-review"),
+            Some(&crate::config::declaration::DeclaredSource::Registry(id))
+        );
     }
 
     #[test]
@@ -719,8 +723,14 @@ mod tests {
         let second = Identifier::parse("ghcr.io/other/code-review:stable").unwrap();
         declare(&mut set, ArtifactKind::Skill, "code-review".to_string(), first.clone());
         let previous = declare(&mut set, ArtifactKind::Skill, "code-review".to_string(), second.clone());
-        assert_eq!(previous, Some(first));
-        assert_eq!(set.skills.get("code-review"), Some(&second));
+        assert_eq!(
+            previous,
+            Some(crate::config::declaration::DeclaredSource::Registry(first))
+        );
+        assert_eq!(
+            set.skills.get("code-review"),
+            Some(&crate::config::declaration::DeclaredSource::Registry(second))
+        );
     }
 
     #[test]
@@ -751,15 +761,16 @@ mod tests {
     fn write_config_round_trips_through_parser() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("grimoire.toml");
+        use crate::config::declaration::DeclaredSource;
         let mut skills = BTreeMap::new();
         skills.insert(
             "code-review".to_string(),
-            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/code-review:stable").unwrap()),
         );
         let mut rules = BTreeMap::new();
         rules.insert(
             "rust-style".to_string(),
-            Identifier::parse("ghcr.io/acme/rust-style:v3").unwrap(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/rust-style:v3").unwrap()),
         );
         let set = DesiredSet::from_parts(skills, rules);
         let opts = ConfigOptions {

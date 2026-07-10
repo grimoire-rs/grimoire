@@ -36,7 +36,7 @@ impl std::fmt::Display for ResolveError {
         write!(
             f,
             "{} '{}' ({}): {}",
-            self.reference.kind, self.reference.name, self.reference.id, self.kind
+            self.reference.kind, self.reference.name, self.reference.source, self.kind
         )
     }
 }
@@ -108,11 +108,11 @@ mod tests {
     use crate::oci::{ArtifactKind, Identifier};
 
     fn artifact_ref() -> ArtifactRef {
-        ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: "code-review".to_string(),
-            id: Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
-        }
+        ArtifactRef::registry(
+            ArtifactKind::Skill,
+            "code-review",
+            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+        )
     }
 
     #[test]

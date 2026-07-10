@@ -268,12 +268,14 @@ mod tests {
     }
 
     fn declared_set(names: &[&str]) -> DesiredSet {
-        let skills: BTreeMap<String, Identifier> = names
+        let skills: BTreeMap<String, crate::config::declaration::DeclaredSource> = names
             .iter()
             .map(|n| {
                 (
                     n.to_string(),
-                    Identifier::parse(&format!("localhost:5000/acme/{n}:latest")).unwrap(),
+                    crate::config::declaration::DeclaredSource::Registry(
+                        Identifier::parse(&format!("localhost:5000/acme/{n}:latest")).unwrap(),
+                    ),
                 )
             })
             .collect();
@@ -332,7 +334,9 @@ mod tests {
         let mut set = declared_set(&["alpha"]);
         set.bundles.insert(
             "starter-pack".to_string(),
-            Identifier::parse("localhost:5000/acme/bundles/starter-pack:latest").unwrap(),
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse("localhost:5000/acme/bundles/starter-pack:latest").unwrap(),
+            ),
         );
         set.invalidate_declaration_hash_cache();
         write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
@@ -386,7 +390,9 @@ mod tests {
         for binding in ["pack-a", "pack-b"] {
             set.bundles.insert(
                 binding.to_string(),
-                Identifier::parse(&format!("localhost:5000/acme/bundles/{binding}:latest")).unwrap(),
+                crate::config::declaration::DeclaredSource::Registry(
+                    Identifier::parse(&format!("localhost:5000/acme/bundles/{binding}:latest")).unwrap(),
+                ),
             );
         }
         set.invalidate_declaration_hash_cache();

@@ -26,9 +26,6 @@ use crate::oci::Identifier;
 /// identifier's canonical string or the raw `./…` path — so
 /// `write_config` re-serialization and the declaration hash are both
 /// byte-stable against the authored declaration.
-// TODO(local-path-sources): staging allow — `DesiredSet` re-types to this
-// enum in the next phase; remove when that ripple lands.
-#[allow(dead_code, reason = "phase-1 core type; DesiredSet re-type lands next")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclaredSource {
     /// A fully-qualified OCI reference (floating tag or pinned digest).
@@ -37,8 +34,6 @@ pub enum DeclaredSource {
     Path(PathSource),
 }
 
-// TODO(local-path-sources): staging allow — see the enum note above.
-#[allow(dead_code, reason = "phase-1 core type; DesiredSet re-type lands next")]
 impl DeclaredSource {
     /// The OCI identifier, when this source is a registry reference.
     pub fn identifier(&self) -> Option<&Identifier> {
@@ -49,6 +44,9 @@ impl DeclaredSource {
     }
 
     /// The path source, when this source is a local one.
+    // TODO(local-path-sources): staging allow — first caller lands with
+    // the resolve/status branches.
+    #[allow(dead_code, reason = "consumed by the resolve/status path branches (next phases)")]
     pub fn path(&self) -> Option<&PathSource> {
         match self {
             Self::Registry(_) => None,
@@ -231,17 +229,19 @@ impl RegistryConfig {
 #[derive(Debug, Default)]
 pub struct DesiredSet {
     /// Declared skills, keyed by config name.
-    pub skills: BTreeMap<String, Identifier>,
+    pub skills: BTreeMap<String, DeclaredSource>,
     /// Declared rules, keyed by config name.
-    pub rules: BTreeMap<String, Identifier>,
+    pub rules: BTreeMap<String, DeclaredSource>,
     /// Declared agents, keyed by config name.
-    pub agents: BTreeMap<String, Identifier>,
+    pub agents: BTreeMap<String, DeclaredSource>,
     /// Declared bundles, keyed by config name. A bundle expands into its
-    /// member skills/rules/agents at resolve time; the identifier is the
-    /// bundle artifact reference (floating tag or pinned digest).
-    pub bundles: BTreeMap<String, Identifier>,
-    /// Declared MCP server descriptors, keyed by config name.
-    pub mcp: BTreeMap<String, Identifier>,
+    /// member skills/rules/agents at resolve time; the source is the
+    /// bundle artifact reference (floating tag or pinned digest) or a
+    /// local bundle TOML path.
+    pub bundles: BTreeMap<String, DeclaredSource>,
+    /// Declared MCP server descriptors, keyed by config name. Always
+    /// `Registry` — the config parser rejects path values under `[mcp]`.
+    pub mcp: BTreeMap<String, DeclaredSource>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -288,7 +288,7 @@ impl DesiredSet {
         dead_code,
         reason = "test-fixture convenience wrapper over from_maps; production always supplies agents/bundles"
     )]
-    pub fn from_parts(skills: BTreeMap<String, Identifier>, rules: BTreeMap<String, Identifier>) -> Self {
+    pub fn from_parts(skills: BTreeMap<String, DeclaredSource>, rules: BTreeMap<String, DeclaredSource>) -> Self {
         Self::from_parts_with_bundles(skills, rules, BTreeMap::new())
     }
 
@@ -298,19 +298,19 @@ impl DesiredSet {
         reason = "test-fixture convenience wrapper over from_maps; production always supplies agents"
     )]
     pub fn from_parts_with_bundles(
-        skills: BTreeMap<String, Identifier>,
-        rules: BTreeMap<String, Identifier>,
-        bundles: BTreeMap<String, Identifier>,
+        skills: BTreeMap<String, DeclaredSource>,
+        rules: BTreeMap<String, DeclaredSource>,
+        bundles: BTreeMap<String, DeclaredSource>,
     ) -> Self {
         Self::from_maps(skills, rules, BTreeMap::new(), bundles)
     }
 
     /// Construct from explicit skill, rule, agent, and bundle maps.
     pub fn from_maps(
-        skills: BTreeMap<String, Identifier>,
-        rules: BTreeMap<String, Identifier>,
-        agents: BTreeMap<String, Identifier>,
-        bundles: BTreeMap<String, Identifier>,
+        skills: BTreeMap<String, DeclaredSource>,
+        rules: BTreeMap<String, DeclaredSource>,
+        agents: BTreeMap<String, DeclaredSource>,
+        bundles: BTreeMap<String, DeclaredSource>,
     ) -> Self {
         Self {
             skills,
@@ -343,8 +343,8 @@ impl DesiredSet {
 mod tests {
     use super::*;
 
-    fn id(s: &str) -> Identifier {
-        Identifier::parse(s).expect("valid identifier")
+    fn id(s: &str) -> DeclaredSource {
+        DeclaredSource::Registry(Identifier::parse(s).expect("valid identifier"))
     }
 
     #[test]

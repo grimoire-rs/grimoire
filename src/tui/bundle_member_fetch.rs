@@ -209,11 +209,11 @@ impl BundleMemberChecker {
             };
 
             // Build an ArtifactRef from the parsed identifier.
-            let bundle_ref = crate::oci::reference::ArtifactRef {
-                kind: crate::oci::ArtifactKind::Bundle,
-                name: id.repository().to_string(),
-                id: id.clone(),
-            };
+            let bundle_ref = crate::oci::reference::ArtifactRef::registry(
+                crate::oci::ArtifactKind::Bundle,
+                id.repository().to_string(),
+                id.clone(),
+            );
 
             let msg = match crate::resolve::resolver::fetch_bundle_members(&bundle_ref, &id, &access, &options).await {
                 Ok((mut members, _pinned)) => {

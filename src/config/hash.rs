@@ -134,8 +134,8 @@ mod tests {
     use crate::config::declaration::DesiredSet;
     use crate::oci::Identifier;
 
-    fn id(s: &str) -> Identifier {
-        Identifier::parse(s).expect("valid identifier")
+    fn id(s: &str) -> crate::config::declaration::DeclaredSource {
+        crate::config::declaration::DeclaredSource::Registry(Identifier::parse(s).expect("valid identifier"))
     }
 
     fn set(skills: &[(&str, &str)], rules: &[(&str, &str)]) -> DesiredSet {

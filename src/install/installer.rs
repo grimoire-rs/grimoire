@@ -136,11 +136,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     let mut results = Vec::with_capacity(work.len());
     for (index, (artifact, kind)) in work.into_iter().enumerate() {
         progress.advance(index + 1, &format!("{kind} {}", artifact.name));
-        let reference = ArtifactRef {
-            kind,
-            name: artifact.name.clone(),
-            id: artifact.pinned.as_identifier().clone(),
-        };
+        let reference = ArtifactRef::registry(kind, artifact.name.clone(), artifact.pinned.as_identifier().clone());
         // The primary client's path is the report target (back-compat).
         let primary = target
             .clients()
@@ -647,11 +643,7 @@ async fn fetch_verified_layer(
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<u8>, crate::error::Error> {
     let repo: Identifier = artifact.pinned.as_identifier().without_tag();
-    let aref = || ArtifactRef {
-        kind,
-        name: artifact.name.clone(),
-        id: artifact.pinned.as_identifier().clone(),
-    };
+    let aref = || ArtifactRef::registry(kind, artifact.name.clone(), artifact.pinned.as_identifier().clone());
 
     let manifest = access.fetch_manifest(&artifact.pinned).await?;
     let Some(manifest) = manifest else {

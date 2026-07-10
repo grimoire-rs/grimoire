@@ -136,6 +136,7 @@ fn classify_config(err: &ConfigError) -> ExitCode {
         ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
         ConfigErrorKind::ArtifactValueMissingRegistry { .. }
         | ConfigErrorKind::ArtifactValueInvalid { .. }
+        | ConfigErrorKind::ArtifactValuePathInvalid { .. }
         | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => ExitCode::DataError,
         ConfigErrorKind::ConfigAlreadyExists => ExitCode::UsageError,
         // A missing config file is a NotFound contract case (docs:

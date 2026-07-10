@@ -22,7 +22,7 @@ use crate::skill::SkillName;
 
 use super::resolve_error::{ResolveError, ResolveErrorKind};
 use super::resolve_options::ResolveOptions;
-use crate::config::declaration::DesiredSet;
+use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::config::hash::DECLARATION_HASH_VERSION;
 use crate::config::scope::ConfigScope;
 use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
@@ -103,13 +103,13 @@ pub async fn resolve_lock_partial(
     // bundle member).
     for name in names {
         if !all_work.iter().any(|w| &w.reference.name == name) {
-            let reference = ArtifactRef {
-                kind: ArtifactKind::Skill,
-                name: name.clone(),
-                // A placeholder identifier: the name is undeclared, so no
-                // real id exists. `parse` cannot fail on this literal.
-                id: Identifier::new_registry(name.clone(), "invalid.localhost"),
-            };
+            // A placeholder identifier: the name is undeclared, so no
+            // real id exists. `parse` cannot fail on this literal.
+            let reference = ArtifactRef::registry(
+                ArtifactKind::Skill,
+                name.clone(),
+                Identifier::new_registry(name.clone(), "invalid.localhost"),
+            );
             return Err(ResolveError::new(reference, ResolveErrorKind::TagNotFound));
         }
     }
@@ -139,40 +139,31 @@ pub async fn resolve_lock_partial(
     Ok(build_lock(merged, set, bundles))
 }
 
-/// Collect the artifacts to resolve in deterministic `BTreeMap` order:
-/// every declared skill (kind Skill), then every declared rule (kind
-/// Rule), then every declared agent (kind Agent), then every declared MCP
-/// descriptor (kind Mcp). The final `(kind, name)` sort happens after
-/// resolution.
-fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
+/// Collect the registry artifacts to resolve in deterministic `BTreeMap`
+/// order: every declared skill (kind Skill), then every declared rule
+/// (kind Rule), then every declared agent (kind Agent), then every
+/// declared MCP descriptor (kind Mcp). Path-sourced entries never become
+/// work items — they pin locally (no registry round-trip), so the
+/// registry-only invariant of the work list is structural. The final
+/// `(kind, name)` sort happens after resolution.
+fn collect_work(set: &DesiredSet) -> Vec<WorkItem> {
     let mut work = Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len() + set.mcp.len());
-    for (name, id) in &set.skills {
-        work.push(ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &set.rules {
-        work.push(ArtifactRef {
-            kind: ArtifactKind::Rule,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &set.agents {
-        work.push(ArtifactRef {
-            kind: ArtifactKind::Agent,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &set.mcp {
-        work.push(ArtifactRef {
-            kind: ArtifactKind::Mcp,
-            name: name.clone(),
-            id: id.clone(),
-        });
+    let tables = [
+        (&set.skills, ArtifactKind::Skill),
+        (&set.rules, ArtifactKind::Rule),
+        (&set.agents, ArtifactKind::Agent),
+        (&set.mcp, ArtifactKind::Mcp),
+    ];
+    for (table, kind) in tables {
+        for (name, source) in table.iter() {
+            if let DeclaredSource::Registry(id) = source {
+                work.push(WorkItem {
+                    reference: ArtifactRef::registry(kind, name.clone(), id.clone()),
+                    id: id.clone(),
+                    bundles: Vec::new(),
+                });
+            }
+        }
     }
     work
 }
@@ -182,6 +173,10 @@ fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
 #[derive(Debug)]
 struct WorkItem {
     reference: ArtifactRef,
+    /// The concrete registry identifier to resolve. Extracted once at
+    /// collection time — path sources never become work items, so every
+    /// item carries a real identifier by construction.
+    id: Identifier,
     /// Every declared bundle this item came from (agreeing bundles
     /// coalesce to one item but ALL contributors are recorded); empty for
     /// a direct `[skills]`/`[rules]` entry.
@@ -211,13 +206,7 @@ async fn build_work(
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
 ) -> Result<(Vec<WorkItem>, Vec<LockedBundle>), ResolveError> {
-    let mut work: Vec<WorkItem> = collect_work(set)
-        .into_iter()
-        .map(|reference| WorkItem {
-            reference,
-            bundles: Vec::new(),
-        })
-        .collect();
+    let mut work: Vec<WorkItem> = collect_work(set);
 
     // Fast path: no bundles ⇒ no bundle I/O at all.
     if set.bundles.is_empty() {
@@ -277,11 +266,7 @@ fn merge_bundle_members(
                 .collect();
             sources.sort();
             sources.dedup();
-            let reference = ArtifactRef {
-                kind,
-                name,
-                id: first.id.clone(),
-            };
+            let reference = ArtifactRef::registry(kind, name, first.id.clone());
             return Err(ResolveError::new(
                 reference,
                 ResolveErrorKind::BundleConflict {
@@ -299,11 +284,8 @@ fn merge_bundle_members(
         bundles.sort_by(|a, b| (&a.repo, &a.tag).cmp(&(&b.repo, &b.tag)));
         bundles.dedup();
         work.push(WorkItem {
-            reference: ArtifactRef {
-                kind,
-                name,
-                id: first.id.clone(),
-            },
+            reference: ArtifactRef::registry(kind, name, first.id.clone()),
+            id: first.id.clone(),
             bundles,
         });
     }
@@ -325,11 +307,20 @@ async fn expand_bundles(
 ) -> Result<(Vec<ExpandedMember>, Vec<LockedBundle>), ResolveError> {
     let mut out = Vec::new();
     let mut snapshots = Vec::new();
-    for (cfg_name, bundle_id) in &set.bundles {
+    for (cfg_name, bundle_source) in &set.bundles {
         let bundle_ref = ArtifactRef {
             kind: ArtifactKind::Bundle,
             name: cfg_name.clone(),
-            id: bundle_id.clone(),
+            source: bundle_source.clone(),
+        };
+        let Some(bundle_id) = bundle_source.identifier() else {
+            // TODO(local-path-sources): local bundle TOML expansion lands
+            // with the resolve phase; until then a declared path bundle is
+            // an explicit failure, not a silent skip.
+            return Err(ResolveError::new(
+                bundle_ref,
+                ResolveErrorKind::BundleInvalid("local path bundle sources are not supported yet".to_string()),
+            ));
         };
 
         let (members, pinned) = fetch_bundle_members(&bundle_ref, bundle_id, access, options).await?;
@@ -461,7 +452,7 @@ async fn fetch_bundle_layer(
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
 ) -> Result<(Vec<u8>, PinnedIdentifier), ResolveError> {
-    let digest = match retry_chain(bundle_ref, access, options).await {
+    let digest = match retry_chain(bundle_ref, bundle_id, access, options).await {
         Ok(digest) => digest,
         Err(mut e) => {
             // A missing bundle tag reads clearer as BundleNotFound.
@@ -577,9 +568,9 @@ async fn resolve_one(
     access: Arc<dyn OciAccess>,
     options: ResolveOptions,
 ) -> Result<LockedArtifact, ResolveError> {
-    let WorkItem { reference, bundles } = item;
+    let WorkItem { reference, id, bundles } = item;
     let timeout = options.per_artifact_timeout;
-    let digest = match tokio::time::timeout(timeout, retry_chain(&reference, &access, &options)).await {
+    let digest = match tokio::time::timeout(timeout, retry_chain(&reference, &id, &access, &options)).await {
         Ok(Ok(digest)) => digest,
         Ok(Err(err)) => return Err(err),
         Err(_elapsed) => {
@@ -587,7 +578,7 @@ async fn resolve_one(
         }
     };
 
-    let pinned_id = reference.id.clone_with_digest(digest);
+    let pinned_id = id.clone_with_digest(digest);
     // `clone_with_digest` unconditionally sets the digest, so the
     // conversion cannot fail. quality-rust.md permits `.expect()` for an
     // invariant proven by preceding logic; the message names it.
@@ -609,6 +600,7 @@ async fn resolve_one(
 /// variant is a compile error here until it is explicitly routed.
 async fn retry_chain(
     reference: &ArtifactRef,
+    id: &Identifier,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
 ) -> Result<crate::oci::Digest, ResolveError> {
@@ -616,7 +608,7 @@ async fn retry_chain(
     let mut backoff = options.base_backoff;
 
     loop {
-        match access.resolve_digest(&reference.id, Operation::Resolve).await {
+        match access.resolve_digest(id, Operation::Resolve).await {
             Ok(Some(digest)) => return Ok(digest),
             Ok(None) => {
                 return Err(ResolveError::new(reference.clone(), ResolveErrorKind::TagNotFound));
@@ -706,20 +698,20 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
 fn stale_reference(set: &DesiredSet, names: &[String]) -> ArtifactRef {
     if let Some(first) = names.first() {
         let work = collect_work(set);
-        if let Some(found) = work.into_iter().find(|r| &r.name == first) {
-            return found;
+        if let Some(found) = work.into_iter().find(|w| &w.reference.name == first) {
+            return found.reference;
         }
-        return ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: first.clone(),
-            id: Identifier::new_registry(first.clone(), "invalid.localhost"),
-        };
+        return ArtifactRef::registry(
+            ArtifactKind::Skill,
+            first.clone(),
+            Identifier::new_registry(first.clone(), "invalid.localhost"),
+        );
     }
-    ArtifactRef {
-        kind: ArtifactKind::Skill,
-        name: "<partial>".to_string(),
-        id: Identifier::new_registry("partial", "invalid.localhost"),
-    }
+    ArtifactRef::registry(
+        ArtifactKind::Skill,
+        "<partial>",
+        Identifier::new_registry("partial", "invalid.localhost"),
+    )
 }
 
 #[cfg(test)]
@@ -823,7 +815,7 @@ mod tests {
         let mut skills = BTreeMap::new();
         skills.insert(
             "code-review".to_string(),
-            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/code-review:stable").unwrap()),
         );
         DesiredSet::from_parts(skills, BTreeMap::new())
     }
@@ -933,10 +925,19 @@ mod tests {
         // Two skills, two rules. One scripted failure plus successes; the
         // failure must abort the rest and yield no lock.
         let mut skills = BTreeMap::new();
-        skills.insert("a".to_string(), Identifier::parse("ghcr.io/acme/a:1").unwrap());
-        skills.insert("b".to_string(), Identifier::parse("ghcr.io/acme/b:1").unwrap());
+        skills.insert(
+            "a".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/a:1").unwrap()),
+        );
+        skills.insert(
+            "b".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/b:1").unwrap()),
+        );
         let mut rules = BTreeMap::new();
-        rules.insert("c".to_string(), Identifier::parse("ghcr.io/acme/c:1").unwrap());
+        rules.insert(
+            "c".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/c:1").unwrap()),
+        );
         let set = DesiredSet::from_parts(skills, rules);
 
         // Every scripted entry is a hard auth failure; whichever task pops
@@ -956,10 +957,19 @@ mod tests {
     #[tokio::test]
     async fn output_order_is_kind_then_name() {
         let mut skills = BTreeMap::new();
-        skills.insert("zeta".to_string(), Identifier::parse("ghcr.io/acme/zeta:1").unwrap());
-        skills.insert("alpha".to_string(), Identifier::parse("ghcr.io/acme/alpha:1").unwrap());
+        skills.insert(
+            "zeta".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/zeta:1").unwrap()),
+        );
+        skills.insert(
+            "alpha".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/alpha:1").unwrap()),
+        );
         let mut rules = BTreeMap::new();
-        rules.insert("rho".to_string(), Identifier::parse("ghcr.io/acme/rho:1").unwrap());
+        rules.insert(
+            "rho".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/rho:1").unwrap()),
+        );
         let set = DesiredSet::from_parts(skills, rules);
         let mock = MockAccess::new(vec![
             Scripted::Ok(Some(digest())),
@@ -981,7 +991,7 @@ mod tests {
         let mut agents = BTreeMap::new();
         agents.insert(
             "code-reviewer".to_string(),
-            Identifier::parse("ghcr.io/acme/code-reviewer:1").unwrap(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/code-reviewer:1").unwrap()),
         );
         let set = DesiredSet::from_maps(BTreeMap::new(), BTreeMap::new(), agents, BTreeMap::new());
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
@@ -1037,8 +1047,14 @@ mod tests {
         // Declare two skills; the lock already has both pinned. Re-resolve
         // only "a"; "b" must be carried forward verbatim.
         let mut skills = BTreeMap::new();
-        skills.insert("a".to_string(), Identifier::parse("ghcr.io/acme/a:1").unwrap());
-        skills.insert("b".to_string(), Identifier::parse("ghcr.io/acme/b:1").unwrap());
+        skills.insert(
+            "a".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/a:1").unwrap()),
+        );
+        skills.insert(
+            "b".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/b:1").unwrap()),
+        );
         let set = DesiredSet::from_parts(skills, BTreeMap::new());
         let current_hash = set.declaration_hash_cached().to_string();
 
@@ -1361,11 +1377,7 @@ mod tests {
 
     fn bundle_ref_and_id() -> (ArtifactRef, Identifier) {
         let id = Identifier::parse("ghcr.io/acme/my-bundle:latest").unwrap();
-        let art_ref = ArtifactRef {
-            kind: ArtifactKind::Bundle,
-            name: "my-bundle".to_string(),
-            id: id.clone(),
-        };
+        let art_ref = ArtifactRef::registry(ArtifactKind::Bundle, "my-bundle", id.clone());
         (art_ref, id)
     }
 

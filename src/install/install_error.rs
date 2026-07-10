@@ -46,7 +46,7 @@ impl InstallError {
 impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.reference {
-            Some(r) => write!(f, "{} '{}' ({}): {}", r.kind, r.name, r.id, self.kind),
+            Some(r) => write!(f, "{} '{}' ({}): {}", r.kind, r.name, r.source, self.kind),
             None => write!(f, "{}", self.kind),
         }
     }
@@ -116,11 +116,11 @@ mod tests {
     use crate::oci::{Algorithm, ArtifactKind, Identifier};
 
     fn artifact_ref() -> ArtifactRef {
-        ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: "code-review".to_string(),
-            id: Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
-        }
+        ArtifactRef::registry(
+            ArtifactKind::Skill,
+            "code-review",
+            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+        )
     }
 
     #[test]

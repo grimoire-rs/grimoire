@@ -88,6 +88,16 @@ pub enum ConfigErrorKind {
         source: IdentifierError,
     },
 
+    /// A path-shaped artifact value (`./`/`../`-prefixed or absolute) is
+    /// invalid: malformed (backslashes), or declared under a table that
+    /// does not support path sources (`[mcp]`).
+    #[error("artifact '{name}': path value '{value}' is not usable: {reason}")]
+    ArtifactValuePathInvalid {
+        name: String,
+        value: String,
+        reason: String,
+    },
+
     /// A bundle-source member value is a malformed relative reference
     /// (`./`/`../` form — issue #31): a misplaced dot segment or a grammar
     /// violation in the remainder. Bundle sources only; `grimoire.toml`

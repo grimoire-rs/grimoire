@@ -177,33 +177,20 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 /// a reference.
 fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef> {
     let mut out = Vec::new();
-    for (name, id) in &scope.set.skills {
-        out.push(ArtifactRef {
-            kind: ArtifactKind::Skill,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &scope.set.rules {
-        out.push(ArtifactRef {
-            kind: ArtifactKind::Rule,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &scope.set.agents {
-        out.push(ArtifactRef {
-            kind: ArtifactKind::Agent,
-            name: name.clone(),
-            id: id.clone(),
-        });
-    }
-    for (name, id) in &scope.set.mcp {
-        out.push(ArtifactRef {
-            kind: ArtifactKind::Mcp,
-            name: name.clone(),
-            id: id.clone(),
-        });
+    let tables = [
+        (&scope.set.skills, ArtifactKind::Skill),
+        (&scope.set.rules, ArtifactKind::Rule),
+        (&scope.set.agents, ArtifactKind::Agent),
+        (&scope.set.mcp, ArtifactKind::Mcp),
+    ];
+    for (table, kind) in tables {
+        for (name, source) in table.iter() {
+            out.push(ArtifactRef {
+                kind,
+                name: name.clone(),
+                source: source.clone(),
+            });
+        }
     }
     out
 }

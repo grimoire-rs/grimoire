@@ -18,7 +18,9 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::config;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
+use crate::config::declaration::DeclaredSource;
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
+use crate::config::path_source::PathSource;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
 use crate::oci::member_ref::{MemberRef, MemberRefError};
@@ -188,13 +190,15 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     validate_registries(&raw.registries, &path)?;
     validate_tree_separators(&raw.options.tui.tree_separators, &path)?;
-    let skills = parse_artifact_map(&raw.skills, &path)?;
-    let rules = parse_artifact_map(&raw.rules, &path)?;
+    let skills = parse_artifact_map(&raw.skills, &path, PathValues::Allowed)?;
+    let rules = parse_artifact_map(&raw.rules, &path, PathValues::Allowed)?;
     // Agent and bundle references validate exactly like skills/rules: a
-    // fully-qualified identifier, bare entries defaulting to `:latest`.
-    let agents = parse_artifact_map(&raw.agents, &path)?;
-    let bundles = parse_artifact_map(&raw.bundles, &path)?;
-    let mcp = parse_artifact_map(&raw.mcp, &path)?;
+    // fully-qualified identifier (bare entries defaulting to `:latest`)
+    // or a local path source. MCP descriptors reject path values — they
+    // have no packable layer source.
+    let agents = parse_artifact_map(&raw.agents, &path, PathValues::Allowed)?;
+    let bundles = parse_artifact_map(&raw.bundles, &path, PathValues::Allowed)?;
+    let mcp = parse_artifact_map(&raw.mcp, &path, PathValues::Rejected)?;
     let mut set = DesiredSet::from_maps(skills, rules, agents, bundles);
     set.mcp = mcp;
     Ok(ProjectConfig {
@@ -451,18 +455,57 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
     })
 }
 
-/// Validate every `(name → value)` entry as a fully-qualified identifier.
+/// Whether an artifact table accepts local path values (`./…`, `../…`,
+/// absolute). Skills, rules, agents, and bundles do; `[mcp]` does not
+/// (descriptors register config entries, they have no packable layer
+/// source on disk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathValues {
+    Allowed,
+    Rejected,
+}
+
+/// Validate every `(name → value)` entry as a fully-qualified identifier
+/// or — when the table supports them — a local path source.
 ///
-/// A bare entry (registry + repository, no tag, no digest) gets `:latest`
-/// injected here — at the schema boundary, not on [`Identifier`] — so CLI
-/// args without a tag still surface as `tag = None`. Digest-pinned entries
-/// keep `tag = None`; the digest is the canonical pin.
+/// A bare identifier entry (registry + repository, no tag, no digest) gets
+/// `:latest` injected here — at the schema boundary, not on
+/// [`Identifier`] — so CLI args without a tag still surface as
+/// `tag = None`. Digest-pinned entries keep `tag = None`; the digest is
+/// the canonical pin. A `./`/`../`-prefixed or absolute value is a path
+/// source (the identifier grammar rejects all three forms, so the branch
+/// is unambiguous).
 fn parse_artifact_map(
     raw: &BTreeMap<String, String>,
     path: &Path,
-) -> Result<BTreeMap<String, Identifier>, ConfigError> {
+    paths: PathValues,
+) -> Result<BTreeMap<String, DeclaredSource>, ConfigError> {
     let mut out = BTreeMap::new();
     for (name, value) in raw {
+        if crate::config::path_source::is_path_value(value) {
+            if paths == PathValues::Rejected {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::ArtifactValuePathInvalid {
+                        name: name.clone(),
+                        value: value.clone(),
+                        reason: "path sources are not supported for mcp artifacts".to_string(),
+                    },
+                ));
+            }
+            let source = PathSource::parse(value).map_err(|e| {
+                ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::ArtifactValuePathInvalid {
+                        name: name.clone(),
+                        value: value.clone(),
+                        reason: e.to_string(),
+                    },
+                )
+            })?;
+            out.insert(name.clone(), DeclaredSource::Path(source));
+            continue;
+        }
         match Identifier::parse(value) {
             Ok(id) => {
                 let id = if id.tag().is_none() && id.digest().is_none() {
@@ -470,7 +513,7 @@ fn parse_artifact_map(
                 } else {
                     id
                 };
-                out.insert(name.clone(), id);
+                out.insert(name.clone(), DeclaredSource::Registry(id));
             }
             Err(e) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {
                 return Err(ConfigError::new(
@@ -817,7 +860,14 @@ rev = "ghcr.io/acme/agents/rev"
 "#,
         )
         .expect("parse");
-        assert_eq!(cfg.set.agents.get("rev").unwrap().tag(), Some("latest"));
+        let id = cfg
+            .set
+            .agents
+            .get("rev")
+            .unwrap()
+            .identifier()
+            .expect("registry source");
+        assert_eq!(id.tag(), Some("latest"));
     }
 
     #[test]
@@ -829,7 +879,14 @@ stack = "ghcr.io/acme/bundles/stack"
 "#,
         )
         .expect("parse");
-        assert_eq!(cfg.set.bundles.get("stack").unwrap().tag(), Some("latest"));
+        let id = cfg
+            .set
+            .bundles
+            .get("stack")
+            .unwrap()
+            .identifier()
+            .expect("registry source");
+        assert_eq!(id.tag(), Some("latest"));
     }
 
     #[test]
@@ -841,7 +898,13 @@ code-review = "ghcr.io/acme/skills/code-review"
 "#,
         )
         .expect("parse");
-        let id = cfg.set.skills.get("code-review").unwrap();
+        let id = cfg
+            .set
+            .skills
+            .get("code-review")
+            .unwrap()
+            .identifier()
+            .expect("registry source");
         assert_eq!(id.tag(), Some("latest"));
         assert_eq!(id.to_string(), "ghcr.io/acme/skills/code-review:latest");
     }
@@ -856,7 +919,7 @@ x = "ghcr.io/acme/x@sha256:{hex}"
 "#
         );
         let cfg = ProjectConfig::from_toml_str(&toml).expect("parse");
-        let id = cfg.set.skills.get("x").unwrap();
+        let id = cfg.set.skills.get("x").unwrap().identifier().expect("registry source");
         assert_eq!(id.tag(), None);
         assert!(id.digest().is_some());
     }
@@ -1080,16 +1143,33 @@ rust-style = "ghcr.io/acme/rust-style:2"
     }
 
     #[test]
-    fn grimoire_toml_artifact_tables_still_reject_relative_values() {
-        // The blanket `.`/`..` defence stays authoritative outside bundle
-        // sources: grimoire.toml declarations never accept relative refs.
-        let err = ProjectConfig::from_toml_str("[skills]\nx = \"./x:0\"\n").unwrap_err();
+    fn grimoire_toml_path_shaped_values_parse_as_path_sources() {
+        // Contract change (local path sources): a `./`/`../`-prefixed or
+        // absolute value in a grimoire.toml artifact table is a PATH
+        // source, not a (rejected) relative registry ref. Bundle-source
+        // member maps keep their own relative-ref grammar.
+        let cfg = ProjectConfig::from_toml_str("[skills]\nx = \"./skills/x\"\n").expect("path value parses");
+        let source = cfg.set.skills.get("x").expect("declared");
+        assert_eq!(source.path().map(|p| p.as_str()), Some("./skills/x"));
+        assert!(source.identifier().is_none());
+    }
+
+    #[test]
+    fn grimoire_toml_rejects_path_values_under_mcp() {
+        let err = ProjectConfig::from_toml_str("[mcp]\nx = \"./mcp/x.toml\"\n").unwrap_err();
         assert!(
-            matches!(
-                err.kind,
-                ConfigErrorKind::ArtifactValueInvalid { .. } | ConfigErrorKind::ArtifactValueMissingRegistry { .. }
-            ),
-            "grimoire.toml must reject relative values, got {:?}",
+            matches!(err.kind, ConfigErrorKind::ArtifactValuePathInvalid { .. }),
+            "mcp path value must be rejected, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn grimoire_toml_rejects_backslash_relative_path_values() {
+        let err = ProjectConfig::from_toml_str("[skills]\nx = \"./skills\\\\x\"\n").unwrap_err();
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ArtifactValuePathInvalid { .. }),
+            "backslash path value must be rejected, got {:?}",
             err.kind
         );
     }

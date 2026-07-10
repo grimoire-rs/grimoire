@@ -1453,8 +1453,10 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Agent, &set.agents),
         (ArtifactKind::Mcp, &set.mcp),
     ] {
-        for id in map.values() {
-            out.insert((kind, id.registry_repository()));
+        for source in map.values() {
+            if let Some(id) = source.identifier() {
+                out.insert((kind, id.registry_repository()));
+            }
         }
     }
     out
@@ -1528,7 +1530,12 @@ fn load_scope_for_badges(
     let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
     let (declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_declaration(ctx)
         .map(|(_options, _registries, set)| {
-            let bundles = set.bundles.values().map(|id| id.registry_repository()).collect();
+            let bundles = set
+                .bundles
+                .values()
+                .filter_map(|source| source.identifier())
+                .map(crate::oci::Identifier::registry_repository)
+                .collect();
             (
                 bundles,
                 direct_declared_repos(&set),
@@ -2018,8 +2025,8 @@ fn resolve_bundle_binding(ctx: &TuiContext, repo: &str, basename: &str) -> anyho
     let matches: Vec<&String> = set
         .bundles
         .iter()
-        .filter(|(_binding, id)| id.registry_repository() == repo)
-        .map(|(binding, _id)| binding)
+        .filter(|(_binding, source)| source.identifier().is_some_and(|id| id.registry_repository() == repo))
+        .map(|(binding, _source)| binding)
         .collect();
     match matches.as_slice() {
         [] => Ok(basename.to_string()),
@@ -3573,7 +3580,8 @@ mod tests {
         // ViaBundle even when it was installed standalone (never via a bundle).
         let mut set = DesiredSet::default();
         let id = Identifier::new_registry("mcp/grim", "ghcr.io/grimoire-rs");
-        set.mcp.insert("grim".to_string(), id.clone());
+        set.mcp
+            .insert("grim".to_string(), crate::config::DeclaredSource::Registry(id.clone()));
 
         let direct = direct_declared_repos(&set);
         assert!(
