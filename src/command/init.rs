@@ -86,6 +86,10 @@ fn snapshot_registry<'a>(ctx: &'a Context, explicit: Option<&'a str>) -> Option<
 /// configurations).
 fn render_config(registry: Option<&str>) -> String {
     let mut out = String::new();
+    // Seed the #:schema editor directive (taplo / Even Better TOML) so a
+    // fresh config validates in the editor out of the box; write_config
+    // preserves it across every later rewrite.
+    out.push_str(&format!("#:schema {}\n\n", crate::command::schema::config_schema_id()));
     if let Some(reg) = registry {
         // TOML-escape the value so quotes or backslashes in the locator
         // produce valid TOML, consistent with how `write_config` in
@@ -107,6 +111,18 @@ fn render_config(registry: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_seeds_schema_directive_first_and_parses() {
+        for registry in [None, Some("ghcr.io/acme")] {
+            let body = render_config(registry);
+            assert!(
+                body.starts_with("#:schema https://grimoire.rs/schemas/grimoire-config.schema.json\n"),
+                "init must seed the #:schema directive as the first line: {body}"
+            );
+            crate::config::project_config::ProjectConfig::from_toml_str(&body).expect("seeded config must still parse");
+        }
+    }
 
     #[test]
     fn render_includes_registries_array_when_present() {
@@ -217,7 +233,9 @@ mod tests {
     fn render_omits_options_table_without_registry() {
         let body = render_config(None);
         assert!(!body.contains("[options]"));
-        assert!(body.starts_with("[skills]"));
+        // First content after the seeded #:schema directive is [skills].
+        let first_content = body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#'));
+        assert_eq!(first_content, Some("[skills]"));
         assert!(body.contains("[rules]"));
         // The seed must parse back as a valid (empty) config.
         let cfg = crate::config::project_config::ProjectConfig::from_toml_str(&body).unwrap();

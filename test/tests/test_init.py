@@ -143,3 +143,20 @@ def test_init_registry_resolves_for_add(
         f"skill binding must use the [[registries]] primary host '{registry}/'; "
         f"got:\n{cfg_after}"
     )
+
+
+def test_init_seeds_schema_directive_and_it_survives_writes(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    """`grim init` seeds the #:schema editor directive; a later config
+    write through the shared serializer keeps it in place."""
+    runner = grim_at(project_dir)
+    runner.run("init")
+
+    directive = "#:schema https://grimoire.rs/schemas/grimoire-config.schema.json"
+    body = (project_dir / "grimoire.toml").read_text()
+    assert body.startswith(directive + "\n"), f"init must seed the directive: {body}"
+
+    runner.run("config", "set", "options.clients", "claude")
+    body = (project_dir / "grimoire.toml").read_text()
+    assert body.startswith(directive), f"rewrite must keep the directive: {body}"

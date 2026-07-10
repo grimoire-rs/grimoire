@@ -69,6 +69,13 @@ impl SchemaKind {
     }
 }
 
+/// The published `$id` URL of the `grimoire.toml` schema — the value
+/// `grim init` seeds as the `#:schema` editor directive. Single-sourced
+/// here so the directive can never drift from the published schema.
+pub fn config_schema_id() -> String {
+    SchemaKind::Config.id()
+}
+
 /// Generate the decorated JSON Schema document for `kind`.
 ///
 /// Pure and unit-testable: builds the schema from the real parse struct,
