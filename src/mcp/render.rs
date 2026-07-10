@@ -19,11 +19,11 @@ use anyhow::anyhow;
 use serde::Serialize;
 
 use crate::context::Context;
+use crate::fetch::fetch_artifact;
 use crate::install::client_target::ClientTarget;
 use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer};
 use crate::oci::ArtifactKind;
 
-use super::fetch::fetch_artifact;
 use super::tool_args::RenderToolArgs;
 
 /// The `grim_render` tool result payload.
@@ -65,7 +65,14 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     // No blob cap: output goes to disk, install parity (the mcp/bundle
     // kind caps inside fetch_artifact still apply, but both kinds are
     // rejected below anyway).
-    let fetched = fetch_artifact(ctx, &args.scope, &args.reference, None).await?;
+    let scope = crate::command::resolve_fetch_scope(
+        ctx,
+        args.scope.global(),
+        args.scope.config.as_deref(),
+        args.scope.workspace.as_deref(),
+    );
+    let access = crate::command::access_seam(ctx)?;
+    let fetched = fetch_artifact(&scope, &access, &args.reference, None).await?;
     match fetched.kind {
         ArtifactKind::Mcp => {
             return Err(anyhow!(

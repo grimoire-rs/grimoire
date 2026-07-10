@@ -261,6 +261,52 @@ pub fn registries_global_fallback(ctx: &crate::context::Context) -> Vec<crate::c
     )
 }
 
+/// Resolve the neutral [`crate::fetch::FetchScope`] for a fetch/render:
+/// the ordered registry browse set, the short-id default, the resolved
+/// scope kind, and any degraded-scope warning.
+///
+/// Scope resolution parity with `grim search`: a resolvable scope supplies
+/// its configured registry set; failure degrades to the flag/env/global
+/// fallback chain (with a warning) instead of failing the fetch. This is
+/// the single command-layer seam the `fetch` / `render` front-ends call so
+/// the moved resolution stays single-sourced and the fetch core never
+/// imports `command`.
+pub fn resolve_fetch_scope(
+    ctx: &crate::context::Context,
+    global: bool,
+    config: Option<&std::path::Path>,
+    workspace: Option<&std::path::Path>,
+) -> crate::fetch::FetchScope {
+    let mut warnings = Vec::new();
+    let (registries, short_id_default, scope) = match scope_resolution::resolve_in(ctx, global, config, workspace) {
+        Ok(scope) => {
+            let registries = registries_for_scope(ctx, &scope);
+            let short_id_default = resolve_default_registry(
+                ctx,
+                scope.options.default_registry.as_deref(),
+                global_config_default(ctx, scope.scope).as_deref(),
+            );
+            (registries, short_id_default, scope.scope)
+        }
+        Err(e) => {
+            warnings.push(format!(
+                "no scope resolved ({e:#}); using the flag/env/global fallback registry chain"
+            ));
+            (
+                registries_global_fallback(ctx),
+                primary_registry_global_fallback(ctx),
+                crate::config::scope::ConfigScope::Project,
+            )
+        }
+    };
+    crate::fetch::FetchScope {
+        registries,
+        short_id_default,
+        scope,
+        warnings,
+    }
+}
+
 /// Build a classifiable usage error (exit 64) for a missing `login`
 /// credential input, routed through the top-level error so
 /// [`crate::error::classify_error`] sees it.

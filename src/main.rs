@@ -22,6 +22,7 @@ mod config;
 mod context;
 mod env;
 mod error;
+mod fetch;
 mod install;
 mod lock;
 mod log_switch;

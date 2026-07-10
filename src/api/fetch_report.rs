@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use serde::Serialize;
 
 use crate::cli::printer::Printable;
-use crate::mcp::fetch::FetchReport;
+use crate::fetch::FetchReport;
 
 /// Newtype wrapping the shared MCP fetch payload for CLI rendering.
 #[derive(Debug, Serialize)]
