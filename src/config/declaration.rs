@@ -44,9 +44,6 @@ impl DeclaredSource {
     }
 
     /// The path source, when this source is a local one.
-    // TODO(local-path-sources): staging allow — first caller lands with
-    // the resolve/status branches.
-    #[allow(dead_code, reason = "consumed by the resolve/status path branches (next phases)")]
     pub fn path(&self) -> Option<&PathSource> {
         match self {
             Self::Registry(_) => None,

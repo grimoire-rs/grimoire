@@ -10,10 +10,6 @@
 //! `TryFrom<Raw…>` — this enum is the in-memory shape only, so every
 //! consumer decides explicitly how a path source behaves.
 
-// TODO(local-path-sources): staging allow — consumed by the lock-wire
-// ripple in a following phase; remove when the first call site lands.
-#![allow(dead_code, reason = "phase-1 core type; call sites land with the lock-wire ripple")]
-
 use crate::config::path_source::PathSource;
 use crate::oci::{Digest, PinnedIdentifier};
 

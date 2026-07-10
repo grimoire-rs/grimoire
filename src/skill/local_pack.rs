@@ -12,14 +12,6 @@
 //! JSON members layer), and MCP descriptors do not support path sources —
 //! neither reaches this function.
 
-// TODO(local-path-sources): staging allow — consumed by the resolver and
-// installer branches in following phases; remove when the first call site
-// lands.
-#![allow(
-    dead_code,
-    reason = "phase-1 core helper; call sites land with the resolve/install branches"
-)]
-
 use std::path::Path;
 
 use crate::oci::ArtifactKind;

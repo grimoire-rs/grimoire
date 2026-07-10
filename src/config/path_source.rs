@@ -14,13 +14,6 @@
 //! the directory holding the config file — only when filesystem access is
 //! needed.
 
-// TODO(local-path-sources): staging allow — consumed by the config-parse
-// ripple in the next phase; remove when the first call site lands.
-#![allow(
-    dead_code,
-    reason = "phase-1 core type; call sites land with the config-parse ripple"
-)]
-
 use std::path::{Component, Path, PathBuf};
 
 /// True when a config/CLI value denotes a local path rather than an OCI
@@ -63,6 +56,7 @@ impl PathSource {
 
     /// The raw declared string (`./skills/x`, `../shared/r.md`, or an
     /// absolute path).
+    #[allow(dead_code, reason = "unit-test accessor; production reads via Display")]
     pub fn as_str(&self) -> &str {
         &self.0
     }
