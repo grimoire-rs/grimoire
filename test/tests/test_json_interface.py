@@ -4,14 +4,21 @@
 
 Locks the cross-command invariants documented in
 ``docs/src/json-interface.md``: the uniform ``{"items": [...]}`` envelope
-for multi-item reports and (later) the structured error document.
+(incl. the empty case), the structured error document (two exit-code
+classes), the "non-zero exit does not imply the error document" carve-out,
+`search`'s nullable `kind` field, and MCP/CLI data parity without byte
+identity.
 """
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from src.helpers import make_artifact, write_config
+from src.registry import REGISTRY_HOST
+
+_PROTOCOL = "2025-06-18"
 
 
 def test_error_document_on_missing_config(
@@ -80,3 +87,140 @@ def test_list_reports_use_items_envelope(
     assert isinstance(doc, dict), "top-level JSON must be an object envelope"
     assert isinstance(doc["items"], list)
     assert doc["items"][0]["name"] == "s"
+
+
+def test_empty_result_is_items_empty_array(grim_at, project_dir: Path) -> None:
+    """A multi-item report with no rows is `{"items": []}`, never an
+    absent key, `null`, or a bare `[]`."""
+    write_config(project_dir)  # no skills/rules/bundles/agents declared
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "status", check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"items": []}
+
+
+def test_config_get_unset_key_reports_data_not_error(
+    grim_at, project_dir: Path
+) -> None:
+    """A non-zero exit does not imply the error document: `config get` of a
+    valid-but-unset key exits 1 and still prints the full data report, with
+    no top-level `error` key — the "branch on error-key first, then exit
+    code" contract."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "--format", "json", "config", "get", "options.clients", check=False
+    )
+    assert result.returncode == 1, result.stderr
+    doc = json.loads(result.stdout)
+    assert "error" not in doc, f"a data report must not carry a top-level error key: {doc}"
+    assert doc == {
+        "key": "options.clients",
+        "value": None,
+        "set": False,
+        "scope": "project",
+    }
+
+
+def test_search_surfaces_null_kind_for_unrecognized_manifest(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`search` items carry `kind: null` (not an absent key) when the
+    manifest declares no kind grim recognizes.
+
+    ``kind_from_manifest`` (``src/oci/annotations.rs``) resolves three
+    tiers — `artifactType`, the legacy config media type, then the
+    `com.grimoire.kind` annotation — and returns `None` when none names a
+    known `ArtifactKind` (`skill`/`rule`/`agent`/`bundle`/`mcp`). Pushing an
+    artifact tagged with an unrecognized kind string puts a manifest on the
+    wire whose `artifactType` and `com.grimoire.kind` annotation both carry
+    that same unrecognized value — neither tier resolves — which is exactly
+    the "foreign manifest" condition the Rust unit tests
+    (`kind_from_manifest_none_for_foreign_image`) exercise directly. The
+    catalog build never filters by kind (`build_entry` in
+    `src/catalog/registry_catalog.rs`), so the row still surfaces here.
+    """
+    make_artifact(
+        f"{unique_repo}/mystery",
+        "widget",  # not a recognized ArtifactKind
+        {"mystery.md": "opaque content\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+    entry = next(r for r in rows if r["repo"].endswith(f"{unique_repo}/mystery"))
+    assert entry["kind"] is None
+
+
+def test_mcp_and_cli_status_share_data_but_differ_in_bytes(
+    grim_at, project_dir: Path
+) -> None:
+    """`grim_status` (MCP) and `grim status --format json` (CLI) carry
+    identical data, envelope included, but are not byte-identical: the CLI
+    pretty-prints (`serde_json::to_string_pretty`,
+    `src/api/status_report.rs`), MCP emits compact JSON
+    (`serde_json::to_string`, `src/mcp/server.rs`)."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    cli_result = runner.run("--offline", "--format", "json", "status", check=False)
+    assert cli_result.returncode == 0, cli_result.stderr
+    cli_bytes = cli_result.stdout
+
+    payload = "".join(
+        json.dumps(r) + "\n"
+        for r in [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": _PROTOCOL,
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_status", "arguments": {}},
+            },
+        ]
+    )
+    mcp_result = subprocess.run(
+        [str(runner.binary), "--offline", "mcp"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=runner.env,
+        cwd=str(project_dir),
+        timeout=30,
+    )
+    responses: dict[int, dict] = {}
+    for line in mcp_result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        msg = json.loads(line)
+        if isinstance(msg.get("id"), int):
+            responses[msg["id"]] = msg
+    assert 2 in responses, (
+        f"grim mcp did not answer the tools/call request; got ids {sorted(responses)}"
+    )
+    mcp_text = responses[2]["result"]["content"][0]["text"]
+
+    assert json.loads(mcp_text) == json.loads(cli_bytes), (
+        "MCP and CLI must carry identical data (envelope included) for the same scope"
+    )
+    assert mcp_text != cli_bytes.strip(), (
+        "MCP (compact) and CLI (pretty) must not be byte-identical"
+    )
+    assert "\n" in cli_bytes.strip(), "CLI JSON must be pretty-printed (multi-line)"
+    assert "\n" not in mcp_text, "MCP JSON must be compact (single line)"
