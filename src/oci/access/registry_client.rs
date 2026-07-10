@@ -935,4 +935,41 @@ mod tests {
         );
         handle.abort();
     }
+
+    /// Unit boundary for [`CappedSink`] itself: the cap compares accumulated
+    /// bytes with `>`, so exactly-at-limit must be accepted and one byte over
+    /// must abort — an off-by-one (`>=`) is caught here without a network
+    /// fixture. Accumulation across chunks is what the streaming `pull_blob`
+    /// drives, so the crossing chunk is exercised too.
+    #[tokio::test]
+    async fn capped_sink_accepts_at_limit_and_aborts_over() {
+        use tokio::io::AsyncWriteExt;
+
+        // Exactly at the limit across two chunks: every byte accepted.
+        let mut sink = super::CappedSink {
+            buf: Vec::new(),
+            limit: 4,
+            exceeded: false,
+        };
+        sink.write_all(&[1, 2]).await.expect("first chunk within limit");
+        sink.write_all(&[3, 4])
+            .await
+            .expect("second chunk reaches the limit exactly");
+        assert_eq!(sink.buf, [1, 2, 3, 4]);
+        assert!(!sink.exceeded);
+
+        // The next chunk crosses the limit: abort, buffer never grows past it.
+        let mut sink = super::CappedSink {
+            buf: vec![1, 2, 3],
+            limit: 4,
+            exceeded: false,
+        };
+        let err = sink
+            .write_all(&[4, 5])
+            .await
+            .expect_err("chunk crossing the cap must abort");
+        assert!(err.to_string().contains("size cap"), "unexpected error: {err}");
+        assert!(sink.exceeded);
+        assert_eq!(sink.buf, [1, 2, 3], "buffer must not grow past the cap");
+    }
 }
