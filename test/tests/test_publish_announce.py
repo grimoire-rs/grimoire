@@ -577,7 +577,10 @@ def test_publish_announce_json_reports_branch_pushed(
     announce = data["announce"]
     assert announce["outcome"] == "branch-pushed", data
     assert announce["branch"] == _announce_branch(bare)
-    assert "url" not in announce, f"url key must be absent off pull-request: {announce}"
+    # Always-present-null: the url key is present, explicit null off
+    # the pull-request outcome.
+    assert "url" in announce, f"url key must always be present: {announce}"
+    assert announce["url"] is None, f"url must be null off pull-request: {announce}"
 
 
 def test_publish_announce_json_pull_request_carries_url_and_branch(
@@ -627,7 +630,10 @@ def test_publish_announce_json_up_to_date_keeps_branch(
     announce = data["announce"]
     assert announce["outcome"] == "up-to-date", data
     assert announce["branch"] == branch
-    assert "url" not in announce
+    # Always-present-null: the url key is present and explicit null off
+    # the pull-request outcome.
+    assert "url" in announce, announce
+    assert announce["url"] is None, announce
 
 
 def test_publish_announce_json_dry_run_announce_is_null(

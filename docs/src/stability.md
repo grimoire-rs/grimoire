@@ -36,6 +36,11 @@ ignore fields it does not recognize rather than error on them. That pairing
 is what makes "add a field in a minor" safe for every consumer, including
 ones written before the field existed.
 
+Optional report fields are **always present**: a field that does not apply
+serializes as an explicit `null`, never as an absent key. A consumer can
+therefore distinguish "not applicable" (`null`) from "talking to an older
+grim that predates the field" (key missing) without version sniffing.
+
 ## Unstable — may change in any minor {#unstable}
 
 Two things are deliberately excluded from the guarantee above, because

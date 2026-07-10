@@ -294,15 +294,17 @@ fn type_and_source<'a>(oci: Option<&'a str>, index: Option<&'a str>) -> (&'stati
 }
 
 /// One row in `grim config registry list`.
+///
+/// Both `oci` and `index` keys are always present; exactly one is
+/// non-null for a valid entry (always-present-null policy,
+/// `subsystem-cli-api.md`).
 #[derive(Debug, Serialize)]
 pub struct RegistryRow {
     /// The registry alias, or `None` for alias-less (locator-only) entries.
     pub alias: Option<String>,
-    /// The plain OCI registry ref (`None` for index entries).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The plain OCI registry ref (`null` for index entries).
     pub oci: Option<String>,
-    /// The package-index locator (`None` for registry entries).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The package-index locator (`null` for registry entries).
     pub index: Option<String>,
     /// Whether this is the default registry.
     pub default: bool,
@@ -312,16 +314,16 @@ pub struct RegistryRow {
 ///
 /// Plain format: one-row table — `Alias | Type | Source | Default`.
 ///
-/// JSON format: `{"alias": "…", "oci"|"index": "…", "default": bool}`.
+/// JSON format: `{"alias": "…", "oci": "…"|null, "index": "…"|null,
+/// "default": bool}` — both locator keys always present, exactly one
+/// non-null (always-present-null policy, `subsystem-cli-api.md`).
 #[derive(Debug, Serialize)]
 pub struct RegistryShowReport {
     /// The registry alias.
     pub alias: String,
-    /// The plain OCI registry ref (`None` for index entries).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The plain OCI registry ref (`null` for index entries).
     pub oci: Option<String>,
-    /// The package-index locator (`None` for registry entries).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The package-index locator (`null` for registry entries).
     pub index: Option<String>,
     /// Whether this is the default registry.
     pub default: bool,
@@ -542,6 +544,25 @@ mod tests {
         assert!(v["items"].is_array());
         assert_eq!(v["items"][0]["alias"], "acme");
         assert_eq!(v["items"][0]["oci"], "ghcr.io/acme");
+        // Always-present-null: the unused locator key is explicit null.
+        let index = v["items"][0].get("index").expect("index key must always be present");
+        assert!(index.is_null(), "index must be explicit null for an oci row");
+    }
+
+    #[test]
+    fn registry_show_report_json_keeps_null_locator_key() {
+        let r = RegistryShowReport {
+            alias: "pub".to_string(),
+            oci: None,
+            index: Some("https://index.example".to_string()),
+            default: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["index"], "https://index.example");
+        let oci = v.get("oci").expect("oci key must always be present");
+        assert!(oci.is_null(), "oci must be explicit null for an index row");
     }
 
     #[test]

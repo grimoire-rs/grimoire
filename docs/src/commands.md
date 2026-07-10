@@ -137,8 +137,11 @@ Add `--format json` to any subcommand for machine-readable output. The shapes ar
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
 | `list` | `{"items": [...]}` of `{"key":"…","value":"…"}` |
-| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci"\|"index":"…","default":bool}` |
-| `registry show` | `{"alias":"…","oci"\|"index":"…","default":bool}` |
+| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"default":bool}` |
+| `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"default":bool}` |
+
+Registry rows always carry both locator keys — exactly one of `oci` /
+`index` is non-null for a valid entry.
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
 

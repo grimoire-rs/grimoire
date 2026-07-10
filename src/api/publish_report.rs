@@ -89,15 +89,15 @@ impl Serialize for AnnounceStatus {
 ///
 /// `branch` is always present: the topic branch is deterministic and
 /// known for every completed outcome, so CI can consume it without
-/// grepping stderr. `url` is present only for [`AnnounceStatus::PullRequest`].
+/// grepping stderr. `url` is always present as a key and non-null only
+/// for [`AnnounceStatus::PullRequest`].
 #[derive(Debug, Serialize)]
 pub struct PublishAnnounce {
     /// What the announce achieved.
     pub outcome: AnnounceStatus,
     /// The deterministic topic branch on the index repository.
     pub branch: String,
-    /// The opened PR/MR URL (`pull-request` outcome only).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The opened PR/MR URL; `null` unless the outcome is `pull-request`.
     pub url: Option<String>,
 }
 
@@ -321,10 +321,8 @@ mod tests {
         let v = serde_json::to_value(&pushed).unwrap();
         assert_eq!(v["announce"]["outcome"], "branch-pushed");
         assert_eq!(v["announce"]["branch"], "announce/acme-12345678");
-        assert!(
-            v["announce"].get("url").is_none(),
-            "url key must be absent off the pull-request outcome"
-        );
+        let url = v["announce"].get("url").expect("url key must always be present");
+        assert!(url.is_null(), "url must be explicit null off the pull-request outcome");
     }
 
     #[test]

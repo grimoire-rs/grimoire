@@ -135,6 +135,13 @@ def test_registry_add_then_show_returns_fields(
     assert "default" in result, (
         f"show must include the 'default' field; got: {result!r}"
     )
+    # Always-present-null: the unused locator key is present and null.
+    assert "index" in result, (
+        f"show must include the 'index' key even for an oci entry; got: {result!r}"
+    )
+    assert result["index"] is None, (
+        f"'index' must be explicit null for an oci entry; got: {result!r}"
+    )
 
 
 def test_registry_use_transfers_default_at_most_one(

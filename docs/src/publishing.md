@@ -685,7 +685,7 @@ wrapper object on stdout:
 order. `announce` carries the completed `--announce` outcome: `outcome`
 is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
 deterministic topic branch on the index repository — is always present;
-`url` appears only for `pull-request`. `announce` is `null` whenever the
+`url` is always present and non-null only for `pull-request`. `announce` is `null` whenever the
 announce step did not complete: `--announce` not passed, a dry run, a
 fail-fast stop, or an announce failure (which still exits 69 with the
 entries rendered). A CI pipeline that needs the pushed branch — for
