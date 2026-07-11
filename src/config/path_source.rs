@@ -56,7 +56,6 @@ impl PathSource {
 
     /// The raw declared string (`./skills/x`, `../shared/r.md`, or an
     /// absolute path).
-    #[allow(dead_code, reason = "unit-test accessor; production reads via Display")]
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -12,7 +12,7 @@
 //! JSON members layer), and MCP descriptors do not support path sources —
 //! neither reaches this function.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::oci::ArtifactKind;
 
@@ -85,6 +85,24 @@ pub fn pack_local_artifact(kind: ArtifactKind, path: &Path) -> Result<(String, V
         ArtifactKind::Bundle => unreachable!("bundles pack via the resolver's bundle path, not pack_local_artifact"),
         ArtifactKind::Mcp => unreachable!("mcp path sources are rejected at config parse"),
     }
+}
+
+/// [`pack_local_artifact`] on the blocking pool: every call site does the
+/// same `std::fs` I/O off the async worker thread (mirrors
+/// `resolver::resolve_path_entries` / `tui::app::perform_local_dev`), then
+/// joins the blocking task. `panic_ctx` names the panicking context for the
+/// join-boundary `.expect()` (quality-rust.md permits `.expect()` there);
+/// the inner `Result` is returned unpropagated so each caller keeps its own
+/// `?`-vs-match handling.
+pub async fn pack_local_artifact_blocking(
+    kind: ArtifactKind,
+    abs: PathBuf,
+    panic_ctx: &'static str,
+) -> Result<(String, Vec<u8>), SkillError> {
+    #[allow(clippy::expect_used)]
+    tokio::task::spawn_blocking(move || pack_local_artifact(kind, &abs))
+        .await
+        .expect(panic_ctx)
 }
 
 #[cfg(test)]

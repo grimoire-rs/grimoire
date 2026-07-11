@@ -334,7 +334,9 @@ async fn add_path_source(
 
     // Validate + pack once up front: an invalid source fails before any
     // config write, and the intrinsic name feeds the default binding name.
-    let (intrinsic_name, _layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
+    let packed =
+        crate::skill::pack_local_artifact_blocking(kind, abs.clone(), "path-source packing task panicked").await;
+    let (intrinsic_name, _layer) = super::grim(packed)?;
     let name = args.name.clone().unwrap_or(intrinsic_name);
 
     // Binding-name charset guard (same as the registry path).

@@ -252,7 +252,10 @@ async fn refresh_dev_installs(
         let LockedSource::Path { path, hash } = &rec.source else {
             continue;
         };
-        let packed = crate::skill::pack_local_artifact(rec.kind, &path.resolve(scope.config_dir()));
+        let abs = path.resolve(scope.config_dir());
+        let packed =
+            crate::skill::pack_local_artifact_blocking(rec.kind, abs, "dev-install refresh packing task panicked")
+                .await;
         let (_, layer) = match packed {
             Ok(packed) => packed,
             Err(e) => {

@@ -105,13 +105,13 @@ pub fn resolve_in(
         })
     } else {
         let discovered = ProjectConfig::discover_from(config, workspace)?;
-        warn_absolute_path_sources(&discovered.config.set);
         let config_path = discovered.config_path().to_path_buf();
         let lock_path = discovered.lock_path();
         let workspace = config_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+        warn_untrusted_path_sources(&discovered.config.set, &workspace);
         let roots = AnchorRoots::resolve(workspace.clone(), ctx);
         Ok(ResolvedScope {
             scope: ConfigScope::Project,
@@ -127,23 +127,78 @@ pub fn resolve_in(
     }
 }
 
-/// Warn about absolute path sources in a PROJECT-scope config: a
-/// committed `grimoire.toml` carrying a machine-local absolute path is
-/// not portable to co-workers' checkouts. Global scope stays silent —
-/// `$GRIM_HOME/grimoire.toml` is machine-local by nature.
-fn warn_absolute_path_sources(set: &DesiredSet) {
+/// Warn about untrusted-boundary path sources in a PROJECT-scope config.
+///
+/// A local path source is trusted like a build script: grim reads whatever
+/// file the source names, on behalf of whoever runs `grim`, with no
+/// registry-side integrity check. Two shapes fall outside the workspace
+/// trust boundary and get a SECURITY-framed warning (exit stays 0 — this is
+/// a warning, not a new error path; ADR sub-decision 3 keeps both forms
+/// declarable):
+///
+/// - an **absolute** path source (also non-portable to a co-worker's
+///   checkout of a committed `grimoire.toml`);
+/// - a **relative** path source whose `../..` chain resolves outside the
+///   workspace root (`workspace`) — an out-of-tree escape that reads a file
+///   the workspace boundary does not contain.
+///
+/// Global scope stays silent — `$GRIM_HOME/grimoire.toml` is machine-local
+/// by nature and has no workspace boundary to escape.
+fn warn_untrusted_path_sources(set: &DesiredSet, workspace: &Path) {
     for table in [&set.skills, &set.rules, &set.agents, &set.bundles] {
         for (name, source) in table.iter() {
-            if let Some(path) = source.path()
-                && path.is_absolute()
-            {
+            let Some(path) = source.path() else { continue };
+            if path.is_absolute() {
                 tracing::warn!(
-                    "artifact '{name}' declares the absolute path source '{path}'; \
-                     a committed grimoire.toml with absolute paths is not portable to other machines"
+                    "SECURITY: artifact '{name}' declares the absolute path source '{path}'; \
+                     it resolves outside the workspace and is trusted like a build script — \
+                     grim can read any file the invoking user can read at that path. A committed \
+                     grimoire.toml with absolute paths is also not portable to other machines."
+                );
+            } else if resolves_outside_workspace(workspace, Path::new(path.as_str())) {
+                tracing::warn!(
+                    "SECURITY: artifact '{name}' declares the relative path source '{path}', \
+                     which resolves outside the workspace root; it is trusted like a build \
+                     script — grim can read any file the invoking user can read at that path. \
+                     Review this source before running grim in an untrusted repo."
                 );
             }
         }
     }
+}
+
+/// Lexically resolve `relative` against `base` and report whether the
+/// result falls outside the tree rooted at `base`.
+///
+/// This is a **lexical, component-only** check: it walks `relative`'s own
+/// `..`/`.` components against `base` and never touches the filesystem —
+/// deliberately, so it works even when the source does not exist yet. That
+/// also means it cannot see through a symlink: a path-source root, or any
+/// ancestor directory on the way to it, that is a symlink pointing outside
+/// `base` resolves as in-tree here even though the bytes it names live
+/// outside the workspace. Detecting that would require canonicalizing the
+/// path, which this function intentionally does not do.
+fn resolves_outside_workspace(base: &Path, relative: &Path) -> bool {
+    // An empty base (e.g. `--config grimoire.toml`, whose parent path is "")
+    // has zero components, so `..` would pop nothing and a genuine escape like
+    // `../outside` reads as in-tree. Anchor it to "." — a single component to
+    // pop against — which keeps the check purely lexical (no filesystem touch).
+    let base = if base.as_os_str().is_empty() { Path::new(".") } else { base };
+    let base_components: Vec<_> = base.components().collect();
+    let mut resolved = base_components.clone();
+    for component in relative.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(_) => resolved.push(component),
+            std::path::Component::CurDir => {}
+            // A validated `PathSource` relative value never mixes in a root
+            // or prefix component; treat it as escaping if it somehow did.
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return true,
+        }
+    }
+    resolved.len() < base_components.len() || resolved[..base_components.len()] != base_components[..]
 }
 
 /// Load the install state for a resolved scope, routing project scope
@@ -273,5 +328,43 @@ mod tests {
         let ctx = Context::new(&opts());
         let scope = resolve_in(&ctx, true, None, Some(dir.path())).expect("global resolves");
         assert_eq!(scope.scope, ConfigScope::Global);
+    }
+
+    /// B4: `resolves_outside_workspace` is the lexical guard behind the
+    /// SECURITY-framed relative-path-source warning — it must flag an
+    /// out-of-tree `../..` escape and clear an in-tree relative path,
+    /// purely by component arithmetic (no filesystem access, so it works
+    /// even when the source does not exist yet).
+    #[test]
+    fn resolves_outside_workspace_flags_out_of_tree_escape_only() {
+        let ws = Path::new("/home/user/project");
+        assert!(
+            resolves_outside_workspace(ws, Path::new("../../outside-skill")),
+            "a ../.. chain past the workspace root must be flagged"
+        );
+        assert!(
+            !resolves_outside_workspace(ws, Path::new("./bundles/x.toml")),
+            "an in-tree relative path must not be flagged"
+        );
+        assert!(
+            !resolves_outside_workspace(ws, Path::new("../project/bundles/x.toml")),
+            "a ../ chain that steps back inside the workspace must not be flagged"
+        );
+    }
+
+    #[test]
+    fn resolves_outside_workspace_flags_escape_from_empty_base() {
+        // `--config grimoire.toml` yields an empty workspace parent; a `../`
+        // escape must still be flagged (regression: an empty base previously
+        // let `..` pop nothing so the escape read as in-tree).
+        let empty = Path::new("");
+        assert!(
+            resolves_outside_workspace(empty, Path::new("../outside-skill")),
+            "a ../ escape from an empty (cwd) workspace must be flagged"
+        );
+        assert!(
+            !resolves_outside_workspace(empty, Path::new("bundles/x.toml")),
+            "an in-tree relative path from an empty workspace must not be flagged"
+        );
     }
 }

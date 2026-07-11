@@ -86,7 +86,7 @@ stability (`.claude/artifacts/adr_render_layout_stability.md`).
 
 ## Known limitations {#limitations}
 
-Two behaviors fall outside every guarantee above — not because they are
+Three behaviors fall outside every guarantee above — not because they are
 likely to change, but because they are hard constraints of the current
 design.
 
@@ -105,6 +105,41 @@ config or lock parse failure uses.
 This only triggers when the feature is actually in use: a registry-only
 lock or state file stays byte-identical across the version boundary, so a
 project that never declares a path source is unaffected either way.
+
+### Local path sources are trusted like a build script {#limitations-path-source-trust}
+
+A [local path source][path-sources] — a `grimoire.toml` skill, rule,
+agent, or bundle declared as `./…`, `../…`, or an absolute path, and the
+equivalent entries a [dev-install][install-dev] writes into
+`.grimoire/state.json` — names a file on the invoking user's own
+filesystem, read with that user's own permissions. There is no registry
+boundary, no signature, and no sandbox around that read: a path source is
+trusted the same way a `Makefile` or a `package.json` script is trusted.
+`grim lock` and `grim install` can read any file the invoking user can
+read at that path, including one outside the project's own directory tree.
+
+This is deliberate — path sources exist so local development and
+monorepo cross-references work without a registry round-trip — but it
+means a cloned repository's `grimoire.toml` (or a hand-edited
+`.grimoire/state.json`) is exactly as trustworthy as its build scripts.
+Review a project's path-sourced declarations before running `grim` inside
+an untrusted checkout, the same way you would review its `Makefile` or CI
+config before running it locally. grim warns to stderr — a SECURITY-framed
+message — on **every command that resolves the project scope**
+([`status`][status], [`install`][install], `add`, `update`, `remove`,
+`uninstall`, [`context`][context], `lock`, all sharing one resolution seam),
+not `grim lock` alone, whenever a declared source is absolute or a relative
+source resolves outside the workspace root; the warning is advisory only,
+and the command's exit code stays `0`.
+
+That out-of-workspace check is **lexical**: it walks the path's own `../`
+and `.` components against the workspace root and never touches the
+filesystem, so it does not catch a symlink-mediated escape. A relative
+source that looks in-tree but whose root — or an ancestor directory on the
+way to it — is a symlink pointing outside the workspace is read and packed
+with no warning at all. This follows from the same "trusted like a build
+script" model above: grim does not resolve symlinks to police the trust
+boundary any more than [`make`][gnu-make] or [`npm install`][npm-install] do.
 
 ### Offline re-materialization needs a manifest {#limitations-offline-remat}
 
@@ -128,9 +163,16 @@ unaffected — they read straight from disk and never touch a manifest.
 [json-interface]: ./json-interface.md
 [status]: ./commands.md#status
 [install]: ./commands.md#install
+[install-dev]: ./commands.md#install-dev
+[context]: ./commands.md#context
 [config-exit-codes]: ./commands.md#config-exit-codes
 [configuration]: ./configuration.md
 [env-vars]: ./configuration.md#environment-variables
 [artifacts-kinds]: ./artifacts.md#kinds
 [publishing-release]: ./publishing.md#release
 [vendor-metadata]: ./vendor-metadata.md
+[path-sources]: ./concepts.md#references-tags-and-digests
+
+<!-- external -->
+[gnu-make]: https://www.gnu.org/software/make/manual/make.html
+[npm-install]: https://docs.npmjs.com/cli/commands/npm-install

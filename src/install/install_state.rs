@@ -261,8 +261,9 @@ impl TryFrom<RawInstallRecord> for InstallRecord {
         let source = match (raw.pinned, raw.path, raw.hash) {
             (Some(pinned), None, None) => LockedSource::Registry(pinned),
             (None, Some(path), Some(hash)) => {
-                // F7 hook: constrain a path `hash` to SHA-256 on the wire
-                // (currently a NO-OP — see `validate_path_hash_algorithm`).
+                // Constrain a path `hash` to SHA-256 on the wire: packing
+                // only ever emits SHA-256, so a `sha384`/`sha512` recorded
+                // hash could never verify.
                 crate::lock::locked_source::validate_path_hash_algorithm(&hash)?;
                 LockedSource::Path { path, hash }
             }
@@ -1034,10 +1035,7 @@ mod tests {
     /// Contract test (design record F7): an install record's path `hash`
     /// must be SHA-256, mirroring the lock-tier `RawLockedArtifact` gate —
     /// packing only ever emits SHA-256, so a non-SHA-256 recorded hash can
-    /// never verify.
-    ///
-    /// STUB: currently FAILS — `validate_path_hash_algorithm` is a no-op,
-    /// so this non-SHA-256 hash is accepted.
+    /// never verify. `validate_path_hash_algorithm` enforces this at parse.
     #[test]
     fn try_from_rejects_non_sha256_path_hash() {
         let json = format!(

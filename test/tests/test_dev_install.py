@@ -253,6 +253,83 @@ def test_dev_install_state_record_has_exactly_one_dev_true_record(
     assert records[0]["dev"] is True
 
 
+def test_dev_install_name_collision_with_declared_binding_is_rejected(
+    grim_at, project_dir: Path
+) -> None:
+    # B2 (post /swarm-review 2026-07-11, plan_local_bundles_tui_group.md):
+    # `uninstall.rs` undeclares unconditionally, so a dev-install whose
+    # intrinsic (kind, name) collides with an existing DECLARED binding
+    # silently overlays the install-state record for that name — a later
+    # `grim uninstall skill foo` then drops the real declaration, never
+    # having owned it (data loss). Root-cause fix: reject the COLLIDING
+    # dev-install itself at `grim install <path>` time (exit 64, guidance),
+    # keeping dev records disjoint from declared bindings so this can never
+    # happen downstream. The declared binding must survive the rejection
+    # untouched.
+    (project_dir / ".claude").mkdir()
+    declared = project_dir / "skills" / "foo"
+    _write(
+        declared / "SKILL.md",
+        "---\nname: foo\ndescription: Declared.\n---\n# Declared v1\n",
+    )
+    _write(project_dir / "grimoire.toml", '[skills]\nfoo = "./skills/foo"\n')
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+    cfg_before = (project_dir / "grimoire.toml").read_text()
+
+    # A DIFFERENT local directory whose SKILL.md ALSO declares `name: foo`
+    # (the skill-dir validator requires the frontmatter name to match the
+    # directory's own basename, so the leaf component must be `foo` too) —
+    # the intrinsic (kind, name) collides with the declared binding even
+    # though it lives at a distinct path from `./skills/foo`.
+    colliding = project_dir / "elsewhere" / "foo"
+    _write(
+        colliding / "SKILL.md",
+        "---\nname: foo\ndescription: Colliding dev copy.\n---\n# Dev copy\n",
+    )
+
+    result = runner.run("install", str(colliding), "--client", "claude", check=False)
+    assert result.returncode == 64, result.stderr
+
+    cfg_after = (project_dir / "grimoire.toml").read_text()
+    assert cfg_after == cfg_before, (
+        "a rejected dev-install collision must leave the declared binding "
+        f"untouched in grimoire.toml:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
+    )
+
+
+def test_dev_install_no_collision_when_declared_binding_name_differs(
+    grim_at, project_dir: Path
+) -> None:
+    # B2 false-positive regression: the collision guard keys on `(kind,
+    # name)` equality, not "some binding is already declared". A
+    # dev-install of a DIFFERENT-named local skill must succeed even
+    # though `foo` is already declared in grimoire.toml.
+    (project_dir / ".claude").mkdir()
+    declared = project_dir / "skills" / "foo"
+    _write(
+        declared / "SKILL.md",
+        "---\nname: foo\ndescription: Declared.\n---\n# Declared v1\n",
+    )
+    _write(project_dir / "grimoire.toml", '[skills]\nfoo = "./skills/foo"\n')
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    # A DIFFERENT-named, unrelated local skill.
+    other = project_dir / "elsewhere" / "bar"
+    _write(
+        other / "SKILL.md",
+        "---\nname: bar\ndescription: Unrelated dev skill.\n---\n# Dev v1\n",
+    )
+
+    result = runner.run("install", str(other), "--client", "claude", check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_dev_record_survives_update_prune_with_real_orphan(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

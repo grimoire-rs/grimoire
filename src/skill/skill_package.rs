@@ -26,6 +26,17 @@ use super::skill_name::SkillName;
 /// the required fields are well-formed; the frontmatter `name` equals the
 /// directory name.
 ///
+/// A symlinked `SKILL.md` is treated as absent (not read through): packing
+/// (`collect_files`, which walks `dir` to build the tar) uses
+/// `symlink_metadata` and silently skips a symlinked entry, so a symlinked
+/// index would validate against content packing never includes — and, in
+/// a cloned repo, that content may sit outside the skill's own tree
+/// (CWE-59). Validation must agree with packing's skip, not read through it.
+/// This guard is leaf-only: it rejects a symlinked `SKILL.md` file, but
+/// does not detect a symlinked skill-directory root or an ancestor
+/// directory in `dir`'s path — that vector is an accepted trust-model
+/// limitation (a local path source is trusted like a build script).
+///
 /// # Errors
 ///
 /// [`SkillErrorKind::MissingSkillMd`], [`SkillErrorKind::FrontmatterParse`],
@@ -33,7 +44,7 @@ use super::skill_name::SkillName;
 /// [`SkillErrorKind::Io`].
 pub fn validate_skill_dir(dir: &Path) -> Result<SkillFrontmatter, SkillError> {
     let skill_md = dir.join("SKILL.md");
-    if !skill_md.is_file() {
+    if !skill_md.is_file() || is_symlink(&skill_md) {
         return Err(SkillError::new(dir, SkillErrorKind::MissingSkillMd));
     }
     let doc = std::fs::read_to_string(&skill_md).map_err(|e| SkillError::new(&skill_md, SkillErrorKind::Io(e)))?;
@@ -71,6 +82,13 @@ pub fn validate_skill_dir(dir: &Path) -> Result<SkillFrontmatter, SkillError> {
 /// parse when present. The file name (sans `.md`) must be a valid skill
 /// name (rules share the name charset).
 ///
+/// A symlinked `file` is rejected rather than read through, for the same
+/// reason as [`validate_skill_dir`]'s index guard (CWE-59). This guard is
+/// leaf-only: it rejects a symlinked index file, but does not detect a
+/// symlinked ancestor directory in `file`'s path — that vector is an
+/// accepted trust-model limitation (a local path source is trusted like a
+/// build script).
+///
 /// # Errors
 ///
 /// [`SkillErrorKind::Io`], [`SkillErrorKind::NameInvalid`], or
@@ -78,6 +96,7 @@ pub fn validate_skill_dir(dir: &Path) -> Result<SkillFrontmatter, SkillError> {
 pub fn validate_rule_file(file: &Path) -> Result<RuleFrontmatter, SkillError> {
     let name = rule_name(file)?;
     SkillName::parse(&name).map_err(|e| SkillError::new(file, SkillErrorKind::NameInvalid(e)))?;
+    reject_symlinked_index(file)?;
     let doc = std::fs::read_to_string(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
     let ParsedRule { frontmatter, .. } = RuleFrontmatter::parse_doc(&doc, file)?;
     Ok(frontmatter)
@@ -90,6 +109,13 @@ pub fn validate_rule_file(file: &Path) -> Result<RuleFrontmatter, SkillError> {
 /// the file stem (the OpenCode filename-as-identity rule, enforced for
 /// every client so the identity is consistent).
 ///
+/// A symlinked `file` is rejected rather than read through, for the same
+/// reason as [`validate_skill_dir`]'s index guard (CWE-59). This guard is
+/// leaf-only: it rejects a symlinked index file, but does not detect a
+/// symlinked ancestor directory in `file`'s path — that vector is an
+/// accepted trust-model limitation (a local path source is trusted like a
+/// build script).
+///
 /// # Errors
 ///
 /// [`SkillErrorKind::Io`], [`SkillErrorKind::NameInvalid`],
@@ -99,6 +125,7 @@ pub fn validate_rule_file(file: &Path) -> Result<RuleFrontmatter, SkillError> {
 pub fn validate_agent_file(file: &Path) -> Result<AgentFrontmatter, SkillError> {
     let stem = rule_name(file)?;
     SkillName::parse(&stem).map_err(|e| SkillError::new(file, SkillErrorKind::NameInvalid(e)))?;
+    reject_symlinked_index(file)?;
     let doc = std::fs::read_to_string(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
     let parsed = AgentFrontmatter::parse_doc(&doc, file)?;
     if parsed.frontmatter.name.as_str() != stem {
@@ -125,6 +152,36 @@ fn rule_name(file: &Path) -> Result<String, SkillError> {
             )
         })?;
     Ok(stem)
+}
+
+/// Whether `path` is itself a symlink. Uses `symlink_metadata` (never
+/// follows the link) — the same call [`collect_files`] uses to decide
+/// whether to skip an entry while packing. A read/stat failure (including
+/// the path simply not existing) is not a symlink.
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Reject a symlinked rule/agent index file (CWE-59): a rule or agent has
+/// no directory wrapper to discover its index through, so unlike
+/// [`validate_skill_dir`] there is no "absent" framing — a symlinked `file`
+/// is refused outright as not-found, the same shape a genuinely-missing
+/// path already produces via [`std::fs::read_to_string`].
+///
+/// # Errors
+///
+/// [`SkillErrorKind::Io`] (not-found) when `file` is a symlink.
+fn reject_symlinked_index(file: &Path) -> Result<(), SkillError> {
+    if is_symlink(file) {
+        return Err(SkillError::new(
+            file,
+            SkillErrorKind::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "index file is a symlink; refusing to read through it outside the source tree",
+            )),
+        ));
+    }
+    Ok(())
 }
 
 /// Pack the skill directory at `dir` into an uncompressed tar whose
@@ -743,8 +800,9 @@ mod tests {
     /// unbounded (CWE-400/770). Uses only tiny (1-byte) files so the test
     /// stays fast — the file-COUNT cap, not the byte cap, is what trips.
     ///
-    /// STUB: currently FAILS — `collect_files`/`pack_skill_dir` never call
-    /// `check_pack_bounds`, so packing this oversized tree still succeeds.
+    /// `collect_files` calls `check_pack_bounds` incrementally as each file
+    /// is collected (see its own doc comment), so the cap trips mid-walk
+    /// rather than after the whole oversized tree is read into memory.
     #[test]
     fn pack_skill_dir_rejects_file_count_over_cap() {
         let tmp = tempfile::tempdir().unwrap();
@@ -967,5 +1025,75 @@ mod tests {
         assert_eq!(names, vec!["code-review/SKILL.md".to_string()]);
         assert!(!names.iter().any(|n| n.contains("leak")));
         assert!(!names.iter().any(|n| n.contains("linked-dir")));
+    }
+
+    // ── W5: validate_* agrees with collect_files' symlink-skip policy ────
+
+    /// W5: a symlinked `SKILL.md` must be rejected by `validate_skill_dir`
+    /// the same way a genuinely-missing one is (`MissingSkillMd`) — never
+    /// read through. Packing already silently skips a symlinked entry
+    /// (`pack_skill_dir_skips_symlinked_file_and_dir`); validation must
+    /// agree instead of reading a target that may sit outside the tree.
+    #[test]
+    #[cfg(unix)]
+    fn validate_skill_dir_rejects_symlinked_skill_md() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside-secret.md");
+        write(&outside, "---\nname: code-review\ndescription: TOP SECRET\n---\n");
+
+        let dir = tmp.path().join("code-review");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&outside, dir.join("SKILL.md")).unwrap();
+
+        let err = validate_skill_dir(&dir).expect_err("a symlinked SKILL.md must be rejected, not read through");
+        assert!(
+            matches!(err.kind, SkillErrorKind::MissingSkillMd),
+            "expected MissingSkillMd, got {:?}",
+            err.kind
+        );
+    }
+
+    /// W5: a symlinked rule file must be rejected outright (no directory
+    /// wrapper to discover it through, unlike the skill-dir case).
+    #[test]
+    #[cfg(unix)]
+    fn validate_rule_file_rejects_symlinked_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("secret.md");
+        write(&outside, "---\npaths: [\"**/*.rs\"]\n---\nTOP SECRET\n");
+        let link = tmp.path().join("rust-style.md");
+        symlink(&outside, &link).unwrap();
+
+        let err = validate_rule_file(&link).expect_err("a symlinked rule file must be rejected, not read through");
+        assert!(
+            matches!(err.kind, SkillErrorKind::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+            "expected Io(NotFound), got {:?}",
+            err.kind
+        );
+    }
+
+    /// W5: a symlinked agent file must be rejected outright, mirroring the
+    /// rule-file guard.
+    #[test]
+    #[cfg(unix)]
+    fn validate_agent_file_rejects_symlinked_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("secret.md");
+        write(&outside, "---\nname: reviewer\ndescription: TOP SECRET\n---\nbody\n");
+        let link = tmp.path().join("reviewer.md");
+        symlink(&outside, &link).unwrap();
+
+        let err = validate_agent_file(&link).expect_err("a symlinked agent file must be rejected, not read through");
+        assert!(
+            matches!(err.kind, SkillErrorKind::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+            "expected Io(NotFound), got {:?}",
+            err.kind
+        );
     }
 }

@@ -663,19 +663,20 @@ def test_add_local_bundle_is_rejected_with_guidance(
     assert "./bundles/x.toml" not in cfg
 
 
-def test_remove_local_bundle_drops_declaration_but_keeps_member_files(
+def test_remove_local_bundle_evicts_member_from_lock_and_install_does_not_resurrect_it(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    # K: the plan's v1 decision for mutating a path-declared bundle —
-    # `effective_set` returns `None` for a path declaration (its
-    # `DeclaredSource::Path` carries no registry `Identifier` to key
-    # membership eviction on), so `drop_from_lock` falls back to
-    # `legacy_drop_from_lock`, which — for a bundle whose declared source
-    # has no `identifier()` — undeclares the binding and drops the
-    # `[[bundle]]` cache entry WITHOUT evicting the member's own lock entry
-    # or touching installed files. Graceful degrade: honest staleness over
-    # silent file loss (`adr_effective_set_mutations.md` /
-    # `src/lock/effective_set.rs` `snapshot_matches` Path arm).
+    # B1 (post /swarm-review 2026-07-11, plan_local_bundles_tui_group.md):
+    # `legacy_drop_from_lock` skipped `evict_bundle_members` for a path
+    # bundle (no `(repo, tag)` to key eviction on), dropped the `[[bundle]]`
+    # snapshot, and restamped `declaration_hash` fresh anyway — the lock
+    # read as current while STILL listing a member only that bundle
+    # provided, so a following `grim install` re-materialized the removed
+    # bundle. The lock must never list a member no surviving declaration
+    # provides under a fresh hash, and a following `grim install` must
+    # never bring it back. (Member *files* already on disk may remain —
+    # out of scope; this test proves the lock is truthful and a REINSTALL
+    # cannot resurrect the file, not that the pre-existing file vanishes.)
     from src.helpers import make_artifact
 
     sk = make_artifact(
@@ -703,10 +704,110 @@ def test_remove_local_bundle_drops_declaration_but_keeps_member_files(
 
     lock = (project_dir / "grimoire.lock").read_text()
     assert "[[bundle]]" not in lock, "the path-bundle cache entry must be dropped"
+    assert 'name = "code-review"' not in lock, (
+        "the lock must not retain a member that only the removed bundle "
+        f"provided:\n{lock}"
+    )
 
-    # Graceful degrade: `grim remove` never deletes files (documented
-    # behaviour for every kind), and a path-bundle's member eviction is
-    # skipped entirely (no registry identifier to match), so the member's
-    # own lock entry AND its installed file both survive.
-    assert 'name = "code-review"' in lock, "the member's own lock entry must survive"
-    assert installed.is_file(), "member files must survive the graceful degrade"
+    # Simulate a fresh checkout: with the member's own lock entry gone, a
+    # following `grim install` must NOT bring the file back — nothing in
+    # the (now-truthful) lock names it any more.
+    installed.unlink()
+    runner.run("install", "--client", "claude")
+    assert not installed.exists(), (
+        "grim install must not resurrect a member the removed bundle used to provide"
+    )
+
+
+def test_local_bundle_status_shows_path_source_not_direct(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # B3 (post /swarm-review 2026-07-11): `grim status`'s declared-bundle
+    # loop hardcodes `source = "direct"` for every bundle row, even a local
+    # (path-declared) one. A local bundle's row must mirror the
+    # skill/rule/agent loop and report its path source instead.
+    from src.helpers import make_artifact
+
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# CR\n"},
+        tag="stable",
+    )
+    _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    items = runner.json("status")["items"]
+    bundle_row = next(r for r in items if r["kind"] == "bundle")
+    assert bundle_row["source"] == "path: ./bundles/x.toml", (
+        f"a local bundle's status row must report its path source, not "
+        f"{bundle_row['source']!r}"
+    )
+
+    plain = runner.plain("status").stdout
+    assert "path: ./bundles/x.toml" in plain, (
+        f"the plain status table must show the bundle's path source too:\n{plain}"
+    )
+
+
+def test_relative_out_of_tree_path_source_warns_security(
+    grim_at, tmp_path: Path
+) -> None:
+    # B4 (post /swarm-review 2026-07-11): `warn_untrusted_path_sources` only
+    # checked `path.is_absolute()`, so a RELATIVE escape out of the
+    # workspace (e.g. `../../outside-skill`) never warned even though it
+    # reads a file the workspace boundary does not contain. Fix decision:
+    # extend the warning to relative out-of-tree escapes, reframed as a
+    # SECURITY message (posture: DOCUMENT — no new error path, exit stays
+    # 0; ADR sub-decision 3's trust model — absolute + relative both
+    # allowed — is unchanged).
+    project = tmp_path / "nested" / "project"
+    outside = tmp_path / "outside-skill"
+    _write(
+        outside / "SKILL.md",
+        "---\nname: outside-skill\ndescription: Outside.\n---\n# Outside\n",
+    )
+    _write(
+        project / "grimoire.toml",
+        '[skills]\noutside-skill = "../../outside-skill"\n',
+    )
+
+    runner = _offline(grim_at(project))
+    result = runner.run("lock")
+    assert result.returncode == 0, result.stderr
+
+    message = result.stderr.lower()
+    assert "security" in message, (
+        f"a relative path source that escapes the workspace must warn with "
+        f"a SECURITY-framed message: {result.stderr}"
+    )
+    assert "outside" in message or "workspace" in message, (
+        f"the warning must name that the source resolves outside the "
+        f"workspace: {result.stderr}"
+    )
+
+
+def test_update_named_path_entry_is_not_rejected_as_undeclared(
+    grim_at, project_dir: Path
+) -> None:
+    # W4 coverage: `resolve_lock_partial`'s per-name guard
+    # (`all_work.iter().any(...) || has_path_entry(set, name)`) must accept
+    # a path-sourced binding name in a NAMED `grim update <name>` — it must
+    # not be rejected with `TagNotFound` ("tag not found") just because a
+    # path entry produces no registry work item. May already pass today
+    # (the `has_path_entry` guard already exists) — coverage, not proven
+    # regression, until run.
+    _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    result = runner.run("update", "my-skill", "--client", "claude", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "tag not found" not in result.stderr.lower(), result.stderr

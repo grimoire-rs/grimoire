@@ -175,7 +175,29 @@ async fn dev_install(
     // Validate + name the source; its layer bytes (and thus the pinned
     // hash) are re-derived below from the stored path so the recorded hash
     // matches what the installer, `status`, and `update` recompute.
-    let (name, _layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
+    let packed = crate::skill::pack_local_artifact_blocking(kind, abs.clone(), "dev-install pack task panicked").await;
+    let (name, _layer) = super::grim(packed)?;
+
+    // B2: reject a dev-install whose intrinsic `(kind, name)` collides with a
+    // binding already declared in `grimoire.toml`. A dev install record and a
+    // declared binding share the same `(kind, name)` install-record key, so
+    // an overlay here would let a later `grim uninstall` drop the real
+    // declaration the dev install never owned (data loss). Keeping dev records
+    // disjoint from declared bindings makes that impossible downstream.
+    let already_declared = match kind {
+        ArtifactKind::Skill => scope.set.skills.contains_key(&name),
+        ArtifactKind::Rule => scope.set.rules.contains_key(&name),
+        ArtifactKind::Agent => scope.set.agents.contains_key(&name),
+        // Path sources never produce these kinds (shape/--kind gate above).
+        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("dev-install is limited to skill/rule/agent"),
+    };
+    if already_declared {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::command::command_error::CommandError::ConfigUsage(format!(
+                "'{name}' is already declared in grimoire.toml; remove the declaration or rename the local {kind} before dev-installing"
+            )),
+        )));
+    }
 
     // Record the source config-dir-relative (like `grim add`) so status
     // and update resolve it against the same anchor; an absolute CLI path
@@ -215,10 +237,9 @@ async fn dev_install(
     // installer's integrity re-pack, `status`, and `update` do. Hashing
     // `abs` (the canonicalized CLI path) instead would diverge under a
     // symlinked project dir and spuriously fail the integrity gate.
-    let (_, layer) = super::grim(crate::skill::pack_local_artifact(
-        kind,
-        &source_path.resolve(scope.config_dir()),
-    ))?;
+    let pin_path = source_path.resolve(scope.config_dir());
+    let packed = crate::skill::pack_local_artifact_blocking(kind, pin_path, "dev-install pin task panicked").await;
+    let (_, layer) = super::grim(packed)?;
     let hash = crate::oci::Algorithm::Sha256.hash(&layer);
 
     // Synthetic single-entry lock — never written to disk.

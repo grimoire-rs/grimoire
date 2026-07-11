@@ -375,7 +375,7 @@ async fn install_one<M: ArtifactMaterializer>(
     let blob = match &artifact.source {
         crate::lock::locked_source::LockedSource::Registry(_) => fetch_verified_layer(artifact, kind, access).await?,
         crate::lock::locked_source::LockedSource::Path { path, hash } => {
-            pack_verified_local(artifact, kind, path, hash, anchor)?
+            pack_verified_local(artifact, kind, path, hash, anchor).await?
         }
     };
 
@@ -713,11 +713,7 @@ fn integrity_gate(
 /// Validate + pack a locked path source and verify the bytes hash to the
 /// locked content pin — the local counterpart of [`fetch_verified_layer`]
 /// (fail-closed: a drifted source refuses to install stale lock content).
-///
-/// Packing is synchronous file I/O on small artifact trees, matching the
-/// existing sync-fs precedent in this module.
-#[allow(clippy::result_large_err)]
-fn pack_verified_local(
+async fn pack_verified_local(
     artifact: &LockedArtifact,
     kind: ArtifactKind,
     path: &crate::config::path_source::PathSource,
@@ -730,8 +726,9 @@ fn pack_verified_local(
         source: artifact.source.to_declared(),
     };
     let abs = path.resolve(anchor);
-    let (_intrinsic_name, layer) = crate::skill::pack_local_artifact(kind, &abs)
-        .map_err(|e| InstallError::with_reference(aref(), InstallErrorKind::LocalSource(Box::new(e))))?;
+    let packed = crate::skill::pack_local_artifact_blocking(kind, abs, "local-source packing task panicked").await;
+    let (_intrinsic_name, layer) =
+        packed.map_err(|e| InstallError::with_reference(aref(), InstallErrorKind::LocalSource(Box::new(e))))?;
     let actual = crate::oci::Algorithm::Sha256.hash(&layer);
     if &actual != locked_hash {
         return Err(InstallError::with_reference(
@@ -749,11 +746,11 @@ fn pack_verified_local(
 
 /// Fetch and digest-verify an artifact's single layer blob.
 ///
-/// `artifact.pinned` is the *manifest* digest: resolve the manifest to its
-/// single layer descriptor, fetch that layer blob, and verify the bytes
-/// hash to the layer digest (defence in depth — `CachedAccess` /
-/// `RegistryClient` already verify, but the seam contract allows a mock
-/// that does not). An access failure (offline miss, auth, registry)
+/// `artifact.source.pinned()` is the *manifest* digest: resolve the
+/// manifest to its single layer descriptor, fetch that layer blob, and
+/// verify the bytes hash to the layer digest (defence in depth —
+/// `CachedAccess` / `RegistryClient` already verify, but the seam contract
+/// allows a mock that does not). An access failure (offline miss, auth, registry)
 /// propagates with its own taxonomy so the exit code is correct
 /// (81/80/69/...).
 async fn fetch_verified_layer(
@@ -2175,8 +2172,8 @@ mod tests {
     /// (a corrupted or forward-incompatible state file) cannot be
     /// re-materialized, so it must be DROPPED from the new record rather than
     /// re-attached at its stale old-pin hash — re-attaching would violate the
-    /// invariant "every output in a record is at `record.pinned`". On-disk files
-    /// are left untouched (D3).
+    /// invariant "every output in a record is at `record.source`'s pin". On-disk
+    /// files are left untouched (D3).
     ///
     /// On pre-fix code the merge re-attaches the legacy output verbatim, so it
     /// lingers at its A-hash under `pinned=B` ⇒ this test FAILS.

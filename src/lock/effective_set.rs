@@ -68,9 +68,15 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
     type Contribution = (Option<Identifier>, BundleProvenance);
     let mut grouped: BTreeMap<(ArtifactKind, String), Vec<Contribution>> = BTreeMap::new();
     for (binding, declared_source) in &set.bundles {
-        // A path-sourced bundle has no registry identity to match a cached
-        // snapshot against; membership is unknowable here, so the caller
-        // falls back to its legacy behavior (same as a missing snapshot).
+        // Whole-call degrade, not per-bundle: the `?` below propagates `None`
+        // out of `effective_set` itself, so a SINGLE path-declared (or
+        // unmatched) bundle makes the entire call return `None` — every
+        // mutation in this project then takes the legacy path
+        // (`remove::legacy_drop_from_lock`), which as of B1 evicts a path
+        // bundle's members via its `[[bundle]]` snapshot provenance. A path
+        // bundle has no registry identity to match a cached snapshot against,
+        // so membership is unknowable in this offline function; the legacy
+        // path handles it (same as a missing snapshot).
         let declared_id = declared_source.identifier()?;
         let snapshot = cached.iter().find(|b| snapshot_matches(binding, declared_id, b))?;
         for member in &snapshot.members {

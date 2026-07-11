@@ -21,7 +21,7 @@ pub mod skill_package;
 #[allow(unused_imports)]
 pub use agent_frontmatter::{AgentFrontmatter, ParsedAgent};
 #[allow(unused_imports)]
-pub use local_pack::pack_local_artifact;
+pub use local_pack::{pack_local_artifact, pack_local_artifact_blocking};
 #[allow(unused_imports)]
 pub use rule_frontmatter::{ParsedRule, RuleFrontmatter};
 #[allow(unused_imports)]

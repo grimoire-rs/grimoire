@@ -313,6 +313,17 @@ Reach for [`grim add <path>`](#add-path) instead when you want the source
 declared — committed to `grimoire.toml` and shared with anyone who clones
 the repo, rather than local to this checkout.
 
+A dev-install is refused (exit 64) when the packed artifact's own
+`(kind, name)` — its frontmatter `name` for a skill, its file stem for a
+rule or agent — matches a binding already declared in `grimoire.toml`, with
+guidance to either remove the declaration or dev-install the local artifact
+under a different name or `--kind`. A dev record and a declared binding are
+stored under the same install-record key; letting a colliding dev-install
+through would leave a later [`grim uninstall`](#uninstall) free to drop the
+declared binding it never actually owned, silently losing config the
+dev-install never touched. The check runs before the local path is
+installed or recorded, so the existing declaration is left untouched.
+
 ## grim update {#update}
 
 `grim update [names…]` re-resolves floating tags, rolls the lock forward, and

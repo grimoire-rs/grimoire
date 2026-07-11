@@ -96,7 +96,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // Declared bundles: one row each so the user sees what they declared.
     // A bundle never installs itself — its state reflects whether it has
     // been expanded into a fresh lock.
-    for name in scope.set.bundles.keys() {
+    for (name, decl) in scope.set.bundles.iter() {
         let state = if !lock_matches_config {
             ArtifactStatus::Stale
         } else if lock.is_none() {
@@ -104,10 +104,14 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         } else {
             ArtifactStatus::Installed
         };
+        let source = match decl.path() {
+            Some(path) => format!("path: {path}"),
+            None => "direct".to_string(),
+        };
         entries.push(StatusEntry {
             kind: ArtifactKind::Bundle,
             name: name.clone(),
-            source: "direct".to_string(),
+            source,
             pinned: None,
             state,
             outputs: Vec::new(),
@@ -134,7 +138,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         // moved registry tag: `grim update <name>`.
         if entry_state == ArtifactStatus::Installed
             && let Some(l) = locked
-            && path_source_drifted(l, scope.config_dir())
+            && path_source_drifted(l, scope.config_dir()).await
         {
             entry_state = ArtifactStatus::Outdated;
         }
@@ -156,7 +160,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // deliberately undeclared, so they appear after the declared rows.
     for record in state.iter_records().filter(|r| r.dev) {
         let outputs = record_outputs(Some(record), &active, &scope.roots);
-        let entry_state = derive_dev_state(record, &scope.roots, &active, scope.config_dir());
+        let entry_state = derive_dev_state(record, &scope.roots, &active, scope.config_dir()).await;
         let source = match record.source.path() {
             Some(path) => format!("path: {path} (dev)"),
             None => "(dev)".to_string(),
@@ -317,13 +321,16 @@ fn derive_state(
 /// counts as drift (a warning is logged): a declared path whose source
 /// vanished is not a clean install, and the remediation is `grim update`.
 /// Status is a read-only report and stays exit-0 regardless.
-fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> bool {
+async fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> bool {
     let crate::lock::locked_source::LockedSource::Path { path, hash } = &locked.source else {
         return false;
     };
     // ponytail: re-packs the source on every status call; cache by mtime
     // if artifact trees ever grow large enough for this to matter.
-    match crate::skill::pack_local_artifact(locked.kind, &path.resolve(anchor)) {
+    let abs = path.resolve(anchor);
+    let packed =
+        crate::skill::pack_local_artifact_blocking(locked.kind, abs, "path-source drift check task panicked").await;
+    match packed {
         Ok((_, layer)) => &crate::oci::Algorithm::Sha256.hash(&layer) != hash,
         Err(e) => {
             tracing::warn!(
@@ -342,7 +349,7 @@ fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> boo
 /// State for a dev-install record (no declaration, no lock entry):
 /// footprint checks first, then a re-pack of the recorded path against
 /// the recorded hash (drift ⇒ outdated, refreshed by `grim update`).
-fn derive_dev_state(
+async fn derive_dev_state(
     record: &crate::install::install_state::InstallRecord,
     roots: &AnchorRoots,
     active: &[ClientTarget],
@@ -368,7 +375,10 @@ fn derive_dev_state(
     let crate::lock::locked_source::LockedSource::Path { path, hash } = &record.source else {
         return ArtifactStatus::Installed;
     };
-    match crate::skill::pack_local_artifact(record.kind, &path.resolve(anchor)) {
+    let abs = path.resolve(anchor);
+    let packed =
+        crate::skill::pack_local_artifact_blocking(record.kind, abs, "dev-install status check task panicked").await;
+    match packed {
         Ok((_, layer)) if &crate::oci::Algorithm::Sha256.hash(&layer) != hash => ArtifactStatus::Outdated,
         Ok(_) => ArtifactStatus::Installed,
         Err(e) => {
@@ -768,8 +778,8 @@ mod tests {
     /// `Outdated`. Mirrors `derive_dev_state`'s Err arm for the dev flow;
     /// pre-fix this returned `false` and a vanished declared source lied as
     /// a clean install.
-    #[test]
-    fn declared_path_source_drifted_flags_missing_source() {
+    #[tokio::test]
+    async fn declared_path_source_drifted_flags_missing_source() {
         use crate::config::path_source::PathSource;
         use crate::lock::locked_source::LockedSource;
 
@@ -784,7 +794,7 @@ mod tests {
             bundles: Vec::new(),
         };
         assert!(
-            path_source_drifted(&locked, dir.path()),
+            path_source_drifted(&locked, dir.path()).await,
             "a declared path whose source is unreadable must read as drift, not a clean install"
         );
     }

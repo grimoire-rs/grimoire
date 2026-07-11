@@ -254,24 +254,50 @@ fn legacy_drop_from_lock(
     set_after: &crate::config::declaration::DesiredSet,
 ) -> UndeclareOutcome {
     let mut lock = previous.clone();
+    let mut stale = false;
     match kind {
         ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
         ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
         ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
         ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
         ArtifactKind::Bundle => {
-            let bundle = set_before
+            // The `(repo, tag)` member-provenance pair the removed bundle
+            // stamped onto its members. A registry bundle derives it from its
+            // declared identifier; a **path** bundle has no identifier, so
+            // read it from the bundle's cached `[[bundle]]` snapshot — whose
+            // `provenance_pair()` is the same `(path, hash-short)` pair the
+            // resolver stamped onto every member. Without the snapshot
+            // fallback a path bundle's members are never evicted and survive
+            // as orphans under a freshly restamped hash (the B1 bug: the lock
+            // reads fresh while listing a member no declaration provides, so
+            // the next `grim install` re-materializes the removed bundle).
+            let provenance = set_before
                 .bundles
                 .get(name)
                 .and_then(|source| source.identifier())
-                .map(|id| (id.registry_repository(), id.tag_or_latest().to_string()));
-            if let Some((repo, tag)) = bundle {
-                evict_bundle_members(&mut lock, &repo, &tag, set_after);
+                .map(|id| (id.registry_repository(), id.tag_or_latest().to_string()))
+                .or_else(|| {
+                    previous
+                        .bundles
+                        .iter()
+                        .find(|b| b.name == name)
+                        .map(crate::lock::locked_bundle::LockedBundle::provenance_pair)
+                });
+            match provenance {
+                Some((repo, tag)) => evict_bundle_members(&mut lock, &repo, &tag, set_after),
+                // No identifier and no cached snapshot (a hand-edited lock):
+                // membership is unknowable offline, so the removed bundle's
+                // members may still be listed. Skip the hash restamp so the
+                // lock reads honestly stale instead of fresh-with-orphans —
+                // the next `grim lock` reconciles it.
+                None => stale = true,
             }
         }
     }
     lock.bundles.retain(|b| b.name != name || kind != ArtifactKind::Bundle);
-    lock.metadata.declaration_hash = set_after.declaration_hash_cached().to_string();
+    if !stale {
+        lock.metadata.declaration_hash = set_after.declaration_hash_cached().to_string();
+    }
     UndeclareOutcome {
         lock,
         notes: Vec::new(),
@@ -286,11 +312,23 @@ fn legacy_drop_from_lock(
 /// binding in `set` resolves to the same `(repo, tag)` — the same bundle
 /// declared under two names — nothing is evicted at all.
 fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &crate::config::declaration::DesiredSet) {
-    let still_declared = set
-        .bundles
-        .values()
-        .filter_map(crate::config::declaration::DeclaredSource::identifier)
-        .any(|id| id.registry_repository() == repo && id.tag_or_latest() == tag);
+    // A surviving binding still declares `(repo, tag)` when its registry
+    // identifier matches — or, for a **path** binding (whose `identifier()`
+    // is always `None`), when its cached `[[bundle]]` snapshot resolves to the
+    // same `provenance_pair()`. Without the snapshot check the same local
+    // bundle declared under two names would wrongly evict a member the
+    // surviving binding still provides.
+    let still_declared = set.bundles.iter().any(|(binding, source)| {
+        source
+            .identifier()
+            .is_some_and(|id| id.registry_repository() == repo && id.tag_or_latest() == tag)
+            || lock.bundles.iter().any(|b| {
+                b.name == *binding && {
+                    let (b_repo, b_tag) = b.provenance_pair();
+                    b_repo == repo && b_tag == tag
+                }
+            })
+    });
     if still_declared {
         return;
     }
@@ -600,6 +638,56 @@ mod tests {
     }
 
     #[test]
+    fn remove_local_bundle_evicts_member_via_snapshot_provenance() {
+        // B1: a path (local) bundle has no `(repo, tag)`, so its members must
+        // be evicted by keying on the `[[bundle]]` snapshot's
+        // `provenance_pair()` — otherwise the member the bundle provided
+        // survives as an orphan under a freshly restamped hash and the next
+        // `grim install` re-materializes it.
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+
+        let path = PathSource::parse("./bundles/x.toml").unwrap();
+        let hash = Digest::Sha256("c".repeat(64));
+        let (repo, tag) = (path.as_str().to_string(), hash.to_short_string());
+
+        let mut prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), tag.as_str())])]);
+        prev.bundles = vec![LockedBundle {
+            name: "x".to_string(),
+            source: LockedBundleSource::Path {
+                path: path.clone(),
+                hash: hash.clone(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "code-review".to_string(),
+                id: "localhost:5000/code-review:1".to_string(),
+            }],
+        }];
+
+        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        before
+            .bundles
+            .insert("x".to_string(), crate::config::declaration::DeclaredSource::Path(path));
+        before.invalidate_declaration_hash_cache();
+        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        after_set.invalidate_declaration_hash_cache();
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
+        assert!(
+            out.lock.skills.is_empty(),
+            "the member only the path bundle provided must be evicted: {:?}",
+            out.lock.skills
+        );
+        assert!(out.lock.bundles.is_empty(), "the path-bundle snapshot must be pruned");
+        assert_eq!(
+            out.lock.metadata.declaration_hash,
+            after_set.declaration_hash_cached(),
+            "eviction removed every orphan, so the hash restamps fresh"
+        );
+    }
+
+    #[test]
     fn bundle_eviction_skipped_while_duplicate_binding_remains() {
         // The same bundle (repo AND tag) declared under a second binding
         // name: removing one binding must not evict anything (legacy path —
@@ -624,6 +712,95 @@ mod tests {
             out.lock.skills[0].bundles.len(),
             1,
             "the provenance entry is kept for the remaining binding"
+        );
+    }
+
+    #[test]
+    fn evict_skips_member_when_second_path_binding_shares_bundle() {
+        // R1: two path bindings (`x`, `y`) point at the SAME local bundle, so
+        // both stamp the same `(path, hash-short)` provenance onto the shared
+        // member. Removing `x` must NOT evict the member `y` still provides —
+        // a path binding has no `identifier()`, so its duplicate-binding
+        // survival is read from its `[[bundle]]` snapshot's `provenance_pair()`.
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+
+        let path = PathSource::parse("./bundles/shared.toml").unwrap();
+        let hash = Digest::Sha256("c".repeat(64));
+        let (repo, tag) = (path.as_str().to_string(), hash.to_short_string());
+
+        let mut prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), tag.as_str())])]);
+        let path_snapshot = |binding: &str| LockedBundle {
+            name: binding.to_string(),
+            source: LockedBundleSource::Path {
+                path: path.clone(),
+                hash: hash.clone(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "code-review".to_string(),
+                id: "localhost:5000/code-review:1".to_string(),
+            }],
+        };
+        prev.bundles = vec![path_snapshot("x"), path_snapshot("y")];
+
+        let path_source = |p: &PathSource| crate::config::declaration::DeclaredSource::Path(p.clone());
+        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        before.bundles.insert("x".to_string(), path_source(&path));
+        before.bundles.insert("y".to_string(), path_source(&path));
+        before.invalidate_declaration_hash_cache();
+        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        after_set.bundles.insert("y".to_string(), path_source(&path));
+        after_set.invalidate_declaration_hash_cache();
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
+        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["code-review"],
+            "the member the second path binding still provides must survive: {:?}",
+            out.lock.skills
+        );
+        assert_eq!(
+            out.lock.bundles.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["y"],
+            "only the removed binding's snapshot is pruned; the survivor stays"
+        );
+    }
+
+    #[test]
+    fn remove_local_bundle_without_snapshot_keeps_member_and_marks_stale() {
+        // R5: a path bundle removal where the lock carries NO matching
+        // `[[bundle]]` snapshot (hand-edited lock). With neither an
+        // `identifier()` nor a cached snapshot, membership is unknowable
+        // offline — the orphaned member is retained and the hash restamp is
+        // skipped so the lock reads honestly stale rather than fresh-with-orphans.
+        use crate::config::path_source::PathSource;
+
+        let path = PathSource::parse("./bundles/gone.toml").unwrap();
+        let repo = path.as_str().to_string();
+
+        // `lock_of` leaves `prev.bundles` empty — no snapshot for the bundle.
+        let prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), "abcdef12")])]);
+
+        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        before
+            .bundles
+            .insert("x".to_string(), crate::config::declaration::DeclaredSource::Path(path));
+        before.invalidate_declaration_hash_cache();
+        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        after_set.invalidate_declaration_hash_cache();
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
+        assert_eq!(
+            out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
+            "no snapshot: the hash restamp is skipped, so the lock reads honestly stale"
+        );
+        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["code-review"],
+            "the orphaned member is retained — it cannot be safely evicted offline"
         );
     }
 }
