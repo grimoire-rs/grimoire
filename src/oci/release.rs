@@ -99,6 +99,13 @@ pub enum ReleaseErrorKind {
     /// so there is no `X.Y`/`X`/`latest` cascade to derive.
     #[error("--cascade requires a semver version (X.Y.Z); '{tag}' is not semver")]
     CascadeRequiresSemver { tag: String },
+
+    /// A user-supplied tag collided with grim's reserved internal namespace
+    /// (the bare `__grimoire` companion tag or any `__grimoire.<x>` family
+    /// member). Publishing under it would overwrite or shadow a machine-owned
+    /// companion tag, so it is refused before any network work.
+    #[error("tag '{tag}' is reserved for grim internal use; choose a different tag")]
+    ReservedTag { tag: String },
 }
 
 /// Resolve the `--cascade` / `--no-cascade` flag pair into the tri-state

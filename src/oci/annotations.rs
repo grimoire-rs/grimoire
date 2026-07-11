@@ -132,14 +132,21 @@ pub fn replacement_ref(annotations: &BTreeMap<String, String>) -> Option<String>
         .and_then(|v| normalize_deprecated(v))
 }
 
+/// Annotation key carrying the publisher-authored keyword list — a
+/// comma-separated value parsed by [`keywords_from_annotations`].
+pub const KEYWORDS_ANNOTATION: &str = "com.grimoire.keywords";
+
+/// Annotation key carrying the optional short, single-line catalog summary.
+pub const SUMMARY_ANNOTATION: &str = "com.grimoire.summary";
+
 /// Read the keyword list off a manifest's annotation map: the comma-separated
-/// `com.grimoire.keywords` value split on commas, trimmed, with empties
+/// [`KEYWORDS_ANNOTATION`] value split on commas, trimmed, with empties
 /// dropped; `[]` when the annotation is absent. The single read seam so the
 /// catalog build, `grim describe`, and the index announce parse keywords
 /// identically (rather than three subtly-diverging inline copies).
 pub fn keywords_from_annotations(annotations: &BTreeMap<String, String>) -> Vec<String> {
     annotations
-        .get("com.grimoire.keywords")
+        .get(KEYWORDS_ANNOTATION)
         .map(|k| {
             k.split(',')
                 .map(str::trim)
@@ -271,10 +278,10 @@ pub fn annotations_for_skill(
     // opt-in below stamps a deterministic per-commit date instead.
     insert_git_provenance(&mut a, git);
     if let Some(kw) = fm.metadata.get("keywords") {
-        a.insert("com.grimoire.keywords".to_string(), kw.clone());
+        a.insert(KEYWORDS_ANNOTATION.to_string(), kw.clone());
     }
     if let Some(summary) = fm.metadata.get("summary") {
-        a.insert("com.grimoire.summary".to_string(), summary.clone());
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
     if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
@@ -319,10 +326,10 @@ pub fn annotations_for_rule(
     // `annotations_for_skill`.
     insert_git_provenance(&mut a, git);
     if let Some(kw) = string_from_extra(fm, "keywords") {
-        a.insert("com.grimoire.keywords".to_string(), kw);
+        a.insert(KEYWORDS_ANNOTATION.to_string(), kw);
     }
     if let Some(summary) = string_from_extra(fm, "summary") {
-        a.insert("com.grimoire.summary".to_string(), summary);
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary);
     }
     if let Some(deprecated) = string_from_extra(fm, "deprecated")
         .as_deref()
@@ -372,10 +379,10 @@ pub fn annotations_for_agent(
     // — see `annotations_for_skill`.
     insert_git_provenance(&mut a, git);
     if let Some(kw) = fm.metadata.get("keywords") {
-        a.insert("com.grimoire.keywords".to_string(), kw.clone());
+        a.insert(KEYWORDS_ANNOTATION.to_string(), kw.clone());
     }
     if let Some(summary) = fm.metadata.get("summary") {
-        a.insert("com.grimoire.summary".to_string(), summary.clone());
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
     if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
@@ -423,10 +430,10 @@ pub fn annotations_for_bundle(
     }
     insert_git_provenance(&mut a, git);
     if let Some(summary) = &metadata.summary {
-        a.insert("com.grimoire.summary".to_string(), summary.clone());
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
     if let Some(keywords) = &metadata.keywords {
-        a.insert("com.grimoire.keywords".to_string(), keywords.clone());
+        a.insert(KEYWORDS_ANNOTATION.to_string(), keywords.clone());
     }
     if let Some(deprecated) = metadata.deprecated.as_deref().and_then(normalize_deprecated) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
@@ -469,10 +476,10 @@ pub fn annotations_for_mcp(
     }
     insert_git_provenance(&mut a, git);
     if let Some(summary) = &descriptor.summary {
-        a.insert("com.grimoire.summary".to_string(), summary.clone());
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
     if let Some(keywords) = &descriptor.keywords {
-        a.insert("com.grimoire.keywords".to_string(), keywords.clone());
+        a.insert(KEYWORDS_ANNOTATION.to_string(), keywords.clone());
     }
     if let Some(deprecated) = descriptor.deprecated.as_deref().and_then(normalize_deprecated) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);

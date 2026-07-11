@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from src.helpers import make_artifact
+from src.helpers import make_artifact, make_description
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
 
@@ -232,6 +232,68 @@ def test_mcp_describe_tool_matches_cli_json(
     cli_payload = runner.json("describe", ref)
     assert mcp_payload == cli_payload, "MCP grim_describe must equal CLI describe --format json"
     assert mcp_payload["replaced_by"] == "ghcr.io/acme/skills/mcp-desc-2"
+
+
+def test_mcp_fetch_description_and_digest_only_match_cli(
+    grim_at: Callable[[Path], GrimRunner],
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """``grim_fetch`` accepts the new ``description`` / ``digest_only`` args and
+    returns the same payloads as the equivalent CLI ``grim fetch`` calls — the
+    tri-shaped outcome routes through one core (``fetch::fetch_outcome``), so
+    MCP and CLI never drift. Needs the network (manifest + layer), so the
+    server runs non-offline."""
+    repo = f"{unique_repo}/skills/mcp-desc-fetch"
+    make_artifact(
+        repo,
+        "skill",
+        {"mcp-desc-fetch/SKILL.md": "---\nname: mcp-desc-fetch\ndescription: d\n---\n# d\n"},
+        tag="latest",
+    )
+    make_description(repo, {"README.md": b"# Repo\n", "assets/logo.png": bytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF])})
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+    ref = f"{registry}/{repo}:latest"
+
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_fetch", "arguments": {"ref": ref, "description": True}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "grim_fetch", "arguments": {"ref": ref, "digest_only": True}},
+            },
+        ],
+        offline=False,
+    )
+
+    desc_call = responses[2]["result"]
+    assert desc_call["isError"] is False, f"grim_fetch --description must not error: {desc_call!r}"
+    desc_payload = json.loads(desc_call["content"][0]["text"])
+    assert desc_payload["kind"] == "desc"
+    assert desc_payload == runner.json("fetch", ref, "--description"), (
+        "MCP grim_fetch(description) must equal CLI fetch --description --format json"
+    )
+
+    probe_call = responses[3]["result"]
+    assert probe_call["isError"] is False, f"grim_fetch --digest-only must not error: {probe_call!r}"
+    probe_payload = json.loads(probe_call["content"][0]["text"])
+    assert set(probe_payload) == {"ref", "digest"}
+    assert probe_payload == runner.json("fetch", ref, "--digest-only"), (
+        "MCP grim_fetch(digest_only) must equal CLI fetch --digest-only --format json"
+    )
 
 
 def test_mcp_allow_writes_gates_grim_render(

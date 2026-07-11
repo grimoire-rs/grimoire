@@ -194,6 +194,32 @@ def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_i
     assert repos == ["ghcr.io/grimoire-rs/mcp/grim"], f"keyword-only match failed: {repos}"
 
 
+def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path, http_index) -> None:
+    """A package's ``summary`` from the index ``all.json`` surfaces on the
+    search row (``row["summary"]``) — the index now carries the catalog blurb
+    the phone book used to drop."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package(
+                "sum-skill",
+                "skill",
+                "ghcr.io/acme/skills/sum-skill",
+                "A skill with a summary",
+                summary="terse catalog blurb",
+            ),
+        ],
+    )
+    _index_config(project_dir, base)
+
+    rows = _search_rows(grim_at(project_dir))
+    row = next(r for r in rows if r.get("repo") == "ghcr.io/acme/skills/sum-skill")
+    assert row.get("summary") == "terse catalog blurb", (
+        f"index summary must reach the search row, got {row!r}"
+    )
+
+
 def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: Path) -> None:
     """An unreachable index degrades that source to an empty group — the
     browse still exits 0 (same contract as an unreachable registry)."""

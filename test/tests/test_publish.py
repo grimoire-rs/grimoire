@@ -695,6 +695,56 @@ def test_publish_version_invalid_channel_values_exit_65(
         tag_digest(f"skills/{skill_name}", channel_value)
 
 
+@pytest.mark.parametrize(
+    "reserved_tag",
+    [
+        "__grimoire",
+        "__grimoire.sbom",
+    ],
+)
+def test_publish_version_reserved_tag_is_usage_error_before_network(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, reserved_tag: str
+) -> None:
+    """`grim publish --version __grimoire` (or any `__grimoire.<x>` family
+    member) targets grim's reserved companion namespace. The reserved-tag write
+    guard (`validate_user_tag`) refuses it as a *usage* error (64) — a distinct
+    code from the 65-tier channel-shape gate (prerelease / cascade-float /
+    charset) — and does so before any push, so a user can never overwrite or
+    shadow a machine-owned companion tag. Mirrors the `grim release` guard
+    (test_release.py::test_release_reserved_tag_is_usage_error_before_network).
+
+    The 64-vs-65 split is load-bearing: drop the `validate_user_tag(channel)`
+    call and `__grimoire` passes the remaining shape checks (it is a legal OCI
+    tag), so it would publish (exit 0) instead of failing 64 — asserting the
+    exact code pins the guard.
+    """
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    manifest_path = _write_publish_manifest(
+        project_dir,
+        registry,
+        prefix,
+    )
+
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--version", reserved_tag,
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"a reserved-tag --version {reserved_tag!r} must be a usage error (64), "
+        f"not the 65-tier channel gate, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+
+    # Refused before the push: the reserved tag must stay absent on the registry.
+    skill_name = f"{prefix}-skill"
+    with pytest.raises(urllib.error.HTTPError):
+        tag_digest(f"skills/{skill_name}", reserved_tag)
+
+
 def test_publish_version_valid_channel_still_exits_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Carry keywords and summary through the package index so index-backed search matches them *(index)*
+- Repository description companion: `publish.toml` `[description]` table (`readme`/`logo`/`changelog`/`include`), with a conventional-file auto-probe (`README.md`, `CHANGELOG.md`, `logo.*`) and per-entry override/opt-out *(publish)*
+- `grim fetch --description` (the description companion, every file inline; `--out` unpacks it to disk) and `--digest-only` (a resolve-only cache probe, composes with `--description`) *(fetch)*
+- `has_description` field on `grim describe`, derived from the tag listing at zero extra network cost *(describe)*
+
+### Changed
+
+- `grim publish` auto-publishes a description companion when conventional files (`README.md`, `CHANGELOG.md`, `logo.*`) are present in the manifest directory; opt out with the manifest-wide `publish = false` or a per-entry `description = false` *(publish)* **BREAKING**
+- A missing artifact or description companion on `grim fetch` / `grim describe` now classifies as not-found (exit 79), matching the documented contract *(fetch)*
+- `grim fetch` / `grim fetch --description` against an uncached reference under `--offline` now exits offline-blocked (exit 81) instead of a misleading not-found (exit 79) *(fetch)*
+- `[description]` companion paths that escape the manifest directory — an explicit `readme`/`logo`/`changelog` or an `include` glob hit reaching outside via `..`, an absolute path, or a symlink — are now a data error (exit 65) instead of being silently packed *(publish)*
+- `grim release` and `grim publish` reject a user-supplied tag colliding with grim's reserved `__grimoire` namespace as a usage error (exit 64), before any network work, so a machine-owned companion tag can never be overwritten *(publish)*
+- `grim fetch --vendor` combined with `--description` is now a usage error (exit 64) — the companion is vendor-neutral, so the projection does not apply *(fetch)*
+
+### Removed
+
+- `grim desc` (introduced this cycle, never released) — description companions now publish through `grim publish` and read through `grim fetch --description` *(desc)*
 
 ## [0.8.4] - 2026-07-07
 

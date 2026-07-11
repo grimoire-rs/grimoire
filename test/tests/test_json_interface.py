@@ -15,7 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, make_description, write_config
 from src.registry import REGISTRY_HOST
 
 _PROTOCOL = "2025-06-18"
@@ -217,16 +217,49 @@ def test_describe_is_single_object_with_all_fields_present(
     assert isinstance(doc, dict)
     assert "items" not in doc and "error" not in doc
     for key in (
-        "ref", "digest", "kind", "name", "title", "description", "summary",
-        "version", "license", "repository", "revision", "created", "keywords",
-        "deprecated", "replaced_by", "tags", "annotations",
+        "ref", "digest", "kind", "name", "title", "description",
+        "has_description", "summary", "version", "license", "repository",
+        "revision", "created", "keywords", "deprecated", "replaced_by",
+        "tags", "annotations",
     ):
         assert key in doc, f"single-object report must always carry {key}"
     assert doc["revision"] is None and doc["created"] is None
+    assert isinstance(doc["has_description"], bool), "companion presence is an always-present bool"
     assert isinstance(doc["keywords"], list)
     assert isinstance(doc["tags"], list)
     assert isinstance(doc["annotations"], dict)
     assert doc["replaced_by"] == "ghcr.io/acme/skills/desc-2"
+
+
+def test_fetch_report_is_tri_shaped(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`fetch` JSON has three documented shapes: content (`{ref, digest, kind,
+    …, content}`), a description bundle (`{ref, digest, kind: "desc",
+    files[]}`), and a digest probe (`{ref, digest}` only). Each is a flat
+    object, never an `items` envelope or `error` key."""
+    repo = f"{unique_repo}/skills/tri"
+    make_artifact(
+        repo, "skill", {"tri/SKILL.md": "---\nname: tri\ndescription: d.\n---\n# t\n"}, tag="latest"
+    )
+    make_description(repo, {"README.md": b"# Repo\n"})
+    # A resolved project scope keeps the digest probe to its minimal shape.
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+    ref = f"{registry}/{repo}:latest"
+
+    content = runner.json("fetch", ref)
+    assert "items" not in content and "error" not in content
+    assert content["kind"] == "skill" and "content" in content
+
+    bundle = runner.json("fetch", ref, "--description")
+    assert bundle["kind"] == "desc"
+    assert isinstance(bundle["files"], list) and bundle["files"]
+    assert {"path", "size", "content"} <= set(bundle["files"][0])
+
+    probe = runner.json("fetch", ref, "--digest-only")
+    assert set(probe) == {"ref", "digest"}, f"digest probe is exactly {{ref, digest}}: {probe}"
+    assert probe["digest"] == content["digest"], "the probe digest equals the full fetch digest"
 
 
 def test_mcp_and_cli_status_share_data_but_differ_in_bytes(

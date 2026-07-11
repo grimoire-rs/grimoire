@@ -8,6 +8,7 @@ pub mod access;
 pub mod annotations;
 pub mod artifact_kind;
 pub mod bundle;
+pub mod description;
 pub mod digest;
 pub mod git_provenance;
 pub mod identifier;

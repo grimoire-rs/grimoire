@@ -94,9 +94,10 @@ pub struct ReleaseArgs {
 ///
 /// # Errors
 ///
-/// A validation/pack failure (65/74), an invalid version (65), a refused
-/// tag overwrite (65), or a registry/auth failure (69/80) propagate via
-/// the typed error chain.
+/// A reference tag colliding with grim's reserved namespace
+/// (`__grimoire`/`__grimoire.<x>`) is a usage error (64); a validation/pack
+/// failure (65/74), an invalid version (65), a refused tag overwrite (65), or a
+/// registry/auth failure (69/80) propagate via the typed error chain.
 pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseReport, ExitCode)> {
     // Parse the release reference, expanding a short identifier against the
     // effective default registry (config `[options].default_registry` first,
@@ -107,6 +108,10 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // rejected (a release must carry a tag). A non-version tag publishes
     // exactly itself (no cascade); full semver cascades.
     let version = id.tag().unwrap_or("").to_string();
+    // Reject a reference tag that collides with grim's reserved namespace
+    // (`__grimoire`/`__grimoire.<x>`) — a usage error (64) surfaced before any
+    // packing or network work, so a companion tag can never be overwritten.
+    super::grim(crate::oci::description::validate_user_tag(&version))?;
     let tags = super::grim(publish_tags(&version, resolve_cascade(args.cascade, args.no_cascade)))?;
 
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
@@ -419,7 +424,7 @@ fn parse_reference(
 /// [`crate::command::primary_registry_global_fallback`] is used instead of
 /// the legacy `[options].default_registry` chain so a `[[registries]]`-only
 /// global config is still honored.
-fn release_default_registry(ctx: &Context) -> String {
+pub(crate) fn release_default_registry(ctx: &Context) -> String {
     use super::scope_resolution;
     // Best-effort: discover the project scope. On miss (no config in tree),
     // fall back through the global-[[registries]]-aware helper so a user with

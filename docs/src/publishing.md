@@ -81,9 +81,144 @@ lone `.md` file; they exist for `grim fetch` and catalog UIs. An agent with no
 companion directory packs to exactly the single `code-reviewer.md` it always
 did.
 
-MCP servers and bundles publish a single JSON layer with no file tree, so they
-carry no README/logo companion — a catalog UI reads their `description` and
-`summary` from [`grim describe`](./commands.md#describe) instead.
+MCP servers and bundles publish a single JSON layer with no file tree of their
+own, so they carry no *in-tree* README. For a README that works uniformly across
+every kind, publish a [repository description companion](#description-companion).
+
+## Repository description companion {#description-companion}
+
+The in-tree READMEs above ride each artifact's own layer, so they cover the
+tree-backed kinds (skill, rule, agent) but not mcp or bundle. A **description
+companion** is a repository-level channel that works for *every* kind: it is the
+one home for all of a repo's descriptive data — a `README.md`, a `CHANGELOG.md`,
+a logo, and any assets the README references — published to the reserved
+`__grimoire` tag in the same repository as each artifact.
+
+The companion is not a separate command — it rides
+[`grim publish`](#batch-publish). After each entry's artifact is pushed, grim
+(re)points that repository's `__grimoire` tag at a deterministic tar of the
+repo's descriptive files. The companion is marked `com.grimoire.kind: desc`; it
+is **not** an artifact kind, so it never installs, resolves, or appears in a
+catalog, and its reserved `__grimoire` tag is hidden from every user-facing tag
+listing (`grim describe` `tags[]`, the TUI version picker, catalog version
+selection). Direct resolution of the tag still works. Because the pack is
+byte-stable, republishing unchanged content produces an identical digest — the
+registry stores nothing new (the tag is always re-pointed, never gated by
+skip-existing).
+
+### Conventional layout {#description-probe}
+
+With no configuration at all, grim probes the manifest directory for the
+conventional files and publishes a companion when it finds any:
+
+| Source (relative to `publish.toml`) | Packed as |
+|-------------------------------------|-----------|
+| `README.md` | `README.md` |
+| `CHANGELOG.md` | `CHANGELOG.md` |
+| `assets/logo.png` / `assets/logo.svg` / `logo.png` / `logo.svg` (first hit) | `logo.png` / `logo.svg` |
+
+Every member is optional — a repo with just a `README.md` publishes a
+one-file companion. Probe misses are silent: a manifest directory with none of
+these files simply publishes no companion, which is not an error.
+
+### The `[description]` table {#description-table}
+
+To decouple the companion from your repository layout — or to add extra
+assets — declare a `[description]` table. Its paths are relative to
+`publish.toml`, and the well-known members map their source onto the fixed
+wire name, so your repo can lay files out however it likes:
+
+```toml
+[description]                     # optional; fans out to every entry
+readme    = "docs/readme.md"      # → packed as README.md
+logo      = "assets/brand.svg"    # → packed as logo.svg (by extension)
+changelog = "CHANGELOG.md"        # → packed as CHANGELOG.md
+include   = ["docs/img/*.png"]    # extra assets — keep their relative path
+# publish = false                 # manifest-wide kill switch
+```
+
+`include` globs (`*`/`?` within a segment, `**` across segments) pull in
+README-referenced assets; each hit keeps its manifest-relative path on the
+wire. An explicit `readme`/`logo`/`changelog` path that does not exist is a
+data error (exit 65) — an explicit config must not silently skip. A companion
+path — a well-known member or an `include` hit — that resolves *outside* the
+manifest directory (a `..` segment, an absolute path, or a symlink whose target
+escapes the tree) is likewise a data error (exit 65), checked before any push.
+A `[description]` table that resolves to zero files is a data error too;
+`publish = false` disables the auto-companion for the whole manifest.
+
+### Fan-out, override, and opt-out {#description-fanout}
+
+A top-level `[description]` publishes the **same** companion to every entry's
+repository. A per-entry table overrides it for one entry, and
+`description = false` opts an entry out:
+
+```toml
+[description]
+readme = "README.md"                 # every repo gets this by default
+
+[skills.grim-usage]
+repository = "grimoire-rs/skills/grim-usage"
+[skills.grim-usage.description]      # per-entry override (same schema)
+readme = "skills/grim-usage/README.md"
+
+[mcp.grim]
+repository = "grimoire-rs/mcp/grim"
+description = false                  # this repo gets no companion
+```
+
+A `--dry-run` publish lists the planned companion pushes (`descriptions` in
+the [JSON report](#batch-publish-report), digest `null`) without touching the
+registry, so you can confirm the fan-out before it happens. Validation parity:
+a dry run still containment- and size-checks every companion and packs it into
+its layer, so a bad companion fails the dry run — only the registry push is
+skipped, and either way zero registry mutations occur.
+
+### Read it back {#description-read}
+
+Read the companion with
+[`grim fetch --description`](./commands.md#fetch-description) — the
+reserved `__grimoire` tag is a grim-internal implementation detail; the
+flag is the documented way to reach it, so nothing outside grim needs to
+type or know the tag:
+
+```sh
+grim fetch ghcr.io/acme/mcp/postgres --description                              # every packed file inline
+grim fetch ghcr.io/acme/mcp/postgres --description --format json | jq '.files[].path'
+grim fetch ghcr.io/acme/mcp/postgres --description --out ./docs                 # unpack the tree to disk
+```
+
+`--format json` reports `kind: "desc"` and every packed file inline in
+`files[]` — README, logo, changelog, and any README-referenced assets — in
+one call, bounded by the same 8 MiB layer gate as any fetch. A repository
+with no companion published returns a clean *not-found* error, so a
+consumer can fall back to an in-tree README. [`grim describe`](./commands.md#describe)'s
+`has_description` field answers "does this repository have one?" without
+a probe fetch at all.
+
+### Replication caveat {#description-replication}
+
+The companion is a separate manifest under the repository's reserved
+`__grimoire` tag, distinct from the artifact's version tags. That distinction
+matters when you replicate a repository between registries.
+
+A **single-tag** copy — [`skopeo copy`][skopeo] or [`oras cp`][oras] naming one
+tag like `:1.2.3` — carries only that tag's manifest and blobs. It does **not**
+follow the `__grimoire` tag, so the mirror ends up with the artifact but no
+description companion; a later `grim fetch --description` against the mirror
+returns *not-found*.
+
+A **full-repository** sync — every tag, e.g. `skopeo sync` or `oras cp
+--recursive` over the whole repository — carries the `__grimoire` tag along
+with the version tags, so the companion survives. Mirror the whole repository
+(or re-run `grim publish` against the destination) when you need the companion
+to travel with the artifact.
+
+The `__grimoire` namespace is a **grim-client-side convention**, not a
+registry-enforced reservation. grim refuses to publish a `__grimoire` /
+`__grimoire.<x>` reference itself, but any other OCI tool can still write that
+tag directly — treat the namespace as reserved only within grim's own tooling,
+not as a guarantee the registry upholds.
 
 ## Catalog metadata {#metadata}
 
@@ -702,7 +837,7 @@ special-cased always-moving tag.
 | Flag | Description |
 |------|-------------|
 | `--manifest <path>` | Manifest file to read (default: `./publish.toml`). |
-| `--dry-run` | Validate and plan without pushing. Prints what would be pushed. |
+| `--dry-run` | Validate and plan without pushing. Prints what would be pushed. Companions are still containment- and size-checked and packed, so a bad companion fails the dry run; zero registry mutations occur either way. |
 | `--force` | Move existing exact-version tags instead of skipping them. |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
@@ -718,6 +853,13 @@ special-cased always-moving tag.
 must be strict `X.Y.Z` semver, every source path must exist, and `pin = true`
 is rejected on non-bundle entries (exit 65 for each). Only after the full
 manifest passes does the first network call happen.
+
+One check runs **before** every shape check below and exits **64** (usage), not
+65: a `--version` channel value in grim's reserved namespace — `__grimoire` or
+`__grimoire.<x>` — is refused up front, so a channel release can never overwrite
+a repository's [description companion](#description-companion) tag. This is the
+lone usage error among the manifest checks; every sibling condition below is a
+data error (65).
 
 Several additional conditions exit 65 at validation time:
 
@@ -763,6 +905,16 @@ wrapper object on stdout:
       "status": "pushed"
     }
   ],
+  "descriptions": {
+    "items": [
+      {
+        "ref": "ghcr.io/acme/skills/code-review:__grimoire",
+        "repository": "ghcr.io/acme/skills/code-review",
+        "digest": "sha256:…",
+        "files": ["README.md"]
+      }
+    ]
+  },
   "announce": {
     "outcome": "pull-request",
     "branch": "announce/acme-1a2b3c4d",
@@ -772,7 +924,13 @@ wrapper object on stdout:
 ```
 
 `items` carries one object per manifest entry processed, in publish
-order. `announce` carries the completed `--announce` outcome: `outcome`
+order. `descriptions` carries the [description companion](#description-companion)
+pushes this run, one per distinct target repository, in the same
+`{"items": [...]}` envelope as every multi-item report; `items` is empty
+when no companion was resolved for this run. Each entry's `digest` is
+`null` under `--dry-run` (the preview lists the planned push without
+touching the registry). `announce` carries the completed `--announce`
+outcome: `outcome`
 is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
 deterministic topic branch on the index repository — is always present;
 `url` is always present and non-null only for `pull-request`. `announce` is `null` whenever the
@@ -821,6 +979,8 @@ Registry][ghcr]) and `grim release` inherits it.
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 [gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
+[skopeo]: https://github.com/containers/skopeo
+[oras]: https://oras.land/docs/commands/oras_cp
 
 <!-- internal -->
 [global-options]: ./commands.md#global-options

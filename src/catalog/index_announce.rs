@@ -382,7 +382,10 @@ pub async fn pointer_metadata(
             .cloned(),
         // Same read seam the catalog build and `grim describe` use.
         keywords: crate::oci::annotations::keywords_from_annotations(&manifest.annotations),
-        summary: manifest.annotations.get("com.grimoire.summary").cloned(),
+        summary: manifest
+            .annotations
+            .get(crate::oci::annotations::SUMMARY_ANNOTATION)
+            .cloned(),
     }
 }
 

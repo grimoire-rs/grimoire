@@ -9,7 +9,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from src.helpers import make_artifact, make_bundle
+from src.helpers import make_artifact, make_bundle, make_description
 
 
 SKILL_DOC = (
@@ -215,3 +215,212 @@ def test_fetch_large_content_is_not_truncated(
 
     parsed = json.loads(runner.run("fetch", f"{registry}/{repo}:latest", format="json").stdout)
     assert parsed.get("truncated") is not True
+
+
+# --------------------------------------------------------------------------
+# Description companion + digest probe (the VS Code details-tab surface)
+# --------------------------------------------------------------------------
+
+README_BYTES = b"# Repo\n\nWhat this repository ships.\n"
+
+
+def _publish_with_companion(registry: str) -> str:
+    """Publish an artifact and its description companion; return the artifact
+    ref (grim retargets the reserved ``__grimoire`` tag itself)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    repo = f"{ns}/skills/desc-demo"
+    make_artifact(
+        repo,
+        "skill",
+        {"desc-demo/SKILL.md": "---\nname: desc-demo\ndescription: d.\n---\n# d\n"},
+        tag="latest",
+    )
+    make_description(repo, {"README.md": README_BYTES, "assets/logo.png": LOGO_BYTES})
+    return f"{registry}/{repo}:latest"
+
+
+def test_fetch_description_json_inlines_all_members(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`fetch --description` returns `{ref, digest, kind: "desc", files: [...]}`
+    with every member inline: text verbatim, binary as base64."""
+    ref = _publish_with_companion(registry)
+    runner = grim_at(project_dir)
+
+    doc = runner.json("fetch", ref, "--description")
+    assert doc["kind"] == "desc"
+    assert doc["ref"].endswith(":__grimoire"), doc["ref"]
+    assert doc["digest"].startswith("sha256:")
+    members = {f["path"]: f for f in doc["files"]}
+
+    readme = members["README.md"]
+    assert readme["content"].encode() == README_BYTES
+    assert "encoding" not in readme, "a text member carries no encoding field"
+
+    logo = members["assets/logo.png"]
+    assert logo["encoding"] == "base64"
+    assert base64.b64decode(logo["content"]) == LOGO_BYTES
+
+
+def test_fetch_description_out_round_trips_the_tree(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`fetch --description --out <dir>` unpacks the companion tree to disk
+    byte-identical; plain stdout stays empty (no single payload)."""
+    ref = _publish_with_companion(registry)
+    runner = grim_at(project_dir)
+
+    out_dir = project_dir / "desc-out"
+    result = runner.plain("fetch", ref, "--description", "--out", str(out_dir))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "", "a multi-file bundle has no single plain payload"
+
+    assert (out_dir / "README.md").read_bytes() == README_BYTES
+    assert (out_dir / "assets" / "logo.png").read_bytes() == LOGO_BYTES
+
+
+def test_fetch_digest_only_matches_full_fetch_for_artifact_and_companion(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`--digest-only` resolves without downloading and returns `{ref, digest}`;
+    the digest equals the full fetch's digest, for the artifact and (with
+    `--description`) the companion."""
+    ref = _publish_with_companion(registry)
+    # A resolved project scope keeps the probe to its minimal shape (a degraded
+    # scope would add a `warnings` note, like every fetch report).
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    # Artifact.
+    full = runner.json("fetch", ref)
+    probe = runner.json("fetch", ref, "--digest-only")
+    assert set(probe) == {"ref", "digest"}, f"digest probe is just {{ref, digest}}: {probe}"
+    assert probe["digest"] == full["digest"]
+
+    # Companion.
+    full_desc = runner.json("fetch", ref, "--description")
+    probe_desc = runner.json("fetch", ref, "--description", "--digest-only")
+    assert probe_desc["digest"] == full_desc["digest"]
+    assert probe_desc["ref"].endswith(":__grimoire")
+    assert probe["digest"] != probe_desc["digest"], "artifact and companion are distinct manifests"
+
+
+def test_fetch_missing_companion_is_not_found_79(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`--description` on a repo with no companion is a not-found (79) — the
+    standard error envelope, parity with a missing `grim fetch`."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    repo = f"{ns}/skills/lonely"
+    make_artifact(repo, "skill", {"lonely/SKILL.md": "---\nname: lonely\ndescription: d.\n---\n# x\n"}, tag="latest")
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "fetch", f"{registry}/{repo}:latest", "--description", check=False)
+    assert result.returncode == 79, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["error"]["code"] == "not-found"
+    assert doc["error"]["exit"] == 79
+
+
+def test_fetch_flag_combination_usage_errors_exit_64(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """The contradictory flag combinations are usage errors (64) before any
+    resolution: `--out` without `--description`, download flags with
+    `--digest-only`, and plain `--description` without `--out`."""
+    ref = _publish_with_companion(registry)
+    runner = grim_at(project_dir)
+
+    # --out requires --description.
+    r1 = runner.plain("fetch", ref, "--out", str(project_dir / "o"), check=False)
+    assert r1.returncode == 64, r1.stderr
+
+    # --digest-only downloads nothing, so it takes no content flag.
+    for extra in (("--path", "README.md"), ("--vendor", "claude"), ("--out", str(project_dir / "o2"))):
+        r = runner.plain("fetch", ref, "--digest-only", *extra, check=False)
+        assert r.returncode == 64, f"--digest-only {extra} must be a usage error; stderr: {r.stderr}"
+
+    # Plain --description without --out has no single payload to print.
+    r3 = runner.plain("fetch", ref, "--description", check=False)
+    assert r3.returncode == 64, r3.stderr
+    assert "--out" in r3.stderr or "json" in r3.stderr, r3.stderr
+
+    # ...but --format json is fine without --out.
+    ok = runner.run("--format", "json", "fetch", ref, "--description", check=False)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_fetch_vendor_with_description_is_usage_error_64(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`--vendor` with `--description` is a usage error (64): a description
+    companion has no vendor projection, so the combination is rejected up front
+    — before any resolution — matching the shipped gate set. Uses `--format
+    json` so the plain `--description`-without-`--out` gate cannot mask it."""
+    ref = _publish_with_companion(registry)
+    runner = grim_at(project_dir)
+
+    r = runner.run("--format", "json", "fetch", ref, "--description", "--vendor", "claude", check=False)
+    assert r.returncode == 64, (
+        f"--vendor + --description must be a usage error (64), got {r.returncode}; stderr: {r.stderr}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Offline parity (B2): an uncached fetch under --offline is offline-blocked (81)
+# --------------------------------------------------------------------------
+
+
+def test_fetch_offline_uncached_is_offline_blocked_81(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """An uncached `grim fetch` under `--offline` surfaces offline-blocked (81),
+    not a misleading not-found (79): the ref may well exist, the network is just
+    unreachable. Same for `--description` and `--digest-only` — all three
+    resolve with `Operation::Resolve` so an offline-uncached miss is 81."""
+    ref = _publish_with_companion(registry)
+    # A resolved project scope keeps the error envelope to its minimal shape.
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    # Content fetch, uncached + offline → 81.
+    r = runner.run("--format", "json", "fetch", ref, "--offline", check=False)
+    assert r.returncode == 81, (
+        f"uncached offline fetch must be 81, got {r.returncode}; stderr: {r.stderr}"
+    )
+    doc = json.loads(r.stdout)
+    assert doc["error"]["code"] == "offline-blocked"
+    assert doc["error"]["exit"] == 81
+
+    # Description companion, uncached + offline → 81.
+    rd = runner.run("--format", "json", "fetch", ref, "--description", "--offline", check=False)
+    assert rd.returncode == 81, (
+        f"uncached offline --description must be 81, got {rd.returncode}; stderr: {rd.stderr}"
+    )
+    assert json.loads(rd.stdout)["error"]["code"] == "offline-blocked"
+
+    # Digest-only probe, uncached + offline → 81.
+    rp = runner.run("--format", "json", "fetch", ref, "--digest-only", "--offline", check=False)
+    assert rp.returncode == 81, (
+        f"uncached offline --digest-only must be 81, got {rp.returncode}; stderr: {rp.stderr}"
+    )
+    assert json.loads(rp.stdout)["error"]["code"] == "offline-blocked"
+
+
+def test_fetch_digest_only_cached_offline_succeeds(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """A `--digest-only` probe of a ref warmed by a prior ONLINE resolve still
+    succeeds offline — served from the tag cache, no network."""
+    ref = _publish_with_companion(registry)
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    # Warm the cache online (a resolve persists the tag pin).
+    online = runner.json("fetch", ref, "--digest-only")
+    # Offline, the cached pin resolves without the network.
+    cached = runner.run("--format", "json", "fetch", ref, "--digest-only", "--offline", check=False)
+    assert cached.returncode == 0, (
+        f"a cached --digest-only must still succeed offline, got {cached.returncode}; stderr: {cached.stderr}"
+    )
+    assert json.loads(cached.stdout)["digest"] == online["digest"]

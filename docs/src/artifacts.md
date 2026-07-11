@@ -172,10 +172,14 @@ kind — `grim fetch <ref> --path <name>/README.md`. The companions are not
 installed to a client (an agent installs as its lone `.md`); they exist for
 `grim fetch`/catalog consumers.
 
-[MCP servers](#mcp-servers) and [bundles](#bundles) have no file tree — their
-layer is a single JSON document — so they carry no README/logo companion. A
-catalog UI shows their `description`/`summary` (from
-[`grim describe`](./commands.md#describe)) instead.
+[MCP servers](#mcp-servers) and [bundles](#bundles) have no file tree of their
+own — their layer is a single JSON document — so they carry no *in-tree* README.
+For a README that works uniformly across **every** kind (including mcp and
+bundle), publish a [repository description companion](./publishing.md#description-companion):
+declare a `[description]` table in `publish.toml` (or let grim probe the
+conventional `README.md` / `CHANGELOG.md` / `logo.*` files) and it rides
+[`grim publish`](./commands.md#publish); read it back with
+[`grim fetch <repo> --description`](./commands.md#fetch-description).
 
 ## Rules {#rules}
 

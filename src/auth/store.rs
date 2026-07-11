@@ -109,8 +109,9 @@ impl DockerCredentialStore {
 
     /// Whether a credential grim would use when pulling from `registry` is
     /// present in the docker config, decided **without invoking any
-    /// credential helper** — a single file read, safe to call for every
-    /// registry `grim context` reports.
+    /// credential helper** — one config-file read per call. Reporting on N
+    /// registries re-reads (and re-parses) the config N times, which is fine
+    /// for the small `grim context` set; a parse-once cache is deferred.
     ///
     /// Mirrors the pull-time lookup in
     /// [`crate::oci::access::registry_client`]: that path authenticates

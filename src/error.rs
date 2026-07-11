@@ -239,6 +239,9 @@ fn classify_release(err: &ReleaseError) -> ExitCode {
         ReleaseErrorKind::MissingTag
         | ReleaseErrorKind::TagExists { .. }
         | ReleaseErrorKind::CascadeRequiresSemver { .. } => ExitCode::DataError,
+        // A reserved-tag collision is a bad CLI/manifest argument, not bad
+        // artifact data — usage error (64), mirroring the other tag-input gates.
+        ReleaseErrorKind::ReservedTag { .. } => ExitCode::UsageError,
     }
 }
 
@@ -555,6 +558,22 @@ mod tests {
             let err: anyhow::Error = Error::from(ReleaseError::without_reference(kind)).into();
             assert_eq!(classify_error(&err), ExitCode::DataError);
         }
+    }
+
+    #[test]
+    fn reserved_tag_error_classifies_as_usage_error() {
+        // W1: a user-supplied tag colliding with grim's reserved internal
+        // namespace (the `__grimoire` companion tag) is a bad CLI/manifest
+        // argument — a usage error (64), NOT bad artifact data (65). This locks
+        // the exit-code contract for the reserved-tag write guard
+        // (`validate_user_tag`), so the release/publish call sites that route
+        // through it exit 64 on `<repo>:__grimoire`.
+        use crate::oci::release::{ReleaseError, ReleaseErrorKind};
+        let err: anyhow::Error = Error::from(ReleaseError::without_reference(ReleaseErrorKind::ReservedTag {
+            tag: "__grimoire".to_string(),
+        }))
+        .into();
+        assert_eq!(classify_error(&err), ExitCode::UsageError);
     }
 
     #[test]

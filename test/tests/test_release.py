@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from urllib.error import HTTPError
+
 from src.helpers import write_config
 from src.registry import fetch_manifest, tag_digest
 
@@ -17,6 +19,17 @@ from src.registry import fetch_manifest, tag_digest
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body)
+
+
+def _assert_tag_absent(repo_path: str, tag: str) -> None:
+    """Assert the registry has no manifest for ``repo_path:tag`` — proves a
+    refused release pushed nothing."""
+    try:
+        tag_digest(repo_path, tag)
+    except HTTPError as exc:
+        assert exc.code == 404, f"expected a 404 for {repo_path}:{tag}, got {exc.code}"
+        return
+    raise AssertionError(f"{repo_path}:{tag} unexpectedly resolved — the release was not refused")
 
 
 def _local_skill(project_dir: Path, name: str = "code-review") -> Path:
@@ -329,3 +342,22 @@ def test_release_skip_existing_conflicts_with_force(
         check=False,
     )
     assert result.returncode != 0, "--skip-existing and --force must conflict"
+
+
+def test_release_reserved_tag_is_usage_error_before_network(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim release <path> <repo>:__grimoire` targets grim's reserved companion
+    tag. The reserved-namespace write guard refuses it as a usage error (64)
+    before any network work, so a user can never overwrite or shadow a
+    machine-owned companion tag."""
+    skill = _local_skill(project_dir)
+    repo = f"{registry}/{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    result = runner.run("release", str(skill), f"{repo}:__grimoire", check=False)
+    assert result.returncode == 64, (
+        f"a reserved-tag release must be a usage error (64), got {result.returncode}; stderr: {result.stderr}"
+    )
+    # Refused before the push: the reserved tag must stay absent on the registry.
+    _assert_tag_absent(f"{unique_repo}/code-review", "__grimoire")

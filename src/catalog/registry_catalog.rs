@@ -796,7 +796,7 @@ impl Catalog {
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
-                let summary = m.annotations.get("com.grimoire.summary").cloned();
+                let summary = m.annotations.get(crate::oci::annotations::SUMMARY_ANNOTATION).cloned();
                 let keywords = crate::oci::annotations::keywords_from_annotations(&m.annotations);
                 // Pre-repository artifacts carry the release ref here —
                 // the prefix guard keeps only real HTTPS repo URLs.
@@ -857,27 +857,33 @@ fn split_host_namespace(registry: &str) -> (&str, Option<&str>) {
 /// Pick the representative tag from `tags`: prefer `latest`, else the
 /// highest semver, else the first (lexicographically, for determinism).
 pub fn pick_latest_tag(tags: &[String]) -> Option<String> {
+    // Internal companions (`__grimoire`, …) are never a representative tag,
+    // including the lexicographic fallback below.
+    let tags: Vec<&String> = tags
+        .iter()
+        .filter(|t| !crate::oci::description::is_internal_tag(t))
+        .collect();
     if tags.is_empty() {
         return None;
     }
-    if tags.iter().any(|t| t == "latest") {
+    if tags.iter().any(|t| *t == "latest") {
         return Some("latest".to_string());
     }
     let mut highest: Option<(semver::Version, &String)> = None;
-    for t in tags {
+    for t in &tags {
         // OCI tags normalize `+` → `_`; semver build metadata uses `+`.
         let candidate = t.replace('_', "+");
         if let Ok(v) = semver::Version::parse(&candidate) {
             match &highest {
                 Some((hv, _)) if &v <= hv => {}
-                _ => highest = Some((v, t)),
+                _ => highest = Some((v, *t)),
             }
         }
     }
     if let Some((_, t)) = highest {
         return Some(t.clone());
     }
-    let mut sorted: Vec<&String> = tags.iter().collect();
+    let mut sorted = tags.clone();
     sorted.sort();
     sorted.first().map(|s| (*s).clone())
 }
@@ -995,6 +1001,27 @@ mod tests {
         let tags = vec!["latest".to_string(), "stable".to_string()];
         assert_eq!(pick_highest_version(&tags), None);
         assert_eq!(pick_highest_version(&[]), None);
+    }
+
+    #[test]
+    fn pickers_exclude_internal_desc_tag() {
+        // The `__grimoire` companion tag is never a representative/highest tag,
+        // including the lexicographic fallback (where it would sort first).
+        let only_internal = vec!["__grimoire".to_string()];
+        assert_eq!(
+            pick_latest_tag(&only_internal),
+            None,
+            "internal-only ⇒ no representative"
+        );
+        assert_eq!(pick_highest_version(&only_internal), None);
+
+        let mixed = vec!["__grimoire".to_string(), "1.2.0".to_string()];
+        assert_eq!(pick_latest_tag(&mixed), Some("1.2.0".to_string()));
+        assert_eq!(pick_highest_version(&mixed), Some("1.2.0".to_string()));
+
+        // No semver, no latest: the fallback must still skip the internal tag.
+        let internal_and_other = vec!["__grimoire".to_string(), "nightly".to_string()];
+        assert_eq!(pick_latest_tag(&internal_and_other), Some("nightly".to_string()));
     }
 
     // ── TTL freshness ────────────────────────────────────────────────

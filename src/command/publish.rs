@@ -19,8 +19,8 @@
 //! every entry uniformly, with no cascade. A channel obeys the same
 //! skip-existing / `--force` rule as everything else.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use schemars::JsonSchema;
@@ -30,6 +30,7 @@ use crate::api::publish_report::{PublishEntry, PublishReport, PublishStatus};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::error::classify_error;
+use crate::glob::expand_description_glob;
 use crate::oci::ArtifactKind;
 use crate::oci::identifier::{MAX_REPOSITORY_LENGTH, RepositoryPathIssue, repository_path_issue};
 use crate::oci::release::resolve_cascade;
@@ -145,6 +146,101 @@ pub struct AnnounceSpec {
     pub owner_id: Option<u64>,
 }
 
+/// A repository description companion source (`[description]` table, top-level
+/// or per-entry). All paths are relative to the manifest (`publish.toml`).
+///
+/// Well-known members map their source path onto a fixed on-wire name so the
+/// repository layout is decoupled from the companion layout: `readme` →
+/// `README.md`, `logo` → `logo.<ext>` (`logo.png` / `logo.svg`), `changelog` →
+/// `CHANGELOG.md`. `include` globs (README-referenced assets) keep their
+/// manifest-relative path on the wire. Every member is optional, but a table
+/// that resolves to zero files is a data error (there is nothing to publish).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DescriptionSpec {
+    /// The repo's human-facing README, packed as the well-known `README.md`.
+    pub readme: Option<PathBuf>,
+
+    /// The repo's logo, packed as `logo.<ext>` (well-known `logo.png` /
+    /// `logo.svg` by source extension).
+    pub logo: Option<PathBuf>,
+
+    /// The repo's changelog, packed as the well-known `CHANGELOG.md`.
+    pub changelog: Option<PathBuf>,
+
+    /// Extra asset globs (README-referenced images). Each glob is relative to
+    /// the manifest directory; hits keep their relative path on the wire.
+    /// Supports `*`/`?` within a path segment and `**` across segments.
+    #[serde(default)]
+    pub include: Vec<String>,
+
+    /// Top-level kill switch: `publish = false` disables the auto-companion for
+    /// the whole manifest. Ignored on a per-entry table (opt out an entry with
+    /// `description = false` instead).
+    pub publish: Option<bool>,
+}
+
+/// A per-entry `description` in a kind sub-table: either a bool
+/// (`description = false` opts the entry out of the fan-out; `true` is an
+/// explicit opt-in, same as omitting) or a full override table sharing the
+/// [`DescriptionSpec`] schema.
+///
+/// `Deserialize` is hand-written (rather than `#[serde(untagged)]`) so a
+/// malformed override table surfaces [`DescriptionSpec`]'s own precise error —
+/// e.g. `unknown field 'redme'` — instead of serde's untagged catch-all
+/// (`data did not match any variant`). The `#[serde(untagged)]` attribute stays
+/// only to drive the `JsonSchema` `anyOf` shape (schemars reads it; the manual
+/// impl overrides how bytes are parsed). The dispatch is a value type-switch:
+/// a boolean maps to [`EntryDescription::Enabled`], a table forwards to
+/// [`DescriptionSpec`] (carrying its `deny_unknown_fields` error through),
+/// anything else is a clear "expected a boolean or a description table" type
+/// error.
+#[derive(Debug, Clone, JsonSchema)]
+#[serde(untagged)]
+pub enum EntryDescription {
+    /// `description = false` (opt out) or `description = true` (explicit opt in).
+    Enabled(bool),
+    /// A per-entry override table, replacing the top-level companion.
+    Spec(DescriptionSpec),
+}
+
+impl<'de> Deserialize<'de> for EntryDescription {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryDescriptionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EntryDescriptionVisitor {
+            type Value = EntryDescription;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a boolean or a description table")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(EntryDescription::Enabled(value))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                // Forward the table to `DescriptionSpec` verbatim so its
+                // `deny_unknown_fields` error (with the offending field name)
+                // reaches the user unchanged.
+                DescriptionSpec::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(EntryDescription::Spec)
+            }
+        }
+
+        deserializer.deserialize_any(EntryDescriptionVisitor)
+    }
+}
+
 /// A single entry in a kind table (`[skills.name]`, `[rules.name]`,
 /// `[agents.name]`, `[bundles.name]`).
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -175,6 +271,12 @@ pub struct PublishEntrySpec {
     /// A `pin = true` on a non-bundle entry is a data error (exit 65).
     #[serde(default)]
     pub pin: bool,
+
+    /// Per-entry description companion: `false` opts this entry out of the
+    /// top-level `[description]` fan-out; a `[<kind>.<name>.description]` table
+    /// overrides it with the entry's own [`DescriptionSpec`]. Absent = inherit
+    /// the top-level companion (or the conventional probe).
+    pub description: Option<EntryDescription>,
 }
 
 /// The deserialized content of a `publish.toml` manifest.
@@ -235,6 +337,15 @@ pub struct PublishManifest {
     /// namespace, owner id).
     #[serde(default)]
     pub announce: Option<AnnounceSpec>,
+
+    /// The repository description companion published to every entry
+    /// (fan-out). A per-entry `description` overrides it; `description = false`
+    /// opts an entry out; `publish = false` here is the manifest-wide kill
+    /// switch. When this table is absent grim probes the manifest directory for
+    /// conventional files (`README.md`, `CHANGELOG.md`, `assets/logo.*`,
+    /// `logo.*`) and publishes a companion when any is found.
+    #[serde(default)]
+    pub description: Option<DescriptionSpec>,
 }
 
 /// One planned publish operation, ready to be handed to `release::run`.
@@ -255,6 +366,36 @@ pub(crate) struct PlannedEntry {
     /// appended. Drives a `--dry-run`-only preview hint so a user who expected
     /// `repository_prefix` append-semantics notices the difference.
     pub name_not_appended: bool,
+}
+
+/// One planned description companion push, deduplicated to a distinct target
+/// repository. The companion re-points that repository's reserved `__grimoire`
+/// tag at the packed [`files`](Self::files) mapping.
+#[derive(Debug)]
+pub(crate) struct PlannedDescription {
+    /// The target repository (`registry/repo`, no tag) the companion publishes
+    /// to (the reserved `__grimoire` tag is appended at push time).
+    pub repository: String,
+    /// The resolved `(packed_name, absolute_source_path)` mapping, non-empty.
+    pub files: Vec<(String, PathBuf)>,
+}
+
+/// A [`PlannedDescription`] with its companion layer already read, bounds-
+/// checked, and packed into deterministic tar bytes.
+///
+/// Produced by [`pack_planned_descriptions`] BEFORE the entry push loop so that
+/// an unreadable or oversized companion aborts the whole publish with **zero**
+/// registry mutations. The post-loop push then only (re)points the reserved
+/// `__grimoire` tag at these pre-built bytes — it never packs under the network
+/// path.
+#[derive(Debug)]
+pub(crate) struct PackedDescription {
+    /// The target repository (`registry/repo`, no tag).
+    pub repository: String,
+    /// The resolved `(packed_name, absolute_source_path)` mapping, non-empty.
+    pub files: Vec<(String, PathBuf)>,
+    /// The deterministic tar layer bytes ready for the post-loop tag push.
+    pub tar: Vec<u8>,
 }
 
 /// Strict `X.Y.Z` semver check: no prerelease, no build metadata, no
@@ -330,6 +471,11 @@ fn version_mode<'a>(version: Option<&'a str>, prefix: &str) -> VersionMode<'a> {
 ///    Reject here with a clean, attributed message instead of a confusing
 ///    repository-grammar error deep in the release path.
 fn validate_channel_value(channel: &str, manifest_path: &std::path::Path) -> anyhow::Result<()> {
+    // A channel value is the one publish tag input that is not strict semver, so
+    // it is where a user could otherwise smuggle grim's reserved `__grimoire`
+    // namespace onto the wire. Reject it first — a usage error (64), before the
+    // 65-tier shape checks below — so a companion tag can never be overwritten.
+    super::grim(crate::oci::description::validate_user_tag(channel))?;
     if semver::Version::parse(channel).is_ok() {
         return Err(data_error_at(
             manifest_path,
@@ -637,6 +783,25 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         channel,
     );
 
+    // Resolve the description companions before any push: an explicit companion
+    // path that does not exist is a data error (65) surfaced here, not partway
+    // through the batch. Conventional-probe misses stay silent.
+    let planned_descriptions = plan_descriptions(&manifest, &entries, &manifest_dir, &args.manifest)?;
+
+    // Pre-pack every companion BEFORE the first registry mutation: an unreadable
+    // or oversized companion aborts the whole publish here, with zero pushes —
+    // it can never fail after an entry is already live. Packing is pure std::fs
+    // work, so it runs on the blocking pool. A dry-run packs too (validation
+    // parity); it just skips the push below.
+    let packed_descriptions = {
+        let planned = planned_descriptions;
+        #[allow(clippy::expect_used)]
+        let packed = tokio::task::spawn_blocking(move || pack_planned_descriptions(&planned))
+            .await
+            .expect("description pre-pack task panicked")?;
+        packed
+    };
+
     // Dry-run preview only: flag entries whose per-entry `repository` is used
     // verbatim and does not end in the entry name (the name was not appended).
     // Surfaced here — not as a publish-time warning — so a real publish of a
@@ -651,6 +816,14 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     planned.reference,
                 );
             }
+        }
+        for pd in &packed_descriptions {
+            tracing::info!(
+                "description: would publish {}:{} ({} file(s))",
+                pd.repository,
+                crate::oci::description::DESC_TAG,
+                pd.files.len(),
+            );
         }
     }
 
@@ -721,6 +894,44 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         }
     }
 
+    // Description companions ride the batch: after every entry's artifact is
+    // live, (re)point each distinct repository's reserved `__grimoire` tag at
+    // its resolved companion. Mutable metadata — always re-pointed, never gated
+    // by skip-existing; deterministic packing makes an unchanged republish a
+    // CAS no-op. Under `--dry-run` nothing is pushed, the digest is omitted.
+    let mut description_items: Vec<crate::api::publish_report::PublishDescription> = Vec::new();
+    for pd in &packed_descriptions {
+        let reference = format!("{}:{}", pd.repository, crate::oci::description::DESC_TAG);
+        let files: Vec<String> = pd.files.iter().map(|(name, _)| name.clone()).collect();
+        if args.dry_run {
+            description_items.push(crate::api::publish_report::PublishDescription {
+                reference,
+                repository: pd.repository.clone(),
+                digest: None,
+                files,
+            });
+            continue;
+        }
+        match push_one_description(ctx, pd).await {
+            Ok(digest) => {
+                eprintln!("description: published {reference}");
+                description_items.push(crate::api::publish_report::PublishDescription {
+                    reference,
+                    repository: pd.repository.clone(),
+                    digest: Some(digest.to_string()),
+                    files,
+                });
+            }
+            Err(err) => {
+                // The entries are live; surface the companion failure and keep
+                // the report (with whatever companions already pushed).
+                eprintln!("error: description companion push failed: {err:#}");
+                let report = PublishReport::new(report_entries).with_descriptions(description_items);
+                return Ok((report, classify_error(&err)));
+            }
+        }
+    }
+
     // Announce only after a fully successful, non-dry-run publish: every
     // planned entry is now live on the registry (freshly pushed or already
     // present via skip-existing).
@@ -737,16 +948,41 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     // failures exit Unavailable (69), announce misconfiguration
                     // (missing host/namespace/owner id) exits usage (64).
                     eprintln!("error: announce failed: {err:#}");
-                    return Ok((PublishReport::new(report_entries), classify_error(&err)));
+                    return Ok((
+                        PublishReport::new(report_entries).with_descriptions(description_items),
+                        classify_error(&err),
+                    ));
                 }
             }
         }
     }
 
     Ok((
-        PublishReport::new(report_entries).with_announce(announce_section),
+        PublishReport::new(report_entries)
+            .with_descriptions(description_items)
+            .with_announce(announce_section),
         ExitCode::Success,
     ))
+}
+
+/// Push one already-packed description companion, returning the pushed manifest
+/// digest. The tar layer was built by [`pack_planned_descriptions`] before the
+/// entry push loop, so this is push-only: it just (re)points the reserved
+/// `__grimoire` tag at the pre-built bytes via
+/// [`crate::oci::description::push_description_companion`].
+///
+/// # Errors
+///
+/// A registry/auth failure (69/80) propagates via the typed error chain.
+async fn push_one_description(ctx: &Context, pd: &PackedDescription) -> anyhow::Result<crate::oci::Digest> {
+    let id = super::grim(crate::oci::Identifier::parse(&format!(
+        "{}:{}",
+        pd.repository,
+        crate::oci::description::DESC_TAG
+    )))?;
+    let repo = id.without_tag();
+    let access = super::access_seam(ctx)?;
+    super::grim(crate::oci::description::push_description_companion(access.as_ref(), &repo, &pd.tar).await)
 }
 
 /// Execute the `--announce` step: derive one metadata pointer per planned
@@ -1350,6 +1586,265 @@ fn plan_entries(
     entries
 }
 
+/// The well-known on-wire name for a companion README.
+const DESC_README: &str = "README.md";
+
+/// The well-known on-wire name for a companion changelog.
+const DESC_CHANGELOG: &str = "CHANGELOG.md";
+
+/// Resolve the description companions to publish for this run — one per
+/// distinct target repository.
+///
+/// Fan-out: the top-level `[description]` (or, when it is absent, the
+/// conventional probe) applies to every planned entry; a per-entry
+/// `description` table overrides it, and `description = false` opts an entry
+/// out. Explicit spec paths that do not exist are a data error (65) so a
+/// misconfiguration fails before any push; conventional-probe misses are
+/// silent (no companion, not an error). The result is deduplicated by target
+/// repository, in entry order.
+///
+/// `entries` is the already-`--only`-filtered planned set, so a companion is
+/// only planned for a repository this run actually touches.
+///
+/// # Errors
+///
+/// Data error (65) when an explicit `readme`/`logo`/`changelog` path is
+/// missing, or when an explicit `[description]` table resolves to no files.
+fn plan_descriptions(
+    manifest: &PublishManifest,
+    entries: &[PlannedEntry],
+    manifest_dir: &Path,
+    manifest_path: &Path,
+) -> anyhow::Result<Vec<PlannedDescription>> {
+    // The top-level fallback, resolved once. `publish = false` is the
+    // manifest-wide kill switch; with no `[description]` table grim probes the
+    // conventional files.
+    let top_level: Option<Vec<(String, PathBuf)>> = match &manifest.description {
+        Some(spec) if spec.publish == Some(false) => None,
+        Some(spec) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
+        None => {
+            let probed = probe_conventional_description(manifest_dir);
+            (!probed.is_empty()).then_some(probed)
+        }
+    };
+
+    let mut planned: Vec<PlannedDescription> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for entry in entries {
+        let files = match entry_description(manifest, entry.kind, &entry.name) {
+            Some(EntryDescription::Enabled(false)) => None,
+            Some(EntryDescription::Enabled(true)) => top_level.clone(),
+            Some(EntryDescription::Spec(spec)) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
+            None => top_level.clone(),
+        };
+        let Some(files) = files else { continue };
+        // The repository is the entry reference minus its tag. The rightmost
+        // `:` is the tag separator (a registry port keeps its own earlier `:`).
+        let repository = entry
+            .reference
+            .rsplit_once(':')
+            .map(|(repo, _)| repo.to_string())
+            .unwrap_or_else(|| entry.reference.clone());
+        if seen.insert(repository.clone()) {
+            planned.push(PlannedDescription { repository, files });
+        }
+    }
+    Ok(planned)
+}
+
+/// Read, bounds-check, and pack every planned companion into deterministic tar
+/// bytes BEFORE the entry push loop runs.
+///
+/// Front-loading the pack makes a bad companion (unreadable file, oversized
+/// layer) abort the whole publish with **zero** registry mutations: the push
+/// loop only starts once every companion is proven packable, and the post-loop
+/// push then just moves the reserved `__grimoire` tag onto these pre-built
+/// bytes. This is the pre-pack half of the fix for the "companion failure after
+/// entries are already live" window.
+///
+/// # Errors
+///
+/// A pack failure — an unreadable companion file (74) or an oversized layer
+/// (65) — propagates so the caller aborts before pushing any artifact.
+fn pack_planned_descriptions(planned: &[PlannedDescription]) -> anyhow::Result<Vec<PackedDescription>> {
+    // ponytail: every packed companion tar (N distinct repos × ≤512 MiB each)
+    // is retained in memory until the post-loop push drains it. Fine for the
+    // handful of repos a manifest fans out to; add an aggregate cap or temp-file
+    // spill if a batch ever packs enough companions for the total to matter.
+    planned
+        .iter()
+        .map(|pd| {
+            let tar = super::grim(crate::skill::pack_description_files(&pd.files))?;
+            Ok(PackedDescription {
+                repository: pd.repository.clone(),
+                files: pd.files.clone(),
+                tar,
+            })
+        })
+        .collect()
+}
+
+/// The per-entry `description` override for `(kind, name)`, if any.
+fn entry_description<'a>(
+    manifest: &'a PublishManifest,
+    kind: ArtifactKind,
+    name: &str,
+) -> Option<&'a EntryDescription> {
+    let table = match kind {
+        ArtifactKind::Skill => &manifest.skills,
+        ArtifactKind::Rule => &manifest.rules,
+        ArtifactKind::Agent => &manifest.agents,
+        ArtifactKind::Bundle => &manifest.bundles,
+        ArtifactKind::Mcp => &manifest.mcp,
+    };
+    table.get(name).and_then(|s| s.description.as_ref())
+}
+
+/// Resolve a [`DescriptionSpec`] into a sorted, deduplicated
+/// `(packed_name, absolute_source_path)` mapping. Well-known members map onto
+/// their fixed wire names; `include` globs keep their manifest-relative path.
+/// Well-known members win over an `include` glob that also matched them.
+///
+/// # Errors
+///
+/// Data error (65) when an explicit `readme`/`logo`/`changelog` path is
+/// missing, or when the whole spec resolves to no files.
+fn resolve_description_spec(
+    spec: &DescriptionSpec,
+    manifest_dir: &Path,
+    manifest_path: &Path,
+) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+
+    if let Some(readme) = &spec.readme {
+        files.push((
+            DESC_README.to_string(),
+            require_desc_path(readme, "readme", manifest_dir, manifest_path)?,
+        ));
+    }
+    if let Some(logo) = &spec.logo {
+        let src = require_desc_path(logo, "logo", manifest_dir, manifest_path)?;
+        files.push((logo_packed_name(logo), src));
+    }
+    if let Some(changelog) = &spec.changelog {
+        files.push((
+            DESC_CHANGELOG.to_string(),
+            require_desc_path(changelog, "changelog", manifest_dir, manifest_path)?,
+        ));
+    }
+    // Include globs contribute assets that keep their relative path. A glob
+    // that matches nothing is silent (unlike a named path): it names a set,
+    // not a specific file. The final empty-set check still catches a wholly
+    // empty spec. Every hit is contained: a pattern that walks out of the tree
+    // (`../**`) or through an escaping symlink is a data error, not a silent
+    // pack of an out-of-tree file.
+    for pattern in &spec.include {
+        for (packed, abs) in expand_description_glob(manifest_dir, pattern) {
+            let rel = abs.strip_prefix(manifest_dir).unwrap_or(abs.as_path());
+            let contained = contained_description_path(manifest_dir, rel)?;
+            files.push((packed, contained));
+        }
+    }
+
+    // Dedup by packed name, first occurrence wins (well-known members precede
+    // include hits), then sort for a deterministic layer.
+    let mut seen: HashSet<String> = HashSet::new();
+    files.retain(|(name, _)| seen.insert(name.clone()));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if files.is_empty() {
+        return Err(data_error_at(
+            manifest_path,
+            "[description] resolves to no files; set readme/logo/changelog/include or remove the table",
+        ));
+    }
+    Ok(files)
+}
+
+/// Contain a companion `source` path under the manifest directory: delegates to
+/// the two-layer [`crate::path_safety::contain`] guard (algorithm doc lives in
+/// the core) and maps its `ContainmentError` onto a manifest-attributed
+/// DataError (65). Applies to every selected companion — explicit
+/// `readme`/`logo`/`changelog` paths and `include` glob hits alike — so an
+/// out-of-tree companion can never ride the layer.
+///
+/// # Errors
+///
+/// Data error (65) naming the offending `source` path when it is absolute,
+/// carries a non-`Normal` component, or canonicalizes outside `manifest_dir`.
+fn contained_description_path(manifest_dir: &Path, source: &Path) -> anyhow::Result<PathBuf> {
+    crate::path_safety::contain(manifest_dir, source).map_err(|e| {
+        data_error_at(
+            manifest_dir,
+            format!(
+                "description path '{}' is not safely contained under the manifest directory: {e}",
+                source.display()
+            ),
+        )
+    })
+}
+
+/// Contain `rel` under the manifest directory (via [`contained_description_path`])
+/// and require the result to be an existing file — an explicit companion path
+/// must not escape the tree nor silently skip.
+///
+/// # Errors
+///
+/// Data error (65) when `rel` escapes the manifest tree or the contained path
+/// is not an existing file.
+fn require_desc_path(rel: &Path, field: &str, manifest_dir: &Path, manifest_path: &Path) -> anyhow::Result<PathBuf> {
+    // Contain first: an out-of-tree explicit path (`..`, absolute, symlink
+    // escape) is a containment data error before the existence check.
+    let src = contained_description_path(manifest_dir, rel)?;
+    if !src.is_file() {
+        return Err(data_error_at(
+            manifest_path,
+            format!(
+                "description {field} '{}' does not exist (paths are relative to the manifest)",
+                rel.display()
+            ),
+        ));
+    }
+    Ok(src)
+}
+
+/// The on-wire packed name for a logo source: `logo.<ext>` (the well-known
+/// `logo.png` / `logo.svg`), lower-cased; bare `logo` when the source has no
+/// extension.
+fn logo_packed_name(path: &Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("logo.{}", ext.to_ascii_lowercase()),
+        None => "logo".to_string(),
+    }
+}
+
+/// Probe the manifest directory for the conventional description files, used
+/// when no `[description]` table is authored. Returns the well-known-name
+/// mapping (sorted); an empty result means no companion. All misses are silent.
+fn probe_conventional_description(manifest_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+
+    let readme = manifest_dir.join("README.md");
+    if readme.is_file() {
+        files.push((DESC_README.to_string(), readme));
+    }
+    let changelog = manifest_dir.join("CHANGELOG.md");
+    if changelog.is_file() {
+        files.push((DESC_CHANGELOG.to_string(), changelog));
+    }
+    // A repo has one logo; the first hit wins. Probe order: assets/ before the
+    // repo root, png before svg.
+    for candidate in ["assets/logo.png", "assets/logo.svg", "logo.png", "logo.svg"] {
+        let p = manifest_dir.join(candidate);
+        if p.is_file() {
+            files.push((logo_packed_name(&p), p));
+            break;
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
 /// Convert a [`crate::api::release_report::ReleaseReport`] and the
 /// [`PlannedEntry`] it came from into a [`PublishEntry`] for the batch
 /// report.
@@ -1907,6 +2402,7 @@ mod tests {
             path: None,
             repository: repository.map(str::to_string),
             pin: false,
+            description: None,
         }
     }
 
@@ -3441,6 +3937,484 @@ mod tests {
         assert_eq!(
             path_count, 1,
             "path must appear exactly once in error (no double-path), got: {msg}"
+        );
+    }
+
+    // ── Description companion: parsing, probe, glob, resolution ───────────
+
+    #[test]
+    fn description_spec_parses_untagged_bool_and_table() {
+        // Per-entry `description = false` is the bool opt-out; a
+        // `[<kind>.<name>.description]` table is the override. Both parse from
+        // the same field via the untagged enum.
+        let toml = r#"
+            registry = "r.example"
+
+            [description]
+            readme = "README.md"
+            logo = "assets/logo.png"
+
+            [skills.optout]
+            version = "0.1.0"
+            description = false
+
+            [skills.override]
+            version = "0.1.0"
+            [skills.override.description]
+            readme = "skills/override/README.md"
+        "#;
+        let m: PublishManifest = toml::from_str(toml).unwrap();
+        assert!(m.description.is_some(), "top-level [description] parses");
+        assert_eq!(
+            m.description.as_ref().unwrap().readme.as_deref(),
+            Some(Path::new("README.md"))
+        );
+        assert!(matches!(
+            m.skills["optout"].description,
+            Some(EntryDescription::Enabled(false))
+        ));
+        assert!(matches!(
+            m.skills["override"].description,
+            Some(EntryDescription::Spec(_))
+        ));
+    }
+
+    #[test]
+    fn probe_precedence_readme_changelog_and_first_logo_hit_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        write(&dir.join("CHANGELOG.md"), "# c\n");
+        // Two logo candidates present; the probe order picks assets/logo.png.
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/logo.png"), b"png").unwrap();
+        std::fs::write(dir.join("logo.svg"), b"svg").unwrap();
+
+        let files = probe_conventional_description(dir);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"README.md"));
+        assert!(names.contains(&"CHANGELOG.md"));
+        assert!(names.contains(&"logo.png"), "assets/logo.png wins the probe order");
+        assert!(!names.contains(&"logo.svg"), "only the first logo hit rides");
+
+        // Which absolute path backs logo.png? The assets/ one.
+        let logo = files.iter().find(|(n, _)| n == "logo.png").unwrap();
+        assert!(logo.1.ends_with("assets/logo.png"));
+    }
+
+    #[test]
+    fn probe_empty_when_no_conventional_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(probe_conventional_description(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn resolve_spec_maps_wire_names_and_dedups_include() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        write(&dir.join("docs/CHANGES.md"), "# c\n");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/brand.svg"), b"<svg/>").unwrap();
+        write(&dir.join("img/extra.png"), "x");
+
+        let spec = DescriptionSpec {
+            readme: Some(PathBuf::from("README.md")),
+            logo: Some(PathBuf::from("assets/brand.svg")),
+            changelog: Some(PathBuf::from("docs/CHANGES.md")),
+            include: vec!["img/*.png".to_string()],
+            publish: None,
+        };
+        let files = resolve_description_spec(&spec, dir, Path::new("publish.toml")).unwrap();
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        // Sorted by packed name; logo maps by extension to logo.svg.
+        assert_eq!(names, vec!["CHANGELOG.md", "README.md", "img/extra.png", "logo.svg"]);
+    }
+
+    #[test]
+    fn resolve_spec_missing_explicit_path_is_data_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = DescriptionSpec {
+            readme: Some(PathBuf::from("does-not-exist.md")),
+            logo: None,
+            changelog: None,
+            include: vec![],
+            publish: None,
+        };
+        let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(format!("{err:#}").contains("does-not-exist.md"));
+    }
+
+    #[test]
+    fn resolve_spec_empty_is_data_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = DescriptionSpec {
+            readme: None,
+            logo: None,
+            changelog: None,
+            include: vec![],
+            publish: None,
+        };
+        let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    /// Build a one-skill planned-entry set targeting `repo` for description tests.
+    fn one_entry(name: &str, repo: &str) -> Vec<PlannedEntry> {
+        vec![PlannedEntry {
+            kind: ArtifactKind::Skill,
+            name: name.to_string(),
+            path: PathBuf::from("skills").join(name),
+            reference: format!("{repo}:1.0.0"),
+            pin: false,
+            name_not_appended: false,
+        }]
+    }
+
+    #[test]
+    fn plan_descriptions_precedence_per_entry_over_top_level_over_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Conventional probe file (lowest precedence).
+        write(&dir.join("README.md"), "# probe\n");
+        // Top-level spec file.
+        write(&dir.join("top.md"), "# top\n");
+        // Per-entry override file.
+        write(&dir.join("entry.md"), "# entry\n");
+
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n\
+             [description]\nreadme = \"top.md\"\n\
+             [skills.demo]\nversion = \"1.0.0\"\n[skills.demo.description]\nreadme = \"entry.md\"\n",
+        )
+        .unwrap();
+        let entries = one_entry("demo", "localhost:5000/acme/skills/demo");
+        let planned = plan_descriptions(&manifest, &entries, dir, Path::new("publish.toml")).unwrap();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].repository, "localhost:5000/acme/skills/demo");
+        // The per-entry override wins: entry.md packed as README.md.
+        assert!(
+            planned[0]
+                .files
+                .iter()
+                .any(|(n, p)| n == "README.md" && p.ends_with("entry.md"))
+        );
+    }
+
+    #[test]
+    fn plan_descriptions_false_opts_entry_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n[description]\nreadme = \"README.md\"\n\
+             [skills.demo]\nversion = \"1.0.0\"\ndescription = false\n",
+        )
+        .unwrap();
+        let entries = one_entry("demo", "localhost:5000/acme/skills/demo");
+        let planned = plan_descriptions(&manifest, &entries, dir, Path::new("publish.toml")).unwrap();
+        assert!(
+            planned.is_empty(),
+            "description = false opts the entry out of the fan-out"
+        );
+    }
+
+    #[test]
+    fn plan_descriptions_top_level_kill_switch_and_probe_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+
+        // publish = false kills the auto-companion even with a probe hit.
+        let killed: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n[description]\npublish = false\n\
+             [skills.demo]\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let entries = one_entry("demo", "localhost:5000/acme/skills/demo");
+        assert!(
+            plan_descriptions(&killed, &entries, dir, Path::new("publish.toml"))
+                .unwrap()
+                .is_empty(),
+            "publish = false is the manifest-wide kill switch"
+        );
+
+        // No [description] table → conventional probe finds README.md.
+        let probed: PublishManifest =
+            toml::from_str("registry = \"localhost:5000\"\n[skills.demo]\nversion = \"1.0.0\"\n").unwrap();
+        let planned = plan_descriptions(&probed, &entries, dir, Path::new("publish.toml")).unwrap();
+        assert_eq!(planned.len(), 1, "conventional probe publishes a companion by default");
+    }
+
+    #[test]
+    fn plan_descriptions_fans_out_to_each_repo_deduped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n[description]\nreadme = \"README.md\"\n\
+             [skills.a]\nversion = \"1.0.0\"\n[skills.b]\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let entries = vec![
+            PlannedEntry {
+                kind: ArtifactKind::Skill,
+                name: "a".to_string(),
+                path: PathBuf::from("skills/a"),
+                reference: "localhost:5000/acme/skills/a:1.0.0".to_string(),
+                pin: false,
+                name_not_appended: false,
+            },
+            PlannedEntry {
+                kind: ArtifactKind::Skill,
+                name: "b".to_string(),
+                path: PathBuf::from("skills/b"),
+                reference: "localhost:5000/acme/skills/b:1.0.0".to_string(),
+                pin: false,
+                name_not_appended: false,
+            },
+        ];
+        let planned = plan_descriptions(&manifest, &entries, dir, Path::new("publish.toml")).unwrap();
+        assert_eq!(planned.len(), 2, "top-level companion fans out to every entry's repo");
+        let repos: Vec<&str> = planned.iter().map(|p| p.repository.as_str()).collect();
+        assert!(repos.contains(&"localhost:5000/acme/skills/a"));
+        assert!(repos.contains(&"localhost:5000/acme/skills/b"));
+    }
+
+    // ── B1: description path containment guard ────────────────────────────
+    //
+    // Every selected companion file — explicit readme/logo/changelog paths and
+    // include glob hits alike — must resolve INSIDE the canonical manifest dir.
+    // Out-of-tree sources (`..`, absolute, symlink escape, non-Normal
+    // components) are a data error (65), never a silent pack.
+
+    #[test]
+    fn contained_description_path_rejects_parent_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = contained_description_path(tmp.path(), Path::new("../outside.md"))
+            .expect_err("a ../ escape must be rejected pre-filesystem");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(
+            format!("{err:#}").contains("outside.md"),
+            "error names the offending source path, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn contained_description_path_rejects_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // An absolute source carries a RootDir/Prefix component — rejected by
+        // layer 1 before the filesystem is ever touched.
+        let abs = if cfg!(windows) {
+            Path::new(r"C:\Windows\System32\drivers\etc\hosts")
+        } else {
+            Path::new("/etc/passwd")
+        };
+        let err = contained_description_path(tmp.path(), abs).expect_err("an absolute source must be rejected");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn contained_description_path_rejects_non_normal_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        // An interior `..` component is non-Normal — layer 1 rejects it without
+        // canonicalizing (works even when the path does not exist on disk).
+        let err = contained_description_path(tmp.path(), Path::new("docs/../../etc/secret.md"))
+            .expect_err("an interior .. component must be rejected");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn contained_description_path_accepts_in_tree_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("docs/readme.md"), "# r\n");
+        let resolved = contained_description_path(dir, Path::new("docs/readme.md")).expect("an in-tree file resolves");
+        assert!(
+            resolved.ends_with("readme.md"),
+            "returns the canonicalized in-tree location, got {}",
+            resolved.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_description_path_rejects_symlink_escaping_the_tree() {
+        // A symlink that lives INSIDE the manifest tree but whose target
+        // resolves OUTSIDE it must be rejected by layer 2 (canonicalize +
+        // starts_with), so a crafted link can never smuggle an out-of-tree file.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = tmp.path().join("secret.env");
+        std::fs::write(&outside, "TOKEN=1\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link.md")).unwrap();
+
+        let err = contained_description_path(&dir, Path::new("link.md"))
+            .expect_err("a symlink whose target escapes the tree must be rejected");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_description_path_accepts_in_tree_symlink_to_in_tree_target() {
+        // A symlink that stays inside the tree canonicalizes to an in-tree
+        // location and is accepted.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir.join("real.md"), "# r\n");
+        std::os::unix::fs::symlink(dir.join("real.md"), dir.join("alias.md")).unwrap();
+
+        let resolved = contained_description_path(&dir, Path::new("alias.md"))
+            .expect("an in-tree symlink to an in-tree target resolves");
+        assert!(resolved.exists(), "returns an existing in-tree location");
+    }
+
+    #[test]
+    fn resolve_spec_include_escaping_glob_is_containment_error_not_silent_pack() {
+        // B1: an `include` glob that walks out of the manifest tree (`../**`)
+        // must surface a containment data error, NOT silently pack the
+        // out-of-tree file. Pre-fix, the glob hit rides the layer under its
+        // basename; the guard rejects it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir.join("README.md"), "# r\n");
+        // A secret OUTSIDE the manifest dir, reachable via `../**/*.env`.
+        std::fs::write(tmp.path().join("secret.env"), "TOKEN=1\n").unwrap();
+
+        let spec = DescriptionSpec {
+            readme: Some(PathBuf::from("README.md")),
+            logo: None,
+            changelog: None,
+            include: vec!["../**/*.env".to_string()],
+            publish: None,
+        };
+        let err = resolve_description_spec(&spec, &dir, Path::new("publish.toml"))
+            .expect_err("an include glob that escapes the manifest tree must be a containment error");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    // ── W2: pre-pack companions before the push loop ──────────────────────
+    //
+    // `pack_planned_descriptions` reads + bounds-checks + builds the tar for
+    // every planned companion BEFORE any registry mutation, so a bad companion
+    // aborts the whole publish with zero pushes. Its signature takes NO
+    // `OciAccess` — packing is a pure filesystem step, provable off-network.
+
+    #[test]
+    fn pack_planned_descriptions_packs_valid_set_without_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        let planned = vec![PlannedDescription {
+            repository: "localhost:5000/acme/skills/demo".to_string(),
+            files: vec![("README.md".to_string(), dir.join("README.md"))],
+        }];
+        let packed = pack_planned_descriptions(&planned).expect("a valid companion packs");
+        assert_eq!(packed.len(), 1, "one planned companion ⇒ one packed companion");
+        assert_eq!(packed[0].repository, "localhost:5000/acme/skills/demo");
+        assert!(
+            !packed[0].tar.is_empty(),
+            "the tar layer bytes are built ahead of the push"
+        );
+    }
+
+    #[test]
+    fn pack_planned_descriptions_shared_repo_packs_companion_once() {
+        // Two entries targeting the SAME repository dedup at plan time to a
+        // single PlannedDescription, so pack produces exactly one
+        // PackedDescription — the companion is packed once, not per-entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("README.md"), "# r\n");
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n[description]\nreadme = \"README.md\"\n\
+             [skills.a]\nversion = \"1.0.0\"\n[rules.a]\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        // Two entries whose references resolve to one shared repository.
+        let entries = vec![
+            PlannedEntry {
+                kind: ArtifactKind::Skill,
+                name: "a".to_string(),
+                path: PathBuf::from("skills/a"),
+                reference: "localhost:5000/acme/shared:1.0.0".to_string(),
+                pin: false,
+                name_not_appended: false,
+            },
+            PlannedEntry {
+                kind: ArtifactKind::Rule,
+                name: "a".to_string(),
+                path: PathBuf::from("rules/a.md"),
+                reference: "localhost:5000/acme/shared:1.0.0".to_string(),
+                pin: false,
+                name_not_appended: false,
+            },
+        ];
+        let planned = plan_descriptions(&manifest, &entries, dir, Path::new("publish.toml")).unwrap();
+        assert_eq!(
+            planned.len(),
+            1,
+            "two entries on one repo dedup to a single planned companion"
+        );
+        let packed = pack_planned_descriptions(&planned).expect("packs the single companion");
+        assert_eq!(packed.len(), 1, "the shared-repo companion is packed exactly once");
+    }
+
+    #[test]
+    fn pack_planned_descriptions_unreadable_source_errors() {
+        // A planned companion whose source file cannot be read aborts the
+        // pre-pack step — before the caller pushes any artifact.
+        let planned = vec![PlannedDescription {
+            repository: "localhost:5000/acme/skills/demo".to_string(),
+            files: vec![("README.md".to_string(), PathBuf::from("/nonexistent/does-not-exist.md"))],
+        }];
+        assert!(
+            pack_planned_descriptions(&planned).is_err(),
+            "an unreadable companion source must abort the pre-pack, not silently skip"
+        );
+    }
+
+    // ── W3: EntryDescription malformed-input diagnostics ──────────────────
+
+    #[test]
+    fn entry_description_typo_key_error_names_unknown_field() {
+        // A per-entry override table with a typo'd key surfaces DescriptionSpec's
+        // own `deny_unknown_fields` error — the precise field name — not serde's
+        // untagged "data did not match any variant" catch-all.
+        let toml = r#"
+            registry = "r.example"
+            [skills.demo]
+            version = "0.1.0"
+            [skills.demo.description]
+            redme = "README.md"
+        "#;
+        let err = toml::from_str::<PublishManifest>(toml).expect_err("a typo'd override key must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "must be the precise deny_unknown_fields error, got: {msg}"
+        );
+        assert!(msg.contains("redme"), "error must name the offending field, got: {msg}");
+    }
+
+    #[test]
+    fn entry_description_non_bool_non_table_is_type_error() {
+        // `description = 1` is neither the bool opt-in/out nor an override table.
+        let toml = r#"
+            registry = "r.example"
+            [skills.demo]
+            version = "0.1.0"
+            description = 1
+        "#;
+        let err = toml::from_str::<PublishManifest>(toml).expect_err("an integer description must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("boolean") && msg.contains("table"),
+            "error must name the expected shape (boolean or table), got: {msg}"
         );
     }
 }

@@ -19,7 +19,7 @@ use anyhow::anyhow;
 use serde::Serialize;
 
 use crate::context::Context;
-use crate::fetch::fetch_artifact;
+use crate::fetch::{FetchedPayload, fetch_artifact};
 use crate::install::client_target::ClientTarget;
 use crate::install::installer::INSTALL_LAYER_SIZE_LIMIT;
 use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer};
@@ -76,7 +76,17 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     );
     let access = crate::command::access_seam(ctx)?;
     let fetched = fetch_artifact(&scope, &access, &args.reference, Some(INSTALL_LAYER_SIZE_LIMIT)).await?;
-    match fetched.kind {
+    // A description companion never materializes files; render only ever
+    // fetches a real, installable kind.
+    let kind = match fetched.payload {
+        FetchedPayload::Description => {
+            return Err(anyhow!(
+                "a description companion renders no files; use grim_fetch instead"
+            ));
+        }
+        FetchedPayload::Artifact(kind) => kind,
+    };
+    match kind {
         ArtifactKind::Mcp => {
             return Err(anyhow!(
                 "mcp descriptors register into client configs and render no files; use grim install"
@@ -97,14 +107,9 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         .tempdir_in(std::env::temp_dir())
         .map_err(|e| anyhow!("cannot create staging dir: {e}"))?;
     let materialized_root = staging.path().join("content");
-    crate::command::grim(DefaultMaterializer.materialize(
-        fetched.kind,
-        &fetched.name,
-        &fetched.blob,
-        &materialized_root,
-    ))?;
+    crate::command::grim(DefaultMaterializer.materialize(kind, &fetched.name, &fetched.blob, &materialized_root))?;
 
-    let canonical = match fetched.kind {
+    let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", fetched.name)),
         ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("rejected above"),
@@ -113,13 +118,13 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         return Err(anyhow!(
             "artifact '{}' ({}) did not produce the expected '{}' entry",
             fetched.name,
-            fetched.kind,
+            kind,
             canonical.display()
         ));
     }
 
     // A rule may stage a sibling support directory beside its index.
-    let staged_support: Option<PathBuf> = match fetched.kind {
+    let staged_support: Option<PathBuf> = match kind {
         ArtifactKind::Rule => {
             let dir = materialized_root.join(&fetched.name);
             dir.is_dir().then_some(dir)
@@ -128,7 +133,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     };
 
     std::fs::create_dir_all(&args.dest_dir).map_err(|e| anyhow!("cannot create '{}': {e}", args.dest_dir.display()))?;
-    let dest = match fetched.kind {
+    let dest = match kind {
         ArtifactKind::Skill => args.dest_dir.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => args.dest_dir.join(format!("{}.md", fetched.name)),
         ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("rejected above"),
@@ -136,7 +141,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
 
     let pinned_str = fetched.pinned.strip_advisory().to_string();
     let written = crate::command::grim(client.materialize(
-        fetched.kind,
+        kind,
         &fetched.name,
         &canonical,
         &dest,
@@ -147,7 +152,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     Ok(RenderReport {
         reference: fetched.identifier.to_string(),
         digest: fetched.pinned.strip_advisory().digest().to_string(),
-        kind: fetched.kind.to_string(),
+        kind: kind.to_string(),
         name: fetched.name,
         vendor: client.as_str().to_string(),
         dest_dir: args.dest_dir.clone(),
