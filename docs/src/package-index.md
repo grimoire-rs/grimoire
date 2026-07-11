@@ -95,6 +95,8 @@ scripts/                           # (optional) build/validation tooling
   "kind": "skill",
   "ref": "ghcr.io/grimoire-rs/skills/grim-usage",
   "description": "Drive the grim CLI — install, update, search, publish.",
+  "summary": "Drive the grim CLI from an agent.",
+  "keywords": ["grim", "install", "search", "publish"],
   "repository": "https://github.com/grimoire-rs/grimoire",
   "owner": { "github": "grimoire-rs", "id": 298895348 }
 }
@@ -107,6 +109,8 @@ scripts/                           # (optional) build/validation tooling
 | `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`. |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
+| `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
+| `keywords` | array of string | no | Publisher keywords, matched by `grim search`. Omitted when empty. |
 | `repository` | string | no | Source repository URL. Consumers keep it only with an `https://` prefix. |
 | `owner.github` | string | yes* | GitHub login owning the namespace — for pointers under `index/github.com/` (and other GitHub-forge hosts). MUST match the namespace directory (case-insensitive). |
 | `owner.login` | string | yes* | The generic owner key for any non-GitHub host (the pointer's `index/<host>/` segment carries the forge context). MUST match the namespace directory (case-insensitive). |

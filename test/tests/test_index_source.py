@@ -30,8 +30,15 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _package(name: str, kind: str, ref: str, description: str) -> dict:
-    return {
+def _package(
+    name: str,
+    kind: str,
+    ref: str,
+    description: str,
+    keywords: list[str] | None = None,
+    summary: str | None = None,
+) -> dict:
+    pkg = {
         "schema": 1,
         "name": name,
         "kind": kind,
@@ -40,6 +47,13 @@ def _package(name: str, kind: str, ref: str, description: str) -> dict:
         "repository": "https://github.com/acme/skills",
         "owner": {"github": "acme", "id": 1},
     }
+    # Omit-empty, mirroring the announce writer: pre-search-metadata
+    # pointers carry neither key.
+    if keywords:
+        pkg["keywords"] = keywords
+    if summary is not None:
+        pkg["summary"] = summary
+    return pkg
 
 
 @pytest.fixture()
@@ -150,6 +164,34 @@ def test_search_http_index_filters_by_query(grim_at, project_dir: Path, http_ind
     assert result.returncode == 0, result.stderr
     repos = [r.get("repo", "") for r in json.loads(result.stdout)["items"]]
     assert repos == ["ghcr.io/acme/skills/alpha-skill"], f"got {repos}"
+
+
+def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_index) -> None:
+    """A query term present only in an index pointer's ``keywords`` (never in
+    the repo name or description) still matches — the index now carries the
+    search metadata the phone book used to drop."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package(
+                "grim",
+                "mcp",
+                "ghcr.io/grimoire-rs/mcp/grim",
+                "The grimoire MCP server",
+                keywords=["catalog", "fetch", "render"],
+                summary="Drive grim from an agent",
+            ),
+            _package("other", "skill", "ghcr.io/acme/skills/other", "Unrelated"),
+        ],
+    )
+    _index_config(project_dir, base)
+
+    runner = grim_at(project_dir)
+    result = runner.run("--format", "json", "search", "--refresh", "fetch", check=False)
+    assert result.returncode == 0, result.stderr
+    repos = [r.get("repo", "") for r in json.loads(result.stdout)["items"]]
+    assert repos == ["ghcr.io/grimoire-rs/mcp/grim"], f"keyword-only match failed: {repos}"
 
 
 def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: Path) -> None:

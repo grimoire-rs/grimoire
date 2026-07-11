@@ -828,8 +828,7 @@ async fn run_announce(
         let id = crate::oci::Identifier::parse(&planned.reference)
             .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
         let reference = format!("{}/{}", id.registry(), id.repository());
-        let (description, repository_url) =
-            crate::catalog::index_announce::pointer_metadata(access.as_ref(), &id).await;
+        let meta = crate::catalog::index_announce::pointer_metadata(access.as_ref(), &id).await;
         packages.push(AnnouncePackage {
             name: planned.name.clone(),
             kind: kind_str(planned.kind).to_string(),
@@ -837,8 +836,12 @@ async fn run_announce(
             // The index spec requires a description; grim-published
             // artifacts always carry the annotation, but degrade honestly
             // for foreign/unreachable manifests.
-            description: description.unwrap_or_else(|| format!("grimoire {} {}", kind_str(planned.kind), planned.name)),
-            repository_url,
+            description: meta
+                .description
+                .unwrap_or_else(|| format!("grimoire {} {}", kind_str(planned.kind), planned.name)),
+            repository_url: meta.repository_url,
+            keywords: meta.keywords,
+            summary: meta.summary,
         });
     }
 

@@ -132,6 +132,24 @@ pub fn replacement_ref(annotations: &BTreeMap<String, String>) -> Option<String>
         .and_then(|v| normalize_deprecated(v))
 }
 
+/// Read the keyword list off a manifest's annotation map: the comma-separated
+/// `com.grimoire.keywords` value split on commas, trimmed, with empties
+/// dropped; `[]` when the annotation is absent. The single read seam so the
+/// catalog build, `grim describe`, and the index announce parse keywords
+/// identically (rather than three subtly-diverging inline copies).
+pub fn keywords_from_annotations(annotations: &BTreeMap<String, String>) -> Vec<String> {
+    annotations
+        .get("com.grimoire.keywords")
+        .map(|k| {
+            k.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// An authored `repository` metadata value rejected at publish time.
 ///
 /// Raised at publish time (`grim build` / `grim release`) so a bad value

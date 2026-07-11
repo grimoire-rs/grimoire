@@ -797,17 +797,7 @@ impl Catalog {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
                 let summary = m.annotations.get("com.grimoire.summary").cloned();
-                let keywords = m
-                    .annotations
-                    .get("com.grimoire.keywords")
-                    .map(|k| {
-                        k.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let keywords = crate::oci::annotations::keywords_from_annotations(&m.annotations);
                 // Pre-repository artifacts carry the release ref here —
                 // the prefix guard keeps only real HTTPS repo URLs.
                 let repository_url = m

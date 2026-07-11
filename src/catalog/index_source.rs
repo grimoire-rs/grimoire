@@ -52,6 +52,15 @@ struct IndexPackage {
     /// Source repository URL.
     #[serde(default)]
     repository: Option<String>,
+    /// Publisher keywords, matched by `grim search` alongside the
+    /// description. Absent in pre-keywords index files (and in the hosted
+    /// `all.json` until packages re-announce) — defaults to `[]`.
+    #[serde(default)]
+    keywords: Vec<String>,
+    /// Short single-line blurb, matched by `grim search`. Absent in
+    /// pre-summary index files — defaults to `None`.
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 impl IndexPackage {
@@ -75,8 +84,8 @@ impl IndexPackage {
             repository: repository.to_string(),
             kind: Some(self.kind),
             description: self.description,
-            summary: None,
-            keywords: Vec::new(),
+            summary: self.summary,
+            keywords: self.keywords,
             // Same HTTPS prefix guard as the manifest read-back path.
             repository_url: self.repository.filter(|r| r.starts_with("https://")),
             revision: None,
@@ -266,6 +275,48 @@ mod tests {
         );
         assert_eq!(e.latest_tag, None, "phone book carries no version data");
         assert_eq!(e.version, None);
+        // Pre-keywords index files carry neither field → defaults.
+        assert!(e.keywords.is_empty(), "missing keywords → []");
+        assert_eq!(e.summary, None, "missing summary → None");
+    }
+
+    #[test]
+    fn package_forwards_keywords_and_summary() {
+        let p = pkg(r#"{
+            "schema": 1,
+            "name": "grim-usage",
+            "kind": "skill",
+            "ref": "ghcr.io/acme/skills/grim-usage",
+            "keywords": ["search", "fetch", " "],
+            "summary": "Drive grim"
+        }"#);
+        let e = p.into_entry("t").expect("maps");
+        // Index keywords are forwarded verbatim (the announce side already
+        // trimmed/dropped empties when writing the pointer). Whitespace-only
+        // entries survive here because JSON arrays are pre-split — the comma
+        // trimming applies only to the manifest annotation string.
+        assert_eq!(e.keywords, vec!["search", "fetch", " "]);
+        assert_eq!(e.summary.as_deref(), Some("Drive grim"));
+    }
+
+    #[test]
+    fn index_entry_matches_keyword_only_query() {
+        use crate::catalog::search_match::SearchQuery;
+        // A term present only in keywords — never in repo, kind, or
+        // description — must match once the index carries the field. This is
+        // the exact gap the fix closes for the default index-backed source.
+        let e = pkg(r#"{
+            "schema": 1,
+            "name": "grim",
+            "kind": "mcp",
+            "ref": "ghcr.io/grimoire-rs/mcp/grim",
+            "description": "The grimoire MCP server",
+            "keywords": ["catalog", "fetch", "render"]
+        }"#)
+        .into_entry("t")
+        .expect("maps");
+        assert!(e.matches(&SearchQuery::parse("fetch")), "keyword-only query matches");
+        assert!(!e.matches(&SearchQuery::parse("absent")), "unrelated term does not");
     }
 
     #[test]

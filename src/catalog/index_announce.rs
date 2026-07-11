@@ -47,6 +47,12 @@ pub struct AnnouncePackage {
     pub description: String,
     /// HTTPS source-repository URL, if known.
     pub repository_url: Option<String>,
+    /// Publisher keywords (`grim search` matches them alongside the
+    /// description). Empty ⇒ omitted from the written pointer.
+    pub keywords: Vec<String>,
+    /// Short single-line blurb (`grim search` matches it too). `None` ⇒
+    /// omitted from the written pointer.
+    pub summary: Option<String>,
 }
 
 /// The announce request: where, as whom, and what.
@@ -319,20 +325,36 @@ fn merge_request_url(push_stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Read the pointer metadata (description + HTTPS source URL) back from
-/// the just-published artifact's manifest annotations: representative tag
-/// → digest → manifest, over the access seam. Every failure degrades to
-/// `None` — announce still proceeds with a fallback description.
+/// Pointer metadata read back from a published artifact's manifest — the
+/// display fields the index carries. Named (not a tuple) so the three
+/// `Option<String>` fields can't be transposed at the call site.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PointerMetadata {
+    /// `org.opencontainers.image.description`.
+    pub description: Option<String>,
+    /// `org.opencontainers.image.source`, kept only with an `https://` prefix.
+    pub repository_url: Option<String>,
+    /// `com.grimoire.keywords`, comma-split (trimmed, empties dropped).
+    pub keywords: Vec<String>,
+    /// `com.grimoire.summary`.
+    pub summary: Option<String>,
+}
+
+/// Read the pointer metadata (description, HTTPS source URL, keywords,
+/// summary) back from the just-published artifact's manifest annotations:
+/// representative tag → digest → manifest, over the access seam. Every
+/// failure degrades to the default — announce still proceeds with a
+/// fallback description.
 pub async fn pointer_metadata(
     access: &dyn crate::oci::access::OciAccess,
     id: &crate::oci::Identifier,
-) -> (Option<String>, Option<String>) {
+) -> PointerMetadata {
     let tags = match access.list_tags(id).await {
         Ok(Some(tags)) => tags,
-        _ => return (None, None),
+        _ => return PointerMetadata::default(),
     };
     let Some(tag) = crate::catalog::registry_catalog::pick_latest_tag(&tags) else {
-        return (None, None);
+        return PointerMetadata::default();
     };
     let tagged = id.clone_with_tag(tag);
     let digest = match access
@@ -340,25 +362,28 @@ pub async fn pointer_metadata(
         .await
     {
         Ok(Some(d)) => d,
-        _ => return (None, None),
+        _ => return PointerMetadata::default(),
     };
     let Ok(pinned) = crate::oci::PinnedIdentifier::try_from(tagged.clone_with_digest(digest)) else {
-        return (None, None);
+        return PointerMetadata::default();
     };
     let Ok(Some(manifest)) = access.fetch_manifest(&pinned).await else {
-        return (None, None);
+        return PointerMetadata::default();
     };
-    (
-        manifest
+    PointerMetadata {
+        description: manifest
             .annotations
             .get("org.opencontainers.image.description")
             .cloned(),
-        manifest
+        repository_url: manifest
             .annotations
             .get("org.opencontainers.image.source")
             .filter(|s| s.starts_with("https://"))
             .cloned(),
-    )
+        // Same read seam the catalog build and `grim describe` use.
+        keywords: crate::oci::annotations::keywords_from_annotations(&manifest.annotations),
+        summary: manifest.annotations.get("com.grimoire.summary").cloned(),
+    }
 }
 
 /// Render the metadata.json pointer for `pkg` (index spec v1).
@@ -382,6 +407,14 @@ fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64, forge: F
     });
     if let Some(repo) = &pkg.repository_url {
         value["repository"] = serde_json::Value::String(repo.clone());
+    }
+    // Omit-empty: pointers for artifacts without keywords/summary stay
+    // byte-identical to pre-search-metadata index files.
+    if !pkg.keywords.is_empty() {
+        value["keywords"] = serde_json::Value::from(pkg.keywords.clone());
+    }
+    if let Some(summary) = &pkg.summary {
+        value["summary"] = serde_json::Value::String(summary.clone());
     }
     let mut out = serde_json::to_string_pretty(&value).unwrap_or_default();
     out.push('\n');
@@ -471,6 +504,8 @@ mod tests {
             reference: format!("ghcr.io/acme/skills/{name}"),
             description: "A test pointer".to_string(),
             repository_url: Some("https://github.com/acme/skills".to_string()),
+            keywords: Vec::new(),
+            summary: None,
         }
     }
 
@@ -486,7 +521,22 @@ mod tests {
         assert_eq!(value["owner"]["id"], 42);
         assert!(value["owner"].get("login").is_none());
         assert_eq!(value["repository"], "https://github.com/acme/skills");
+        // Omit-empty: a pointer with no keywords/summary carries neither key,
+        // keeping pre-search-metadata index files byte-identical.
+        assert!(value.get("keywords").is_none());
+        assert!(value.get("summary").is_none());
         assert!(rendered.ends_with('\n'), "trailing newline for clean diffs");
+    }
+
+    #[test]
+    fn metadata_json_carries_keywords_and_summary_when_present() {
+        let mut p = pkg("code-review");
+        p.keywords = vec!["review".to_string(), "quality".to_string()];
+        p.summary = Some("Terse review".to_string());
+        let value: serde_json::Value =
+            serde_json::from_str(&metadata_json(&p, "acme", 42, ForgeKind::GitHub)).expect("valid JSON");
+        assert_eq!(value["keywords"], serde_json::json!(["review", "quality"]));
+        assert_eq!(value["summary"], "Terse review");
     }
 
     #[test]

@@ -519,16 +519,7 @@ pub async fn describe_artifact(
 
     let a = &manifest.annotations;
     let get = |k: &str| a.get(k).cloned();
-    let keywords = a
-        .get("com.grimoire.keywords")
-        .map(|k| {
-            k.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let keywords = crate::oci::annotations::keywords_from_annotations(a);
 
     Ok(DescribeReport {
         reference: id.to_string(),

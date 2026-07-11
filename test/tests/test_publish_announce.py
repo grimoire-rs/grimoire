@@ -43,11 +43,22 @@ def _write(p: Path, body: str) -> None:
     p.write_text(body)
 
 
-def _make_skill_source(project_dir: Path, name: str, description: str) -> None:
+def _make_skill_source(
+    project_dir: Path,
+    name: str,
+    description: str,
+    keywords: str | None = None,
+    summary: str | None = None,
+) -> None:
+    meta = f"  repository: https://github.com/acme/{name}\n"
+    if keywords is not None:
+        meta += f"  keywords: {keywords}\n"
+    if summary is not None:
+        meta += f"  summary: {summary}\n"
     _write(
         project_dir / "skills" / name / "SKILL.md",
         f"---\nname: {name}\ndescription: {description}\n"
-        f"metadata:\n  repository: https://github.com/acme/{name}\n---\n# {name}\n",
+        f"metadata:\n{meta}---\n# {name}\n",
     )
 
 
@@ -238,6 +249,29 @@ def test_publish_announce_pushes_branch_with_metadata(
     assert meta["description"] == "Announce me."
     assert meta["owner"] == {"login": "acme", "id": 42}
     assert meta["repository"] == f"https://github.com/acme/{name}"
+
+
+def test_publish_announce_carries_keywords_and_summary(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A skill published with metadata.keywords / metadata.summary announces
+    a pointer that carries them, so an index-backed `grim search` can match
+    them (a skill without those fields writes neither key)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-kw"
+    _make_skill_source(project_dir, name, "Announce me.", keywords="review, quality", summary="Terse review")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, f"publish --announce failed: {result.stderr}"
+
+    branch = _announce_branch(bare)
+    blob = _git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json")
+    meta = json.loads(blob)
+    assert meta["keywords"] == ["review", "quality"], meta
+    assert meta["summary"] == "Terse review", meta
 
 
 def test_publish_announce_is_repeatable(
