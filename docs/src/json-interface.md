@@ -150,6 +150,37 @@ grim-specific codes above 78; the same table governs plain-mode exit
 codes. Clap parse failures (the pre-contract boundary above) and `--help`
 never produce the document.
 
+### The optional `reason` field {#error-reason}
+
+Some failures carry a machine-readable `reason` alongside `code`/`exit` —
+a kebab-case subtype that lets a consumer detect a *specific* refusal
+without scraping the non-frozen `message`:
+
+```json
+{
+  "error": {
+    "code": "data",
+    "exit": 65,
+    "reason": "stale-lock",
+    "message": "skill 'code-review' (…): partial-resolve refused: lock declaration_hash … does not match current …; retry with a full resolve"
+  }
+}
+```
+
+`reason` is **additive and optional**: it appears only when grim has a
+subtype for the failure and is **omitted** otherwise — an absent key, not
+`null` (the [`fetch` omit-empty fields](#fetch) set the precedent; the
+error document is likewise exempt from the [null policy](#null-policy)).
+A consumer must tolerate both its absence and a value it does not
+recognize. The reasons defined so far:
+
+| `reason` | Paired with | Meaning |
+|----------|-------------|---------|
+| `stale-lock` | `data` / 65 | A partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration. Retry with a full `grim update` (no names). |
+
+New reasons may appear in any minor release under the [additive-field
+policy][stability-additive]; existing ones never change meaning.
+
 ## Null and additive policy {#null-policy}
 
 Optional report fields are **always present**: a field that does not

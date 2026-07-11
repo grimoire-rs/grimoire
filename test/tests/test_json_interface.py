@@ -38,6 +38,9 @@ def test_error_document_on_missing_config(
     assert doc["error"]["code"] == "not-found"
     assert doc["error"]["exit"] == 79
     assert doc["error"]["message"], "message carries the rendered chain"
+    assert "reason" not in doc["error"], (
+        f"an unclassified error omits the optional reason subtype: {doc}"
+    )
     assert result.stderr.strip(), "human-readable chain still on stderr"
 
 
@@ -57,6 +60,42 @@ def test_error_document_on_usage_error(
     doc = json.loads(result.stdout)
     assert doc["error"]["code"] == "usage"
     assert doc["error"]["exit"] == 64
+    assert "reason" not in doc["error"], "a usage error carries no reason subtype"
+
+
+def test_error_reason_marks_stale_lock(grim_at, project_dir: Path) -> None:
+    """The error document carries a machine-readable ``reason`` for the
+    stale-lock refusal, so a consumer detects it without scraping the
+    non-frozen ``message``.
+
+    The partial-resolve guard (``resolve_lock_partial``,
+    ``src/resolve/resolver.rs``) runs BEFORE any registry I/O, so a
+    hand-crafted lock whose ``declaration_hash`` deliberately mismatches the
+    declared set triggers the refusal fully offline — no registry needed.
+    """
+    write_config(
+        project_dir, skills={"code-review": "ghcr.io/acme/code-review:stable"}
+    )
+    # A valid lock whose all-zero declaration_hash cannot match the real
+    # canonicalized hash of the declaration above.
+    (project_dir / "grimoire.lock").write_text(
+        "[metadata]\n"
+        "lock_version = 1\n"
+        "declaration_hash_version = 1\n"
+        f'declaration_hash = "sha256:{"0" * 64}"\n'
+        'generated_by = "grim test"\n'
+        'generated_at = "2026-01-01T00:00:00Z"\n'
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "--offline", "--format", "json", "update", "code-review", check=False
+    )
+    assert result.returncode == 65, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["error"]["code"] == "data"
+    assert doc["error"]["exit"] == 65
+    assert doc["error"]["reason"] == "stale-lock"
 
 
 def test_plain_mode_failure_keeps_stdout_empty(

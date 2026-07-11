@@ -283,6 +283,27 @@ fn classify_auth(err: &AuthError) -> ExitCode {
     }
 }
 
+/// Maps an error chain to a machine-readable failure `reason`, or `None`
+/// when no specific subtype applies.
+///
+/// A companion to [`classify_error`]: same free-function shape and same
+/// chain walk (first cause that downcasts to [`Error`] decides), but it
+/// yields the optional `reason` subtype the JSON error envelope carries
+/// alongside `code`/`exit`. The string is kebab-case and additive —
+/// consumers must tolerate both absence and unknown future values. Only
+/// the stale-lock refusal is annotated today; every other error is `None`.
+pub fn classify_reason(err: &anyhow::Error) -> Option<&'static str> {
+    for cause in err.chain() {
+        if let Some(e) = cause.downcast_ref::<Error>() {
+            return match e {
+                Error::Resolve(re) if matches!(re.kind, ResolveErrorKind::StaleLock { .. }) => Some("stale-lock"),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
 fn classify_io(io: &std::io::Error) -> ExitCode {
     if io.kind() == std::io::ErrorKind::PermissionDenied {
@@ -534,6 +555,62 @@ mod tests {
             let err: anyhow::Error = Error::from(ReleaseError::without_reference(kind)).into();
             assert_eq!(classify_error(&err), ExitCode::DataError);
         }
+    }
+
+    #[test]
+    fn stale_lock_classifies_reason_as_stale_lock() {
+        use crate::oci::ArtifactKind;
+        use crate::oci::reference::ArtifactRef;
+        let reference = ArtifactRef::registry(
+            ArtifactKind::Skill,
+            "code-review",
+            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+        );
+        let err: anyhow::Error = Error::from(ResolveError::new(
+            reference,
+            ResolveErrorKind::StaleLock {
+                previous_hash: "sha256:aaa".to_string(),
+                current_hash: "sha256:bbb".to_string(),
+            },
+        ))
+        .into();
+        assert_eq!(classify_error(&err), ExitCode::DataError);
+        assert_eq!(classify_reason(&err), Some("stale-lock"));
+    }
+
+    #[test]
+    fn other_errors_carry_no_reason() {
+        // A representative data error and a not-found error both classify to
+        // an exit code but to no reason subtype — the field must stay absent.
+        let data: anyhow::Error = Error::from(DigestError::Invalid("nope".to_string())).into();
+        assert_eq!(classify_reason(&data), None);
+
+        let usage: anyhow::Error = Error::from(CommandError::LoginInput("bad input")).into();
+        assert_eq!(classify_reason(&usage), None);
+
+        // A non-Grimoire error (the classify_error fall-through case) also
+        // has no reason.
+        assert_eq!(classify_reason(&anyhow::anyhow!("unrelated")), None);
+    }
+
+    #[test]
+    fn reason_survives_anyhow_context_layers() {
+        use crate::oci::ArtifactKind;
+        use crate::oci::reference::ArtifactRef;
+        let reference = ArtifactRef::registry(
+            ArtifactKind::Skill,
+            "code-review",
+            Identifier::parse("ghcr.io/acme/code-review:stable").unwrap(),
+        );
+        let err = anyhow::Error::from(Error::from(ResolveError::new(
+            reference,
+            ResolveErrorKind::StaleLock {
+                previous_hash: "sha256:aaa".to_string(),
+                current_hash: "sha256:bbb".to_string(),
+            },
+        )))
+        .context("while re-resolving the lock");
+        assert_eq!(classify_reason(&err), Some("stale-lock"));
     }
 
     #[test]

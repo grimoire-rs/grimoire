@@ -60,7 +60,7 @@ use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
 use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
-use crate::error::classify_error;
+use crate::error::{classify_error, classify_reason};
 
 #[derive(Parser)]
 #[command(
@@ -154,6 +154,7 @@ fn main() -> std::process::ExitCode {
                 format,
                 ExitCode::Failure,
                 &format!("failed to start async runtime: {err}"),
+                None,
             );
             return ExitCode::Failure.into();
         }
@@ -167,33 +168,43 @@ fn main() -> std::process::ExitCode {
             // the default filter also writes to stderr).
             eprintln!("{err:#}");
             let code = classify_error(&err);
-            emit_error_document(format, code, &format!("{err:#}"));
+            emit_error_document(format, code, &format!("{err:#}"), classify_reason(&err));
             code.into()
         }
     }
 }
 
 /// Under `--format json`, print the structured error document to stdout:
-/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>"}}`.
+/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>", "reason"?}}`.
 ///
 /// stdout — not stderr — because stderr carries tracing output and the two
 /// would interleave; a consumer parses stdout and treats a top-level
 /// `error` key as the error document (see `docs/src/json-interface.md`).
 /// Plain mode emits nothing here (the human chain is already on stderr).
-fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str) {
+fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reason: Option<&str>) {
     if format != OutputFormat::Json {
         return;
     }
-    let doc = serde_json::json!({
-        "error": {
-            "code": code.slug(),
-            "exit": code as u8,
-            "message": message,
-        }
-    });
-    if let Ok(rendered) = serde_json::to_string_pretty(&doc) {
+    if let Ok(rendered) = serde_json::to_string_pretty(&error_document(code, message, reason)) {
         println!("{rendered}");
     }
+}
+
+/// Build the error-document value. `reason` is the optional machine-readable
+/// subtype (`classify_reason`); when `None` the key is omitted, matching the
+/// fetch `encoding` omit-empty precedent so a consumer distinguishes an old
+/// grim (no key) from an unclassified error (still no key — the same, by
+/// design: reasons are purely additive over the existing `code`/`exit`).
+fn error_document(code: ExitCode, message: &str, reason: Option<&str>) -> serde_json::Value {
+    let mut error = serde_json::json!({
+        "code": code.slug(),
+        "exit": code as u8,
+        "message": message,
+    });
+    if let Some(reason) = reason {
+        error["reason"] = serde_json::Value::String(reason.to_string());
+    }
+    serde_json::json!({ "error": error })
 }
 
 /// Initialize tracing from the `GRIM_LOG` env var (falls back to `warn`).
@@ -224,4 +235,25 @@ fn init_tracing() {
                 .with_filter(filter),
         )
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_document_omits_reason_when_absent() {
+        let doc = error_document(ExitCode::DataError, "boom", None);
+        let error = &doc["error"];
+        assert_eq!(error["code"], "data");
+        assert_eq!(error["exit"], 65);
+        assert_eq!(error["message"], "boom");
+        assert!(error.get("reason").is_none(), "absent reason must omit the key: {doc}");
+    }
+
+    #[test]
+    fn error_document_carries_reason_when_present() {
+        let doc = error_document(ExitCode::DataError, "boom", Some("stale-lock"));
+        assert_eq!(doc["error"]["reason"], "stale-lock");
+    }
 }
