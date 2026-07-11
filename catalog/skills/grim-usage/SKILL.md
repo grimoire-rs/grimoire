@@ -72,8 +72,18 @@ full reference is `--help` plus the docs site linked below.
 
 An artifact is named `registry/repository:tag` (a floating tag — `:1`
 follows the newest `1.x` release) or `registry/repository@sha256:…` (an
-immutable digest). A bare reference defaults to `:latest`. A short
-reference with no registry resolves against the default registry —
+immutable digest). A bare reference defaults to `:latest`.
+
+A third form skips the registry: a **local path** — `./skills/x`,
+`../shared/rule.md`, or an absolute path — names a directory or file on
+disk directly. The discriminant is used everywhere a reference is accepted
+(`grim add`, `grim install`, a `[skills]`/`[rules]`/`[agents]`/`[bundles]`
+value): a value starting with `./` or `../`, or an absolute path, is a
+local path source; anything else is an OCI reference. See
+[references/consume.md](references/consume.md#declaring) for how it is
+declared and installed.
+
+A short reference with no registry resolves against the default registry —
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the
 built-in fallback registry `ghcr.io/grimoire-rs`; full
 precedence in [references/registries.md](references/registries.md). Browsing

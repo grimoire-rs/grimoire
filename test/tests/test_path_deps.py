@@ -444,3 +444,269 @@ def test_symlinked_out_of_tree_secret_never_installed(
         if p.is_file() and secret_marker in p.read_text(errors="ignore")
     ]
     assert not leaked, f"secret content leaked into installed files: {leaked}"
+
+
+# ---------------------------------------------------------------------------
+# Local-path bundles: a `[bundles]` value points at a local bundle-source
+# TOML whose members are ordinary registry refs (plan_local_bundles_tui_group).
+# ---------------------------------------------------------------------------
+
+
+def test_local_bundle_lock_writes_path_hash_entry_and_installs_members(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    from src.helpers import make_artifact
+
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# CR\n"},
+        tag="stable",
+    )
+    _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+    (project_dir / ".claude").mkdir()
+
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "[[bundle]]" in lock
+    assert 'path = "./bundles/x.toml"' in lock
+    assert 'hash = "sha256:' in lock
+    # The bundle entry took the path arm, not the registry arm — and this
+    # bundle has exactly one member/contributor, so the member's own
+    # provenance uses the legacy `bundle`/`bundle_tag` pair (never the
+    # `bundles = [{ repo = ..., tag = ... }]` array), so a bare `repo = "`
+    # can only ever come from a registry-arm bundle entry.
+    assert 'repo = "' not in lock, f"a local bundle must not emit a repo key: {lock}"
+    assert sk.digest in lock, "the member keeps its own registry pin"
+
+    rows = runner.json("install")["items"]
+    assert {r["status"] for r in rows} == {"installed"}
+    installed = project_dir / ".claude" / "skills" / "code-review" / "SKILL.md"
+    assert installed.is_file()
+
+    status_rows = runner.json("status")["items"]
+    member = next(r for r in status_rows if r["name"] == "code-review")
+    assert member["state"] == "installed"
+    bundle_row = next(r for r in status_rows if r["kind"] == "bundle")
+    assert bundle_row["name"] == "x"
+
+
+def test_local_bundle_update_after_editing_members_rolls_lock_forward(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    from src.helpers import make_artifact
+
+    first = make_artifact(
+        f"{unique_repo}/first",
+        "skill",
+        {"first/SKILL.md": "---\nname: first\n---\n# one\n"},
+        tag="stable",
+    )
+    _write(project_dir / "bundles" / "x.toml", f'[skills]\nfirst = "{first.fq}"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    lock_before = (project_dir / "grimoire.lock").read_text()
+    assert "first" in lock_before
+    assert "second" not in lock_before
+
+    second = make_artifact(
+        f"{unique_repo}/second",
+        "skill",
+        {"second/SKILL.md": "---\nname: second\n---\n# two\n"},
+        tag="stable",
+    )
+    _write(
+        project_dir / "bundles" / "x.toml",
+        f'[skills]\nfirst = "{first.fq}"\nsecond = "{second.fq}"\n',
+    )
+    runner.run("update")
+
+    lock_after = (project_dir / "grimoire.lock").read_text()
+    assert lock_after != lock_before, "editing the member set must roll the lock forward"
+    assert "second" in lock_after
+    assert second.digest in lock_after
+
+
+def test_local_bundle_relative_member_rejected_65(
+    grim_at, project_dir: Path
+) -> None:
+    # ADR sub-decision 5: a local bundle has no registry directory to
+    # late-bind a `./`/`../` member against — relative members are only
+    # valid inside a REGISTRY bundle.
+    _write(project_dir / "bundles" / "x.toml", '[skills]\nfoo = "./y:1"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+
+    runner = _offline(grim_at(project_dir))
+    result = runner.run("lock", check=False)
+    assert result.returncode == 65, result.stderr
+    message = result.stderr.lower()
+    assert "relative" in message or "absolute" in message, (
+        f"error must clearly name the relative-member problem: {result.stderr}"
+    )
+
+
+def test_local_bundle_traversal_member_name_rejected_65(
+    grim_at, project_dir: Path
+) -> None:
+    # CWE-22: a local bundle member's config table KEY becomes an install-path
+    # component. A traversal key ("../../evil") must be rejected at `grim lock`
+    # (exit 65) before it can materialize outside the client dir — the same
+    # `SkillName` guard the registry branch enforces on member names.
+    _write(
+        project_dir / "bundles" / "x.toml",
+        '[skills]\n"../../evil" = "ghcr.io/acme/code-review:1"\n',
+    )
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+    (project_dir / ".claude").mkdir()
+
+    runner = _offline(grim_at(project_dir))
+    result = runner.run("lock", check=False)
+    assert result.returncode == 65, result.stderr
+
+    # Fail-closed: the traversal member never materialized anywhere in or above
+    # the project (the guard fires before any file is written).
+    for candidate in (project_dir / "evil", project_dir.parent / "evil"):
+        assert not candidate.exists(), f"traversal target must never be written: {candidate}"
+
+
+def test_local_bundle_offline_reinstall_is_network_free(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # After an online lock+install, a bare offline `grim install` with the
+    # output INTACT must succeed without any network access — proving the
+    # local-bundle install path adds no new network dependency (it does not
+    # re-expand/re-resolve the bundle online). Mirrors
+    # test_install.py::test_offline_warm_blob_cache_succeeds.
+    #
+    # NOTE: offline RE-materialize AFTER deleting the output would require a
+    # manifest cache grim keeps for NO artifact kind (registry or local) — a
+    # general v1 limitation, not local-bundle-specific and out of scope here.
+    from src.helpers import make_artifact
+
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# CR\n"},
+        tag="stable",
+    )
+    _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+    (project_dir / ".claude").mkdir()
+
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    installed = project_dir / ".claude" / "skills" / "code-review" / "SKILL.md"
+    assert installed.is_file()
+
+    # Output intact: a bare offline reinstall is a network-free re-verify no-op.
+    offline_runner = _offline(grim_at(project_dir))
+    result = offline_runner.run("install", "--client", "claude", check=False)
+    assert result.returncode == 0, (
+        f"offline reinstall of a local bundle must succeed network-free, got "
+        f"{result.returncode}; {result.stderr}"
+    )
+    assert installed.is_file(), "offline reinstall must keep the member installed"
+
+
+def test_registry_only_lock_has_no_local_bundle_wire_keys(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Compat contract: a project declaring no local (path-sourced) bundle
+    # must never see `path`/`hash` bundle keys or a `[[bundle]]` section at
+    # all — the frozen registry-only lock shape stays byte-identical.
+    from src.helpers import make_artifact
+
+    sk = make_artifact(
+        f"{unique_repo}/s",
+        "skill",
+        {"s/SKILL.md": "---\nname: s\n---\n"},
+        tag="stable",
+    )
+    _write(project_dir / "grimoire.toml", f'[skills]\ns = "{sk.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "[[bundle]]" not in lock
+    # `[metadata].declaration_hash = "sha256:…"` always contains "hash =", so a
+    # bare `"hash =" not in lock` false-positives. A real top-level bundle
+    # `path`/`hash` key starts a line — assert the leading-newline forms so the
+    # check targets only top-level keys, not the metadata field.
+    assert "\npath = " not in lock
+    assert "\nhash = " not in lock
+
+
+def test_add_local_bundle_is_rejected_with_guidance(
+    grim_at, project_dir: Path
+) -> None:
+    # v1 descope: a local bundle's supported path is a declared `[bundles]`
+    # entry resolved by `grim lock`, not `grim add`. The reject is a usage
+    # error (64) whose message guides the user to the supported flow.
+    _write(project_dir / "bundles" / "x.toml", '[skills]\ncode-review = "ghcr.io/acme/code-review:1"\n')
+    _write(project_dir / "grimoire.toml", "[bundles]\n")
+
+    runner = _offline(grim_at(project_dir))
+    result = runner.run("add", "./bundles/x.toml", "--kind", "bundle", "--name", "x", check=False)
+    assert result.returncode == 64, result.stderr
+    assert "[bundles]" in result.stderr, result.stderr
+    assert "grim lock" in result.stderr, result.stderr
+
+    # The reject leaves the config untouched — no binding written.
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert "./bundles/x.toml" not in cfg
+
+
+def test_remove_local_bundle_drops_declaration_but_keeps_member_files(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # K: the plan's v1 decision for mutating a path-declared bundle —
+    # `effective_set` returns `None` for a path declaration (its
+    # `DeclaredSource::Path` carries no registry `Identifier` to key
+    # membership eviction on), so `drop_from_lock` falls back to
+    # `legacy_drop_from_lock`, which — for a bundle whose declared source
+    # has no `identifier()` — undeclares the binding and drops the
+    # `[[bundle]]` cache entry WITHOUT evicting the member's own lock entry
+    # or touching installed files. Graceful degrade: honest staleness over
+    # silent file loss (`adr_effective_set_mutations.md` /
+    # `src/lock/effective_set.rs` `snapshot_matches` Path arm).
+    from src.helpers import make_artifact
+
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\n---\n# CR\n"},
+        tag="stable",
+    )
+    _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
+    _config(project_dir, "bundles", "x", "./bundles/x.toml")
+    (project_dir / ".claude").mkdir()
+
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    installed = project_dir / ".claude" / "skills" / "code-review" / "SKILL.md"
+    assert installed.is_file()
+
+    result = runner.run("remove", "bundle", "x")
+    assert result.returncode == 0, result.stderr
+
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert '"./bundles/x.toml"' not in cfg, "the bundle declaration must be dropped"
+
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "[[bundle]]" not in lock, "the path-bundle cache entry must be dropped"
+
+    # Graceful degrade: `grim remove` never deletes files (documented
+    # behaviour for every kind), and a path-bundle's member eviction is
+    # skipped entirely (no registry identifier to match), so the member's
+    # own lock entry AND its installed file both survive.
+    assert 'name = "code-review"' in lock, "the member's own lock entry must survive"
+    assert installed.is_file(), "member files must survive the graceful degrade"

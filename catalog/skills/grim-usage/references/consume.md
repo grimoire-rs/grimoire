@@ -85,6 +85,25 @@ If the reference is deprecated, `add` prints the publisher's deprecation
 notice on stderr and still completes the add — treat it as a prompt to
 look for a successor, not a failure.
 
+`<reference>` may also be a local path (`./skills/x`, `../shared/rule.md`,
+or an absolute path) for a skill, rule, or agent — declared verbatim and
+pinned by the SHA-256 of its canonical packed layer instead of a registry
+digest, then installed the same way:
+
+```sh
+grim add ./skills/my-skill
+grim add --kind agent ../shared/reviewer.md
+```
+
+The kind infers from the path's shape the same way `grim build` does (a
+directory with `SKILL.md` is a skill, a bare `.md` is a rule; pass
+`--kind agent` for an agent). A relative CLI path is rewritten
+config-dir-relative before it is declared, so it stays portable across
+clones; an absolute path is declared verbatim and warns in project scope
+(not portable to another machine). A bundle has no path form via `add` —
+declare it in `[bundles]` directly and run `grim lock` instead; see
+[Bundles](#bundles) below.
+
 `grim lock` re-resolves the floating tags declared in `grimoire.toml`
 and rewrites the lock. You need it only after hand-editing the config —
 `grim add` already locks what it declares.
@@ -108,6 +127,22 @@ Install never deletes anything, and it refuses to overwrite an artifact
 you have modified locally — or any pre-existing same-named file it has
 no record of writing — pass `--force` to overwrite deliberately.
 See [troubleshooting.md](troubleshooting.md) for the integrity gates.
+
+`grim install <path>` — the same local-path form as a positional argument
+— is a different move: a throwaway dev-install. It renders a skill,
+rule, or agent straight from disk into your clients **without** declaring
+it (`grimoire.toml` and `grimoire.lock` stay untouched):
+
+```sh
+grim install ./skills/my-skill
+```
+
+The install record is still written, marked `dev`, so it stays visible
+to `grim status` (`Source` reads `path: <path> (dev)`) and is refreshed by
+`grim update` on content drift — but it is never pruned automatically;
+`grim uninstall` is the only way to drop it. Reach for `grim add <path>`
+instead when you want the source declared and shared with co-workers.
+Confirm the current flag set with `grim install --help`.
 
 ## Updating
 
@@ -175,10 +210,9 @@ stale, and tells you to run `grim lock` — never a silently wrong pin.
 
 ## Bundles
 
-A bundle is a published, curated set of members. Declare it once and it
-**expands** into its member skills, rules, and agents at lock time, each
-pinned like a direct declaration and tagged with the bundle as its
-provenance:
+A bundle is a curated set of members. Declare it once and it **expands**
+into its member skills, rules, and agents at lock time, each pinned like a
+direct declaration and tagged with the bundle as its provenance:
 
 ```sh
 grim add --kind bundle ghcr.io/acme/python-stack:1
@@ -196,6 +230,13 @@ agreeing bundles coalesce, and disagreeing bundles **fail closed** with
 a conflict error at lock time — declare the member directly to pick a
 winner. `grim remove bundle <name>` undeclares the bundle and drops only
 the members no other declaration still holds.
+
+A `[bundles]` value can also be a local path (`./bundles/x.toml`) instead
+of a registry reference — a **local bundle**, resolved without a publish
+step and pinned by the SHA-256 of its canonical members layer rather than
+a manifest digest. Its members must still be registry references: `grim
+lock` rejects a relative (`./`/`../`) member id, since a local bundle has
+no registry identity of its own to resolve one against.
 
 ## Further Reading
 

@@ -102,9 +102,14 @@ fn bundles_content_equal(
     b_sorted.sort_by(|x, y| x.name.cmp(&y.name));
     a_sorted.iter().zip(&b_sorted).all(|(x, y)| {
         x.name == y.name
-            && x.repo == y.repo
-            && x.tag == y.tag
-            && x.pinned.strip_advisory() == y.pinned.strip_advisory()
+            && x.repo() == y.repo()
+            && x.tag() == y.tag()
+            // Registry arm: advisory tag stripped (like every pin comparison).
+            // Path arm: `pinned()`/`path()` are None/Some, and
+            // `content_digest()` compares the members-layer hash.
+            && x.pinned().map(|p| p.strip_advisory()) == y.pinned().map(|p| p.strip_advisory())
+            && x.path() == y.path()
+            && x.content_digest() == y.content_digest()
             && x.members == y.members
     })
 }
@@ -277,6 +282,81 @@ mod tests {
     fn generated_at_updated_when_content_differs() {
         let prev = lock_with("2026-01-01T00:00:00Z", vec![artifact("x", pinned("acme/x", None, 'a'))]);
         let next = lock_with("2026-06-01T12:00:00Z", vec![artifact("x", pinned("acme/x", None, 'b'))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_ne!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    fn bundle_member(name: &str, id: &str) -> crate::oci::bundle::BundleMember {
+        crate::oci::bundle::BundleMember {
+            kind: ArtifactKind::Skill,
+            name: name.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    /// A local (path-sourced) `LockedBundle` snapshot — mirrors the
+    /// registry-arm `pinned()` helper above, but for the `Path` arm
+    /// (`bundles_content_equal`'s path-arm branch).
+    fn path_bundle(
+        name: &str,
+        path: &str,
+        byte: char,
+        members: Vec<crate::oci::bundle::BundleMember>,
+    ) -> crate::lock::locked_bundle::LockedBundle {
+        crate::lock::locked_bundle::LockedBundle {
+            name: name.to_string(),
+            source: crate::lock::locked_bundle::LockedBundleSource::Path {
+                path: crate::config::path_source::PathSource::parse(path).unwrap(),
+                hash: Digest::Sha256(sha(byte)),
+            },
+            members,
+        }
+    }
+
+    #[test]
+    fn generated_at_preserved_when_path_bundle_content_unchanged() {
+        // Mirrors `generated_at_preserved_when_content_unchanged`, but the
+        // declared entry is a bundle pinned via the `Path` arm: same path,
+        // same content hash, same member list ⇒ relock keeps the old
+        // timestamp.
+        let member = bundle_member("code-review", "ghcr.io/acme/code-review:1");
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.bundles = vec![path_bundle("x", "./bundles/x.toml", 'a', vec![member.clone()])];
+        let mut next = lock_with("2099-12-31T23:59:59Z", vec![]);
+        next.bundles = vec![path_bundle("x", "./bundles/x.toml", 'a', vec![member])];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_updated_when_path_bundle_members_differ() {
+        // Mirrors `generated_at_updated_when_content_differs`: the bundle's
+        // content hash is held constant so the change is isolated to the
+        // member list — `bundles_content_equal`'s `x.members == y.members`
+        // arm alone must be enough to bump the timestamp forward.
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.bundles = vec![path_bundle(
+            "x",
+            "./bundles/x.toml",
+            'a',
+            vec![bundle_member("first", "ghcr.io/acme/first:1")],
+        )];
+        let mut next = lock_with("2026-06-01T12:00:00Z", vec![]);
+        next.bundles = vec![path_bundle(
+            "x",
+            "./bundles/x.toml",
+            'a',
+            vec![
+                bundle_member("first", "ghcr.io/acme/first:1"),
+                bundle_member("second", "ghcr.io/acme/second:1"),
+            ],
+        )];
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grimoire.lock");
         save(&path, &next, Some(&prev)).unwrap();

@@ -1000,6 +1000,16 @@ mod tests {
         }
     }
 
+    /// Build a synthesized "Local" row (path declaration or dev record):
+    /// `source = Some("Local")`, no registry.
+    fn local_row(repository: &str, kind: &str) -> TuiRow {
+        TuiRow {
+            oci: crate::catalog::OciMeta::default(),
+            source: Some("Local".to_string()),
+            ..row2("", repository, kind, ArtifactState::Installed)
+        }
+    }
+
     /// Flatten the tree with no collapsed groups and collect
     /// `(label, depth, is_group)` tuples for easy assertions.
     fn shape(tree: &Tree) -> Vec<(String, usize, bool)> {
@@ -1118,6 +1128,34 @@ mod tests {
                 ("code-review".to_string(), 2, false),
             ],
             "index and OCI rows must not share a fabricated bare-host root"
+        );
+    }
+
+    // ── TUI Local group (path declarations + dev records) ────────────────────
+
+    // Design record: local_bundles_tui_group plan, "TUI Local group" — a row
+    // with `source = Some("Local")` roots under a top-level "Local" group via
+    // the same `display_split` seam the index-source rows use (D-TREE); an
+    // ordinary registry row is unaffected and keeps its own root.
+    #[test]
+    fn local_source_row_roots_under_local_group_registry_row_unaffected() {
+        let rows = vec![
+            local_row("dev-skill", "skill"),
+            skill_row("r/a", ArtifactState::Installed),
+        ];
+        let opts = opts_default(None);
+        let t = build(&rows, &[0, 1], &opts);
+        let s = shape(&t);
+        assert_eq!(
+            s,
+            vec![
+                ("Local".to_string(), 0, true),
+                ("dev-skill".to_string(), 1, false),
+                ("r".to_string(), 0, true),
+                ("a".to_string(), 1, false),
+            ],
+            "a Some(\"Local\") row must root under its own \"Local\" group, and a plain \
+             registry row must keep its own separate root — never nested under \"Local\""
         );
     }
 

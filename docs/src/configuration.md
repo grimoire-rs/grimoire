@@ -10,7 +10,7 @@ lossy serializer: comments are removed** on every write. The one exception
 is a leading [`#:schema` editor directive](#editor-schema), which every
 rewrite preserves at the top of the file.
 
-## `grimoire.toml`
+## `grimoire.toml` {#grimoire-toml}
 
 The declaration file. An `[options]` table holds defaults, and `[skills]` /
 `[rules]` / `[agents]` map each binding name to a reference:
@@ -77,6 +77,8 @@ The registry host is always the tree root. When the browsed registry matches
 the configured default registry, the host node is elided from the display
 so leaf names stay short.
 
+### `[bundles]` {#bundles}
+
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member
 skills, rules, and [agents](./agents.md) at lock time:
@@ -94,6 +96,24 @@ Bundle references follow the same rules as skills and rules — a bare reference
 defaults to `:latest`. Per `(kind, name)`, a direct declaration wins over any
 bundle, agreeing bundles coalesce, and disagreeing bundles fail closed; see the
 [conflict policy](./concepts.md#bundle-conflicts).
+
+A `[bundles]` value may also be a [local path](./concepts.md#references-tags-and-digests)
+(`./bundles/x.toml`, `../…`, or absolute) instead of a registry reference —
+a **local bundle**, declared and resolved without a publish step:
+
+```toml
+[bundles]
+docs-stack = "./bundles/docs-stack.toml"
+```
+
+A local bundle's members must be **registry** references. `grim lock` rejects
+a relative (`./`/`../`) member id with exit 65, because — unlike a
+registry-published bundle, whose [deployment-relative
+members](./artifacts.md#bundle-relative-refs) resolve against the bundle's
+own repository — a local bundle has no registry identity to resolve a
+relative member against. It is pinned by the SHA-256 of its canonical JSON
+members layer, not a manifest digest; see [`grimoire.lock`](#grimoire-lock)
+for the wire shape.
 
 ## Multiple registries {#multiple-registries}
 
@@ -214,7 +234,7 @@ them.
 When an online browse comes back empty, grim prints a hint pointing to
 this section so you can confirm whether the registry supports `_catalog`.
 
-## `grimoire.lock`
+## `grimoire.lock` {#grimoire-lock}
 
 The lockfile pins every declared tag to an exact digest and records the
 [scope's](./concepts.md#scopes) declaration hash so drift is detectable. It is
@@ -273,6 +293,37 @@ on the *effective* declaration: before applying an edit they compute the set
 of artifacts the declaration implies before and after, drop only what no
 remaining declaration holds, and keep everything else. A bundle-free lock
 carries no `[[bundle]]` section at all.
+
+### Local path sources {#lock-path-sources}
+
+A skill, rule, or agent [declared as a local path](./concepts.md#references-tags-and-digests)
+pins by the SHA-256 of its canonical packed layer instead of a registry
+digest: the entry carries `path` and `hash` and omits `pinned` entirely —
+the two field sets are mutually exclusive on the wire, the same XOR shape
+as the `bundle`/`bundle_tag` pair above.
+
+```toml
+[[skill]]
+name = "my-skill"
+path = "./skills/my-skill"
+hash = "sha256:…"
+```
+
+A [local bundle](./concepts.md#bundles) follows the same shape in its
+`[[bundle]]` cache entry: `path` and `hash` (of the canonical members
+layer) replace `repo`/`tag`/`pinned` entirely — never a mix of the two.
+
+```toml
+[[bundle]]
+name = "docs-stack"
+path = "./bundles/docs-stack.toml"
+hash = "sha256:…"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-reviewer"
+id = "ghcr.io/acme/code-reviewer:1"
+```
 
 ## Editor schema support {#editor-schema}
 

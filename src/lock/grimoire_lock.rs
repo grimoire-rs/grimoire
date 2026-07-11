@@ -197,16 +197,11 @@ impl GrimoireLock {
         agents.sort_by(|a, b| a.name.cmp(&b.name));
         let mut mcp: Vec<&LockedArtifact> = self.mcp.iter().collect();
         mcp.sort_by(|a, b| a.name.cmp(&b.name));
-        // Bundles sort by binding name; pinned strips the advisory tag like
-        // every artifact pin, so output stays byte-stable.
-        let mut bundles: Vec<crate::lock::locked_bundle::LockedBundle> = self
-            .bundles
-            .iter()
-            .map(|b| crate::lock::locked_bundle::LockedBundle {
-                pinned: b.pinned.strip_advisory(),
-                ..b.clone()
-            })
-            .collect();
+        // Bundles sort by binding name; the advisory tag is stripped from the
+        // registry-arm `pinned` inside the `LockedBundle` serialize projection
+        // (`From<LockedBundle> for RawLockedBundle`), so output stays
+        // byte-stable.
+        let mut bundles: Vec<crate::lock::locked_bundle::LockedBundle> = self.bundles.clone();
         bundles.sort_by(|a, b| a.name.cmp(&b.name));
 
         let view = SerializableView {
@@ -635,9 +630,11 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             mcp: vec![],
             bundles: vec![crate::lock::locked_bundle::LockedBundle {
                 name: "stack".to_string(),
-                repo: "ghcr.io/acme/bundles/stack".to_string(),
-                tag: "1".to_string(),
-                pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
+                source: crate::lock::locked_bundle::LockedBundleSource::Registry {
+                    repo: "ghcr.io/acme/bundles/stack".to_string(),
+                    tag: "1".to_string(),
+                    pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
+                },
                 members: vec![BundleMember {
                     kind: ArtifactKind::Skill,
                     name: "s".to_string(),

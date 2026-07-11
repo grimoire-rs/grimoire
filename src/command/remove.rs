@@ -385,9 +385,11 @@ mod tests {
             .clone_with_digest(Digest::Sha256("b".repeat(64)));
         crate::lock::locked_bundle::LockedBundle {
             name: binding.to_string(),
-            repo: repo.to_string(),
-            tag: tag.to_string(),
-            pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
+            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
+                repo: repo.to_string(),
+                tag: tag.to_string(),
+                pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
+            },
             members: members
                 .iter()
                 .map(|(name, id)| crate::oci::bundle::BundleMember {

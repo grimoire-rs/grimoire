@@ -353,6 +353,19 @@ fn strip_default_registry<'a>(repo: &'a str, default_registry: Option<&str>) -> 
     repo
 }
 
+/// The Tag-column cell for a "Local" row (path declaration or dev record): the
+/// short content hash (`version`), since a local artifact has no registry tag.
+/// The path itself renders in the Repo cell. A not-installed row carries no
+/// hash yet, so an empty `version` renders as a `-` placeholder rather than a
+/// blank cell.
+fn local_tag_cell(r: &super::state::TuiRow) -> String {
+    if r.version.is_empty() {
+        "-".to_string()
+    } else {
+        r.version.clone()
+    }
+}
+
 /// Build the visible cells for one catalog row. `repo_text` is the
 /// Repo-column content (the full reference, default registry elided).
 /// `registry` is the Registry-column label in flat multi-registry mode;
@@ -366,9 +379,12 @@ fn render_leaf(
 ) -> RenderRow {
     let (glyph, label, color) = status_view(r.state);
     // A user-pinned version shows with a leading `*`; otherwise the
-    // explicit highest version, falling back to the tag.
+    // explicit highest version, falling back to the tag. A "Local" row has no
+    // registry tag — its Tag cell shows the short content hash instead (the
+    // path shows in the Repo cell).
     let tag_cell = match &r.pinned_version {
         Some(p) => format!("*{p}"),
+        None if r.source.as_deref() == Some("Local") => local_tag_cell(r),
         None if !r.version.is_empty() => r.version.clone(),
         None => r.latest_tag.clone(),
     };
@@ -1512,6 +1528,41 @@ mod tests {
         let leaf2 = render_leaf(&plain, "r/beta", false, false, None);
         assert!(!leaf2.deprecated, "non-deprecated row must not set the flag");
         assert!(!leaf2.columns[0].contains('†'), "non-deprecated row must not be marked");
+    }
+
+    // Design record: local_bundles_tui_group plan, "TUI Local group" — a
+    // "Local" row (path declaration or dev record) has no registry tag; its
+    // Tag cell must show the short content hash instead, never the
+    // `latest_tag`/`version` registry-resolution fallback a catalog row uses.
+    #[test]
+    fn render_leaf_local_row_tag_cell_shows_hash_not_registry_tag() {
+        let mut r = row("ghcr.io/should-be-ignored", ArtifactState::Installed);
+        r.source = Some("Local".to_string());
+        r.repository = "./local-skill".to_string();
+        r.version = "deadbee1".to_string();
+        r.latest_tag = "latest".to_string();
+        r.pinned_version = None;
+        let leaf = render_leaf(&r, "./local-skill", false, false, None);
+        assert_eq!(
+            leaf.columns[2].trim(),
+            "deadbee1",
+            "a Local row's Tag cell must show the short content hash: {:?}",
+            leaf.columns[2]
+        );
+    }
+
+    // A not-installed Local row carries no pinned hash yet; its Tag cell shows
+    // a `-` placeholder instead of a blank (or a stale registry-tag fallback).
+    #[test]
+    fn local_tag_cell_empty_hash_shows_placeholder() {
+        let mut r = row("ghcr.io/should-be-ignored", ArtifactState::NotInstalled);
+        r.source = Some("Local".to_string());
+        r.repository = "./local-skill".to_string();
+        r.version = String::new();
+        r.pinned_version = None;
+        assert_eq!(local_tag_cell(&r), "-", "an empty hash must render as a placeholder");
+        r.version = "deadbee1".to_string();
+        assert_eq!(local_tag_cell(&r), "deadbee1", "a present hash renders verbatim");
     }
 
     // Regression: the trailing `†` must land INSIDE the Catalog box, not be

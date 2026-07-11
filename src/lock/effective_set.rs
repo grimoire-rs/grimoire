@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::lock::locked_artifact::BundleProvenance;
-use crate::lock::locked_bundle::LockedBundle;
+use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
 use crate::oci::{ArtifactKind, Identifier};
 
 /// How the effective declaration provides one `(kind, name)`.
@@ -74,7 +74,11 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
         let declared_id = declared_source.identifier()?;
         let snapshot = cached.iter().find(|b| snapshot_matches(binding, declared_id, b))?;
         for member in &snapshot.members {
-            let provenance = BundleProvenance::new(snapshot.repo.clone(), snapshot.tag.clone());
+            // Only a registry snapshot reaches here — `snapshot_matches`
+            // matched it against a registry `declared_id`, so `repo`/`tag`
+            // are always present (the path arm never returns a match).
+            let provenance =
+                BundleProvenance::new(snapshot.repo().unwrap_or_default(), snapshot.tag().unwrap_or_default());
             // An unparseable cached id (hand-edited lock) degrades the key
             // to Conflicted below rather than failing the whole mutation.
             let id = Identifier::parse(&member.id).ok();
@@ -115,17 +119,33 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
 /// tag equals the declared tag (or the short digest for a digest-only
 /// declaration — mirroring how the resolver stamps it).
 pub fn snapshot_matches(binding: &str, declared_id: &Identifier, snapshot: &LockedBundle) -> bool {
-    if snapshot.name != binding || snapshot.repo != declared_id.registry_repository() {
+    if snapshot.name != binding {
         return false;
     }
-    let declared_tag = match declared_id.tag() {
-        Some(tag) => tag.to_string(),
-        None => declared_id
-            .digest()
-            .map(|d| d.to_short_string())
-            .unwrap_or_else(|| "latest".to_string()),
-    };
-    snapshot.tag == declared_tag
+    match &snapshot.source {
+        LockedBundleSource::Registry { repo, tag, .. } => {
+            if *repo != declared_id.registry_repository() {
+                return false;
+            }
+            let declared_tag = match declared_id.tag() {
+                Some(t) => t.to_string(),
+                None => declared_id
+                    .digest()
+                    .map(|d| d.to_short_string())
+                    .unwrap_or_else(|| "latest".to_string()),
+            };
+            *tag == declared_tag
+        }
+        // A path-sourced snapshot never corresponds to a registry-declared
+        // identifier: the two source kinds carry disjoint identity, mirroring
+        // `LockedSource::eq_content`'s cross-variant-is-always-false rule.
+        // `effective_set` already bails on a path-declared bundle (its
+        // `identifier()` is `None`) before reaching this arm, so a path
+        // snapshot is only ever compared against a registry declaration here —
+        // always a miss (graceful degrade; full path-keyed eviction is a
+        // deferred follow-up, see plan_local_bundles_tui_group.md).
+        LockedBundleSource::Path { .. } => false,
+    }
 }
 
 /// Whether a declared bundle provides `(kind, name)` — so its materialized
@@ -198,9 +218,11 @@ mod tests {
         let pinned_id = id(&format!("{repo}:{tag}")).clone_with_digest(Digest::Sha256("a".repeat(64)));
         LockedBundle {
             name: binding.to_string(),
-            repo: repo.to_string(),
-            tag: tag.to_string(),
-            pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
+            source: LockedBundleSource::Registry {
+                repo: repo.to_string(),
+                tag: tag.to_string(),
+                pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
+            },
             members: members
                 .iter()
                 .map(|(kind, name, mid)| BundleMember {
@@ -391,5 +413,48 @@ mod tests {
         let set = set_with(&[], &[("stack", "ghcr.io/acme/stack:1")]);
         let cache = [snapshot("stack", "ghcr.io/acme/stack", "1", &[])];
         assert!(!declared_bundle_provides(&set, &cache, ArtifactKind::Bundle, "stack"));
+    }
+
+    // ── snapshot_matches Path arm ────────────────────────────────────────
+
+    fn path_snapshot(binding: &str, path: &str, hash_byte: char) -> LockedBundle {
+        LockedBundle {
+            name: binding.to_string(),
+            source: LockedBundleSource::Path {
+                path: crate::config::path_source::PathSource::parse(path).unwrap(),
+                hash: Digest::Sha256(hash_byte.to_string().repeat(64)),
+            },
+            members: Vec::new(),
+        }
+    }
+
+    /// A registry-declared identifier can never correspond to a path-sourced
+    /// snapshot — the two source kinds carry disjoint identity, mirroring
+    /// `LockedSource::eq_content`'s "cross-variant is always false" rule
+    /// (`locked_source.rs::eq_content_cross_variant_is_false`). This is the
+    /// one path-arm contract testable through `snapshot_matches`'s current
+    /// `(binding, declared_id: &Identifier, snapshot)` signature.
+    ///
+    /// DESIGN GAP (flagged, not invented — see
+    /// `plan_local_bundles_tui_group.md` Progress Log): the plan's Testing
+    /// Strategy row for `snapshot_matches` also wants "same path+hash →
+    /// match; changed hash → no match; moved path same hash → still match".
+    /// The current signature has no parameter carrying the *declared*
+    /// `PathSource`/`Digest` to compare against `snapshot`'s — only a
+    /// `declared_id: &Identifier`, which a path declaration can never
+    /// produce (`DeclaredSource::Path::identifier()` is always `None`, and
+    /// `effective_set`'s only call site early-returns via `?` on that `None`
+    /// before ever reaching `snapshot_matches`). Exercising the richer
+    /// path-vs-path contract needs either a signature change (e.g.
+    /// `declared: &DeclaredSource`) or a second comparison function —
+    /// flagged for the architect rather than invented here.
+    #[test]
+    fn snapshot_matches_path_snapshot_never_matches_a_registry_declared_id() {
+        let declared = id("ghcr.io/acme/docs:1");
+        let snap = path_snapshot("docs", "./bundles/docs.toml", 'a');
+        assert!(
+            !snapshot_matches("docs", &declared, &snap),
+            "a registry-declared identifier must never match a path-sourced snapshot"
+        );
     }
 }

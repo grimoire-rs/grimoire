@@ -66,7 +66,7 @@ This is why Grimoire needs no server of its own. Any registry that speaks the
 [distribution spec][oci] — [GHCR][ghcr], [Docker Hub][hub], a private
 [Distribution][dist] — is a complete backend.
 
-## References, tags, and digests
+## References, tags, and digests {#references-tags-and-digests}
 
 You name an artifact with a reference: `registry/repository:tag`, or
 `registry/repository@sha256:…` for an exact digest. A **floating tag** such as
@@ -75,6 +75,17 @@ moves.
 
 You declare floating tags for convenience and let Grimoire pin them to digests
 for reproducibility — which is the job of the lock.
+
+A third form skips the registry entirely: a **local path** — `./skills/x`,
+`../shared/rule.md`, or an absolute path. Round-tripping every edit of a
+skill you are actively writing through a registry push is slow, and a draft
+that has never been published has no reference to point at in the first
+place. A local path source names a directory or file on disk directly, and
+Grimoire pins it by the SHA-256 of its canonical packed layer — the same
+tar [`grim build`](./commands.md#build) would produce — instead of a
+manifest digest. [`grim add`](./commands.md#add-path) declares one
+permanently; [`grim install <path>`](./commands.md#install-dev) renders one
+once, without declaring it.
 
 ## The lock
 
@@ -93,12 +104,27 @@ Declaring the same dozen skills and rules in every repository does not scale.
 Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
-A **bundle** is a curated set of members — skills, rules, and agents —
-published as its own OCI artifact. You declare the bundle once in `[bundles]`,
-and on
-[`grim lock`](./commands.md#lock) it **expands** into its members, which are
-pinned into the lock exactly like a direct declaration. Update the published
-bundle, re-lock, and every project that declares it moves together.
+A **bundle** is a curated set of members — skills, rules, and agents. You
+declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
+**expands** into its members, which are pinned into the lock exactly like a
+direct declaration.
+
+A bundle comes from one of two sources — the same split as an individual
+[reference](#references-tags-and-digests):
+
+- **Registry bundle** — the common case. `[bundles]` names a registry
+  reference (`ghcr.io/acme/python-stack:1`); the bundle is
+  [published as its own OCI artifact](./publishing.md#bundles) and pinned
+  in the lock by its manifest digest, exactly like a skill or rule. Update
+  the published bundle, re-lock, and every project that declares it moves
+  together.
+- **Local bundle** — `[bundles]` names a [local path](#references-tags-and-digests)
+  (`./bundles/x.toml`) instead of a registry reference. There is no publish
+  step: the bundle is pinned by the SHA-256 of its canonical members layer,
+  and every member it names must be a registry reference — a local bundle
+  has no registry identity of its own to resolve a relative member
+  against. See [`[bundles]`](./configuration.md#grimoire-toml) for the
+  declaration shape.
 
 Each locked member records its **provenance** — `direct` for something you
 declared yourself, or the bundle it came from — which [`grim status`](./commands.md#status)

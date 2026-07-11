@@ -135,6 +135,19 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
         },
     ]);
+    // A "Local" row (path declaration or dev record) carries no registry tag —
+    // its `repository` field holds the declared source path and `version` the
+    // short content hash, surfaced here as dedicated `Path:`/`Hash:` rows.
+    if r.source.as_deref() == Some("Local") {
+        lines.push(DetailLine::MetaEntry {
+            label: "Path:",
+            value: r.repository.clone(),
+        });
+        lines.push(DetailLine::MetaEntry {
+            label: "Hash:",
+            value: r.version.clone(),
+        });
+    }
     // Curated `org.opencontainers.image.*` metadata — each row shown only when
     // the artifact carries that annotation, so an ordinary artifact's pane is
     // unchanged. grim emits `licenses` (skills) today; the rest surface for OCI
@@ -574,6 +587,30 @@ mod tests {
             )),
             "a non-deprecated row must not show a Deprecated: entry"
         );
+    }
+
+    // Design record: local_bundles_tui_group plan, "TUI Local group" — a
+    // "Local" row (path declaration or dev record) carries no registry tag;
+    // the detail pane shows its local source path and short content hash
+    // via dedicated `Path:`/`Hash:` rows instead.
+    #[test]
+    fn detail_lines_show_path_and_hash_for_local_row() {
+        let mut row = tui_row(None);
+        row.source = Some("Local".to_string());
+        row.repository = "./local-skill".to_string();
+        row.version = "deadbee1".to_string();
+        let lines = detail_lines(Some(&row));
+        assert_eq!(meta_value(&lines, "Path:"), Some("./local-skill"));
+        assert_eq!(meta_value(&lines, "Hash:"), Some("deadbee1"));
+    }
+
+    #[test]
+    fn detail_lines_omit_path_and_hash_for_registry_row() {
+        // A registry-sourced row (`source: None`) must never show the
+        // Local-only Path:/Hash: rows.
+        let lines = detail_lines(Some(&tui_row(None)));
+        assert_eq!(meta_value(&lines, "Path:"), None);
+        assert_eq!(meta_value(&lines, "Hash:"), None);
     }
 
     #[test]

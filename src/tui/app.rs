@@ -45,8 +45,8 @@ use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
-#[cfg(test)]
 use crate::lock::locked_artifact::LockedArtifact;
+use crate::lock::locked_bundle::LockedBundle;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
 use crate::store::paths::GrimPaths;
@@ -446,7 +446,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // Find the LockedBundle whose `repo` matches this bundle_repo.
                     l.bundles
                         .iter()
-                        .find(|b| b.repo == bundle_repo)
+                        .find(|b| b.repo() == Some(bundle_repo.as_str()))
                         .map(|b| b.members.clone())
                 });
 
@@ -622,7 +622,8 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos, _direct_repos, _snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+        load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -681,7 +682,8 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos, _direct_repos, _snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+        load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -882,7 +884,8 @@ fn drain_bundle_member_checks(
 /// [`rows_from_catalog`] are retained, tested, and kept current (C4
 /// registry/repository fields) so re-arming is a one-line change, not a rebuild.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
-    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -951,7 +954,7 @@ async fn load_into(ctx: &TuiContext, state: &mut TuiState) {
 /// TUI remains usable (offline included). The rows are only replaced on success —
 /// a failed refresh keeps the previously-loaded rows visible.
 async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
-    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, config, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     // The simpler catalog_service::BadgeContext (4 fields) drives the per-row
     // StatusBadge derivation inside load_catalog itself.
@@ -985,11 +988,16 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 direct_repos: &direct_repos,
                 snapshot_repos: &snapshot_repos,
             };
-            let rows: Vec<TuiRow> = results
+            let mut rows: Vec<TuiRow> = results
                 .groups
                 .iter()
                 .flat_map(|g| project_group_rows(g, &badge))
                 .collect();
+            // Append the "Local" root: path-declared artifacts + dev records.
+            // Sourced from the already-loaded declaration + install state (no
+            // extra registry I/O); each row carries `source = Some("Local")`
+            // so `tree::display_split` roots it under the Local group.
+            rows.extend(local_rows(&config, lock.as_ref(), &install_state));
             // Aggregate health from group metadata.
             let mut offline_regs: Vec<String> = Vec::new();
             let mut truncated_regs: Vec<String> = Vec::new();
@@ -1358,7 +1366,8 @@ fn snapshot_declared_repos(
 /// scope's lock + install-state (used after a scope toggle — the catalog
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
-    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -1369,11 +1378,25 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         direct_repos: &direct_repos,
         snapshot_repos: &snapshot_repos,
     };
+    // Index the lock's path-sourced entries once (shared across every Local
+    // row's re-derivation below) instead of a per-row `iter_artifacts` scan.
+    let locked_by_name = index_local_lock_entries(lock.as_ref());
     for r in &mut state.rows {
-        // A2: use authoritative registry + repository fields directly so
-        // namespaced registries ("ghcr.io/acme") are matched exactly without
-        // re-splitting `repo` on the first '/' (which would give "ghcr.io").
-        r.state = derive_row_state(&r.kind, &r.registry, &r.repository, &badge);
+        // A "Local" row carries no registry identity (path/dev source, whose
+        // `pinned()` is always `None`), so `derive_row_state` would misread it
+        // as `NotInstalled`. Re-derive it the way `local_rows` does, keyed on
+        // the binding name (`repo`) instead.
+        r.state = if r.source.as_deref() == Some("Local") {
+            let kind = row_kind(&r.kind);
+            let locked = locked_by_name.get(&(kind, r.repo.as_str())).copied();
+            let locked_bundle = local_locked_bundle(lock.as_ref(), kind, &r.repo);
+            local_row_state(locked, locked_bundle, kind, &r.repo, &install_state)
+        } else {
+            // A2: use authoritative registry + repository fields directly so
+            // namespaced registries ("ghcr.io/acme") are matched exactly without
+            // re-splitting `repo` on the first '/' (which would give "ghcr.io").
+            derive_row_state(&r.kind, &r.registry, &r.repository, &badge)
+        };
     }
     // Member-node states live in a separate cache (`bundle_members`) that is
     // otherwise only rebuilt on re-expand / scope toggle. Refresh it here too so
@@ -1516,8 +1539,9 @@ fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
 ///
-/// Returns the active scope's lock, install state, the set of declared bundle
-/// `registry/repository` values (drives bundle row state), the set of
+/// Returns the active scope's lock, install state, the parsed declaration set
+/// (drives the "Local" root rows via [`local_rows`]), the set of declared
+/// bundle `registry/repository` values (drives bundle row state), the set of
 /// directly-declared `(kind, registry/repository)` (drives the via-bundle badge),
 /// and the set of `(kind, registry/repository)` a currently-declared bundle
 /// provides (lets a stale-dropped member still derive via the snapshot). The
@@ -1529,6 +1553,7 @@ fn load_scope_for_badges(
 ) -> (
     Option<GrimoireLock>,
     InstallState,
+    DesiredSet,
     std::collections::BTreeSet<String>,
     std::collections::BTreeSet<(ArtifactKind, String)>,
     std::collections::BTreeSet<(ArtifactKind, String)>,
@@ -1536,7 +1561,7 @@ fn load_scope_for_badges(
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
     let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
-    let (declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_declaration(ctx)
+    let (set, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_declaration(ctx)
         .map(|(_options, _registries, set)| {
             let bundles = set
                 .bundles
@@ -1544,14 +1569,211 @@ fn load_scope_for_badges(
                 .filter_map(|source| source.identifier())
                 .map(crate::oci::Identifier::registry_repository)
                 .collect();
-            (
-                bundles,
-                direct_declared_repos(&set),
-                snapshot_declared_repos(&set, cached),
-            )
+            let direct = direct_declared_repos(&set);
+            let snapshot = snapshot_declared_repos(&set, cached);
+            // The parsed set is threaded out so `local_rows` can synthesize the
+            // "Local" root from path declarations without re-reading the config.
+            (set, bundles, direct, snapshot)
         })
         .unwrap_or_default();
-    (lock, state, declared_bundle_repos, direct_repos, snapshot_repos)
+    (lock, state, set, declared_bundle_repos, direct_repos, snapshot_repos)
+}
+
+/// Synthesize the TUI rows for the "Local" root group.
+///
+/// Two row sources, each tagged `source = Some("Local")` so
+/// [`super::tree::display_split`] roots them under the "Local" group and the
+/// registry attribution never fabricates an OCI host:
+///
+/// - **Declared path artifacts** — `[skills]`/`[rules]`/`[agents]` entries in
+///   `config` whose [`DeclaredSource`] is a local path (installed or not); the
+///   pinned content hash is read from `lock` when present.
+/// - **Dev records** — install records with `dev == true` (written by
+///   `grim install <path>` without a declaration), read from `install_state`.
+///
+/// Inputs are the already-loaded declaration + lock + install state from
+/// [`load_scope_for_badges`]; this function performs no I/O.
+fn local_rows(config: &DesiredSet, lock: Option<&GrimoireLock>, install_state: &InstallState) -> Vec<TuiRow> {
+    let mut rows = Vec::new();
+    let mut seen: std::collections::BTreeSet<(ArtifactKind, String)> = std::collections::BTreeSet::new();
+
+    // Index the lock's path-sourced entries by `(kind, name)` once, so each
+    // row is an O(1) lookup instead of a full `iter_artifacts` scan shared
+    // between the digest and state derivations (was O(rows × locked)).
+    let locked_by_name = index_local_lock_entries(lock);
+
+    // (a) Path-declared artifacts, installed or not. A registry-declared entry
+    // contributes nothing here — only `DeclaredSource::Path` yields a row.
+    for (kind, map) in [
+        (ArtifactKind::Skill, &config.skills),
+        (ArtifactKind::Rule, &config.rules),
+        (ArtifactKind::Agent, &config.agents),
+        (ArtifactKind::Bundle, &config.bundles),
+    ] {
+        for (name, source) in map {
+            let Some(path) = source.path() else { continue };
+            seen.insert((kind, name.clone()));
+            let locked = locked_by_name.get(&(kind, name.as_str())).copied();
+            let locked_bundle = local_locked_bundle(lock, kind, name);
+            rows.push(local_row(
+                kind,
+                name,
+                &path.to_string(),
+                locked,
+                locked_bundle,
+                install_state,
+            ));
+        }
+    }
+
+    // (b) Dev records not already covered by a path declaration (dedup: a
+    // declared path that is also a dev/installed record is one row, sourced
+    // above with the record's install state driving the badge).
+    for record in install_state.iter_records() {
+        if !record.dev || seen.contains(&(record.kind, record.name.clone())) {
+            continue;
+        }
+        let Some(path) = record.source.path() else { continue };
+        let locked = locked_by_name.get(&(record.kind, record.name.as_str())).copied();
+        let locked_bundle = local_locked_bundle(lock, record.kind, &record.name);
+        rows.push(local_row(
+            record.kind,
+            &record.name,
+            &path.to_string(),
+            locked,
+            locked_bundle,
+            install_state,
+        ));
+    }
+
+    rows
+}
+
+/// The lock's cached bundle expansion for a Bundle-kind local row, matched by
+/// binding name. `None` for any non-Bundle kind (those pin in `iter_artifacts`,
+/// indexed by [`index_local_lock_entries`]) or when the bundle is not yet
+/// locked. A bundle lives in `lock.bundles`, which `iter_artifacts` does not
+/// cover — so a bundle row must resolve its pin here, not through that index.
+fn local_locked_bundle<'a>(lock: Option<&'a GrimoireLock>, kind: ArtifactKind, name: &str) -> Option<&'a LockedBundle> {
+    if kind != ArtifactKind::Bundle {
+        return None;
+    }
+    lock?.bundles.iter().find(|b| b.name == name)
+}
+
+/// Index a lock's path-sourced entries by `(kind, name)` so a "Local" row's
+/// digest and state derivations are an O(1) lookup instead of a full
+/// `iter_artifacts` scan per row. Only `LockedSource::Path` entries are kept
+/// (a registry pin never drives a Local row).
+fn index_local_lock_entries(
+    lock: Option<&GrimoireLock>,
+) -> std::collections::HashMap<(ArtifactKind, &str), &LockedArtifact> {
+    lock.map(|l| {
+        l.iter_artifacts()
+            .filter(|a| a.source.path().is_some())
+            .map(|a| ((a.kind, a.name.as_str()), a))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Build one "Local" root row for a path declaration or dev record.
+///
+/// `repository` carries the declared path and `version` the short content
+/// hash so the detail pane's `Path:`/`Hash:` rows render (never a registry
+/// tag); `repo` carries the config binding name — the routing key
+/// [`perform_local`]/[`perform_local_uninstall`] read back. `source =
+/// Some("Local")` roots the row under the Local group and keeps it out of the
+/// registry-only guards.
+fn local_row(
+    kind: ArtifactKind,
+    name: &str,
+    path: &str,
+    locked: Option<&LockedArtifact>,
+    locked_bundle: Option<&LockedBundle>,
+    install_state: &InstallState,
+) -> TuiRow {
+    let version = local_row_digest(locked, locked_bundle, kind, name, install_state)
+        .map(|d| d.to_short_string())
+        .unwrap_or_default();
+    TuiRow {
+        kind: kind.to_string(),
+        registry: String::new(),
+        repository: path.to_string(),
+        repo: name.to_string(),
+        description: String::new(),
+        summary: String::new(),
+        keywords: Vec::new(),
+        repository_url: None,
+        revision: None,
+        created: None,
+        deprecated: None,
+        oci: crate::catalog::OciMeta::default(),
+        latest_tag: String::new(),
+        version,
+        pinned_version: None,
+        state: local_row_state(locked, locked_bundle, kind, name, install_state),
+        source: Some("Local".to_string()),
+    }
+}
+
+/// The content digest to display for a local row: the lock's path pin
+/// (`locked`, pre-looked-up by [`local_rows`]) if present, else the install
+/// record's. `None` when the artifact is neither locked nor recorded (a
+/// declared-but-never-locked path).
+///
+/// A Bundle-kind row has no per-kind artifact pin or install record — its pin
+/// is the members-layer content hash on its `lock.bundles` entry
+/// (`locked_bundle`, pre-looked-up by [`local_locked_bundle`]).
+fn local_row_digest(
+    locked: Option<&LockedArtifact>,
+    locked_bundle: Option<&LockedBundle>,
+    kind: ArtifactKind,
+    name: &str,
+    install_state: &InstallState,
+) -> Option<crate::oci::Digest> {
+    if kind == ArtifactKind::Bundle {
+        return locked_bundle.map(LockedBundle::content_digest);
+    }
+    locked.map(|a| a.source.content_digest()).or_else(|| {
+        install_state
+            .get(kind, name)
+            .filter(|r| r.source.path().is_some())
+            .map(|r| r.source.content_digest())
+    })
+}
+
+/// Coarse install badge for a local row from lock + install-state alone.
+///
+/// No [`AnchorRoots`] reach [`local_rows`], so on-disk integrity (Modified /
+/// IntegrityMissing) is not distinguished here: a path-sourced record present
+/// is `Installed`, a lock pin (`locked`, pre-looked-up by [`local_rows`]) ahead
+/// of that record is `Outdated`, and no record is `NotInstalled`.
+///
+/// A Bundle-kind row has no own install record — its members carry their own
+/// state. The bundle is a declaration, so presence in the lock
+/// (`locked_bundle`, pre-looked-up by [`local_locked_bundle`]) is its install
+/// signal: locked is `Installed`, absent is `NotInstalled`.
+fn local_row_state(
+    locked: Option<&LockedArtifact>,
+    locked_bundle: Option<&LockedBundle>,
+    kind: ArtifactKind,
+    name: &str,
+    install_state: &InstallState,
+) -> ArtifactState {
+    if kind == ArtifactKind::Bundle {
+        return match locked_bundle {
+            Some(_) => ArtifactState::Installed,
+            None => ArtifactState::NotInstalled,
+        };
+    }
+    let Some(record) = install_state.get(kind, name).filter(|r| r.source.path().is_some()) else {
+        return ArtifactState::NotInstalled;
+    };
+    match locked {
+        Some(locked) if !record.source.eq_content(&locked.source) => ArtifactState::Outdated,
+        _ => ArtifactState::Installed,
+    }
 }
 
 /// Lazily fetch the tag list for `row` and feed it to the open picker.
@@ -1769,6 +1991,13 @@ async fn run_batch_with_progress(
 /// provides keeps its files ([`bundle_provides_files`]) — the delete
 /// degrades to dropping the direct declaration, like `grim remove`.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
+    // A "Local" row deletes through the local seam: undeclare a path
+    // declaration (config + lock) or drop a dev record — never the
+    // registry-uninstall path below, which keys on a registry identity.
+    if row.source.as_deref() == Some("Local") {
+        return perform_local_uninstall(ctx, row);
+    }
+
     // Authoritative repository field (never first-slash-split `repo`, which
     // mis-attributes namespaced registries — D-TREE).
     let repository = row.repository.clone();
@@ -1877,6 +2106,68 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delete a "Local" row (path declaration or dev record).
+///
+/// Dispatched from [`perform_uninstall`] when `row.source == Some("Local")`:
+///
+/// - a **declared path** row is undeclared through the `remove` seam (config +
+///   lock) and its materialized files are removed, and
+/// - a **dev record** row has its install-state record dropped (and files
+///   removed) — there is no declaration to undeclare.
+fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
+    let kind = row_kind(&row.kind);
+    let name = row.repo.clone();
+
+    // Hold the config flock for the whole read-modify-write (file deletion +
+    // undeclare see one declaration snapshot), matching the registry path.
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
+
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    // The clients whose vendor config must be re-synced after the record drops
+    // (captured before the record is removed).
+    let involved_clients: Vec<ClientTarget> = install_state
+        .get(kind, &name)
+        .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
+        .unwrap_or_default();
+
+    // Delete the materialized files and drop the install-state record through
+    // the shared `uninstall` seam — it handles both a declared path record and
+    // a bare dev record (keyed on `(kind, name)`).
+    let removed = crate::install::uninstall::uninstall(&mut install_state, kind, &name, &ctx.roots)
+        .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?
+        .outcome
+        == crate::install::uninstall::UninstallOutcome::Removed;
+    if removed {
+        install_state
+            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+            .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+    }
+    for client in involved_clients {
+        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+            tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
+        }
+    }
+
+    // Undeclare a path declaration from config + lock (a no-op for a bare dev
+    // record — nothing declared, and dev installs never write a lock entry). If
+    // the config can no longer be read, the goal is already met — converge.
+    if let Ok((options, registries, mut set)) = load_scope_declaration(ctx) {
+        undeclare_and_unlock(
+            &ctx.config_path,
+            &ctx.lock_path,
+            &options,
+            &registries,
+            &mut set,
+            kind,
+            &name,
+        )?;
+    }
+    Ok(())
+}
+
 /// Human label for an install outcome (status-line only).
 /// The progress-modal title verb for a batch/member operation.
 fn batch_title(op: BatchOp) -> &'static str {
@@ -1919,6 +2210,13 @@ async fn perform(
     name_override: Option<&str>,
     progress: &dyn InstallProgress,
 ) -> anyhow::Result<String> {
+    // A "Local" row carries no registry identity (path declaration or dev
+    // record), so it must route to the local seam BEFORE the empty-`registry`
+    // guard below — that guard would otherwise reject it as malformed.
+    if row.source.as_deref() == Some("Local") {
+        return perform_local(ctx, row, is_update, progress).await;
+    }
+
     // Use the authoritative registry/repository fields directly — never
     // first-slash-split `repo`, which mis-attributes namespaced registries like
     // `ghcr.io/acme` to the bare host (D-TREE / D-BACKGROUND). The fields equal
@@ -2005,6 +2303,224 @@ async fn perform(
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
 
+    install_outcomes_label(outcomes)
+}
+
+/// Install / update a "Local" row (path declaration or dev record).
+///
+/// Dispatched from [`perform`] when `row.source == Some("Local")`, ahead of the
+/// registry-only path:
+///
+/// - a **declared path** row re-materializes through the declared-install seam
+///   (the path source stays declared in `grimoire.toml`), and
+/// - a **dev record** row re-materializes through `install_and_persist` with
+///   [`InstallIntent::Dev`] so `prune_orphans` never reaps it.
+async fn perform_local(
+    ctx: &TuiContext,
+    row: &TuiRow,
+    is_update: bool,
+    progress: &dyn InstallProgress,
+) -> anyhow::Result<String> {
+    let kind = row_kind(&row.kind);
+    let name = row.repo.clone();
+
+    // A config-declared path dep is a declared install, never a dev install
+    // (preserves the declared/dev distinction). Read the declaration fresh —
+    // the config can change while the TUI runs.
+    let declared = load_scope_declaration(ctx)
+        .ok()
+        .is_some_and(|(_options, _registries, set)| declared_as_path(&set, kind, &name));
+    if declared {
+        return perform_local_declared(ctx, kind, &name, is_update, progress).await;
+    }
+
+    // Otherwise route a dev-install record (`grim install <path>`, no
+    // declaration) through the Dev re-materialize path.
+    let install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let Some(record) = install_state
+        .get(kind, &name)
+        .filter(|r| r.dev && r.source.path().is_some())
+        .cloned()
+    else {
+        return Err(anyhow::anyhow!(
+            "'{name}' is not a declared path artifact or a dev-install record"
+        ));
+    };
+    perform_local_dev(ctx, kind, &name, &record.source, is_update, progress).await
+}
+
+/// Whether `(kind, name)` is declared in `set` as a local path source.
+fn declared_as_path(set: &DesiredSet, kind: ArtifactKind, name: &str) -> bool {
+    let map = match kind {
+        ArtifactKind::Skill => &set.skills,
+        ArtifactKind::Rule => &set.rules,
+        ArtifactKind::Agent => &set.agents,
+        ArtifactKind::Bundle => &set.bundles,
+        ArtifactKind::Mcp => &set.mcp,
+    };
+    map.get(name).is_some_and(|source| source.path().is_some())
+}
+
+/// Install / update a **declared** path entry: re-lock the already-declared
+/// path source (a fresh content hash) through the same partial-relock seam the
+/// registry action uses, then materialize only that entry with
+/// [`InstallIntent::Declared`]. The declaration itself is untouched — the path
+/// stays declared in `grimoire.toml`.
+async fn perform_local_declared(
+    ctx: &TuiContext,
+    kind: ArtifactKind,
+    name: &str,
+    is_update: bool,
+    progress: &dyn InstallProgress,
+) -> anyhow::Result<String> {
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
+    let (_options, _registries, set) = load_scope_declaration(ctx)?;
+    let previous = lock_io::load(&ctx.lock_path).ok();
+    let anchor = ctx
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let new_lock = grim(relock_declared(&set, previous.as_ref(), kind, name, &ctx.access, ctx.scope, &anchor).await)?;
+    grim(lock_io::save(&ctx.lock_path, &new_lock, previous.as_ref()))?;
+
+    // Project the acted-on entry, mirroring `install_added`: a bundle expands
+    // into its provenance-stamped members (a bundle has no single-entry lock —
+    // `single_entry_lock` returns `None` for `Bundle`), everything else is a
+    // one-artifact projection.
+    let single = match kind {
+        ArtifactKind::Bundle => match new_lock.bundles.iter().find(|b| b.name == name) {
+            Some(b) => {
+                let (repo, tag) = b.provenance_pair();
+                bundle_members_lock(&new_lock, &repo, &tag)
+            }
+            // A local bundle that resolved to zero members: nothing to install.
+            None => return Ok("unchanged".to_string()),
+        },
+        _ => single_entry_lock(&new_lock, kind, name)
+            .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
+    };
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
+        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let materializer = DefaultMaterializer;
+    let outcomes = install_and_persist(
+        &single,
+        &ctx.access,
+        &materializer,
+        &target,
+        &mut install_state,
+        &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        &ctx.config_path,
+        is_update,
+        InstallIntent::Declared,
+        progress,
+    )
+    .await
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    install_outcomes_label(outcomes)
+}
+
+/// Re-materialize a **dev** record: re-pack the local source (a fresh content
+/// hash) into a synthetic single-entry lock and install it with
+/// [`InstallIntent::Dev`] so `prune_orphans` never reaps it — the same seam
+/// `command::update::refresh_dev_installs` uses, for one record.
+async fn perform_local_dev(
+    ctx: &TuiContext,
+    kind: ArtifactKind,
+    name: &str,
+    source: &crate::lock::locked_source::LockedSource,
+    is_update: bool,
+    progress: &dyn InstallProgress,
+) -> anyhow::Result<String> {
+    let crate::lock::locked_source::LockedSource::Path { path, .. } = source else {
+        return Err(anyhow::anyhow!("dev record '{name}' has no path source"));
+    };
+    let anchor = ctx
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // `pack_local_artifact` does blocking `std::fs` I/O; run it on the blocking
+    // pool (mirrors `resolver::expand_local_bundle`). `kind` (Copy) and the
+    // resolved path move into the closure by value.
+    let abs = path.resolve(&anchor);
+    let join = tokio::task::spawn_blocking(move || crate::skill::pack_local_artifact(kind, &abs)).await;
+    // quality-rust.md permits `.expect()` at the join boundary; the message
+    // names the panicking context.
+    #[allow(clippy::expect_used)]
+    let packed = join.expect("local dev-record pack task panicked");
+    let (_, layer) = grim(packed)?;
+    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+
+    let entry = crate::lock::locked_artifact::LockedArtifact {
+        name: name.to_string(),
+        kind,
+        source: crate::lock::locked_source::LockedSource::Path {
+            path: path.clone(),
+            hash,
+        },
+        bundles: Vec::new(),
+    };
+    let mut synth = GrimoireLock {
+        metadata: crate::lock::grimoire_lock::LockMetadata {
+            lock_version: crate::lock::lock_version::LockVersion::V1,
+            declaration_hash_version: crate::config::DECLARATION_HASH_VERSION,
+            declaration_hash: String::new(),
+            generated_by: crate::lock::grimoire_lock::LockMetadata::generated_by_current(),
+            generated_at: String::new(),
+        },
+        skills: Vec::new(),
+        rules: Vec::new(),
+        agents: Vec::new(),
+        mcp: Vec::new(),
+        bundles: Vec::new(),
+    };
+    match kind {
+        ArtifactKind::Skill => synth.skills.push(entry),
+        ArtifactKind::Rule => synth.rules.push(entry),
+        ArtifactKind::Agent => synth.agents.push(entry),
+        // A dev record is only ever a skill/rule/agent (dev-install rejects the
+        // rest); this arm is defensive.
+        ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            return Err(anyhow::anyhow!(
+                "dev-install is limited to skill/rule/agent, not {kind}"
+            ));
+        }
+    }
+
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
+        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let materializer = DefaultMaterializer;
+    let outcomes = install_and_persist(
+        &synth,
+        &ctx.access,
+        &materializer,
+        &target,
+        &mut install_state,
+        &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        &ctx.config_path,
+        is_update,
+        InstallIntent::Dev,
+        progress,
+    )
+    .await
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    install_outcomes_label(outcomes)
+}
+
+/// Reduce a batch of per-artifact install outcomes to a single status label,
+/// surfacing the first hard error. Shared by the registry ([`perform`]) and
+/// local install paths so all three report identically.
+fn install_outcomes_label(outcomes: Vec<crate::install::installer::ArtifactInstall>) -> anyhow::Result<String> {
     let mut label = "unchanged".to_string();
     for o in outcomes {
         match o.result {
@@ -2947,6 +3463,304 @@ mod tests {
         );
     }
 
+    // ── TUI Local group: `local_rows` sourcing ────────────────────────────────
+    //
+    // Design record: local_bundles_tui_group plan, "TUI Local group" —
+    // `local_rows` synthesizes rows for (a) declared path artifacts and
+    // (b) dev records, tagging both `source = Some("Local")`; a
+    // registry-declared artifact in the same config contributes no row.
+
+    #[test]
+    fn local_rows_includes_path_declaration_and_dev_record_tagged_local() {
+        use crate::config::declaration::DeclaredSource;
+        use crate::config::path_source::PathSource;
+        use crate::install::install_state::InstallRecord;
+        use crate::lock::locked_source::LockedSource;
+
+        let mut config = DesiredSet::default();
+        config.skills.insert(
+            "local-skill".to_string(),
+            DeclaredSource::Path(PathSource::parse("./local-skill").unwrap()),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut install_state = InstallState::empty(tmp.path());
+        install_state.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "dev-skill".to_string(),
+            source: LockedSource::Path {
+                path: PathSource::parse("./dev-skill").unwrap(),
+                hash: crate::oci::Digest::Sha256(sha('a')),
+            },
+            dev: true,
+            outputs: Vec::new(),
+        });
+
+        let rows = local_rows(&config, None, &install_state);
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "a path declaration and a dev record must each produce one Local row: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.source.as_deref() == Some("Local")),
+            "every row synthesized by local_rows must carry source = Some(\"Local\"): {rows:?}"
+        );
+    }
+
+    #[test]
+    fn local_rows_excludes_registry_declared_artifacts() {
+        use crate::config::declaration::DeclaredSource;
+
+        let mut config = DesiredSet::default();
+        config.skills.insert(
+            "registry-skill".to_string(),
+            DeclaredSource::Registry(Identifier::new_registry("acme/code-review", "ghcr.io")),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let install_state = InstallState::empty(tmp.path());
+
+        let rows = local_rows(&config, None, &install_state);
+
+        assert!(
+            rows.is_empty(),
+            "a registry-declared artifact must never produce a Local row: {rows:?}"
+        );
+    }
+
+    /// A path-sourced lock entry and an install record for the same name.
+    fn path_entry(hash_byte: char) -> crate::lock::locked_artifact::LockedArtifact {
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_source::LockedSource;
+        LockedArtifact {
+            name: "local-skill".to_string(),
+            kind: ArtifactKind::Skill,
+            source: LockedSource::Path {
+                path: PathSource::parse("./local-skill").unwrap(),
+                hash: crate::oci::Digest::Sha256(sha(hash_byte)),
+            },
+            bundles: Vec::new(),
+        }
+    }
+
+    fn path_record(state: &mut InstallState, hash_byte: char) {
+        use crate::config::path_source::PathSource;
+        use crate::install::install_state::InstallRecord;
+        use crate::lock::locked_source::LockedSource;
+        state.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "local-skill".to_string(),
+            source: LockedSource::Path {
+                path: PathSource::parse("./local-skill").unwrap(),
+                hash: crate::oci::Digest::Sha256(sha(hash_byte)),
+            },
+            dev: false,
+            outputs: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn local_row_digest_prefers_lock_pin_over_install_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = InstallState::empty(tmp.path());
+        path_record(&mut state, 'b');
+        let locked = path_entry('a');
+
+        // The lock's path pin ('a') wins over the install record's ('b').
+        assert_eq!(
+            local_row_digest(Some(&locked), None, ArtifactKind::Skill, "local-skill", &state),
+            Some(crate::oci::Digest::Sha256(sha('a'))),
+            "the lock pin takes precedence over the install record"
+        );
+        // No lock → the install record's pin is used.
+        assert_eq!(
+            local_row_digest(None, None, ArtifactKind::Skill, "local-skill", &state),
+            Some(crate::oci::Digest::Sha256(sha('b'))),
+            "the install record's pin is the fallback"
+        );
+        // Neither locked nor recorded → None.
+        assert_eq!(
+            local_row_digest(None, None, ArtifactKind::Skill, "absent", &state),
+            None,
+            "an unknown local artifact has no digest"
+        );
+    }
+
+    #[test]
+    fn local_row_state_covers_not_installed_installed_and_outdated() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // (1) No install record → NotInstalled (a declared-but-uninstalled path).
+        let empty = InstallState::empty(tmp.path());
+        assert_eq!(
+            local_row_state(None, None, ArtifactKind::Skill, "local-skill", &empty),
+            ArtifactState::NotInstalled
+        );
+
+        // (2) A path-sourced record with no lock → Installed.
+        let mut state = InstallState::empty(tmp.path());
+        path_record(&mut state, 'a');
+        assert_eq!(
+            local_row_state(None, None, ArtifactKind::Skill, "local-skill", &state),
+            ArtifactState::Installed
+        );
+
+        // (2b) A lock pin whose content matches the record → still Installed.
+        let matching = path_entry('a');
+        assert_eq!(
+            local_row_state(Some(&matching), None, ArtifactKind::Skill, "local-skill", &state),
+            ArtifactState::Installed,
+            "a lock pin that eq_content-matches the record is not outdated"
+        );
+
+        // (3) A lock pin ahead of the record (hash mismatch) → Outdated.
+        let ahead = path_entry('c');
+        assert_eq!(
+            local_row_state(Some(&ahead), None, ArtifactKind::Skill, "local-skill", &state),
+            ArtifactState::Outdated,
+            "a lock pin whose hash differs from the record is outdated"
+        );
+    }
+
+    /// A locked local **bundle** row derives its hash and Installed badge from
+    /// `lock.bundles`, not `iter_artifacts` (which omits bundles). Regression:
+    /// bundle rows keyed only the `iter_artifacts` index, so a locked local
+    /// bundle showed an empty hash and NotInstalled even after a successful
+    /// install.
+    #[test]
+    fn local_row_bundle_derives_hash_and_installed_from_lock_bundles() {
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_bundle::LockedBundleSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = InstallState::empty(tmp.path());
+        let bundle = LockedBundle {
+            name: "docs".to_string(),
+            source: LockedBundleSource::Path {
+                path: PathSource::parse("./bundles/docs.toml").unwrap(),
+                hash: crate::oci::Digest::Sha256(sha('a')),
+            },
+            members: Vec::new(),
+        };
+
+        // Digest: the bundle's members-layer content hash (never empty).
+        assert_eq!(
+            local_row_digest(None, Some(&bundle), ArtifactKind::Bundle, "docs", &state),
+            Some(crate::oci::Digest::Sha256(sha('a'))),
+            "a locked bundle row derives its hash from lock.bundles"
+        );
+        // State: present in the lock → Installed (no per-member scan).
+        assert_eq!(
+            local_row_state(None, Some(&bundle), ArtifactKind::Bundle, "docs", &state),
+            ArtifactState::Installed,
+            "a bundle present in the lock reads Installed"
+        );
+        // Absent from the lock → NotInstalled.
+        assert_eq!(
+            local_row_state(None, None, ArtifactKind::Bundle, "docs", &state),
+            ArtifactState::NotInstalled,
+            "a bundle not yet locked reads NotInstalled"
+        );
+
+        // End-to-end through `local_row`: non-empty short hash + Installed badge.
+        let row = local_row(
+            ArtifactKind::Bundle,
+            "docs",
+            "./bundles/docs.toml",
+            None,
+            Some(&bundle),
+            &state,
+        );
+        assert!(!row.version.is_empty(), "the bundle row hash must not be empty");
+        assert_eq!(row.state, ArtifactState::Installed);
+    }
+
+    // Design record: same plan, "Badge non-contamination" — a path/dev source
+    // (`LockedSource::Path`, whose `.pinned()` is always `None`) must never
+    // participate in the registry badge-match `build_row_check` keys on
+    // (`locked_source.rs::pinned`), even when it shares a lock with a genuine
+    // registry entry.
+    #[test]
+    fn path_sourced_lock_entry_never_flips_a_registry_row_badge() {
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_source::LockedSource;
+
+        let path_entry = LockedArtifact {
+            name: "local-skill".to_string(),
+            kind: ArtifactKind::Skill,
+            source: LockedSource::Path {
+                path: PathSource::parse("./local-skill").unwrap(),
+                hash: crate::oci::Digest::Sha256(sha('p')),
+            },
+            bundles: Vec::new(),
+        };
+        let registry_entry = locked("a", ArtifactKind::Skill, '1');
+        let lock = lock_fixture(vec![path_entry, registry_entry], Vec::new());
+
+        let rows = vec![installed_row("r/a")];
+        let checks = post_batch_checks(&lock, &rows, &[0]);
+
+        assert_eq!(
+            checks.len(),
+            1,
+            "the registry row must still resolve its own lock entry despite the path entry sharing the lock"
+        );
+        assert_eq!(
+            checks[0].locked_digest,
+            crate::oci::Digest::Sha256(sha('1')),
+            "a path-sourced lock entry (source.pinned() == None) must never contaminate a registry row's badge match"
+        );
+    }
+
+    // ── TUI Local group: action dispatch ──────────────────────────────────────
+    //
+    // `perform`/`perform_uninstall` dispatch a `Some("Local")` row into
+    // `perform_local`/`perform_local_uninstall` BEFORE the registry-only guards
+    // (empty-registry / "malformed catalog repo"), since a Local row carries no
+    // registry identity at all. Each test drives a Local row with empty
+    // registry fields and asserts the local seam's own outcome — never the
+    // registry-only guard's "malformed catalog repo" message.
+
+    #[tokio::test]
+    async fn perform_routes_local_row_before_empty_registry_guard() {
+        let (_tmp, ctx) = drain_test_ctx();
+        let mut row = installed_row("dummy/x");
+        row.source = Some("Local".to_string());
+        row.registry = String::new();
+        row.repository = String::new();
+
+        let result = perform(&ctx, &row, false, None, &SilentProgress).await;
+
+        // Positive contract: the row routed into `perform_local`, which — with
+        // no path declaration and no dev record for this name — fails with the
+        // local seam's own message, never the registry-only guard.
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("is not a declared path artifact or a dev-install record")),
+            "a Local row must dispatch into perform_local: {result:?}"
+        );
+    }
+
+    #[test]
+    fn perform_uninstall_routes_local_row_before_the_registry_only_guard() {
+        let (_tmp, ctx) = drain_test_ctx();
+        let mut row = installed_row("dummy/x");
+        row.source = Some("Local".to_string());
+        row.repository = String::new();
+
+        let result = perform_uninstall(&ctx, &row);
+
+        // Positive contract: the row routed into `perform_local_uninstall`,
+        // which — with nothing to delete and no config to undeclare —
+        // converges to `Ok`. The registry-only guard would instead return
+        // `Err("malformed catalog repo")`, so `Ok` positively proves dispatch.
+        assert!(
+            result.is_ok(),
+            "a Local row must dispatch into perform_local_uninstall and converge: {result:?}"
+        );
+    }
+
     // GAP-4: direct unit tests for elision_registry and registry_order.
     // These two pure helpers are the only seam between TuiContext and the
     // tree's multi-registry root projection — testing them directly locks
@@ -3275,7 +4089,8 @@ mod tests {
         );
 
         // The bundle row badge derives `installed` from its members.
-        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+            load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -3321,7 +4136,8 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert!(lock.skills.is_empty(), "members must be evicted from the lock");
 
-        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+            load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -3335,6 +4151,62 @@ mod tests {
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
             ArtifactState::NotInstalled
         );
+    }
+
+    #[tokio::test]
+    async fn perform_local_installs_declared_bundle_members_not_a_partial_failure() {
+        // Regression: `local_rows` yields a `ArtifactKind::Bundle` Local row for
+        // a declared local (path-sourced) bundle, so `perform_local` →
+        // `perform_local_declared` must project the bundle's MEMBERS. It used to
+        // call `single_entry_lock` unconditionally, which returns `None` for a
+        // bundle → the action wrote the lock then failed with "resolved lock is
+        // missing". This asserts the members materialize instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        // Declare a local bundle by path; its member is served by the in-memory
+        // registry `registry_with_bundle` stands up (skill `demo` at
+        // `grimoire/skills/demo:1.0.0`).
+        std::fs::write(
+            workspace.join("grimoire.toml"),
+            "[bundles]\nlocal-pack = \"./bundles/local.toml\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join("bundles")).unwrap();
+        std::fs::write(
+            workspace.join("bundles/local.toml"),
+            "[skills]\ndemo = \"localhost:5050/grimoire/skills/demo:1.0.0\"\n",
+        )
+        .unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut row = installed_row("local-pack");
+        row.kind = "bundle".to_string();
+        row.repo = "local-pack".to_string();
+        row.source = Some("Local".to_string());
+        row.state = ArtifactState::NotInstalled;
+
+        let label = perform_local(&ctx, &row, false, &SilentProgress)
+            .await
+            .expect("a local-bundle Local row must not hit the resolved-lock-missing partial failure");
+        assert_eq!(label, "installed", "the bundle's member must materialize");
+
+        // The member skill materialized (proves the members projection ran,
+        // not the single-entry path).
+        assert!(
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "local-bundle member skill files must exist"
+        );
+
+        // The lock carries the local `[[bundle]]` path snapshot plus the member.
+        let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
+        assert_eq!(lock.bundles.len(), 1, "the local bundle is snapshotted");
+        assert_eq!(lock.bundles[0].name, "local-pack");
+        assert!(
+            lock.bundles[0].path().is_some(),
+            "a local bundle pins by path, not registry"
+        );
+        assert_eq!(lock.skills.len(), 1, "the member is expanded into the lock");
+        assert_eq!(lock.skills[0].name, "demo");
     }
 
     #[tokio::test]
@@ -3703,7 +4575,8 @@ mod tests {
             .await
             .expect("bundle install succeeds");
 
-        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+            load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -3726,7 +4599,8 @@ mod tests {
         perform(&ctx, &skill_row, false, None, &SilentProgress)
             .await
             .expect("skill install succeeds");
-        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+            load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,

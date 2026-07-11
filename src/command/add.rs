@@ -303,6 +303,15 @@ async fn add_path_source(
         Some("skill") => ArtifactKind::Skill,
         Some("rule") => ArtifactKind::Rule,
         Some("agent") => ArtifactKind::Agent,
+        // v1: a local bundle's supported path is a declared `[bundles]` entry
+        // resolved by `grim lock`, not `grim add` — guide the user there.
+        Some("bundle") => {
+            return Err(anyhow::Error::from(crate::error::Error::from(
+                CommandError::ConfigUsage(
+                    "a local bundle is declared in [bundles] in grimoire.toml, not via grim add; add the entry and run grim lock".to_string(),
+                ),
+            )));
+        }
         Some(other) => {
             return Err(anyhow::Error::from(crate::error::Error::from(
                 CommandError::ConfigUsage(format!("path sources are not supported for {other} artifacts")),
@@ -446,9 +455,14 @@ async fn install_added(
     // Project the acted-on entry out of the (now complete) lock.
     let single = match kind {
         ArtifactKind::Bundle => match new_lock.bundles.iter().find(|b| b.name == name) {
-            // The cached expansion's repo+tag select exactly this bundle's
-            // members (the tag is digest-safe — it mirrors member provenance).
-            Some(b) => bundle_members_lock(new_lock, &b.repo, &b.tag),
+            // The cached expansion's `(repo, tag)` provenance selects exactly
+            // this bundle's members — registry repo/tag or, for a local bundle,
+            // the declared path + members-layer short hash (one encoding, see
+            // `LockedBundle::provenance_pair`).
+            Some(b) => {
+                let (repo, tag) = b.provenance_pair();
+                bundle_members_lock(new_lock, &repo, &tag)
+            }
             // A bundle that resolved to zero members: nothing to install.
             None => return Ok(()),
         },

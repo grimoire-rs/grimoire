@@ -227,6 +227,35 @@ contributes only loses this bundle's provenance entry and stays locked.
 If the reference is [deprecated](./publishing.md#metadata-deprecated), `add`
 prints the publisher's notice on stderr and still completes the add.
 
+### Local path sources {#add-path}
+
+`<reference>` may also be a [local path](./concepts.md#references-tags-and-digests)
+— `./skills/x`, `../shared/rule.md`, or an absolute path — for a skill, rule,
+or agent. `add` declares it verbatim, pins it by the SHA-256 of its canonical
+packed layer instead of a registry digest, and installs it exactly like a
+registry reference:
+
+```sh
+grim add ./skills/my-skill
+grim add --kind agent ../shared/reviewer.md
+```
+
+The kind is inferred from the path's shape — the same rule
+[`grim build`](#build) uses: a directory with `SKILL.md` is a skill, a bare
+`.md` file is a rule; pass `--kind agent` for an agent. The binding name
+defaults to the artifact's own name (a skill's frontmatter `name`, or a
+rule/agent file's stem) rather than a reference path segment. A relative CLI
+path is rewritten to be relative to the config file's directory before it is
+declared, so the recorded value is portable when a co-worker clones the
+repo; an absolute path is declared verbatim, and a project-scope config
+carrying one gets a warning on every subsequent command — it is not portable
+to another machine (global scope, being machine-local already, stays quiet).
+
+A bundle has no local-path form via `add`: `grim add --kind bundle
+./bundles/x.toml` refuses (exit 64) and points you at declaring the entry in
+`[bundles]` directly and running [`grim lock`](#lock) instead — see
+[`[bundles]`](./configuration.md#bundles) for the local-bundle shape.
+
 ## grim lock {#lock}
 
 Resolves the floating tags declared in `grimoire.toml` to concrete digests and
@@ -257,6 +286,33 @@ grim install
 grim install --client claude,copilot
 ```
 
+### Dev-install a local path {#install-dev}
+
+`grim install <path>` — a [local path](./concepts.md#references-tags-and-digests)
+positional argument (`./…`, `../…`, or absolute) — renders a skill, rule, or
+agent straight from disk into your clients **without** touching
+`grimoire.toml` or `grimoire.lock`. It is a throwaway test loop: edit the
+source, re-run the same command, see the change land, with nothing declared.
+
+```sh
+grim install ./skills/my-skill
+grim install ../shared/reviewer.md --kind agent
+```
+
+An install record is still written, marked `dev`, so the artifact stays
+visible instead of turning into an untracked file: [`grim status`](#status)
+lists it with `Source` reading `path: <path> (dev)`,
+[`grim update`](#update) re-packs the source and re-materializes it when the
+content drifts, and [`grim uninstall`](#uninstall) removes it. Unlike an
+orphan dropped from the lock, a dev record is **never** pruned automatically
+— removing it is always an explicit `grim uninstall`. `--kind` overrides the
+path-shape inference the same way it does for [`grim add`](#add-path);
+`--client` and `--force` behave exactly as for a normal install.
+
+Reach for [`grim add <path>`](#add-path) instead when you want the source
+declared — committed to `grimoire.toml` and shared with anyone who clones
+the repo, rather than local to this checkout.
+
 ## grim update {#update}
 
 `grim update [names…]` re-resolves floating tags, rolls the lock forward, and
@@ -281,12 +337,21 @@ overwritten without `--force`.
 Pruning happens only on `update`. `grim install` materializes the current lock
 but never deletes — like [`grim remove`](#remove), it leaves files on disk.
 
+`update` also refreshes every [local path source](#add-path): a declared
+path dependency and a [dev-installed](#install-dev) record alike are
+re-packed, and a changed content hash re-materializes them — the local
+equivalent of a floating registry tag rolling to a new digest. Before you
+run it, [`grim status`](#status) surfaces that drift ahead of time as
+`outdated`, the same state a moved registry tag produces.
+
 ## grim status {#status}
 
 Reports each declared artifact's state — installed, outdated, locally modified,
 integrity-missing, or not installed. The `Source` column shows each artifact's
-[provenance](./concepts.md#bundles): `direct` or the bundle it came from. Pair
-with `--format json` to drive automation.
+[provenance](./concepts.md#bundles): `direct` for a registry declaration, the
+bundle it came from, `path: <path>` for a declared [local path
+source](#add-path), or `path: <path> (dev)` for a [dev-installed](#install-dev)
+record. Pair with `--format json` to drive automation.
 
 `--format json` output carries an `outputs` array per artifact: the
 per-[client](./concepts.md#clients) locations the artifact was materialized
@@ -356,6 +421,9 @@ the bundle names it at a *different* identifier, the correct pin cannot be
 derived offline: the entry is dropped, the lock is left stale, and grim tells
 you to run [`grim lock`](#lock) — never a silently incomplete fresh lock.
 
+A [dev-installed](#install-dev) record was never declared, so `remove` has
+nothing to undeclare for it — use `grim uninstall` to drop one instead.
+
 ## grim uninstall {#uninstall}
 
 `grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, or
@@ -372,6 +440,13 @@ The lock follows the same effective-declaration rule as
 the same identifier, the files are deleted (that is what you asked for) but
 the lock entry survives via the bundle — the next `grim install`
 rematerializes it.
+
+`uninstall <kind> <name>` is also the removal path for a
+[dev-installed](#install-dev) record: since a dev install writes only an
+install record and never a declaration, the file-deletion half behaves
+exactly like a registry artifact's uninstall — same addressing, same
+deleted files, same dropped record — and the undeclare half is a no-op
+(there was nothing declared to drop).
 
 ## grim search {#search}
 
@@ -502,6 +577,19 @@ and `fmt` leaves. A registry root always keeps its own row.
 declares, derived from the registry (or the lock snapshot when offline).
 Bundle members cannot be individually marked, installed, or uninstalled from
 the tree — use the parent bundle row for batch operations.
+
+**Local group** — [declared path sources](#add-path) and
+[dev-installed](#install-dev) records have no registry to root under, so
+they group under their own top-level **Local** root alongside the registry
+roots, carrying the same `path: <path>` / `path: <path> (dev)` provenance
+[`grim status`](#status) reports. `i` / `u` / `d` on a Local row route to
+the local seams instead of the registry ones: install/update on a
+declared-path row re-locks it in place (the `grimoire.toml` entry is
+untouched) and materializes it, install/update on a dev row re-packs and
+re-materializes it, and delete removes the materialized files either
+way — additionally dropping the `[skills]` / `[rules]` / `[agents]` entry
+for a declared-path row, or just the install record for a dev row (which
+was never declared).
 
 An active search (started with `/`) reveals matching entries even when their
 parent group is collapsed — the tree stays navigable in search mode and does

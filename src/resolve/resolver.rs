@@ -29,7 +29,7 @@ use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
 use crate::lock::lock_io::now_rfc3339;
 use crate::lock::lock_version::LockVersion;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
-use crate::lock::locked_bundle::LockedBundle;
+use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
 use crate::oci::access::error::AccessErrorKind;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::reference::ArtifactRef;
@@ -53,7 +53,7 @@ pub async fn resolve_lock(
     anchor: &std::path::Path,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
-    let (work, bundles) = build_work(set, access, options).await?;
+    let (work, bundles) = build_work(set, access, options, anchor).await?;
     let mut resolved = resolve_work(work, access, options).await?;
     // Path-sourced entries pin locally (validate + pack + hash) — no
     // registry round-trip, so they resolve even fully offline.
@@ -167,7 +167,7 @@ pub async fn resolve_lock_partial(
     }
 
     // Expand bundles + merge so a requested name can be a bundle member.
-    let (all_work, bundles) = build_work(set, access, options).await?;
+    let (all_work, bundles) = build_work(set, access, options, anchor).await?;
 
     // Validate every requested name is an effective artifact (direct,
     // path-sourced, or a bundle member).
@@ -277,6 +277,7 @@ async fn build_work(
     set: &DesiredSet,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
+    anchor: &std::path::Path,
 ) -> Result<(Vec<WorkItem>, Vec<LockedBundle>), ResolveError> {
     let mut work: Vec<WorkItem> = collect_work(set);
 
@@ -290,7 +291,7 @@ async fn build_work(
         .map(|w| (w.reference.kind, w.reference.name.clone()))
         .collect();
 
-    let (members, snapshots) = expand_bundles(set, access, options).await?;
+    let (members, snapshots) = expand_bundles(set, access, options, anchor).await?;
     work.extend(merge_bundle_members(&direct_keys, members)?);
     Ok((work, snapshots))
 }
@@ -376,6 +377,7 @@ async fn expand_bundles(
     set: &DesiredSet,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
+    anchor: &std::path::Path,
 ) -> Result<(Vec<ExpandedMember>, Vec<LockedBundle>), ResolveError> {
     let mut out = Vec::new();
     let mut snapshots = Vec::new();
@@ -385,20 +387,37 @@ async fn expand_bundles(
             name: cfg_name.clone(),
             source: bundle_source.clone(),
         };
-        let Some(bundle_id) = bundle_source.identifier() else {
-            // TODO(local-path-sources): local bundle TOML expansion lands
-            // with the resolve phase; until then a declared path bundle is
-            // an explicit failure, not a silent skip.
-            return Err(ResolveError::new(
-                bundle_ref,
-                ResolveErrorKind::BundleInvalid("local path bundle sources are not supported yet".to_string()),
-            ));
+        let bundle_id = match bundle_source.identifier() {
+            Some(id) => id,
+            None => {
+                // A path-sourced bundle has no registry identity: resolve,
+                // pack, and hash it locally (no registry round-trip).
+                let path = bundle_source.path().ok_or_else(|| {
+                    ResolveError::new(
+                        bundle_ref.clone(),
+                        ResolveErrorKind::BundleInvalid(
+                            "bundle source is neither a registry reference nor a path".to_string(),
+                        ),
+                    )
+                })?;
+                let (members, snapshot) = expand_local_bundle(&bundle_ref, cfg_name, path, anchor).await?;
+                out.extend(members);
+                snapshots.push(snapshot);
+                continue;
+            }
         };
 
         let (members, pinned) = fetch_bundle_members(&bundle_ref, bundle_id, access, options).await?;
 
-        let bundle_repo = bundle_id.registry_repository();
-        let bundle_tag = bundle_provenance_tag(bundle_id);
+        // Build the source once so the member provenance the loop stamps and
+        // the source stored in the lock snapshot derive from one encoding
+        // ([`LockedBundleSource::provenance_pair`]) — no lockstep to maintain.
+        let source = LockedBundleSource::Registry {
+            repo: bundle_id.registry_repository(),
+            tag: bundle_provenance_tag(bundle_id),
+            pinned,
+        };
+        let (bundle_repo, bundle_tag) = source.provenance_pair();
 
         // The lock snapshot stores RESOLVED (absolute) member ids so every
         // downstream consumer (effective-set mutations, status, TUI lock
@@ -452,13 +471,154 @@ async fn expand_bundles(
         }
         snapshots.push(LockedBundle {
             name: cfg_name.clone(),
-            repo: bundle_repo,
-            tag: bundle_tag,
-            pinned,
+            source,
             members: resolved_members,
         });
     }
     Ok((out, snapshots))
+}
+
+/// Expand a local (path-sourced) bundle into its flattened members plus a
+/// [`LockedBundle`] snapshot pinned by the SHA-256 of its canonical members
+/// layer.
+///
+/// Resolves the [`PathSource`] against the config-dir `anchor`, reads the
+/// bundle's member list, rejects any relative member (a local bundle has no
+/// registry directory to anchor one against — ADR sub-decision 5), packs the
+/// members into their canonical layer, hashes it, and builds the
+/// [`LockedBundleSource::Path`] snapshot.
+///
+/// # Errors
+///
+/// [`ResolveErrorKind::BundleInvalid`] for a missing/unparseable bundle
+/// file, a relative member, or a members-layer hash mismatch.
+async fn expand_local_bundle(
+    bundle_ref: &ArtifactRef,
+    cfg_name: &str,
+    path_source: &crate::config::path_source::PathSource,
+    anchor: &std::path::Path,
+) -> Result<(Vec<ExpandedMember>, LockedBundle), ResolveError> {
+    // `read_bundle_members` does blocking `std::fs` I/O; run it on the
+    // blocking pool (mirrors `resolve_path_entries`). A missing or malformed
+    // bundle file surfaces as `BundleInvalid` (65).
+    let abs = path_source.resolve(anchor);
+    let join = tokio::task::spawn_blocking(move || crate::command::build::read_bundle_members(&abs)).await;
+    // quality-rust.md permits `.expect()` at the join boundary; the message
+    // names the panicking context.
+    #[allow(clippy::expect_used)]
+    let read = join.expect("local-bundle read task panicked");
+    let (_name, members, _metadata) =
+        read.map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(format!("{e:#}"))))?;
+
+    // Canonicalize the member set (sorted by `(kind, name)`) so the pin hash
+    // and stored member list are reproducible across repacks of the same
+    // source.
+    let manifest = BundleManifest::new(members);
+    // Validate the member set (count cap, name charset, absolute ids) before
+    // anything is packed or installed — the same guards the registry branch
+    // enforces, so a local bundle cannot traverse out of the client dir.
+    validate_local_members(bundle_ref, &manifest.members)?;
+
+    let layer = manifest
+        .to_layer_bytes()
+        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
+    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+
+    // Build the source once so the member provenance the loop stamps and the
+    // source stored in the snapshot derive from one encoding
+    // ([`LockedBundleSource::provenance_pair`]): the declared path stands in
+    // for the repo, the members-layer hash (short form) for the tag. `add.rs`'s
+    // member projection matches members back by the same pair.
+    let source = LockedBundleSource::Path {
+        path: path_source.clone(),
+        hash,
+    };
+    let (bundle_repo, bundle_tag) = source.provenance_pair();
+    let mut expanded = Vec::with_capacity(manifest.members.len());
+    for member in &manifest.members {
+        // Already validated absolute by `validate_local_members`; parse the
+        // concrete identifier for the shared registry work path.
+        let id = Identifier::parse(&member.id).map_err(|e| {
+            ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!(
+                    "member '{}' has an invalid identifier '{}': {e}",
+                    member.name, member.id
+                )),
+            )
+        })?;
+        expanded.push(ExpandedMember {
+            kind: member.kind,
+            name: member.name.clone(),
+            id,
+            bundle_repo: bundle_repo.clone(),
+            bundle_tag: bundle_tag.clone(),
+        });
+    }
+
+    let locked = LockedBundle {
+        name: cfg_name.to_string(),
+        source,
+        members: manifest.members,
+    };
+    Ok((expanded, locked))
+}
+
+/// Validate every member of a local bundle before it is packed or installed.
+///
+/// Enforces the same guards the registry branch applies in [`expand_bundles`],
+/// so a local bundle cannot be weaponized where a registry one is safe:
+///
+/// - the member count must not exceed [`MAX_BUNDLE_MEMBERS`]
+///   (defense-in-depth parity with [`fetch_bundle_members`]);
+/// - each member `name` (the config table KEY, which becomes an install-path
+///   component) must parse as a [`SkillName`] so a key like
+///   `"../../evil"` cannot traverse out of the client dir (CWE-22); and
+/// - each member id must be an absolute registry reference — a local bundle
+///   has no registry directory to late-bind a `./`/`../` member against (ADR
+///   sub-decision 5).
+///
+/// # Errors
+///
+/// [`ResolveErrorKind::BundleInvalid`] on an over-cap count or the first
+/// member whose name or id is invalid.
+#[allow(clippy::result_large_err)]
+fn validate_local_members(bundle_ref: &ArtifactRef, members: &[BundleMember]) -> Result<(), ResolveError> {
+    if members.len() > MAX_BUNDLE_MEMBERS {
+        return Err(ResolveError::new(
+            bundle_ref.clone(),
+            ResolveErrorKind::BundleInvalid(format!(
+                "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
+                members.len()
+            )),
+        ));
+    }
+    for member in members {
+        // The member name is the config table key and flows into a filesystem
+        // install path; validate it against the same charset as a declared
+        // name so it cannot traverse out of the client dir (CWE-22) — the
+        // registry branch enforces the identical guard.
+        SkillName::parse(&member.name).map_err(|e| {
+            ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
+            )
+        })?;
+        let is_absolute = matches!(
+            crate::oci::member_ref::MemberRef::parse(&member.id),
+            Ok(crate::oci::member_ref::MemberRef::Absolute(_))
+        );
+        if !is_absolute {
+            return Err(ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!(
+                    "local bundle member '{}' must be an absolute registry reference (relative members are not supported)",
+                    member.name
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Fetch and parse a bundle's member list, enforcing the `MAX_BUNDLE_MEMBERS`
@@ -1524,7 +1684,7 @@ mod tests {
         )
         .unwrap();
 
-        let (members, snapshots) = expand_bundles(&cfg.set, &access, &fast_options())
+        let (members, snapshots) = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
             .await
             .expect("relative members must resolve");
 
@@ -1553,7 +1713,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = expand_bundles(&cfg.set, &access, &fast_options())
+        let err = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
             .await
             .expect_err("escaping member must fail the resolve");
         assert!(
@@ -1745,5 +1905,193 @@ mod tests {
             "digest-pinned bundle records its digest, got {tag}"
         );
         assert_ne!(tag, "latest", "must not fabricate a `latest` tag");
+    }
+
+    // ── Local (path-sourced) bundle expansion — Phase 1 spec ────────────
+    //
+    // `expand_local_bundle` / `validate_local_members` cover the design
+    // record's "Resolve — local branch in `expand_bundles`" contract: an
+    // absolute-member local bundle pins by the SHA-256 of its canonical
+    // members layer, a relative member is rejected (ADR sub-decision 5 —
+    // no registry directory to late-bind against), and packing is
+    // deterministic across repacks of the same source.
+
+    fn local_bundle_ref(name: &str, path: &str) -> ArtifactRef {
+        ArtifactRef {
+            kind: ArtifactKind::Bundle,
+            name: name.to_string(),
+            source: DeclaredSource::Path(crate::config::path_source::PathSource::parse(path).unwrap()),
+        }
+    }
+
+    /// Write a bundle source file (a `grimoire.toml`-shaped `[skills]`/
+    /// `[rules]` document — the same shape `read_bundle_members` parses)
+    /// under `dir` at `rel`, creating parent directories as needed.
+    fn write_bundle_source(dir: &std::path::Path, rel: &str, body: &str) {
+        let full = dir.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).expect("create bundle dir");
+        }
+        std::fs::write(&full, body).expect("write bundle source");
+    }
+
+    #[test]
+    fn validate_local_members_accepts_all_absolute_members() {
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members = vec![bundle_member(
+            ArtifactKind::Skill,
+            "code-review",
+            "ghcr.io/acme/code-review:1",
+        )];
+        assert!(
+            validate_local_members(&bundle_ref, &members).is_ok(),
+            "an all-absolute member list must be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_local_members_rejects_relative_member() {
+        // ADR sub-decision 5: a local bundle has no registry directory to
+        // late-bind a `./`/`../` member against.
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members = vec![bundle_member(ArtifactKind::Skill, "widget", "./widget:1")];
+        let err = validate_local_members(&bundle_ref, &members).expect_err("relative member must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("widget")),
+            "must be BundleInvalid naming the offending member, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_local_members_rejects_traversal_member_name() {
+        // CWE-22: the member NAME is the config table key and becomes an
+        // install-path component; a traversal key must be rejected before it
+        // reaches the filesystem, matching the registry branch's guard.
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members = vec![bundle_member(
+            ArtifactKind::Skill,
+            "../../evil",
+            "ghcr.io/acme/code-review:1",
+        )];
+        let err = validate_local_members(&bundle_ref, &members).expect_err("traversal member name must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("../../evil")),
+            "must be BundleInvalid naming the offending member name, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_local_members_rejects_over_cap_count() {
+        // Defense-in-depth parity with `fetch_bundle_members`: a local bundle
+        // over MAX_BUNDLE_MEMBERS is rejected before packing.
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members: Vec<BundleMember> = (0..=MAX_BUNDLE_MEMBERS)
+            .map(|i| bundle_member(ArtifactKind::Skill, &format!("m{i}"), "ghcr.io/acme/code-review:1"))
+            .collect();
+        let err = validate_local_members(&bundle_ref, &members).expect_err("over-cap member count must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("exceeds the limit")),
+            "must be BundleInvalid naming the count cap, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_local_bundle_with_absolute_members_pins_by_members_layer_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_bundle_source(
+            dir.path(),
+            "bundles/docs.toml",
+            "[skills]\ncode-review = \"ghcr.io/acme/code-review:1\"\n",
+        );
+        let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+
+        let (members, locked) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+            .await
+            .expect("absolute-member local bundle must resolve");
+
+        assert_eq!(locked.name, "docs");
+        assert_eq!(locked.path(), Some(&path_source));
+        assert!(locked.pinned().is_none(), "a local bundle carries no registry pin");
+
+        let expected_member = BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "code-review".to_string(),
+            id: "ghcr.io/acme/code-review:1".to_string(),
+        };
+        assert_eq!(locked.members, vec![expected_member.clone()]);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "code-review");
+        assert_eq!(members[0].id.to_string(), "ghcr.io/acme/code-review:1");
+
+        let expected_bytes = BundleManifest::new(vec![expected_member])
+            .to_layer_bytes()
+            .expect("serialize expected manifest");
+        let expected_hash = Algorithm::Sha256.hash(expected_bytes);
+        match &locked.source {
+            LockedBundleSource::Path { hash, .. } => {
+                assert_eq!(
+                    *hash, expected_hash,
+                    "pin must be the SHA-256 of the canonical members layer"
+                );
+            }
+            other => panic!("expected a Path source, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn expand_local_bundle_is_deterministic_across_repacks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_bundle_source(
+            dir.path(),
+            "bundles/docs.toml",
+            "[skills]\ncode-review = \"ghcr.io/acme/code-review:1\"\n[rules]\nrust-style = \"ghcr.io/acme/rust-style:1\"\n",
+        );
+        let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+
+        let (_, first) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+            .await
+            .expect("first pack succeeds");
+        let (_, second) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+            .await
+            .expect("second pack succeeds");
+
+        assert_eq!(
+            first.source, second.source,
+            "repacking the same source twice must yield the same hash"
+        );
+        assert_eq!(first.members, second.members);
+    }
+
+    #[tokio::test]
+    async fn expand_local_bundle_rejects_relative_member() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_bundle_source(dir.path(), "bundles/docs.toml", "[skills]\nwidget = \"./widget:1\"\n");
+        let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+
+        let err = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+            .await
+            .expect_err("a relative member in a local bundle must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
+            "must be BundleInvalid, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_local_bundle_missing_file_is_bundle_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_source = crate::config::path_source::PathSource::parse("./bundles/ghost.toml").unwrap();
+        let bundle_ref = local_bundle_ref("ghost", "./bundles/ghost.toml");
+
+        let err = expand_local_bundle(&bundle_ref, "ghost", &path_source, dir.path())
+            .await
+            .expect_err("a missing bundle file must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
+            "must be BundleInvalid, got {err:?}"
+        );
     }
 }

@@ -84,9 +84,50 @@ The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout
 stability (`.claude/artifacts/adr_render_layout_stability.md`).
 
+## Known limitations {#limitations}
+
+Two behaviors fall outside every guarantee above — not because they are
+likely to change, but because they are hard constraints of the current
+design.
+
+### Forward compatibility {#limitations-forward-compat}
+
+Every lock and install-state field parses with `deny_unknown_fields`: a
+`grim` binary that does not recognise a field refuses to load the file
+rather than silently drop it. That protects a downgrade from misreading
+data it cannot faithfully represent, but it cuts both ways — a lock or
+state entry using [local path sources](./concepts.md#references-tags-and-digests)
+(a path-declared skill, rule, or agent, or a [local
+bundle](./concepts.md#bundles)) is unreadable by a `grim` build that
+predates the feature. It exits 78 (`EX_CONFIG`), the same code any other
+config or lock parse failure uses.
+
+This only triggers when the feature is actually in use: a registry-only
+lock or state file stays byte-identical across the version boundary, so a
+project that never declares a path source is unaffected either way.
+
+### Offline re-materialization needs a manifest {#limitations-offline-remat}
+
+Grimoire caches a fetched artifact's content layer — content-addressed, so
+identical bytes are never re-downloaded — but not its manifest. An offline
+[`grim install`][install] whose rendered output is still on disk is
+network-free: the integrity gate compares the on-disk content hash against
+the lock and needs nothing from the registry.
+
+Deleting that output and asking `--offline` to re-materialize it is a
+different story. Even a pinned manifest digest has to be *fetched* to learn
+which layer blob to pull, and that fetch always needs the network — grim
+keeps no local manifest cache to serve it from. This is a general
+constraint of the content-cache design, not specific to path sources: it
+applies to every registry-sourced kind (skill, rule, agent, MCP server, or
+bundle member) whose materialized output has gone missing while offline.
+[Local path sources](./concepts.md#references-tags-and-digests) are
+unaffected — they read straight from disk and never touch a manifest.
+
 <!-- internal -->
 [json-interface]: ./json-interface.md
 [status]: ./commands.md#status
+[install]: ./commands.md#install
 [config-exit-codes]: ./commands.md#config-exit-codes
 [configuration]: ./configuration.md
 [env-vars]: ./configuration.md#environment-variables
