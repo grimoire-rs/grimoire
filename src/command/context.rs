@@ -17,6 +17,7 @@
 use clap::Args;
 
 use crate::api::context_report::{ContextRegistry, ContextRegistryKind, ContextReport, OfflineSource};
+use crate::auth::store::{DockerCredentialStore, StoreOptions};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::target::InstallTarget;
@@ -46,9 +47,15 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     ))?;
     let clients = target.clients().iter().map(ToString::to_string).collect();
 
+    // A file-only view of the docker-compatible credential store, resolved
+    // once. `None` when no config location exists (no `$DOCKER_CONFIG`, no
+    // home) — everything then reports `authenticated: false`. Never spawns a
+    // credential helper.
+    let cred_store = DockerCredentialStore::new(StoreOptions::default()).ok();
     let registries = super::registries_for_scope(ctx, &scope)
         .into_iter()
         .map(|r| ContextRegistry {
+            authenticated: cred_store.as_ref().is_some_and(|s| s.has_credential(&r.url)),
             alias: r.alias,
             kind: if r.kind.is_index() {
                 ContextRegistryKind::Index

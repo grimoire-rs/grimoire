@@ -106,6 +106,30 @@ impl DockerCredentialStore {
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
+
+    /// Whether a credential grim would use when pulling from `registry` is
+    /// present in the docker config, decided **without invoking any
+    /// credential helper** — a single file read, safe to call for every
+    /// registry `grim context` reports.
+    ///
+    /// Mirrors the pull-time lookup in
+    /// [`crate::oci::access::registry_client`]: that path authenticates
+    /// against the registry **host** (`Identifier::registry`, scheme and
+    /// namespace already stripped), so this reduces `registry` to its host
+    /// via [`registry_host`] before canonicalizing to the docker store key.
+    /// Presence is **per-host**: the key must appear in `auths` or
+    /// `credHelpers`. A global `credsStore` with no matching per-host entry
+    /// is deliberately NOT counted — detecting it would mean spawning the
+    /// helper. A missing, unreadable, or malformed config yields `false`,
+    /// never an error: a corrupt `~/.docker/config.json` must not make
+    /// `grim context` fail.
+    pub fn has_credential(&self, registry: &str) -> bool {
+        let canonical = canonicalize_registry(registry_host(registry));
+        match read_config(&self.config_path) {
+            Ok(config) => config.auths.contains_key(&canonical) || config.cred_helpers.contains_key(&canonical),
+            Err(_) => false,
+        }
+    }
 }
 
 #[async_trait]
@@ -279,6 +303,15 @@ struct AuthEntry {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────
+
+/// The host portion of a registry locator: the scheme and any `/namespace`
+/// path stripped, matching what `Identifier::registry` yields at pull time.
+/// `canonicalize_registry` then folds host case / the `docker.io` alias, so
+/// this only has to peel the scheme and the first path segment.
+fn registry_host(registry: &str) -> &str {
+    let after_scheme = registry.split_once("://").map_or(registry, |(_, rest)| rest);
+    after_scheme.split('/').next().unwrap_or(after_scheme)
+}
 
 /// The helper configured for `canonical`: per-registry first, then global.
 fn resolve_helper(config: &DockerConfig, canonical: &str) -> Option<String> {
@@ -541,6 +574,51 @@ mod tests {
         let cred = Credential::basic("u", SecretString::from("p"));
         let res = rt().block_on(store.put("ghcr.io", &cred));
         assert!(matches!(res, Err(AuthError::MalformedConfig { .. })), "got: {res:?}");
+    }
+
+    #[test]
+    fn has_credential_detects_auths_and_cred_helpers_per_host() {
+        let (_d, path) = tmp();
+        std::fs::write(
+            &path,
+            r#"{
+              "auths": {"ghcr.io": {"auth": "dTpw"}},
+              "credHelpers": {"registry.example.com": "ecr-login"},
+              "credsStore": "desktop"
+            }"#,
+        )
+        .unwrap();
+        let store = DockerCredentialStore::with_path(path, opts(false));
+
+        // Present via auths — including when the entry carries a namespace
+        // path the pull path strips off before the host lookup.
+        assert!(store.has_credential("ghcr.io"));
+        assert!(store.has_credential("https://ghcr.io/v2/"));
+        assert!(store.has_credential("ghcr.io/grimoire-rs"));
+        // Present via credHelpers.
+        assert!(store.has_credential("registry.example.com"));
+        // A global credsStore alone is NOT a per-host credential.
+        assert!(!store.has_credential("docker.io"));
+        assert!(!store.has_credential("other.example.com"));
+    }
+
+    #[test]
+    fn has_credential_is_false_for_absent_or_malformed_config() {
+        let (_d, path) = tmp();
+        // Absent file.
+        let store = DockerCredentialStore::with_path(path.clone(), opts(false));
+        assert!(!store.has_credential("ghcr.io"));
+        // Malformed JSON must degrade to false, never panic or error.
+        std::fs::write(&path, "not json {").unwrap();
+        assert!(!store.has_credential("ghcr.io"));
+    }
+
+    #[test]
+    fn registry_host_strips_scheme_and_namespace() {
+        assert_eq!(registry_host("ghcr.io"), "ghcr.io");
+        assert_eq!(registry_host("ghcr.io/grimoire-rs"), "ghcr.io");
+        assert_eq!(registry_host("https://ghcr.io/v2/"), "ghcr.io");
+        assert_eq!(registry_host("localhost:5000/team"), "localhost:5000");
     }
 
     #[test]

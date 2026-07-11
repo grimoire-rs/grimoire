@@ -90,7 +90,7 @@ no kind at all, in which case `kind` is `null`.
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
 | `config set` / `unset` / `registry add` / `rm` / `use` | `{action, key, value, scope}` | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default` |
 | `config registry show` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
-| `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, state_path, grim_home, offline, offline_source, clients, registries, default_registry}` — see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null |
+| `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated}` — see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null |
 | `describe` | `{ref, digest, kind, name, title, description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | `{ref, digest, kind, name, vendor, path?, content, encoding?, truncated?, files?, pointer?, warnings?}` — see [grim fetch](#fetch) | — |
 

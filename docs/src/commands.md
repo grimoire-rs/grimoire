@@ -412,10 +412,19 @@ grim context --format json | jq .clients
 The JSON document is a single object: `{version, scope, workspace,
 config_path, config_exists, lock_path, lock_exists, state_path, grim_home,
 offline, offline_source, clients, registries, default_registry}`.
-`registries` entries are `{alias, url, kind, default}` with `kind` either
-`registry` or `index`. `clients` carries **names only** — the vendor
-on-disk layout is not a contract; script installed locations via
-[`grim status --format json`](#status) `outputs` instead.
+`registries` entries are `{alias, url, kind, default, authenticated}` with
+`kind` either `registry` or `index`. `authenticated` is a boolean: `true`
+when a credential for this registry's **host** is present in the
+docker-compatible credential store (`~/.docker/config.json`, or
+`$DOCKER_CONFIG/config.json`) — an `auths` or `credHelpers` entry for the
+host. It is a file-only probe that never invokes a credential helper, so a
+global `credsStore` with no matching per-host entry is **not** detected as
+authenticated, and a missing, unreadable, or malformed config reports
+`false` for every registry rather than failing the command. The host is the
+url with any scheme and namespace path stripped, matching the credential
+grim uses when pulling from that registry. `clients` carries **names
+only** — the vendor on-disk layout is not a contract; script installed
+locations via [`grim status --format json`](#status) `outputs` instead.
 
 Scope follows the usual rules: project walk-up by default, `--global` for
 the global scope, `--config <path>` for an explicit file. Outside a

@@ -14,7 +14,9 @@
 //! or `null` (when online); `clients` is the effective client-target
 //! name list (names only — vendor on-disk layout is unstable, and
 //! `grim status --format json` `outputs` is the path channel);
-//! `registries` is `[{alias, url, kind, default}]`.
+//! `registries` is `[{alias, url, kind, default, authenticated}]`
+//! (`authenticated`: a credential for the registry's host is present in the
+//! docker-compatible store).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -54,6 +56,11 @@ pub struct ContextRegistry {
     /// Whether this is the primary registry short identifiers expand
     /// against.
     pub default: bool,
+    /// Whether a credential for this registry's host is present in the
+    /// docker-compatible store (a file-only probe — a global `credsStore`
+    /// with no per-host entry does not count). See
+    /// [`crate::auth::store::DockerCredentialStore::has_credential`].
+    pub authenticated: bool,
 }
 
 /// Where the effective offline mode came from.
@@ -148,9 +155,10 @@ impl Printable for ContextReport {
         for r in &self.registries {
             let alias = r.alias.as_deref().unwrap_or("-");
             let default = if r.default { ", default" } else { "" };
+            let auth = if r.authenticated { ", authenticated" } else { "" };
             rows.push(vec![
                 "registry".into(),
-                format!("{alias} {} ({}{default})", r.url, r.kind),
+                format!("{alias} {} ({}{default}{auth})", r.url, r.kind),
             ]);
         }
         rows.push(vec!["default_registry".into(), self.default_registry.clone()]);
@@ -186,6 +194,7 @@ mod tests {
                 url: "ghcr.io/acme".to_string(),
                 kind: ContextRegistryKind::Registry,
                 default: true,
+                authenticated: true,
             }],
             default_registry: "ghcr.io/acme".to_string(),
         }
@@ -201,6 +210,7 @@ mod tests {
         assert!(out.contains("claude,opencode"));
         assert!(out.contains("true (flag)"));
         assert!(out.contains("ghcr.io/acme"));
+        assert!(out.contains(", authenticated"));
         assert!(out.contains("(exists)"));
         assert!(out.contains("(absent)"));
     }
@@ -220,7 +230,14 @@ mod tests {
         assert_eq!(v["registries"][0]["alias"], "acme");
         assert_eq!(v["registries"][0]["kind"], "registry");
         assert_eq!(v["registries"][0]["default"], true);
+        assert_eq!(v["registries"][0]["authenticated"], true);
         assert_eq!(v["default_registry"], "ghcr.io/acme");
+
+        // `authenticated` is a plain always-present bool in both states.
+        let mut r = report();
+        r.registries[0].authenticated = false;
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["registries"][0]["authenticated"], false);
 
         // Always-present-null: offline_source is an explicit null online.
         let mut r = report();

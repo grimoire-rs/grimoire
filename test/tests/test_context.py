@@ -41,7 +41,37 @@ def test_context_reports_scope_paths_clients_registries(
         r["alias"] == "test" and r["url"] == registry and r["default"] and r["kind"] == "registry"
         for r in regs
     ), regs
+    # `authenticated` is always present as a bool; the isolated HOME has no
+    # docker config, so nothing is authenticated.
+    for r in regs:
+        assert isinstance(r["authenticated"], bool)
+        assert r["authenticated"] is False, r
     assert doc["default_registry"] == registry
+
+
+def test_context_registry_authenticated_from_docker_config(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    """A stored credential for the registry's host flips `authenticated`.
+
+    Offline and hermetic: `grim context` never dials the registry, and the
+    credential presence is derived from a temp `$DOCKER_CONFIG` file — no
+    real keychain or network involved.
+    """
+    _project(project_dir, "private.example.com/team")
+    docker_dir = tmp_path / "docker"
+    docker_dir.mkdir()
+    # An `auths` entry for the host (namespace path stripped by the probe).
+    (docker_dir / "config.json").write_text(
+        '{"auths": {"private.example.com": {"auth": "dXNlcjpwYXNz"}}}'
+    )
+
+    runner = grim_at(project_dir)
+    runner.env["DOCKER_CONFIG"] = str(docker_dir)
+    doc = runner.json("context")
+
+    reg = next(r for r in doc["registries"] if r["url"] == "private.example.com/team")
+    assert reg["authenticated"] is True, doc["registries"]
 
 
 def test_context_global_scope(grim_at, project_dir: Path, grim_home: Path) -> None:
