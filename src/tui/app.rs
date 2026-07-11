@@ -37,7 +37,7 @@ use crate::config::scope::ConfigScope;
 use crate::env::grim_home;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
-use crate::install::installer::{InstallOutcome, install_and_persist};
+use crate::install::installer::{InstallIntent, InstallOutcome, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::progress::{InstallProgress, SilentProgress};
@@ -1999,6 +1999,7 @@ async fn perform(
         &ctx.workspace,
         &ctx.config_path,
         is_update,
+        InstallIntent::Declared,
         progress,
     )
     .await

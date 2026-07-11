@@ -20,7 +20,7 @@ use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::installer::install_all_with_progress;
+use crate::install::installer::{InstallIntent, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, prune_orphans};
 use crate::install::target::InstallTarget;
@@ -139,6 +139,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &scope.roots,
         scope.config_dir(),
         true,
+        InstallIntent::Declared,
         progress.as_ref(),
     )
     .await;
@@ -299,6 +300,7 @@ async fn refresh_dev_installs(
             &scope.roots,
             scope.config_dir(),
             true,
+            InstallIntent::Dev,
             &crate::install::progress::SilentProgress,
         )
         .await;
@@ -309,11 +311,6 @@ async fn refresh_dev_installs(
                     tracing::warn!("dev-installed {} '{}': refresh failed: {err:#}", rec.kind, rec.name);
                 }
             }
-        }
-        // The lock-driven install path writes `dev: false`; restore the
-        // marker so the record stays prune-exempt.
-        if let Some(refreshed) = state.get(rec.kind, &rec.name).cloned() {
-            state.record(crate::install::install_state::InstallRecord { dev: true, ..refreshed });
         }
     }
 }

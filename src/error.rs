@@ -197,7 +197,8 @@ fn classify_install(err: &InstallError) -> ExitCode {
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::OversizeLayer { .. }
         | InstallErrorKind::MaterializeFailed(_)
-        | InstallErrorKind::LocalSource(_) => ExitCode::DataError,
+        | InstallErrorKind::LocalSource(_)
+        | InstallErrorKind::LocalContentChanged { .. } => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
     }
@@ -225,6 +226,7 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::MissingFrontmatter
         | SkillErrorKind::MetadataInvalid(_)
         | SkillErrorKind::ValidationFailed(_)
+        | SkillErrorKind::TooLarge(_)
         | SkillErrorKind::GitProvenance(_) => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }

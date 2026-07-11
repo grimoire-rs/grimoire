@@ -34,7 +34,7 @@ use crate::api::add_report::AddReport;
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::install_and_persist;
+use crate::install::installer::{InstallIntent, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
@@ -483,6 +483,7 @@ async fn install_added(
             &scope.workspace,
             &scope.config_path,
             false,
+            InstallIntent::Declared,
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
             crate::cli::progress::select_progress(ctx.progress(), false).as_ref(),

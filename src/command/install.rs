@@ -16,7 +16,7 @@ use crate::api::install_report::{InstallEntry, InstallReport};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{ArtifactInstall, InstallOutcome, install_and_persist};
+use crate::install::installer::{ArtifactInstall, InstallIntent, InstallOutcome, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
@@ -105,6 +105,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             &scope.workspace,
             &scope.config_path,
             args.force,
+            InstallIntent::Declared,
             progress.as_ref(),
         )
         .await,
@@ -171,8 +172,10 @@ async fn dev_install(
         }
     };
 
-    let (name, layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
-    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+    // Validate + name the source; its layer bytes (and thus the pinned
+    // hash) are re-derived below from the stored path so the recorded hash
+    // matches what the installer, `status`, and `update` recompute.
+    let (name, _layer) = super::grim(crate::skill::pack_local_artifact(kind, &abs))?;
 
     // Record the source config-dir-relative (like `grim add`) so status
     // and update resolve it against the same anchor; an absolute CLI path
@@ -206,6 +209,17 @@ async fn dev_install(
             )
         }))?
     };
+
+    // Pin the content hash from the SAME basis every reader uses (F2): the
+    // stored path resolved against the raw config dir, exactly as the
+    // installer's integrity re-pack, `status`, and `update` do. Hashing
+    // `abs` (the canonicalized CLI path) instead would diverge under a
+    // symlinked project dir and spuriously fail the integrity gate.
+    let (_, layer) = super::grim(crate::skill::pack_local_artifact(
+        kind,
+        &source_path.resolve(scope.config_dir()),
+    ))?;
+    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
 
     // Synthetic single-entry lock — never written to disk.
     let entry = crate::lock::locked_artifact::LockedArtifact {
@@ -262,29 +276,11 @@ async fn dev_install(
             &scope.workspace,
             &scope.config_path,
             args.force,
+            InstallIntent::Dev,
             progress.as_ref(),
         )
         .await,
     )?;
-
-    // The lock-driven pipeline records `dev: false`; restore the marker
-    // and persist once more so the record stays prune-exempt.
-    if let Some(record) = state.get(kind, &name).cloned() {
-        state.record(crate::install::install_state::InstallRecord { dev: true, ..record });
-        super::grim(
-            state
-                .persist(
-                    scope.scope,
-                    &scope.workspace,
-                    &scope.roots.grim_home,
-                    &scope.config_path,
-                )
-                .map_err(|e| match e {
-                    crate::install::install_state::PersistError::EnsureDir { path, source }
-                    | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-                }),
-        )?;
-    }
 
     finish(outcomes)
 }

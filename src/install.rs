@@ -41,7 +41,7 @@ pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]
 pub use install_state::{InstallRecord, InstallState};
 #[allow(unused_imports)]
-pub use installer::{ArtifactInstall, InstallOutcome, install_all, install_all_with_progress};
+pub use installer::{ArtifactInstall, InstallIntent, InstallOutcome, install_all, install_all_with_progress};
 #[allow(unused_imports)]
 pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 #[allow(unused_imports)]

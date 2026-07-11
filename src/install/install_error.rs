@@ -109,11 +109,26 @@ pub enum InstallErrorKind {
     #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
     UnsupportedClient(String),
 
-    /// A local path source failed at install time: it is missing, fails
-    /// validation, or its packed content no longer hashes to the locked
-    /// pin (edit the source, then `grim update <name>` / `grim lock`).
-    #[error("local source unusable: {0}")]
-    LocalSource(String),
+    /// A local path source failed to pack at install time: it is missing,
+    /// fails validation, or is unreadable. Carries the packing
+    /// [`crate::skill::SkillError`] structurally (boxed to keep the kind
+    /// small) so the `{:#}` chain and `source()` expose the real cause
+    /// rather than a flattened string.
+    #[error("local source unusable")]
+    LocalSource(#[source] Box<crate::skill::SkillError>),
+
+    /// A local path source's packed content no longer hashes to the locked
+    /// pin — the source drifted since the lock was written. Wraps no inner
+    /// error; the mismatch is fully described by the recorded vs. found
+    /// digests (edit the source, then `grim update <name>` / `grim lock`).
+    #[error(
+        "local source '{name}' changed since the lock was written (locked {locked}, found {actual}); run `grim update {name}` or `grim lock`"
+    )]
+    LocalContentChanged {
+        name: String,
+        locked: Digest,
+        actual: Digest,
+    },
 }
 
 #[cfg(test)]
@@ -173,5 +188,40 @@ mod tests {
             source: std::io::Error::other("disk full"),
         });
         assert!(io.source().expect("chain reaches the I/O cause").is::<std::io::Error>());
+    }
+
+    /// Regression lock (design record F8): a local-pack failure carries its
+    /// `SkillError` structurally via `#[source]`, not flattened into a
+    /// `String` — the source chain is walkable to the packing failure (its
+    /// message survives verbatim, not re-derived from a stringified
+    /// `Display`), and the exit-code classification stays `DataError` (65)
+    /// unchanged.
+    ///
+    /// The `#[source]` field is `Box<SkillError>` (kept small per
+    /// `quality-rust-errors.md`'s three-layer pattern), so the concrete
+    /// type behind the returned trait object is `Box<SkillError>` — a
+    /// documented `thiserror`/`std::error::Error` interaction for boxed
+    /// source fields (`Box<T>: Error` is a distinct concrete type from
+    /// `T` for downcasting purposes, even though `Display`/`source()`
+    /// delegate transparently to the inner value).
+    #[test]
+    fn local_source_error_chain_walks_to_skill_error() {
+        use std::error::Error;
+
+        let skill_err = crate::skill::SkillError::new("/w/skill", crate::skill::SkillErrorKind::MissingSkillMd);
+        let err = InstallError::with_reference(artifact_ref(), InstallErrorKind::LocalSource(Box::new(skill_err)));
+
+        let source = err.source().expect("chain reaches the packing SkillError");
+        let boxed = source
+            .downcast_ref::<Box<crate::skill::SkillError>>()
+            .expect("source downcasts to the boxed SkillError, not a flattened String");
+        assert!(matches!(boxed.kind, crate::skill::SkillErrorKind::MissingSkillMd));
+        assert_eq!(source.to_string(), "/w/skill: skill directory has no SKILL.md");
+
+        let anyhow_err: anyhow::Error = crate::error::Error::from(err).into();
+        assert_eq!(
+            crate::error::classify_error(&anyhow_err),
+            crate::cli::exit_code::ExitCode::DataError
+        );
     }
 }

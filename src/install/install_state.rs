@@ -260,7 +260,12 @@ impl TryFrom<RawInstallRecord> for InstallRecord {
         use crate::lock::locked_source::LockedSource;
         let source = match (raw.pinned, raw.path, raw.hash) {
             (Some(pinned), None, None) => LockedSource::Registry(pinned),
-            (None, Some(path), Some(hash)) => LockedSource::Path { path, hash },
+            (None, Some(path), Some(hash)) => {
+                // F7 hook: constrain a path `hash` to SHA-256 on the wire
+                // (currently a NO-OP — see `validate_path_hash_algorithm`).
+                crate::lock::locked_source::validate_path_hash_algorithm(&hash)?;
+                LockedSource::Path { path, hash }
+            }
             (Some(_), _, _) => {
                 return Err("an install record carries either `pinned` or `path`/`hash`, not both".to_string());
             }
@@ -1022,6 +1027,39 @@ mod tests {
             dev: false,
             outputs: vec![client_output_workspace("claude", name, kind)],
         }
+    }
+
+    // ── F7: path hash constrained to SHA-256 on the wire ────────────────
+
+    /// Contract test (design record F7): an install record's path `hash`
+    /// must be SHA-256, mirroring the lock-tier `RawLockedArtifact` gate —
+    /// packing only ever emits SHA-256, so a non-SHA-256 recorded hash can
+    /// never verify.
+    ///
+    /// STUB: currently FAILS — `validate_path_hash_algorithm` is a no-op,
+    /// so this non-SHA-256 hash is accepted.
+    #[test]
+    fn try_from_rejects_non_sha256_path_hash() {
+        let json = format!(
+            r#"{{"kind":"skill","name":"m","path":"./skills/m","hash":"sha512:{}","outputs":[]}}"#,
+            "b".repeat(128)
+        );
+        assert!(
+            serde_json::from_str::<InstallRecord>(&json).is_err(),
+            "a non-SHA-256 path hash must be rejected"
+        );
+    }
+
+    /// Regression lock: a `sha256:` path hash keeps parsing once F7 lands.
+    #[test]
+    fn try_from_accepts_sha256_path_hash() {
+        let json = format!(
+            r#"{{"kind":"skill","name":"m","path":"./skills/m","hash":"sha256:{}","outputs":[]}}"#,
+            "b".repeat(64)
+        );
+        let record: InstallRecord = serde_json::from_str(&json).expect("a sha256 path hash must parse");
+        assert_eq!(record.name, "m");
+        assert_eq!(record.source.path().map(|p| p.as_str()), Some("./skills/m"));
     }
 
     // ── Ported tests (V2 API) ────────────────────────────────────────────────

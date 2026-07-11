@@ -7,7 +7,12 @@ with GRIM_OFFLINE=1 to prove path deps never touch the network.
 """
 from __future__ import annotations
 
+import json
+import shutil
+import sys
 from pathlib import Path
+
+import pytest
 
 
 def _write(p: Path, body: str) -> None:
@@ -316,3 +321,126 @@ def test_global_scope_path_dep(grim_at, grim_home: Path, tmp_path: Path) -> None
         runner.home / ".copilot" / "skills" / "my-skill" / "SKILL.md",
     ):
         assert out.is_file(), f"missing vendor output: {out}"
+
+
+def test_declared_install_state_record_has_no_dev_marker(
+    grim_at, project_dir: Path
+) -> None:
+    # F1: a normal declared (path-sourced) install writes `dev: false` —
+    # checked via the PARSED state.json, not a substring match. `dev` is
+    # omitted from the wire when false (`skip_serializing_if`), so absence
+    # counts as `false` too.
+    _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    records = state["records"]
+    assert len(records) == 1, f"exactly one record expected: {records}"
+    assert records[0]["name"] == "my-skill"
+    assert records[0].get("dev", False) is False
+
+
+def test_bare_install_refuses_when_source_content_drifted_since_lock(
+    grim_at, project_dir: Path
+) -> None:
+    # F5: a bare `grim install` (not `update`) must fail-closed with exit
+    # 65 when the locked path source's content drifted since `grim lock`
+    # wrote its pin — never silently install stale (or worse, mismatched)
+    # content.
+    skill = _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+
+    _write(
+        skill / "SKILL.md",
+        "---\nname: my-skill\ndescription: Demo skill.\n---\n# Body v2\n",
+    )
+    result = runner.run("install", "--client", "claude", check=False)
+    assert result.returncode == 65, result.stderr
+    assert "changed since the lock was written" in result.stderr
+
+
+def test_bare_install_refuses_when_source_missing(
+    grim_at, project_dir: Path
+) -> None:
+    # F5: a bare `grim install` must fail-closed with exit 65 when the
+    # locked path source no longer exists at all.
+    skill = _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+
+    shutil.rmtree(skill)
+    result = runner.run("install", "--client", "claude", check=False)
+    assert result.returncode == 65, result.stderr
+
+
+def test_declared_path_status_flags_deleted_source_as_problem(
+    grim_at, project_dir: Path
+) -> None:
+    # F6: a DECLARED (non-dev) path skill whose source is deleted after the
+    # lock+install must surface a problem in `grim status` — never a clean
+    # `installed`. `path_source_drifted`'s Err arm reads the vanished source
+    # as drift (outdated), mirroring the dev arm. Read-only status stays
+    # exit-0 (state is data).
+    skill = _skill(project_dir, "my-skill")
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    shutil.rmtree(skill)
+
+    entry = runner.json("status")["items"][0]
+    assert entry["name"] == "my-skill"
+    assert entry["state"] != "installed", (
+        "a deleted declared path source must surface a problem "
+        "(outdated/missing), not report installed"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX symlink-skip semantics (CWE-59)"
+)
+def test_symlinked_out_of_tree_secret_never_installed(
+    grim_at, project_dir: Path
+) -> None:
+    # F4 (CWE-59): a symlink inside a path skill dir pointing at an
+    # out-of-tree secret must never be packed/installed — the symlink-skip
+    # in `collect_files` is the sole barrier against exfiltrating a victim's
+    # secrets via a symlink in a cloned repo. The skill installs (offline),
+    # but the secret's content must be absent from the whole client tree.
+    secret_marker = "TOP-SECRET-EXFIL-XYZZY"
+    secret = project_dir / "outside" / "secret.txt"
+    _write(secret, secret_marker)
+
+    skill = _skill(project_dir, "my-skill")
+    (skill / "leak.txt").symlink_to(secret)
+    (project_dir / ".claude").mkdir()
+    _config(project_dir, "skills", "my-skill", "./skills/my-skill")
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+
+    out_dir = project_dir / ".claude" / "skills" / "my-skill"
+    assert (out_dir / "SKILL.md").is_file(), "the skill itself must install"
+    assert not (out_dir / "leak.txt").exists(), "the symlink must not be installed"
+    leaked = [
+        p
+        for p in out_dir.rglob("*")
+        if p.is_file() and secret_marker in p.read_text(errors="ignore")
+    ]
+    assert not leaked, f"secret content leaked into installed files: {leaked}"

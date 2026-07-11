@@ -13,6 +13,29 @@
 use crate::config::path_source::PathSource;
 use crate::oci::{Digest, PinnedIdentifier};
 
+/// Validate the hash algorithm of a path source's content pin.
+///
+/// Packing only ever emits SHA-256, so a `sha384`/`sha512` path `hash`
+/// could never verify and would otherwise deserialize and then fail-closed
+/// at install with a misleading "content changed" message. Rejecting it at
+/// parse turns the mistake into a clear wire/config error. Shared by
+/// `RawLockedArtifact::try_from` (lock) and `RawInstallRecord::try_from`
+/// (install state); both surface the returned message as their
+/// `TryFrom::Error` (a `String`).
+///
+/// # Errors
+///
+/// Returns a message when `hash` is not SHA-256.
+pub fn validate_path_hash_algorithm(hash: &Digest) -> Result<(), String> {
+    match hash {
+        Digest::Sha256(_) => Ok(()),
+        Digest::Sha384(_) | Digest::Sha512(_) => Err(format!(
+            "a path source hash must be SHA-256, not {}",
+            hash.algorithm().prefix()
+        )),
+    }
+}
+
 /// Where a locked artifact's content comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockedSource {

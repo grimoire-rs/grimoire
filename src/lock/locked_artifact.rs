@@ -145,6 +145,9 @@ impl TryFrom<RawLockedArtifact> for LockedArtifact {
                 if !bundles.is_empty() {
                     return Err("a path-sourced lock entry cannot carry bundle provenance".to_string());
                 }
+                // F7 hook: constrain a path `hash` to SHA-256 on the wire
+                // (currently a NO-OP — see `validate_path_hash_algorithm`).
+                crate::lock::locked_source::validate_path_hash_algorithm(&hash)?;
                 LockedSource::Path { path, hash }
             }
             (Some(_), _, _) => {
@@ -298,5 +301,31 @@ mod tests {
             toml::from_str::<LockedArtifact>(&toml).is_err(),
             "bundle without bundle_tag must fail"
         );
+    }
+
+    // ── F7: path hash constrained to SHA-256 on the wire ────────────────
+
+    /// Contract test (design record F7): a path lock entry's `hash` must
+    /// be SHA-256 — packing only ever emits SHA-256, so a `sha384`/`sha512`
+    /// path hash can never verify and would otherwise deserialize, then
+    /// fail-closed at install with a misleading "content changed" message.
+    ///
+    /// STUB: currently FAILS — `validate_path_hash_algorithm` is a no-op,
+    /// so this non-SHA-256 hash is accepted.
+    #[test]
+    fn path_entry_with_sha512_hash_rejected() {
+        let toml = format!("name = \"m\"\npath = \"./m\"\nhash = \"sha512:{}\"\n", "b".repeat(128));
+        assert!(
+            toml::from_str::<LockedArtifact>(&toml).is_err(),
+            "a non-SHA-256 path hash must be rejected"
+        );
+    }
+
+    /// Regression lock: a `sha256:` path hash keeps parsing once F7 lands.
+    #[test]
+    fn path_entry_with_sha256_hash_parses() {
+        let toml = format!("name = \"m\"\npath = \"./m\"\nhash = \"sha256:{}\"\n", "b".repeat(64));
+        let entry: LockedArtifact = toml::from_str(&toml).expect("a sha256 path hash must parse");
+        assert_eq!(entry.source.path().map(|p| p.as_str()), Some("./m"));
     }
 }

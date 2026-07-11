@@ -42,6 +42,33 @@ use super::target::InstallTarget;
 /// size. MCP layers use the tighter [`MCP_LAYER_SIZE_LIMIT`].
 pub const INSTALL_LAYER_SIZE_LIMIT: u64 = 512 * 1024 * 1024;
 
+/// Whether an install pass records a **declared** artifact (from the lock)
+/// or a **dev-install** (`grim install <path>`, undeclared).
+///
+/// The record's `dev` marker drives prune-exemption: `prune_orphans` reaps
+/// only non-`dev` records that dropped out of the lock. Threading the intent
+/// from the caller — instead of writing `dev:false` and re-stamping it later
+/// — makes the record land with the correct value in one write, so a
+/// synthetic-lock caller cannot forget the re-stamp and let `grim update`
+/// prune a dev install (deleting the user's rendered files). An explicit
+/// two-variant enum (not a bare `bool`) also keeps this from being confused
+/// with the adjacent `force` flag at call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallIntent {
+    /// A declared artifact materialized from `grimoire.toml` / the lock.
+    /// Prunable when it drops out of the lock.
+    Declared,
+    /// A dev-install (`grim install <path>`): undeclared, prune-exempt.
+    Dev,
+}
+
+impl InstallIntent {
+    /// The `dev` marker to persist on the [`InstallRecord`].
+    fn is_dev(self) -> bool {
+        matches!(self, InstallIntent::Dev)
+    }
+}
+
 /// What happened to one artifact during an install pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -116,6 +143,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
         roots,
         anchor,
         force,
+        InstallIntent::Declared,
         &SilentProgress,
     )
     .await
@@ -138,6 +166,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     roots: &AnchorRoots,
     anchor: &Path,
     force: bool,
+    intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Vec<ArtifactInstall> {
     let work: Vec<(&LockedArtifact, ArtifactKind)> = lock.iter_artifacts().map(|a| (a, a.kind)).collect();
@@ -172,6 +201,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             roots,
             anchor,
             force,
+            intent,
         )
         .await;
         if result.is_ok()
@@ -266,6 +296,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     workspace: &Path,
     config_path: &Path,
     force: bool,
+    intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
     // Path sources resolve against the config file's directory.
@@ -279,6 +310,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
         roots,
         anchor,
         force,
+        intent,
         progress,
     )
     .await;
@@ -323,13 +355,14 @@ async fn install_one<M: ArtifactMaterializer>(
     roots: &AnchorRoots,
     anchor: &Path,
     force: bool,
+    intent: InstallIntent,
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::ClientOutput;
 
     // MCP descriptors never materialize files; they register entries in
     // client MCP configs on a dedicated path.
     if kind == ArtifactKind::Mcp {
-        return install_mcp(artifact, access, target, state, roots, force).await;
+        return install_mcp(artifact, access, target, state, roots, force, intent).await;
     }
 
     let recorded = state.get(kind, &artifact.name).cloned();
@@ -597,7 +630,7 @@ async fn install_one<M: ArtifactMaterializer>(
         kind,
         name: artifact.name.clone(),
         source: artifact.source.clone(),
-        dev: false,
+        dev: intent.is_dev(),
         outputs,
     });
 
@@ -698,15 +731,16 @@ fn pack_verified_local(
     };
     let abs = path.resolve(anchor);
     let (_intrinsic_name, layer) = crate::skill::pack_local_artifact(kind, &abs)
-        .map_err(|e| InstallError::with_reference(aref(), InstallErrorKind::LocalSource(format!("{e:#}"))))?;
+        .map_err(|e| InstallError::with_reference(aref(), InstallErrorKind::LocalSource(Box::new(e))))?;
     let actual = crate::oci::Algorithm::Sha256.hash(&layer);
     if &actual != locked_hash {
         return Err(InstallError::with_reference(
             aref(),
-            InstallErrorKind::LocalSource(format!(
-                "content changed since the lock was written (locked {locked_hash}, found {actual}); run `grim update {}` or `grim lock`",
-                artifact.name
-            )),
+            InstallErrorKind::LocalContentChanged {
+                name: artifact.name.clone(),
+                locked: locked_hash.clone(),
+                actual,
+            },
         )
         .into());
     }
@@ -736,7 +770,7 @@ async fn fetch_verified_layer(
                 name: artifact.name.clone(),
                 source: artifact.source.to_declared(),
             },
-            InstallErrorKind::LocalSource("path sources never fetch from a registry".to_string()),
+            InstallErrorKind::MaterializeFailed("path sources never fetch from a registry".to_string()),
         )
         .into());
     };
@@ -815,6 +849,7 @@ async fn install_mcp(
     state: &mut InstallState,
     roots: &AnchorRoots,
     force: bool,
+    intent: InstallIntent,
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::{ClientOutput, entry_value_hash};
     use crate::install::json_splice::{Splice, split_pointer, upsert_member};
@@ -976,7 +1011,7 @@ async fn install_mcp(
         kind,
         name: artifact.name.clone(),
         source: artifact.source.clone(),
-        dev: false,
+        dev: intent.is_dev(),
         outputs,
     });
 
@@ -2476,6 +2511,7 @@ mod tests {
             &roots,
             std::path::Path::new("."),
             false,
+            InstallIntent::Declared,
             &recorder,
         )
         .await;

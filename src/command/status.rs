@@ -313,8 +313,10 @@ fn derive_state(
 }
 
 /// Whether a path-sourced lock entry's local source no longer packs to
-/// the locked content hash. A missing/invalid source degrades to a
-/// warning — status is a read-only report and stays exit-0.
+/// the locked content hash. A source that is missing or will not pack
+/// counts as drift (a warning is logged): a declared path whose source
+/// vanished is not a clean install, and the remediation is `grim update`.
+/// Status is a read-only report and stays exit-0 regardless.
 fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> bool {
     let crate::lock::locked_source::LockedSource::Path { path, hash } = &locked.source else {
         return false;
@@ -329,7 +331,10 @@ fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> boo
                 locked.kind,
                 locked.name
             );
-            false
+            // A source that no longer packs is not a clean install: surface
+            // it as drift (→ `Outdated`), consistent with `derive_dev_state`'s
+            // Err arm — remediation is `grim update`.
+            true
         }
     }
 }
@@ -372,7 +377,11 @@ fn derive_dev_state(
                 record.kind,
                 record.name
             );
-            ArtifactStatus::Installed
+            // A source that no longer packs is not a clean install: surface
+            // it as outdated (rendered files still exist, so not `Missing`),
+            // consistent with the drift arm above and the declared-path
+            // source-drift arm — remediation is `grim update`.
+            ArtifactStatus::Outdated
         }
     }
 }
@@ -750,6 +759,33 @@ mod tests {
             state,
             ArtifactStatus::Missing,
             "an active client with a missing file must still flag missing"
+        );
+    }
+
+    /// F6: a DECLARED path-sourced entry whose local source is unreadable
+    /// (deleted / unpackable) must read as drift — `path_source_drifted`
+    /// returns `true`, so the reported state flips from `Installed` to
+    /// `Outdated`. Mirrors `derive_dev_state`'s Err arm for the dev flow;
+    /// pre-fix this returned `false` and a vanished declared source lied as
+    /// a clean install.
+    #[test]
+    fn declared_path_source_drifted_flags_missing_source() {
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_source::LockedSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = LockedArtifact {
+            name: "x".to_string(),
+            kind: ArtifactKind::Skill,
+            source: LockedSource::Path {
+                path: PathSource::parse("./does-not-exist").unwrap(),
+                hash: Digest::Sha256("a".repeat(64)),
+            },
+            bundles: Vec::new(),
+        };
+        assert!(
+            path_source_drifted(&locked, dir.path()),
+            "a declared path whose source is unreadable must read as drift, not a clean install"
         );
     }
 }

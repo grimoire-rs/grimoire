@@ -92,6 +92,13 @@ pub enum SkillErrorKind {
     #[error("--git provenance failed")]
     GitProvenance(#[source] crate::oci::git_provenance::GitProvenanceError),
 
+    /// A local source tree exceeded a packing safety bound — its cumulative
+    /// byte size or file count is over the cap. Guards the in-memory tar
+    /// from unbounded growth on a mis-pointed or hostile path source
+    /// (CWE-400/770). The message names the bound that was exceeded.
+    #[error("local source too large to pack: {0}")]
+    TooLarge(String),
+
     /// A filesystem operation failed.
     #[error("I/O error")]
     Io(#[source] io::Error),
