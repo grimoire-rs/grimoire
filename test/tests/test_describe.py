@@ -7,7 +7,7 @@ import json
 import uuid
 from pathlib import Path
 
-from src.helpers import make_artifact
+from src.helpers import make_artifact, make_description
 
 
 SKILL_DOC = (
@@ -129,6 +129,32 @@ def test_describe_plain_is_key_value_table(
     assert out.splitlines()[0].startswith("Key"), "flat key/value table like grim context"
     assert "skill" in out
     assert "1.0.0,latest" in out, "tags comma-joined"
+
+
+def test_describe_has_description_true_when_companion_present(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`has_description` is true when the repository carries a `__grimoire`
+    companion — derived from the tag listing describe already fetches, and the
+    internal tag stays hidden from `tags[]`."""
+    repo = f"{unique_repo}/skills/describe-demo"
+    make_artifact(repo, "skill", {"describe-demo/SKILL.md": SKILL_DOC}, tag="latest")
+    make_description(repo, {"README.md": b"# Repo\n"})
+    runner = grim_at(project_dir)
+
+    doc = runner.json("describe", f"{registry}/{repo}:latest")
+    assert doc["has_description"] is True
+    assert "__grimoire" not in doc["tags"], "the internal companion tag stays hidden from tags[]"
+
+
+def test_describe_has_description_false_when_absent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`has_description` is an always-present bool — false when no companion."""
+    ref = _publish(registry, unique_repo)
+    runner = grim_at(project_dir)
+    doc = runner.json("describe", ref)
+    assert doc["has_description"] is False
 
 
 def test_describe_offline_uncached_is_offline_blocked_81(

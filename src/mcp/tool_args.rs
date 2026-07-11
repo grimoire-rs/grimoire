@@ -92,6 +92,18 @@ pub struct FetchToolArgs {
     #[serde(default)]
     pub path: Option<String>,
 
+    /// Fetch the repository description companion (README, logo, CHANGELOG)
+    /// with every member inline, instead of the artifact. No writes — use
+    /// `grim_render` to materialize files.
+    #[serde(default)]
+    pub description: Option<bool>,
+
+    /// Resolve the reference to a digest and return `{ref, digest}` without
+    /// downloading — a cheap cache probe. Composes with `description` to
+    /// probe the companion tag.
+    #[serde(default)]
+    pub digest_only: Option<bool>,
+
     /// Per-call scope selection (registry-set derivation only — fetch
     /// never touches install state).
     #[serde(flatten, default)]
@@ -201,11 +213,36 @@ mod tests {
         for schema in [
             serde_json::to_value(schemars::schema_for!(SearchToolArgs)).unwrap(),
             serde_json::to_value(schemars::schema_for!(StatusToolArgs)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(FetchToolArgs)).unwrap(),
         ] {
             let props = schema.get("properties").expect("schema has properties");
             for key in ["global", "config", "workspace"] {
                 assert!(props.get(key).is_some(), "missing flattened property {key} in {schema}");
             }
+        }
+    }
+
+    #[test]
+    fn fetch_args_expose_description_and_digest_only() {
+        // The new fetch modes deserialize and appear in the published schema.
+        let args: FetchToolArgs =
+            serde_json::from_str(r#"{"ref": "skills/x", "description": true, "digest_only": true}"#).unwrap();
+        assert_eq!(args.description, Some(true));
+        assert_eq!(args.digest_only, Some(true));
+
+        let bare: FetchToolArgs = serde_json::from_str(r#"{"ref": "skills/x"}"#).unwrap();
+        assert!(
+            bare.description.is_none() && bare.digest_only.is_none(),
+            "both default to absent"
+        );
+
+        let schema = serde_json::to_value(schemars::schema_for!(FetchToolArgs)).unwrap();
+        let props = schema.get("properties").expect("schema has properties");
+        for key in ["description", "digest_only"] {
+            assert!(
+                props.get(key).is_some(),
+                "missing fetch-mode property {key} in {schema}"
+            );
         }
     }
 }

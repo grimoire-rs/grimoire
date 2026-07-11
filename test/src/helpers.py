@@ -87,6 +87,22 @@ def make_bundle(
     return push_artifact(repo, tag, layer, "bundle")
 
 
+def make_description(repo: str, files: dict[str, str | bytes]) -> PublishedArtifact:
+    """Build and push a repository description companion at the reserved
+    ``__grimoire`` tag.
+
+    Mirrors :func:`make_artifact` but tags the reserved companion tag and
+    marks the manifest ``com.grimoire.kind: desc`` (the sole discriminator —
+    ``kind_from_manifest`` returns ``None`` for it, so the read path routes it
+    to the description path, not an installable kind). ``files`` is the
+    companion tree (``README.md``, ``logo.png``, ``CHANGELOG.md``, …). Pushes
+    directly to the registry so the fetch read lane does not depend on
+    ``grim publish``.
+    """
+    tar_bytes = _tar_of(files)
+    return push_artifact(repo, "__grimoire", tar_bytes, "desc")
+
+
 def make_artifact(
     repo: str,
     kind: str,

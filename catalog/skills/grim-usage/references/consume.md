@@ -195,14 +195,21 @@ Two read-only companions:
   content without installing (use != install). Plain output is the raw
   payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
   adds the digest, kind, and a `files` listing. A binary `--path` file
-  (e.g. `logo.png`) round-trips through a redirect. Confirm flags with
-  `grim fetch --help`.
+  (e.g. `logo.png`) round-trips through a redirect. `--description`
+  retargets the fetch to the repository's description companion (README,
+  logo, CHANGELOG) instead of the artifact — JSON inlines every member,
+  plain requires `--out <dir>` to unpack the tree (no single payload to
+  print). `--digest-only` resolves a digest without downloading anything —
+  a cheap cache probe — and composes with `--description` to probe the
+  companion tag instead. Confirm flags with `grim fetch --help`.
 - `grim describe <ref>` reports an artifact's manifest-level metadata —
   kind, curated annotations, tags, and the verbatim annotation map —
   *without* downloading its content, so it is the cheap way to inspect a
-  package or discover its versions. `--format json` is a single object;
-  plain output is a flat key/value table. Confirm with `grim describe
-  --help`.
+  package or discover its versions. It also reports `has_description` —
+  whether the repository has a description companion — derived from the
+  tag listing it already fetches, at zero extra network cost. `--format
+  json` is a single object; plain output is a flat key/value table.
+  Confirm with `grim describe --help`.
 
 ## Removing
 

@@ -8,7 +8,9 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Cascade Tags](#cascade-tags) · [Immutability](#immutability) ·
 [Scripted Publishing](#scripted-publishing) ·
 [Announcing to the Index](#announce) · [Bundles](#bundles) ·
-[Catalog Metadata](#catalog-metadata) · [Authentication](#authentication)
+[Catalog Metadata](#catalog-metadata) ·
+[Description Companion](#description-companion) ·
+[Authentication](#authentication)
 
 Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
 relying on one.
@@ -280,6 +282,52 @@ file says. Two invariants hold for every kind:
 `metadata` map; rule: top-level frontmatter; bundle: top-level TOML) —
 see [the per-kind examples][metadata].
 
+## Description Companion {#description-companion}
+
+The in-tree README convention ([artifacts.md][artifacts-readme]) only
+reaches tar-backed kinds — mcp and bundle publish a single JSON layer with
+no file tree. For a README/logo/CHANGELOG that reads back uniformly
+across **every** kind, `grim publish` can push a repository-level
+**description companion**: a small doc bundle stored at an internal tag in
+the same repository, read back via `grim fetch <ref> --description` (see
+[consume.md](consume.md#inspecting)) — the tag itself is never something
+you type.
+
+Author it in `publish.toml` with a top-level `[description]` table (paths
+relative to the manifest):
+
+```toml
+[description]
+readme    = "README.md"
+logo      = "assets/logo.png"
+changelog = "CHANGELOG.md"
+include   = ["docs/img/*.png"]   # extra README-referenced assets
+```
+
+- **Fan-out.** The top-level `[description]` publishes to **every**
+  entry's repository. Override one entry with its own
+  `[<kind>.<name>.description]` table (same schema), or opt it out with
+  `description = false`. A manifest-wide `publish = false` inside the
+  top-level table disables the companion for the whole run.
+- **Convention fallback.** With no `[description]` table at all, grim
+  probes the manifest directory for `README.md`, `CHANGELOG.md`, and
+  `assets/logo.png|svg` / `logo.png|svg`; any hit publishes a companion
+  automatically (opt out per entry with `description = false`). All
+  members are optional — an explicit table that resolves to zero files is
+  a data error (exit 65), but a conventional-probe miss is silent.
+- Companion pushes ride the same `grim publish` batch, after the entry's
+  own artifact push, and are idempotent — unchanged content republishes
+  to the same digest. `--dry-run` previews the planned companion pushes
+  alongside the artifact plan, and the `--format json` report carries a
+  `descriptions` section (`{"items": [...], "descriptions": {...}, ...}`)
+  beside the usual per-entry `items`.
+- There is no separate publish command for it — re-running `grim publish`
+  after a docs-only edit re-points the companion; the artifacts themselves
+  skip-existing as usual.
+
+Confirm the current schema with `grim schema --kind publish` and flags
+with `grim publish --help`.
+
 ## Git Provenance
 
 `build`, `release`, and `publish` take an opt-in `--git` flag that stamps the
@@ -343,3 +391,4 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 [editor-schema]: https://grimoire.rs/configuration.html#editor-schema
 [auth]: https://grimoire.rs/authentication.html
 [commands]: https://grimoire.rs/commands.html#build
+[artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets

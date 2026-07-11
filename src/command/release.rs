@@ -419,7 +419,7 @@ fn parse_reference(
 /// [`crate::command::primary_registry_global_fallback`] is used instead of
 /// the legacy `[options].default_registry` chain so a `[[registries]]`-only
 /// global config is still honored.
-fn release_default_registry(ctx: &Context) -> String {
+pub(crate) fn release_default_registry(ctx: &Context) -> String {
     use super::scope_resolution;
     // Best-effort: discover the project scope. On miss (no config in tree),
     // fall back through the global-[[registries]]-aware helper so a user with

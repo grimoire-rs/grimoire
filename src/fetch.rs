@@ -29,7 +29,7 @@
 //! still useful in-context).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -40,12 +40,13 @@ use serde::Serialize;
 use crate::config::ResolvedRegistry;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
-use crate::install::materializer::{TarEntryData, unpack_tar_in_memory};
+use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer, TarEntryData, unpack_tar_in_memory};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
-use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
+use crate::oci::{ArtifactKind, ArtifactRef, Identifier, PinnedIdentifier};
+use crate::resolve::{ResolveError, ResolveErrorKind};
 
 /// Upper bound on a fetched layer blob. Checked against the manifest's
 /// layer-descriptor `size` before download (a cheap reject for an
@@ -76,6 +77,22 @@ where
     result.map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))
 }
 
+/// Build a not-found error for a resolved `id` the registry has no tag or
+/// manifest for. Classifies to `NotFound` (79) — the documented fetch
+/// taxonomy (`docs/src/commands.md`: "a missing repository is a not-found
+/// failure (parity with grim fetch)") — by routing through the existing
+/// [`ResolveErrorKind::TagNotFound`] classification rather than a bare
+/// `anyhow!` (which would fall through to the generic failure, 1).
+fn not_found(id: &Identifier) -> anyhow::Error {
+    // ponytail: the kind is unknown before the manifest read (this fires on
+    // the resolve miss), so a neutral `Skill` placeholder stands in — the
+    // reference name and source carry the signal.
+    anyhow::Error::from(crate::error::Error::from(ResolveError::new(
+        ArtifactRef::registry(ArtifactKind::Skill, id.name(), id.clone()),
+        ResolveErrorKind::TagNotFound,
+    )))
+}
+
 /// Resolved scope inputs for a fetch, computed once by the caller.
 ///
 /// Mirrors `catalog::BadgeContext` — the caller does scope/registry
@@ -93,6 +110,23 @@ pub struct FetchScope {
     pub warnings: Vec<String>,
 }
 
+/// What a fetched manifest turned out to be: a typed artifact kind, or a
+/// `__grimoire` description companion (`com.grimoire.kind: desc`) — a tar
+/// layer indexed by `README.md`, not an installable artifact. Replaces a
+/// former `kind: ArtifactKind` + `is_description: bool` pair on
+/// [`FetchedArtifact`], where the kind field held a lying placeholder
+/// (`ArtifactKind::Skill`) for the description case.
+///
+/// Closed internal enum: the binary is the only consumer, so matches stay
+/// total — no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchedPayload {
+    /// A typed, installable artifact.
+    Artifact(ArtifactKind),
+    /// A `__grimoire` description companion.
+    Description,
+}
+
 /// A resolved + fetched + digest-verified artifact layer (shared between
 /// `grim_fetch` and `grim_render`).
 #[derive(Debug)]
@@ -101,8 +135,8 @@ pub struct FetchedArtifact {
     pub identifier: Identifier,
     /// The pinned (digest-addressed) form of [`Self::identifier`].
     pub pinned: PinnedIdentifier,
-    /// The artifact kind, inferred from the manifest.
-    pub kind: ArtifactKind,
+    /// What the fetched manifest turned out to be.
+    pub payload: FetchedPayload,
     /// The artifact name (the reference's last path segment).
     pub name: String,
     /// The verified single-layer blob.
@@ -166,6 +200,92 @@ pub struct FetchReport {
     pub warnings: Vec<String>,
 }
 
+/// One member of a description companion bundle.
+#[derive(Debug, Serialize)]
+pub struct DescriptionFile {
+    /// Path inside the companion tree.
+    pub path: String,
+    /// Full size in bytes, as reported by the tar header.
+    pub size: u64,
+    /// The member content: UTF-8 text verbatim, or the base64 of a non-UTF-8
+    /// member when [`Self::encoding`] is `"base64"`.
+    pub content: String,
+    /// `"base64"` when [`Self::content`] is the base64 of a non-UTF-8 member;
+    /// omitted (UTF-8 text) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+}
+
+/// The `grim fetch --description` result: the whole repository description
+/// companion with every member inline.
+///
+/// JSON format: `{ref, digest, kind: "desc", files: [{path, size, content,
+/// encoding?}], warnings?}`. Every member is inline (bounded by the 8 MiB
+/// layer gate, no per-file truncation) so the consumer reads the entire
+/// companion in one call.
+#[derive(Debug, Serialize)]
+pub struct DescriptionReport {
+    /// The fully-qualified resolved companion reference (`…:__grimoire`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The resolved companion manifest digest.
+    pub digest: String,
+    /// Always `"desc"` — the companion discriminator.
+    pub kind: String,
+    /// Every member of the companion tree, sorted by path.
+    pub files: Vec<DescriptionFile>,
+    /// Non-fatal notes (degraded scope, …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// The `grim fetch --digest-only` result: a cheap resolve probe with no
+/// content download.
+///
+/// JSON format: `{ref, digest, warnings?}`. The digest equals the full
+/// fetch's manifest digest, so a consumer caches on it and skips unchanged
+/// downloads.
+#[derive(Debug, Serialize)]
+pub struct DigestReport {
+    /// The fully-qualified resolved reference.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The resolved manifest digest.
+    pub digest: String,
+    /// Non-fatal notes (degraded scope, …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// The tri-shaped `grim fetch` result: full content, a description bundle, or
+/// a bare digest probe. Serializes untagged, so each variant is its own flat
+/// JSON object (the MCP server and the CLI report render it directly).
+///
+/// Closed internal enum — the binary is the only consumer, so matches stay
+/// total (no `#[non_exhaustive]`).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum FetchOutcome {
+    /// A resolved + shaped artifact document (default / `--vendor` / `--path`).
+    Content(Box<FetchReport>),
+    /// The repository description companion (`--description`).
+    Description(DescriptionReport),
+    /// A resolve-only digest probe (`--digest-only`).
+    Digest(DigestReport),
+}
+
+impl FetchOutcome {
+    /// Non-fatal warnings accumulated during resolution, for stderr surfacing
+    /// (the CLI keeps stdout a pure payload).
+    pub fn warnings(&self) -> &[String] {
+        match self {
+            Self::Content(r) => &r.warnings,
+            Self::Description(r) => &r.warnings,
+            Self::Digest(r) => &r.warnings,
+        }
+    }
+}
+
 /// Resolve `reference` against the pre-resolved scope's registries and
 /// fetch its single verified layer. `max_layer_size` gates the layer
 /// descriptor size before download (`None` ⇒ no generic gate — `grim_render`
@@ -201,15 +321,25 @@ pub async fn fetch_artifact(
     let name = id.name().to_string();
 
     // Pure read: `Query` never write-throughs the tag cache.
-    let digest = wrap(access.resolve_digest(&id, Operation::Query).await)?
-        .ok_or_else(|| anyhow!("reference '{id}' not found on the registry"))?;
+    let digest = wrap(access.resolve_digest(&id, Operation::Query).await)?.ok_or_else(|| not_found(&id))?;
     let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest))
         .map_err(|e| anyhow!("resolved digest did not pin '{id}': {e}"))?;
 
     let manifest = wrap(access.fetch_manifest(&pinned).await)?
         .ok_or_else(|| anyhow!("manifest for '{pinned}' not found on the registry"))?;
-    let kind = crate::oci::annotations::kind_from_manifest(&manifest)
-        .ok_or_else(|| anyhow!("'{pinned}' is not a Grimoire artifact (no kind on the manifest)"))?;
+    // A `__grimoire` description companion carries no artifact kind; it is a
+    // tar layer like a skill, so it takes the generic size cap below via the
+    // `_ => max_layer_size` arm rather than a real kind.
+    let is_description = crate::oci::description::is_description_manifest(&manifest);
+    let payload = match crate::oci::annotations::kind_from_manifest(&manifest) {
+        Some(kind) => FetchedPayload::Artifact(kind),
+        None if is_description => FetchedPayload::Description,
+        None => {
+            return Err(anyhow!(
+                "'{pinned}' is not a Grimoire artifact (no kind on the manifest)"
+            ));
+        }
+    };
     let layer = manifest.single_layer().ok_or_else(|| {
         anyhow!(
             "expected a single-layer artifact, manifest has {} layers",
@@ -219,9 +349,9 @@ pub async fn fetch_artifact(
 
     // Size gate on the (untrusted) descriptor BEFORE the transfer. The
     // publish-side kind caps always hold; the generic cap is the caller's.
-    let cap = match kind {
-        ArtifactKind::Mcp => Some(MCP_LAYER_SIZE_LIMIT),
-        ArtifactKind::Bundle => Some(BUNDLE_LAYER_SIZE_LIMIT),
+    let cap = match payload {
+        FetchedPayload::Artifact(ArtifactKind::Mcp) => Some(MCP_LAYER_SIZE_LIMIT),
+        FetchedPayload::Artifact(ArtifactKind::Bundle) => Some(BUNDLE_LAYER_SIZE_LIMIT),
         _ => max_layer_size,
     };
     let repo: Identifier = pinned.as_identifier().without_tag();
@@ -254,7 +384,7 @@ pub async fn fetch_artifact(
     Ok(FetchedArtifact {
         identifier: id,
         pinned,
-        kind,
+        payload,
         name,
         blob,
         scope: scope.scope,
@@ -294,7 +424,10 @@ pub async fn fetch_with_limit(
     let mut report = FetchReport {
         reference: fetched.identifier.to_string(),
         digest: fetched.pinned.strip_advisory().digest().to_string(),
-        kind: fetched.kind.to_string(),
+        kind: match fetched.payload {
+            FetchedPayload::Description => crate::oci::description::DESC_KIND.to_string(),
+            FetchedPayload::Artifact(kind) => kind.to_string(),
+        },
         name: fetched.name.clone(),
         vendor: vendor_client.map_or_else(|| "canonical".to_string(), |v| v.as_str().to_string()),
         path: path.map(str::to_string),
@@ -306,8 +439,15 @@ pub async fn fetch_with_limit(
         warnings: Vec::new(),
     };
 
-    match fetched.kind {
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
+    // A description companion is a tar layer like a skill, but indexed by
+    // `README.md` and never vendor-projected — handle it before the kind match.
+    match fetched.payload {
+        FetchedPayload::Description => {
+            if vendor_client.is_some() {
+                return Err(anyhow!(
+                    "a description companion has no vendor projection; omit --vendor"
+                ));
+            }
             let entries = wrap(unpack_tar_in_memory(&fetched.blob, doc_limit as u64))?;
             report.files = entries
                 .iter()
@@ -316,19 +456,11 @@ pub async fn fetch_with_limit(
                     size: e.size,
                 })
                 .collect();
-
-            let index_rel = match fetched.kind {
-                ArtifactKind::Skill => PathBuf::from(&fetched.name).join("SKILL.md"),
-                _ => PathBuf::from(format!("{}.md", fetched.name)),
-            };
-
             if let Some(path) = path {
-                // One support file: UTF-8 text verbatim, or base64 for a
-                // non-UTF-8 (binary) file within the size limit.
                 let entry = entries
                     .iter()
                     .find(|e| e.path == std::path::Path::new(path))
-                    .ok_or_else(|| anyhow!("no file '{path}' in this artifact (see the files listing)"))?;
+                    .ok_or_else(|| anyhow!("no file '{path}' in this description (see the files listing)"))?;
                 let (content, truncated, encoding) = path_content(entry)?;
                 report.content = content;
                 report.truncated = truncated;
@@ -336,65 +468,103 @@ pub async fn fetch_with_limit(
             } else {
                 let index = entries
                     .iter()
-                    .find(|e| e.path == index_rel)
-                    .ok_or_else(|| anyhow!("artifact is missing its '{}' index", index_rel.display()))?;
+                    .find(|e| e.path == std::path::Path::new("README.md"))
+                    .ok_or_else(|| anyhow!("description is missing its 'README.md' index"))?;
                 let (doc, doc_truncated) = entry_content(index)?;
+                report.content = doc;
                 report.truncated = doc_truncated;
-                report.content = match vendor_client {
-                    None => doc,
-                    Some(client) => {
-                        let projected = project_index(fetched.kind, &doc, client, &fetched.pinned, &mut warnings)?;
-                        match projected {
-                            // `None` ⇒ the canonical bytes ARE the projection.
-                            None => doc,
-                            Some(rendered) => rendered,
-                        }
-                    }
+            }
+        }
+        FetchedPayload::Artifact(kind) => match kind {
+            ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
+                let entries = wrap(unpack_tar_in_memory(&fetched.blob, doc_limit as u64))?;
+                report.files = entries
+                    .iter()
+                    .map(|e| FetchFileEntry {
+                        path: e.path.to_string_lossy().into_owned(),
+                        size: e.size,
+                    })
+                    .collect();
+
+                let index_rel = match kind {
+                    ArtifactKind::Skill => PathBuf::from(&fetched.name).join("SKILL.md"),
+                    _ => PathBuf::from(format!("{}.md", fetched.name)),
                 };
-            }
-        }
-        ArtifactKind::Mcp => {
-            if path.is_some() {
-                return Err(anyhow!("mcp descriptors carry no support files; omit 'path'"));
-            }
-            let descriptor = McpDescriptor::from_layer_bytes(&fetched.blob)
-                .map_err(|e| anyhow!("invalid mcp descriptor layer: {e}"))?;
-            match vendor_client {
-                None => {
-                    let bytes = descriptor
-                        .to_layer_bytes()
-                        .map_err(|e| anyhow!("descriptor re-serialize failed: {e}"))?;
-                    report.content = String::from_utf8_lossy(&bytes).into_owned();
+
+                if let Some(path) = path {
+                    // One support file: UTF-8 text verbatim, or base64 for a
+                    // non-UTF-8 (binary) file within the size limit.
+                    let entry = entries
+                        .iter()
+                        .find(|e| e.path == std::path::Path::new(path))
+                        .ok_or_else(|| anyhow!("no file '{path}' in this artifact (see the files listing)"))?;
+                    let (content, truncated, encoding) = path_content(entry)?;
+                    report.content = content;
+                    report.truncated = truncated;
+                    report.encoding = encoding;
+                } else {
+                    let index = entries
+                        .iter()
+                        .find(|e| e.path == index_rel)
+                        .ok_or_else(|| anyhow!("artifact is missing its '{}' index", index_rel.display()))?;
+                    let (doc, doc_truncated) = entry_content(index)?;
+                    report.truncated = doc_truncated;
+                    report.content = match vendor_client {
+                        None => doc,
+                        Some(client) => {
+                            let projected = project_index(kind, &doc, client, &fetched.pinned, &mut warnings)?;
+                            match projected {
+                                // `None` ⇒ the canonical bytes ARE the projection.
+                                None => doc,
+                                Some(rendered) => rendered,
+                            }
+                        }
+                    };
                 }
-                Some(client) => {
-                    let (pointer, value) = client
-                        .vendor()
-                        .mcp_entry(fetched.scope, &fetched.name, &descriptor)
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "client '{}' cannot represent this descriptor at {} scope",
-                                client.as_str(),
-                                fetched.scope
-                            )
-                        })?;
-                    report.pointer = Some(pointer);
-                    report.content = serde_json::to_string_pretty(&value)
-                        .map_err(|e| anyhow!("vendor entry serialize failed: {e}"))?;
+            }
+            ArtifactKind::Mcp => {
+                if path.is_some() {
+                    return Err(anyhow!("mcp descriptors carry no support files; omit 'path'"));
+                }
+                let descriptor = McpDescriptor::from_layer_bytes(&fetched.blob)
+                    .map_err(|e| anyhow!("invalid mcp descriptor layer: {e}"))?;
+                match vendor_client {
+                    None => {
+                        let bytes = descriptor
+                            .to_layer_bytes()
+                            .map_err(|e| anyhow!("descriptor re-serialize failed: {e}"))?;
+                        report.content = String::from_utf8_lossy(&bytes).into_owned();
+                    }
+                    Some(client) => {
+                        let (pointer, value) = client
+                            .vendor()
+                            .mcp_entry(fetched.scope, &fetched.name, &descriptor)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "client '{}' cannot represent this descriptor at {} scope",
+                                    client.as_str(),
+                                    fetched.scope
+                                )
+                            })?;
+                        report.pointer = Some(pointer);
+                        report.content = serde_json::to_string_pretty(&value)
+                            .map_err(|e| anyhow!("vendor entry serialize failed: {e}"))?;
+                    }
                 }
             }
-        }
-        ArtifactKind::Bundle => {
-            if vendor_client.is_some() {
-                return Err(anyhow!(
-                    "bundles have no vendor projection (they expand into members); fetch a member instead"
-                ));
+            ArtifactKind::Bundle => {
+                if vendor_client.is_some() {
+                    return Err(anyhow!(
+                        "bundles have no vendor projection (they expand into members); fetch a member instead"
+                    ));
+                }
+                if path.is_some() {
+                    return Err(anyhow!("bundles carry no support files; omit 'path'"));
+                }
+                // The layer IS the member-list document.
+                report.content = String::from_utf8_lossy(&fetched.blob).into_owned();
             }
-            if path.is_some() {
-                return Err(anyhow!("bundles carry no support files; omit 'path'"));
-            }
-            // The layer IS the member-list document.
-            report.content = String::from_utf8_lossy(&fetched.blob).into_owned();
-        }
+        },
     }
 
     // Cap whatever content shape was produced (vendor projections and
@@ -413,6 +583,183 @@ pub async fn fetch_with_limit(
     }
     report.warnings = warnings;
     Ok(report)
+}
+
+/// Resolve `reference` and retarget its repository to the reserved
+/// `__grimoire` companion tag (dropping any caller-supplied tag/digest). The
+/// tag is a grim internal — it is composed here, never typed by the consumer.
+fn companion_reference(scope: &FetchScope, reference: &str) -> anyhow::Result<Identifier> {
+    let id = wrap(crate::config::resolve_reference(
+        reference,
+        &scope.registries,
+        &scope.short_id_default,
+    ))?;
+    Ok(id.clone_with_tag(crate::oci::description::DESC_TAG))
+}
+
+/// Fetch the repository description companion at `reference`'s reserved
+/// `__grimoire` tag, shaping every member inline. When `out` is `Some`, the
+/// companion tree is also unpacked into that directory through install's
+/// tar-materialize guard ([`DefaultMaterializer`]).
+///
+/// The repository is retargeted to the internal companion tag before
+/// resolution; the result must be a `com.grimoire.kind: desc` companion.
+/// Bounded by the 8 MiB layer gate — no per-file truncation, so the whole
+/// companion returns in one call.
+///
+/// # Errors
+///
+/// A missing companion (not-found, 79 — parity with `grim fetch`), an
+/// offline-uncached miss (81), a `__grimoire` manifest that is not a
+/// companion or an empty companion (data error, 65), or a filesystem failure
+/// writing `out`.
+pub async fn fetch_description(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    reference: &str,
+    out: Option<&Path>,
+) -> anyhow::Result<DescriptionReport> {
+    let companion = companion_reference(scope, reference)?;
+    let mut fetched = fetch_artifact(scope, access, &companion.to_string(), Some(FETCH_BLOB_SIZE_LIMIT)).await?;
+    if fetched.payload != FetchedPayload::Description {
+        // The `__grimoire` tag resolved to a non-companion manifest — bad
+        // external data (65), the same tier as an empty companion below.
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            AccessError::with_identifier(
+                fetched.pinned.as_identifier().without_tag(),
+                AccessErrorKind::InvalidManifest(format!("'{}' is not a description companion", fetched.pinned)),
+            ),
+        )));
+    }
+    let warnings = std::mem::take(&mut fetched.warnings);
+
+    // The whole companion is bounded by the 8 MiB layer gate above, so a
+    // per-file limit of that size never truncates a member. An empty
+    // companion is rejected here (data error, 65) by the unpack guard.
+    let entries = wrap(unpack_tar_in_memory(&fetched.blob, FETCH_BLOB_SIZE_LIMIT))?;
+    let files = entries
+        .iter()
+        .map(|e| {
+            let (content, _truncated, encoding) = path_content(e)?;
+            Ok(DescriptionFile {
+                path: e.path.to_string_lossy().into_owned(),
+                size: e.size,
+                content,
+                encoding,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if let Some(dir) = out {
+        // Reuse install's tar path guard (`safe_relative_path` inside
+        // `DefaultMaterializer`) rather than hand-rolling one. The kind/name
+        // are cosmetic here — the companion is a plain tar tree.
+        wrap(DefaultMaterializer.materialize(ArtifactKind::Skill, &fetched.name, &fetched.blob, dir))?;
+    }
+
+    Ok(DescriptionReport {
+        reference: fetched.identifier.to_string(),
+        digest: fetched.pinned.strip_advisory().digest().to_string(),
+        kind: crate::oci::description::DESC_KIND.to_string(),
+        files,
+        warnings,
+    })
+}
+
+/// Resolve `reference` (retargeted to the `__grimoire` companion tag when
+/// `description` is set) to a digest **without downloading** the manifest or
+/// any blob — the extension's cache probe. One resolve, one `{ref, digest}`.
+///
+/// The reported digest equals the full fetch's manifest digest, so a matching
+/// digest lets a consumer skip `describe` + `fetch` entirely.
+///
+/// # Errors
+///
+/// A missing reference (not-found, 79 — parity with `grim fetch`) or an
+/// offline-uncached miss (81); resolution/transport faults keep their own
+/// taxonomy.
+pub async fn resolve_digest_only(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    reference: &str,
+    description: bool,
+) -> anyhow::Result<DigestReport> {
+    let warnings = scope.warnings.clone();
+    let id = if description {
+        companion_reference(scope, reference)?
+    } else {
+        let id = wrap(crate::config::resolve_reference(
+            reference,
+            &scope.registries,
+            &scope.short_id_default,
+        ))?;
+        if id.tag().is_none() && id.digest().is_none() {
+            id.clone_with_tag("latest")
+        } else {
+            id
+        }
+    };
+
+    // `Resolve` (not `Query`), like `describe`: an offline-uncached ref
+    // surfaces `offline-blocked` (81) instead of a misleading not-found.
+    let digest = wrap(access.resolve_digest(&id, Operation::Resolve).await)?.ok_or_else(|| not_found(&id))?;
+    let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest))
+        .map_err(|e| anyhow!("resolved digest did not pin '{id}': {e}"))?;
+
+    Ok(DigestReport {
+        reference: id.to_string(),
+        digest: pinned.strip_advisory().digest().to_string(),
+        warnings,
+    })
+}
+
+/// Route a `grim fetch` invocation to the shape its flags select — the single
+/// seam both the CLI (`grim fetch`) and the MCP `grim_fetch` tool call so the
+/// three modes stay in lockstep. `out` (CLI-only; MCP passes `None`) unpacks a
+/// `--description` companion to disk.
+///
+/// - `digest_only` ⇒ a resolve-only [`DigestReport`] (composes with
+///   `description` — the companion tag is probed).
+/// - `description` ⇒ the [`DescriptionReport`] bundle; with a `path` it
+///   composes through the shared content core (returns that one member — a
+///   works-but-undocumented convenience).
+/// - otherwise ⇒ the shaped [`FetchReport`] content.
+///
+/// # Errors
+///
+/// See [`fetch_description`], [`resolve_digest_only`], and
+/// [`fetch_with_limit`].
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_outcome(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    reference: &str,
+    vendor: Option<&str>,
+    path: Option<&str>,
+    description: bool,
+    digest_only: bool,
+    out: Option<&Path>,
+    doc_limit: usize,
+) -> anyhow::Result<FetchOutcome> {
+    if digest_only {
+        return Ok(FetchOutcome::Digest(
+            resolve_digest_only(scope, access, reference, description).await?,
+        ));
+    }
+    if description {
+        if let Some(path) = path {
+            // `--path` composes through the shared content core: pull one
+            // companion member (works, not the documented contract).
+            let companion = companion_reference(scope, reference)?;
+            let report = fetch_with_limit(scope, access, &companion.to_string(), None, Some(path), doc_limit).await?;
+            return Ok(FetchOutcome::Content(Box::new(report)));
+        }
+        return Ok(FetchOutcome::Description(
+            fetch_description(scope, access, reference, out).await?,
+        ));
+    }
+    let report = fetch_with_limit(scope, access, reference, vendor, path, doc_limit).await?;
+    Ok(FetchOutcome::Content(Box::new(report)))
 }
 
 /// The `grim describe` report: manifest-level metadata for one artifact,
@@ -440,6 +787,11 @@ pub struct DescribeReport {
     pub title: Option<String>,
     /// `org.opencontainers.image.description`.
     pub description: Option<String>,
+    /// Whether the repository carries a description companion at its reserved
+    /// `__grimoire` tag (fetch it with `grim fetch <ref> --description`).
+    /// Always present — the consumer skips a blind probe. Named to avoid
+    /// colliding with the `description` text annotation above.
+    pub has_description: bool,
     /// `com.grimoire.summary`, the short catalog blurb.
     pub summary: Option<String>,
     /// `org.opencontainers.image.version`.
@@ -501,6 +853,12 @@ pub async fn describe_artifact(
     // Tag listing (no blob), sorted for a stable report. `None` (endpoint
     // absent / repo has no tags) degrades to an empty list, not an error.
     let mut tags = wrap(access.list_tags(&id.without_tag()).await)?.unwrap_or_default();
+    // Derive companion presence from the PRE-filter tag list — the reserved
+    // `__grimoire` tag is visible here, before it is hidden below. Zero extra
+    // network: the tag listing is already in hand.
+    let has_description = tags.iter().any(|t| t == crate::oci::description::DESC_TAG);
+    // Internal companions (`__grimoire`, …) are never user-facing tags.
+    tags.retain(|t| !crate::oci::description::is_internal_tag(t));
     tags.sort();
 
     // Resolve to a digest with `Resolve` (not `Query`): online it delegates
@@ -509,8 +867,7 @@ pub async fn describe_artifact(
     // surfaces `offline-blocked` (81) here rather than the `Query` path's
     // misleading "not found" — the ref may well exist, the network is just
     // unreachable.
-    let digest = wrap(access.resolve_digest(&id, Operation::Resolve).await)?
-        .ok_or_else(|| anyhow!("reference '{id}' not found on the registry"))?;
+    let digest = wrap(access.resolve_digest(&id, Operation::Resolve).await)?.ok_or_else(|| not_found(&id))?;
     let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest))
         .map_err(|e| anyhow!("resolved digest did not pin '{id}': {e}"))?;
 
@@ -529,6 +886,7 @@ pub async fn describe_artifact(
         name,
         title: get("org.opencontainers.image.title"),
         description: get("org.opencontainers.image.description"),
+        has_description,
         summary: get("com.grimoire.summary"),
         version: get("org.opencontainers.image.version"),
         license: get("org.opencontainers.image.licenses"),
@@ -855,6 +1213,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_description_companion_indexes_readme_lists_files_and_rejects_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let readme = b"# Repo\n\nWhat this repo ships.\n";
+        let logo: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff];
+        let blob = tar_of(&[("README.md", readme.as_slice()), ("logo.png", logo)]);
+        // A description companion: kind "desc", published to the __grimoire tag.
+        publish(&reg, "test.registry/acme/skills/demo:__grimoire", "desc", &blob).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let reference = "test.registry/acme/skills/demo:__grimoire";
+
+        // Default: the README.md index, with every file listed.
+        let report = fetch_with_limit(&scope, &access, reference, None, None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect("fetch desc");
+        assert_eq!(report.kind, "desc", "reported kind is 'desc', not the placeholder");
+        assert_eq!(report.content.as_bytes(), readme);
+        let files: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(files.contains(&"README.md"), "files: {files:?}");
+        assert!(files.contains(&"logo.png"), "files: {files:?}");
+
+        // --path pulls an asset (binary → base64, same shape as a skill).
+        let asset = fetch_with_limit(&scope, &access, reference, None, Some("logo.png"), FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect("fetch desc path");
+        assert_eq!(asset.encoding.as_deref(), Some("base64"));
+        assert_eq!(BASE64.decode(asset.content.as_bytes()).unwrap(), logo);
+
+        // A description has no vendor projection.
+        let err = fetch_with_limit(&scope, &access, reference, Some("claude"), None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect_err("desc + vendor must error");
+        assert!(err.to_string().contains("no vendor projection"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_description_inlines_all_members_and_out_unpacks_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let readme = b"# Repo\n\nWhat this repo ships.\n";
+        let logo: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff];
+        let blob = tar_of(&[("README.md", readme.as_slice()), ("assets/logo.png", logo)]);
+        // Retarget happens off the ARTIFACT ref, so publish the companion at
+        // the reserved tag in the same repo.
+        publish(&reg, "test.registry/acme/skills/demo:__grimoire", "desc", &blob).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let artifact_ref = "test.registry/acme/skills/demo:latest";
+
+        let out_dir = tmp.path().join("unpacked");
+        let report = fetch_description(&scope, &access, artifact_ref, Some(&out_dir))
+            .await
+            .expect("fetch description");
+
+        assert_eq!(report.kind, "desc");
+        assert!(
+            report.reference.ends_with(":__grimoire"),
+            "companion ref: {}",
+            report.reference
+        );
+        assert!(report.digest.starts_with("sha256:"));
+        // Every member inline, sorted by path: text verbatim, binary base64.
+        let readme_file = report
+            .files
+            .iter()
+            .find(|f| f.path == "README.md")
+            .expect("README member");
+        assert_eq!(readme_file.content.as_bytes(), readme);
+        assert!(readme_file.encoding.is_none(), "text member carries no encoding");
+        let logo_file = report
+            .files
+            .iter()
+            .find(|f| f.path == "assets/logo.png")
+            .expect("logo member");
+        assert_eq!(logo_file.encoding.as_deref(), Some("base64"));
+        assert_eq!(BASE64.decode(logo_file.content.as_bytes()).unwrap(), logo);
+
+        // --out unpacked the tree through install's guard.
+        assert_eq!(std::fs::read(out_dir.join("README.md")).unwrap(), readme);
+        assert_eq!(std::fs::read(out_dir.join("assets/logo.png")).unwrap(), logo);
+    }
+
+    #[tokio::test]
+    async fn fetch_description_missing_companion_classifies_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        // An artifact with no companion at the __grimoire tag.
+        publish(
+            &reg,
+            "test.registry/acme/skills/lonely:latest",
+            "skill",
+            &tar_of(&[("lonely/SKILL.md", b"# x\n")]),
+        )
+        .await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let err = fetch_description(&scope, &access, "test.registry/acme/skills/lonely:latest", None)
+            .await
+            .expect_err("missing companion must error");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::NotFound,
+            "a missing companion is not-found (79), parity with grim fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn digest_only_matches_full_fetch_digest_for_artifact_and_companion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let skill = tar_of(&[("demo/SKILL.md", b"---\nname: demo\ndescription: d\n---\n# d\n")]);
+        publish(&reg, "test.registry/acme/skills/demo:latest", "skill", &skill).await;
+        let companion = tar_of(&[("README.md", b"# Repo\n")]);
+        publish(&reg, "test.registry/acme/skills/demo:__grimoire", "desc", &companion).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let reference = "test.registry/acme/skills/demo:latest";
+
+        // Artifact: the probe digest equals the full fetch's digest.
+        let full = fetch_with_limit(&scope, &access, reference, None, None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect("full fetch");
+        let probe = resolve_digest_only(&scope, &access, reference, false)
+            .await
+            .expect("digest probe");
+        assert_eq!(probe.digest, full.digest, "artifact probe digest == full fetch digest");
+        assert!(!probe.reference.ends_with(":__grimoire"));
+
+        // Companion: the probe digest equals the description bundle's digest.
+        let desc = fetch_description(&scope, &access, reference, None)
+            .await
+            .expect("fetch description");
+        let desc_probe = resolve_digest_only(&scope, &access, reference, true)
+            .await
+            .expect("companion digest probe");
+        assert_eq!(
+            desc_probe.digest, desc.digest,
+            "companion probe digest == companion fetch digest"
+        );
+        assert!(desc_probe.reference.ends_with(":__grimoire"));
+        assert_ne!(
+            probe.digest, desc_probe.digest,
+            "artifact and companion are distinct manifests"
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_hides_internal_desc_tag_from_tags_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        // A real artifact whose repo also carries the internal __grimoire tag.
+        publish_annotated(
+            &reg,
+            "test.registry/acme/skills/demo:latest",
+            &[(KIND_ANNOTATION, "skill")],
+            &["1.0.0", "__grimoire"],
+        )
+        .await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let d = describe_artifact(&scope, &access, "test.registry/acme/skills/demo:latest")
+            .await
+            .expect("describe");
+        assert!(
+            !d.tags.iter().any(|t| t == "__grimoire"),
+            "internal tag must be hidden from describe tags[], got {:?}",
+            d.tags
+        );
+        assert_eq!(d.tags, vec!["1.0.0", "latest"], "only user-facing tags remain, sorted");
+        assert!(
+            d.has_description,
+            "the __grimoire companion tag is present ⇒ has_description"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_bundle_rejects_vendor_and_oversize_layer_gates() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = MemoryRegistry::new();
@@ -1029,6 +1561,10 @@ mod tests {
         assert_eq!(d.deprecated.as_deref(), Some("use acme/demo-2"));
         assert_eq!(d.replaced_by.as_deref(), Some("ghcr.io/acme/skills/demo-2"));
         assert_eq!(d.tags, vec!["1.0.0", "1.2.0", "latest"], "tags sorted");
+        assert!(
+            !d.has_description,
+            "no __grimoire companion tag ⇒ has_description false"
+        );
         assert!(d.digest.starts_with("sha256:"));
         // The verbatim annotation map is carried whole.
         assert_eq!(d.annotations["com.grimoire.replaced-by"], "ghcr.io/acme/skills/demo-2");

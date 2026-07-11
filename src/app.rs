@@ -111,7 +111,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             c
         }
         Command::Fetch(args) => {
-            let (r, c) = crate::command::fetch::run(&ctx, &args).await?;
+            let (r, c) = crate::command::fetch::run(&ctx, &args, format).await?;
             render(&r, format)?;
             c
         }

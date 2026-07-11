@@ -521,7 +521,11 @@ grim search --refresh --registry ghcr.io/acme
 install**: nothing is materialized, no state is touched. It is the CLI
 port of the MCP [`grim_fetch` tool](#mcp): canonical (as-authored) content
 by default, a `--vendor <claude|opencode|copilot>` projection, or one
-`--path <tree-path>` support file.
+`--path <tree-path>` support file. Two more flags switch the report to a
+different shape entirely instead of fetching the artifact:
+[`--description`](#fetch-description) fetches the repository's description
+companion, and [`--digest-only`](#fetch-digest-only) resolves a digest
+without downloading anything.
 
 A `--path` file is UTF-8 text by default. A **binary** support file (e.g. a
 `logo.png`) that fits within the size limit is returned base64-encoded — the
@@ -551,7 +555,61 @@ declared layer size is checked against the 8 MiB limit *before* download
 (a cheap reject for an honestly-oversized layer, exit 65), and that same
 declared size then bounds the *actual* streamed bytes — a registry that
 serves more than it declared aborts mid-transfer into a data error (exit
-65) rather than growing an unbounded body in memory.
+65) rather than growing an unbounded body in memory. A missing repository
+or tag — the artifact itself, or (with `--description`) its companion —
+is a not-found failure (exit 79); an offline run against an uncached
+reference exits 81 instead, since the reference may exist and only the
+network to confirm it is unreachable.
+
+### Description companion (--description) {#fetch-description}
+
+`--description` retargets the reference to the repository's [description
+companion](./publishing.md#description-companion) — the reserved
+`__grimoire` tag is a grim-internal implementation detail; the flag is
+the documented way to reach it, so nothing outside grim needs to type or
+know the tag. `--format json` returns every packed file inline in one
+call instead of the single artifact document:
+
+```sh
+grim fetch ghcr.io/acme/mcp/postgres --description --format json | jq '.files[].path'
+grim fetch ghcr.io/acme/mcp/postgres --description --out ./docs   # unpack the tree to disk
+```
+
+The JSON shape is `{ref, digest, kind: "desc", files: [{path, size,
+content, encoding?}], warnings?}` — every member inline (`encoding:
+"base64"` only for a binary member), bounded by the same 8 MiB layer gate
+as any fetch and never per-file truncated, so the whole companion —
+README, logo, changelog, and any README-referenced assets — comes back in
+one report. A multi-file bundle has no single payload to print, so plain
+mode requires `--out <dir>` to unpack the tree to disk instead; without
+`--out` (and no `--path`), plain mode is a usage error (exit 64).
+
+### Cache probe (--digest-only) {#fetch-digest-only}
+
+`--digest-only` resolves the reference to a digest and reports `{ref,
+digest, warnings?}` **without downloading** the manifest or any blob — a
+cheap HEAD-equivalent probe. It composes with `--description` to probe
+the companion tag instead of the artifact; either way the reported digest
+equals the corresponding full fetch's manifest digest, so a consumer
+caches on it directly and skips an unchanged download:
+
+```sh
+grim fetch skills/code-review --digest-only --format json
+grim fetch skills/code-review --description --digest-only --format json
+```
+
+`--digest-only` takes no `--vendor`, `--path`, or `--out` — a digest-only
+probe never downloads content to shape, so combining any of them is a
+usage error (exit 64). An offline run against an uncached reference exits
+81 rather than a misleading not-found.
+
+### Flag-combination errors {#fetch-usage-errors}
+
+| Combination | Result |
+|---|---|
+| `--out` without `--description` | usage error (exit 64) |
+| `--digest-only` with `--vendor`, `--path`, or `--out` | usage error (exit 64) |
+| `--description` in plain mode, without `--out` and without `--path` | usage error (exit 64) |
 
 ## grim describe {#describe}
 
@@ -569,14 +627,23 @@ beyond the globals.
 `annotations` is the verbatim manifest annotation map):
 
 ```
-{ref, digest, kind, name, title, description, summary, version, license,
- repository, revision, created, keywords, deprecated, replaced_by, tags,
- annotations}
+{ref, digest, kind, name, title, description, has_description, summary,
+ version, license, repository, revision, created, keywords, deprecated,
+ replaced_by, tags, annotations}
 ```
 
 `kind` is `null` for a foreign / non-Grimoire manifest (describe never
-hard-errors on one). The curated fields follow [`grim search`](#search)
-semantics: `repository` is kept only when the source annotation is an
+hard-errors on one). `has_description` is an always-present boolean —
+whether the repository carries a [description
+companion](./publishing.md#description-companion) — derived from the tag
+listing describe already fetches, at zero extra network cost, so a
+consumer can skip a blind probe before calling
+[`grim fetch <ref> --description`](#fetch-description). `tags[]` lists
+only user-facing tags — grim-internal companions such as `__grimoire` (see
+the
+[repository description companion](./publishing.md#description-companion)) are
+hidden. The
+curated fields follow [`grim search`](#search) semantics: `repository` is kept only when the source annotation is an
 `https://` URL, `deprecated` is the deprecation notice or `null`, and
 `replaced_by` is the [successor reference](./publishing.md#metadata-replaced-by)
 or `null`. Plain output is a flat key/value table (like
@@ -923,8 +990,8 @@ down when the client closes stdin (EOF).
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. Args: scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, scope. | always |
-| `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
+| `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
 The scope arguments on each tool are `global` (boolean), `config` (explicit

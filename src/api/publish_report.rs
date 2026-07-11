@@ -6,11 +6,14 @@
 //! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status);
 //! the announce outcome stays human prose on stderr.
 //!
-//! JSON format: `{"items": [...], "announce": ...}` (uniform `items`
-//! envelope, per subsystem-cli-api.md). `items` is the per-entry array
-//! (`{kind, ref, digest, tags, status}`); `announce` is
-//! `{outcome, branch, url}` when the `--announce` step completed, else
-//! `null` (no `--announce`, dry run, fail-fast, or announce failure).
+//! JSON format: `{"items": [...], "descriptions": {...}, "announce": ...}`
+//! (uniform `items` envelope, per subsystem-cli-api.md). `items` is the
+//! per-entry array (`{kind, ref, digest, tags, status}`); `descriptions` is a
+//! sibling `{"items": [...]}` of published description companions
+//! (`{ref, repository, digest, files}`, digest `null` under `--dry-run`);
+//! `announce` is `{outcome, branch, url}` when the `--announce` step
+//! completed, else `null` (no `--announce`, dry run, fail-fast, or announce
+//! failure).
 
 use std::io::{self, Write};
 
@@ -101,6 +104,32 @@ pub struct PublishAnnounce {
     pub url: Option<String>,
 }
 
+/// One published (or, under `--dry-run`, planned) description companion.
+///
+/// The companion re-points a repository's reserved `__grimoire` tag at a tar
+/// of the repo's descriptive files (README, logo, changelog, extra assets).
+#[derive(Debug, Serialize)]
+pub struct PublishDescription {
+    /// The companion reference (`registry/repo:__grimoire`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The target repository (`registry/repo`, no tag).
+    pub repository: String,
+    /// The pushed manifest digest; `null` under `--dry-run` (nothing pushed).
+    pub digest: Option<String>,
+    /// The packed file names, in on-wire (sorted) order.
+    pub files: Vec<String>,
+}
+
+/// The `descriptions` section of the publish report: the description
+/// companions published this run, one per distinct repository, in the uniform
+/// `{"items": [...]}` envelope. Empty when no companion was resolved.
+#[derive(Debug, Default, Serialize)]
+pub struct PublishDescriptions {
+    /// Per-repository companion outcomes, in publish order.
+    items: Vec<PublishDescription>,
+}
+
 /// One row in the publish report: the outcome of a single manifest entry.
 #[derive(Debug, Serialize)]
 pub struct PublishEntry {
@@ -130,15 +159,29 @@ fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::
 pub struct PublishReport {
     /// Per-entry outcomes, in publish order.
     items: Vec<PublishEntry>,
+    /// The description companions published this run (uniform `items`
+    /// envelope); empty `items` when no companion was resolved.
+    descriptions: PublishDescriptions,
     /// The completed `--announce` outcome; `None` when announce did not
     /// run to completion (not requested, dry run, fail-fast, failure).
     announce: Option<PublishAnnounce>,
 }
 
 impl PublishReport {
-    /// Build from operation results (no completed announce).
+    /// Build from operation results (no companions, no completed announce).
     pub fn new(items: Vec<PublishEntry>) -> Self {
-        Self { items, announce: None }
+        Self {
+            items,
+            descriptions: PublishDescriptions::default(),
+            announce: None,
+        }
+    }
+
+    /// Attach the published description companions (consuming builder).
+    #[must_use]
+    pub fn with_descriptions(mut self, items: Vec<PublishDescription>) -> Self {
+        self.descriptions = PublishDescriptions { items };
+        self
     }
 
     /// Attach the completed `--announce` outcome (consuming builder).
@@ -176,7 +219,7 @@ fn truncate_digest(digest: &str) -> String {
 
 impl Printable for PublishReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
-        let rows: Vec<Vec<String>> = self
+        let mut rows: Vec<Vec<String>> = self
             .items
             .iter()
             .map(|e| {
@@ -192,6 +235,21 @@ impl Printable for PublishReport {
                 ]
             })
             .collect();
+        // Description companions share the single table as `desc` rows so a
+        // plain `--dry-run` previews the planned fan-out (ADR risk
+        // mitigation). No digest ⇒ nothing was pushed ⇒ dry-run.
+        rows.extend(self.descriptions.items.iter().map(|d| {
+            vec![
+                "desc".to_string(),
+                d.reference.clone(),
+                d.digest
+                    .as_deref()
+                    .map(truncate_digest)
+                    .unwrap_or_else(|| "-".to_string()),
+                "-".to_string(), // files live in JSON; the companion tag is in the ref
+                if d.digest.is_some() { "pushed" } else { "dry-run" }.to_string(),
+            ]
+        }));
         print_table(w, &["Kind", "Ref", "Digest", "Tags", "Status"], &rows)
     }
 
@@ -248,6 +306,31 @@ mod tests {
             "plain digest must not contain full hex, got: {}",
             lines[1]
         );
+    }
+
+    #[test]
+    fn plain_appends_description_rows_to_the_single_table() {
+        let r = PublishReport::new(vec![PublishEntry {
+            reference: "registry.example/acme/s:1.0.0".to_string(),
+            kind: ArtifactKind::Skill,
+            digest: None,
+            tags: vec![],
+            status: PublishStatus::DryRun,
+        }])
+        .with_descriptions(vec![PublishDescription {
+            reference: "registry.example/acme/s:__grimoire".to_string(),
+            repository: "registry.example/acme/s".to_string(),
+            digest: None,
+            files: vec!["README.md".to_string()],
+        }]);
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "header + entry + companion row");
+        assert!(lines[2].starts_with("desc"));
+        assert!(lines[2].contains(":__grimoire"));
+        assert!(lines[2].contains("dry-run"));
     }
 
     #[test]

@@ -376,6 +376,61 @@ fn read_capped(path: &Path, remaining: u64) -> Result<Vec<u8>, SkillError> {
     Ok(bytes)
 }
 
+/// Pack an explicit `(packed_name, source_path)` mapping into the
+/// uncompressed tar layer for the reserved `__grimoire` description
+/// companion. Each source file is read and appended under its packed name —
+/// well-known files (`README.md`, `logo.png`|`logo.svg`, `CHANGELOG.md`) map
+/// their source path onto the wire name; `include` glob hits keep their
+/// relative path. Entries are emitted in sorted packed-name order with stable
+/// headers (no mtime/uid/gid), so republishing byte-identical content produces
+/// an identical layer digest — the CAS no-op the caller relies on.
+///
+/// The mapping must be **non-empty**: an empty companion carries nothing, so
+/// the caller resolves that to a data error (there is no README-required gate
+/// anymore — every member is optional as long as at least one is present).
+///
+/// # Errors
+///
+/// [`SkillErrorKind::ValidationFailed`] when the mapping is empty;
+/// [`SkillErrorKind::Io`] for a read failure;
+/// [`SkillErrorKind::TooLarge`] when the files exceed the packing bounds.
+pub fn pack_description_files(files: &[(String, PathBuf)]) -> Result<Vec<u8>, SkillError> {
+    let limits = &PackLimits::DEFAULT;
+
+    let Some((_, first)) = files.first() else {
+        return Err(SkillError::new(
+            Path::new("description"),
+            SkillErrorKind::ValidationFailed("description companion resolves to no files".to_string()),
+        ));
+    };
+    let root = first.clone();
+
+    // Deterministic order: sort by the on-wire packed name.
+    let mut files: Vec<(String, PathBuf)> = files.to_vec();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Bound the cumulative size (from metadata) and file count before reading
+    // any file into memory (CWE-400/770); the read-side cap below is the
+    // TOCTOU backstop.
+    let mut total_bytes: u64 = 0;
+    for (_, abs) in &files {
+        let meta = std::fs::metadata(abs).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+        total_bytes = total_bytes.saturating_add(meta.len());
+    }
+    check_pack_bounds(&root, total_bytes, files.len(), limits)?;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut read_bytes: u64 = 0;
+    for (entry_path, abs) in &files {
+        let bytes = read_capped(abs, limits.byte_limit.saturating_sub(read_bytes))?;
+        read_bytes = read_bytes.saturating_add(bytes.len() as u64);
+        append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+    }
+    builder
+        .into_inner()
+        .map_err(|e| SkillError::new(&root, SkillErrorKind::Io(e)))
+}
+
 /// Append one regular-file entry with a stable header (mode 0o644, no
 /// mtime/uid/gid noise) so the produced tar bytes are deterministic.
 fn append_entry(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) -> std::io::Result<()> {
@@ -557,6 +612,8 @@ fn collect_files(
                     _ => None,
                 })
                 .collect();
+            // Root the entry at `<root_name>/<rel>` (skill / rule / agent —
+            // every caller passes a non-empty name).
             let entry = format!("{root_name}/{}", rel_str.join("/"));
             state.out.push((entry, path));
             state.total_bytes = state.total_bytes.saturating_add(meta.len());
@@ -886,6 +943,71 @@ mod tests {
             .materialize(ArtifactKind::Agent, "solo", &tar, &dest)
             .expect("materialize");
         assert_eq!(written, vec![PathBuf::from("solo.md")]);
+    }
+
+    #[test]
+    fn pack_description_files_maps_source_paths_onto_wire_names_and_round_trips() {
+        // The mapping decouples repo layout from wire layout: `assets/brand.png`
+        // packs as the well-known `logo.png`, `docs/CHANGES.md` as `CHANGELOG.md`.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        write(&src.join("README.md"), "# Repo\n\nWhat this repo ships.\n");
+        write(&src.join("docs/CHANGES.md"), "# Changelog\n");
+        write(&src.join("docs/img/diagram.svg"), "<svg/>\n");
+        std::fs::create_dir_all(src.join("assets")).unwrap();
+        std::fs::write(src.join("assets/brand.png"), [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff]).unwrap();
+
+        let files = vec![
+            ("README.md".to_string(), src.join("README.md")),
+            ("CHANGELOG.md".to_string(), src.join("docs/CHANGES.md")),
+            ("logo.png".to_string(), src.join("assets/brand.png")),
+            // An `include` glob hit keeps its relative path.
+            ("docs/img/diagram.svg".to_string(), src.join("docs/img/diagram.svg")),
+        ];
+        let tar = pack_description_files(&files).expect("pack");
+        let dest = tmp.path().join("out");
+        // The materializer is generic over the tar; Skill kind is just a label.
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Skill, "description", &tar, &dest)
+            .expect("materialize");
+        assert_eq!(
+            written,
+            vec![
+                PathBuf::from("CHANGELOG.md"),
+                PathBuf::from("README.md"),
+                PathBuf::from("docs/img/diagram.svg"),
+                PathBuf::from("logo.png"),
+            ],
+            "packed under wire names, sorted by packed name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("README.md")).unwrap(),
+            "# Repo\n\nWhat this repo ships.\n"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("logo.png")).unwrap(),
+            [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff]
+        );
+
+        // CAS: byte-identical content re-packs to identical bytes (same digest).
+        assert_eq!(
+            tar,
+            pack_description_files(&files).unwrap(),
+            "republish must be byte-stable"
+        );
+    }
+
+    #[test]
+    fn pack_description_files_readme_optional_but_not_empty() {
+        // No README-required gate: a logo-only companion packs fine.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("logo.png"), [0x89u8, 0x50, 0x4e, 0x47]).unwrap();
+        let files = vec![("logo.png".to_string(), tmp.path().join("logo.png"))];
+        assert!(pack_description_files(&files).is_ok(), "README is optional");
+
+        // But an empty mapping is a data error (nothing to publish).
+        let err = pack_description_files(&[]).expect_err("empty companion is rejected");
+        assert!(matches!(err.kind, SkillErrorKind::ValidationFailed(_)));
     }
 
     #[test]

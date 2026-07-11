@@ -36,6 +36,7 @@ impl Printable for DescribeCliReport {
             vec!["name".into(), d.name.clone()],
             vec!["title".into(), opt(&d.title)],
             vec!["description".into(), opt(&d.description)],
+            vec!["has_description".into(), d.has_description.to_string()],
             vec!["summary".into(), opt(&d.summary)],
             vec!["version".into(), opt(&d.version)],
             vec!["license".into(), opt(&d.license)],
@@ -72,6 +73,7 @@ mod tests {
             name: "code-review".to_string(),
             title: Some("code-review".to_string()),
             description: Some("Review code.".to_string()),
+            has_description: true,
             summary: Some("terse blurb".to_string()),
             version: Some("1.2.0".to_string()),
             license: Some("Apache-2.0".to_string()),
@@ -93,6 +95,7 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.lines().next().unwrap().starts_with("Key"));
         assert!(out.contains("skill"));
+        assert!(out.contains("has_description"), "companion presence row present");
         assert!(out.contains("review,quality"), "keywords comma-joined");
         assert!(out.contains("1.2.0,latest"), "tags comma-joined");
         assert!(out.contains("ghcr.io/acme/skills/code-review-2"));
@@ -106,6 +109,7 @@ mod tests {
         assert!(v.is_object());
         assert_eq!(v["ref"], "ghcr.io/acme/skills/code-review:latest");
         assert_eq!(v["kind"], "skill");
+        assert_eq!(v["has_description"], true, "always-present companion flag");
         assert_eq!(v["keywords"], serde_json::json!(["review", "quality"]));
         assert_eq!(v["tags"], serde_json::json!(["1.2.0", "latest"]));
         assert_eq!(v["replaced_by"], "ghcr.io/acme/skills/code-review-2");

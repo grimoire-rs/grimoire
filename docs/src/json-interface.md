@@ -67,7 +67,7 @@ One row object per item inside `{"items": [...]}`:
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value}` | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
-| `publish` | `{ref, kind, digest, tags, status}` + sibling envelope key `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
+| `publish` | `{ref, kind, digest, tags, status}` + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
 `kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
 enveloped report except `search`: the other reports resolve a locked or
@@ -91,19 +91,73 @@ no kind at all, in which case `kind` is `null`.
 | `config set` / `unset` / `registry add` / `rm` / `use` | `{action, key, value, scope}` | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default` |
 | `config registry show` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated}` — see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null |
-| `describe` | `{ref, digest, kind, name, title, description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
-| `fetch` | `{ref, digest, kind, name, vendor, path?, content, encoding?, truncated?, files?, pointer?, warnings?}` — see [grim fetch](#fetch) | — |
+| `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
+| `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
 
 ### The fetch exception {#fetch}
 
-`grim fetch` shares its JSON payload with the MCP `grim_fetch` tool, and
-that shape predates the [null policy](#null-policy): empty or default
-fields (`path`, `encoding`, `truncated`, `files`, `pointer`, `warnings`)
-are **omitted**, not null. Treat a missing key as its default. `encoding`
-is present only as `"base64"`, when `content` is the base64 of a non-UTF-8
-`--path` support file (plain mode decodes it back to the raw bytes). Its
-plain mode is the raw `content` payload (pipe-able, no report at all) — the
-one payload-plain command; see [grim fetch][commands-fetch].
+`grim fetch` shares its JSON payload with the MCP `grim_fetch` tool. Both
+route every call through the same neutral fetch core, so the report takes
+one of three shapes depending on the `--description` / `--digest-only`
+flags — each an untagged variant, its own flat JSON object. The shape
+predates the [null policy](#null-policy): empty or default fields are
+**omitted**, not null. Treat a missing key as its default.
+
+**Content** (default, `--vendor`, or `--path`) — the resolved artifact
+document: `{ref, digest, kind, name, vendor, path?, content, encoding?,
+truncated?, files?, pointer?, warnings?}`.
+
+```json
+{
+  "ref": "ghcr.io/acme/skills/code-review:1.2.0",
+  "digest": "sha256:…",
+  "kind": "skill",
+  "name": "code-review",
+  "vendor": "canonical",
+  "content": "---\nname: code-review\n…"
+}
+```
+
+`encoding` is present only as `"base64"`, when `content` is the base64 of
+a non-UTF-8 `--path` support file (plain mode decodes it back to the raw
+bytes). Its plain mode is the raw `content` payload (pipe-able, no report
+at all) — the one payload-plain command; see [grim fetch][commands-fetch].
+
+**Description bundle** (`--description`) — the repository's [description
+companion](./publishing.md#description-companion), every member inline:
+`{ref, digest, kind: "desc", files: [{path, size, content, encoding?}],
+warnings?}`.
+
+```json
+{
+  "ref": "ghcr.io/acme/mcp/postgres:__grimoire",
+  "digest": "sha256:…",
+  "kind": "desc",
+  "files": [
+    { "path": "README.md", "size": 812, "content": "…" },
+    { "path": "logo.svg", "size": 4096, "content": "…", "encoding": "base64" }
+  ]
+}
+```
+
+Bounded by the same 8 MiB layer gate as any fetch, with no per-file
+truncation — the whole companion returns in one call. A multi-file bundle
+has no single payload to print, so plain mode requires
+[`--out <dir>`](./commands.md#fetch-description) to unpack the tree to
+disk instead of printing JSON.
+
+**Digest probe** (`--digest-only`, optionally combined with
+`--description`) — a resolve-only cache key, no download: `{ref, digest,
+warnings?}`.
+
+```json
+{ "ref": "ghcr.io/acme/skills/code-review:1.2.0", "digest": "sha256:…" }
+```
+
+The reported digest equals the corresponding full fetch's manifest digest
+— the artifact's, or, combined with `--description`, the companion's — so
+a consumer caches on it and skips an unchanged download entirely. Plain
+mode prints the bare digest, no trailing newline.
 
 ## The error document {#error-document}
 
@@ -227,7 +281,12 @@ truncates a printed payload. Both share the same two download ceilings:
 the manifest's declared layer size is checked against the 8 MiB limit
 before download, and that declared size then bounds the actual streamed
 bytes — a registry serving more than it declared aborts mid-transfer into
-a data error (exit 65) on either interface.
+a data error (exit 65) on either interface. The tool's `description` and
+`digest_only` arguments select the same tri-shaped report the CLI flags
+do, with identical composition rules (`digest_only` with `description`
+probes the companion tag) — both interfaces call the same fetch core.
+`grim_describe` returns the same shape as `grim describe --format json`,
+including the `has_description` field.
 
 ## No self-identifying reports {#no-discriminator}
 

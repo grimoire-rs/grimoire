@@ -1812,6 +1812,10 @@ fn order_tags(tags: Vec<String>) -> Vec<String> {
     let mut semver: Vec<(semver::Version, String)> = Vec::new();
     let mut other = Vec::new();
     for t in tags {
+        // Internal companions (`__grimoire`, …) never show in the picker.
+        if crate::oci::description::is_internal_tag(&t) {
+            continue;
+        }
         if t == "latest" {
             latest.push(t);
         } else if let Ok(v) = semver::Version::parse(&t.replace('_', "+")) {

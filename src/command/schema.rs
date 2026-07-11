@@ -209,6 +209,39 @@ mod tests {
     }
 
     #[test]
+    fn publish_schema_documents_description_companion_fields() {
+        // The description companion adds an optional top-level `[description]`
+        // table and an optional per-entry `description` — `registry` must stay
+        // the only required top-level field.
+        let v = parsed(SchemaKind::Publish);
+        assert!(
+            v["properties"]["description"].is_object(),
+            "top-level description must be a documented manifest property"
+        );
+        let required = v["required"].as_array().expect("required is an array");
+        assert_eq!(required.len(), 1, "only `registry` required, got: {required:?}");
+        assert_eq!(required[0], "registry");
+        // Per-entry `description` is a documented (optional) entry property.
+        let entry = v["$defs"]["PublishEntrySpec"]
+            .as_object()
+            .expect("PublishEntrySpec definition present");
+        assert!(
+            entry["properties"]["description"].is_object(),
+            "per-entry description must be a documented property"
+        );
+        // The DescriptionSpec definition documents the well-known members.
+        let spec = v["$defs"]["DescriptionSpec"]
+            .as_object()
+            .expect("DescriptionSpec definition present");
+        for key in ["readme", "logo", "changelog", "include", "publish"] {
+            assert!(
+                spec["properties"][key].is_object(),
+                "DescriptionSpec must document `{key}`"
+            );
+        }
+    }
+
+    #[test]
     fn publish_schema_documents_catalog_wide_version() {
         // Issue #29: the top-level `version` / `version_prefix` are documented
         // optional manifest properties; `registry` stays the only required one.
