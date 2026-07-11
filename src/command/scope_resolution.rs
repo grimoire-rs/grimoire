@@ -183,13 +183,24 @@ fn resolves_outside_workspace(base: &Path, relative: &Path) -> bool {
     // has zero components, so `..` would pop nothing and a genuine escape like
     // `../outside` reads as in-tree. Anchor it to "." — a single component to
     // pop against — which keeps the check purely lexical (no filesystem touch).
-    let base = if base.as_os_str().is_empty() { Path::new(".") } else { base };
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
     let base_components: Vec<_> = base.components().collect();
     let mut resolved = base_components.clone();
     for component in relative.components() {
         match component {
             std::path::Component::ParentDir => {
-                resolved.pop();
+                // Popping past every component `base` has is a genuine escape.
+                // On an empty stack `pop()` is a silent no-op, after which a
+                // later `Normal` push can re-spell one of `base`'s own component
+                // names and read as in-tree — the relative-base bypass
+                // (`--config sub/x.toml` + `../../sub/escape`). Fail closed.
+                if resolved.pop().is_none() {
+                    return true;
+                }
             }
             std::path::Component::Normal(_) => resolved.push(component),
             std::path::Component::CurDir => {}
@@ -365,6 +376,25 @@ mod tests {
         assert!(
             !resolves_outside_workspace(empty, Path::new("bundles/x.toml")),
             "an in-tree relative path from an empty workspace must not be flagged"
+        );
+    }
+
+    #[test]
+    fn resolves_outside_workspace_flags_escape_from_relative_base() {
+        // S1 (re-review of 48e2087): a RELATIVE workspace base (e.g. `grim
+        // status --config sub/grimoire.toml`, or an MCP `workspace`/`config`
+        // param) has finitely many components. A crafted `../..` that pops
+        // past all of them escapes even when a later `Normal` component
+        // re-spells a base name — the empty-base anchor fixed only the first
+        // pop-past-zero; failing closed on an empty pop covers the general case.
+        let base = Path::new("sub");
+        assert!(
+            resolves_outside_workspace(base, Path::new("../../sub/escape.md")),
+            "popping past every component of a relative base is an escape even when a later component re-spells the base name"
+        );
+        assert!(
+            !resolves_outside_workspace(base, Path::new("./nested/x.toml")),
+            "an in-tree relative path from a relative base must not be flagged"
         );
     }
 }

@@ -330,6 +330,114 @@ def test_dev_install_no_collision_when_declared_binding_name_differs(
     assert result.returncode == 0, result.stderr
 
 
+def test_add_declaration_after_dev_install_same_name_is_rejected(
+    grim_at, project_dir: Path
+) -> None:
+    # C2 (re-review of 48e2087, plan_local_bundles_tui_group.md): B2 guarded
+    # the dev-install/declaration collision only at `grim install <path>`
+    # time. The REVERSE order — `grim add <path>` after a dev-install with the
+    # same (kind, name) — was unguarded, so the dev record and the new
+    # declaration coexisted; a later `grim uninstall skill <name>` then
+    # undeclared the real binding (data loss). Fix: `grim add` rejects (exit
+    # 64) a declaration whose (kind, name) collides with an existing dev
+    # record, keeping the two keyspaces disjoint at BOTH creation paths.
+    (project_dir / ".claude").mkdir()
+    _write(project_dir / "grimoire.toml", "[skills]\n")
+
+    dev = project_dir / "dev-skill"
+    _write(
+        dev / "SKILL.md",
+        "---\nname: dev-skill\ndescription: Dev.\n---\n# Dev v1\n",
+    )
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "./dev-skill", "--client", "claude")
+    cfg_before = (project_dir / "grimoire.toml").read_text()
+
+    # A different local skill dir whose intrinsic name is also `dev-skill`.
+    other = project_dir / "elsewhere" / "dev-skill"
+    _write(
+        other / "SKILL.md",
+        "---\nname: dev-skill\ndescription: Would-be declaration.\n---\n# Decl\n",
+    )
+
+    result = runner.run("add", str(other), "--kind", "skill", "--no-install", check=False)
+    assert result.returncode == 64, result.stderr
+
+    cfg_after = (project_dir / "grimoire.toml").read_text()
+    assert cfg_after == cfg_before, (
+        "a declaration colliding with a dev record must be rejected, leaving "
+        f"grimoire.toml untouched:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
+    )
+
+
+def test_dev_install_name_collision_with_declared_rule_binding_is_rejected(
+    grim_at, project_dir: Path
+) -> None:
+    # T1 (re-review of 48e2087): the B2 install-side collision guard matches
+    # on (kind, name) for skill/rule/agent, but only the skill arm had
+    # coverage. A dev-install of a RULE whose stem collides with a declared
+    # rule binding must be rejected (exit 64) too.
+    (project_dir / ".claude").mkdir()
+    _write(
+        project_dir / "rules" / "foo.md",
+        "---\ndescription: Declared rule.\n---\n# Declared v1\n",
+    )
+    _write(project_dir / "grimoire.toml", '[rules]\nfoo = "./rules/foo.md"\n')
+
+    runner = _offline(grim_at(project_dir))
+    runner.run("lock")
+    runner.run("install", "--client", "claude")
+    cfg_before = (project_dir / "grimoire.toml").read_text()
+
+    # A different local rule file whose stem is also `foo`.
+    colliding = project_dir / "elsewhere" / "foo.md"
+    _write(colliding, "---\ndescription: Colliding dev rule.\n---\n# Dev copy\n")
+
+    result = runner.run("install", str(colliding), "--client", "claude", check=False)
+    assert result.returncode == 64, result.stderr
+
+    cfg_after = (project_dir / "grimoire.toml").read_text()
+    assert cfg_after == cfg_before, (
+        "a rejected dev-install rule collision must leave the declared binding "
+        f"untouched:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
+    )
+
+
+def test_add_declaration_aborts_on_unreadable_state(
+    grim_at, project_dir: Path
+) -> None:
+    # C2 fail-closed (Codex round-2): the dev-collision guard must NOT swallow
+    # a state-read error. A corrupt `.grimoire/state.json` must abort `grim
+    # add` before it writes the declaration — swallowing the error would skip
+    # the guard and re-open the data-loss path it exists to prevent. (A MISSING
+    # state file is `Ok(empty)` and still declares fine — covered by every
+    # other add test that runs without prior install state.)
+    (project_dir / ".claude").mkdir()
+    _write(project_dir / "grimoire.toml", "[skills]\n")
+    cfg_before = (project_dir / "grimoire.toml").read_text()
+
+    # Corrupt the project install-state file.
+    _write(project_dir / ".grimoire" / "state.json", "{ this is not valid json")
+
+    to_add = project_dir / "to-add"
+    _write(
+        to_add / "SKILL.md",
+        "---\nname: to-add\ndescription: Fresh.\n---\n# Fresh v1\n",
+    )
+
+    runner = _offline(grim_at(project_dir))
+    result = runner.run("add", str(to_add), "--kind", "skill", "--no-install", check=False)
+    assert result.returncode != 0, "a corrupt state file must abort add, not fail open"
+
+    cfg_after = (project_dir / "grimoire.toml").read_text()
+    assert cfg_after == cfg_before, (
+        "a fail-closed abort must leave grimoire.toml untouched (no declaration "
+        f"written):\nbefore={cfg_before!r}\nafter={cfg_after!r}"
+    )
+
+
 def test_dev_record_survives_update_prune_with_real_orphan(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

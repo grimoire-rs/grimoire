@@ -250,6 +250,11 @@ declared, so the recorded value is portable when a co-worker clones the
 repo; an absolute path is declared verbatim, and a project-scope config
 carrying one gets a warning on every subsequent command — it is not portable
 to another machine (global scope, being machine-local already, stays quiet).
+A relative path source whose `../..` chain resolves outside the workspace
+root — for example `../../shared/skill` from a monorepo — gets the same
+warning even though it stays portable: it reads a file the workspace
+boundary does not contain. See the [path-source trust
+model][path-source-trust] for the full reasoning.
 
 A bundle has no local-path form via `add`: `grim add --kind bundle
 ./bundles/x.toml` refuses (exit 64) and points you at declaring the entry in
@@ -906,6 +911,7 @@ registers the same entry — in every detected client, not just Claude Code
 [global-options]: #global-options
 [options-tui]: ./configuration.md#options-tui
 [json-mcp-parity]: ./json-interface.md#mcp-parity
+[path-source-trust]: ./stability.md#limitations-path-source-trust
 
 <!-- external -->
 [git-config]: https://git-scm.com/docs/git-config

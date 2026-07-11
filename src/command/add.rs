@@ -199,6 +199,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // Re-declaring the *same* identifier stays the pre-existing idempotent
     // overwrite. The check runs on the local clone before any write, so a
     // refusal leaves the on-disk config and lock untouched.
+    // Keep the dev-record keyspace disjoint from declared bindings (C2).
+    reject_dev_install_collision(&scope, kind, &name)?;
+
     let mut set = scope.set.clone();
     if let Some(existing) = declare(&mut set, kind, name.clone(), id.clone())
         && existing.identifier() != Some(&id)
@@ -262,6 +265,39 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// Reject a declaration whose `(kind, name)` collides with an existing
+/// `dev:true` install record.
+///
+/// A `grim install <path>` dev-install writes an install record with no
+/// declaration, keyed by the artifact's intrinsic `(kind, name)`. Declarations
+/// share that keyspace, and `grim uninstall <kind> <name>` undeclares by the
+/// same key — so if a declaration were added on top of a colliding dev record,
+/// a later uninstall would drop a binding the dev install never owned (C2, the
+/// reverse-order twin of the guard in [`crate::command::install::dev_install`]).
+/// Keeping the two keyspaces disjoint at both creation paths closes it.
+fn reject_dev_install_collision(
+    scope: &scope_resolution::ResolvedScope,
+    kind: ArtifactKind,
+    name: &str,
+) -> anyhow::Result<()> {
+    // Fail CLOSED on an unreadable/corrupt state file: swallowing the error
+    // (`.ok()`) would skip the guard and re-open the very declaration-loss path
+    // it exists to prevent. A missing state file is `Ok(empty)` (a fresh
+    // project still declares fine); only a genuine read/parse failure aborts —
+    // mirroring the mutating commands' `load_state` path.
+    let state =
+        super::grim(scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
+    let collides = state.get(kind, name).is_some_and(|record| record.dev);
+    if collides {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            CommandError::ConfigUsage(format!(
+                "'{name}' is already dev-installed as a local {kind}; run `grim uninstall {kind} {name}` or dev-install under a different name before declaring it"
+            )),
+        )));
+    }
+    Ok(())
 }
 
 /// Declare a local path source: detect the kind by shape (or honor
@@ -382,6 +418,9 @@ async fn add_path_source(
 
     // Same-name conflict guard as the registry path: re-declaring the
     // identical source is idempotent, anything else refuses loudly.
+    // Keep the dev-record keyspace disjoint from declared bindings (C2).
+    reject_dev_install_collision(scope, kind, &name)?;
+
     let mut set = scope.set.clone();
     if let Some(existing) = declare(&mut set, kind, name.clone(), declared.clone())
         && existing != declared

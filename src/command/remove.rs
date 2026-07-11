@@ -255,11 +255,51 @@ fn legacy_drop_from_lock(
 ) -> UndeclareOutcome {
     let mut lock = previous.clone();
     let mut stale = false;
+    // A direct-artifact removal on the offline legacy path cannot re-derive
+    // bundle provenance, but it must NOT drop an entry a still-declared bundle
+    // still provides (C1: any project with even one path bundle degrades the
+    // whole `effective_set` to this legacy path — see `effective_set`'s
+    // whole-call `?` — so removing a directly-declared skill that a REGISTRY
+    // bundle also provides would otherwise drop it under a freshly restamped
+    // hash, and `grim install` would never restore it). If a cached snapshot
+    // for a still-declared bundle lists the removed member, keep the lock entry
+    // and mark the lock stale so the next `grim lock` re-derives its exact
+    // provenance — honest staleness over silent omission, mirroring the
+    // non-legacy path's id-mismatch branch.
+    let provided_by_bundle = |name: &str, kind: ArtifactKind| {
+        previous.bundles.iter().any(|b| {
+            set_after.bundles.contains_key(&b.name) && b.members.iter().any(|m| m.kind == kind && m.name == name)
+        })
+    };
     match kind {
-        ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
-        ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
-        ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
-        ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
+        ArtifactKind::Skill => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.skills.retain(|a| a.name != name);
+            }
+        }
+        ArtifactKind::Rule => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.rules.retain(|a| a.name != name);
+            }
+        }
+        ArtifactKind::Agent => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.agents.retain(|a| a.name != name);
+            }
+        }
+        ArtifactKind::Mcp => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.mcp.retain(|a| a.name != name);
+            }
+        }
         ArtifactKind::Bundle => {
             // The `(repo, tag)` member-provenance pair the removed bundle
             // stamped onto its members. A registry bundle derives it from its
@@ -532,6 +572,57 @@ mod tests {
         assert!(
             note.contains("localhost:5000/acme/stack"),
             "the note names the bundle so the user knows which bundle provides it: {note}"
+        );
+    }
+
+    #[test]
+    fn legacy_remove_direct_keeps_member_a_registry_bundle_still_provides() {
+        // C1: a project with even one path bundle degrades the WHOLE
+        // effective_set to the legacy path (effective_set's whole-call `?`).
+        // Removing a directly-declared skill that a REGISTRY bundle also
+        // provides must NOT drop it under a freshly restamped hash — keep the
+        // lock entry and mark the lock honestly stale (run `grim lock`).
+        use crate::config::path_source::PathSource;
+
+        let mut prev = lock_of(vec![locked("shared")]);
+        // A registry bundle whose cached snapshot still lists `shared`.
+        prev.bundles = vec![snapshot(
+            "regb",
+            "localhost:5000/acme/stack",
+            "1",
+            &[("shared", "localhost:5000/shared:1")],
+        )];
+
+        // Declared set: direct skill `shared` + the registry bundle + an
+        // unrelated PATH bundle whose presence forces the legacy path.
+        let path = PathSource::parse("./bundles/local.toml").unwrap();
+        let mut before = set_of(
+            &[("shared", "localhost:5000/shared:1")],
+            &[("regb", "localhost:5000/acme/stack:1")],
+        );
+        before.bundles.insert(
+            "pathb".to_string(),
+            crate::config::declaration::DeclaredSource::Path(path.clone()),
+        );
+        before.invalidate_declaration_hash_cache();
+        let mut after_set = set_of(&[], &[("regb", "localhost:5000/acme/stack:1")]);
+        after_set.bundles.insert(
+            "pathb".to_string(),
+            crate::config::declaration::DeclaredSource::Path(path),
+        );
+        after_set.invalidate_declaration_hash_cache();
+
+        let out = drop_from_lock(&prev, ArtifactKind::Skill, "shared", &before, &after_set);
+
+        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["shared"],
+            "a member a still-declared registry bundle provides must survive the direct removal"
+        );
+        assert_eq!(
+            out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
+            "the restamp is skipped — the lock is honestly stale, not fresh-with-omission"
         );
     }
 

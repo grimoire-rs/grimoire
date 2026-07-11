@@ -142,7 +142,13 @@ to `grim status` (`Source` reads `path: <path> (dev)`) and is refreshed by
 `grim update` on content drift — but it is never pruned automatically;
 `grim uninstall` is the only way to drop it. Reach for `grim add <path>`
 instead when you want the source declared and shared with co-workers.
-Confirm the current flag set with `grim install --help`.
+
+A dev-install refuses (exit 64) when the local artifact's own
+`(kind, name)` — a skill's frontmatter `name`, or a rule/agent file's
+stem — already matches a binding declared in `grimoire.toml`: remove the
+declaration, or dev-install the local artifact under a different name or
+`--kind`, before retrying. Confirm the current flag set with
+`grim install --help`.
 
 ## Updating
 
