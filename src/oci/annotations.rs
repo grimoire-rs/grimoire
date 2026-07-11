@@ -112,6 +112,26 @@ pub fn deprecation_message(annotations: &BTreeMap<String, String>) -> Option<Str
         .and_then(|v| normalize_deprecated(v))
 }
 
+/// Annotation key carrying a publisher-authored replacement reference.
+///
+/// Optional, authored per kind (skill/agent `metadata.replaced-by`, rule
+/// top-level `replaced-by`, bundle TOML `replaced-by`). The value is a grim
+/// artifact reference naming the successor. Absent or whitespace-only ⇒ no
+/// replacement. Fully independent of [`DEPRECATED_ANNOTATION`]: an artifact
+/// may name a successor without being deprecated (and vice versa). Read back
+/// by the catalog (search) and `grim describe` through [`replacement_ref`].
+pub const REPLACED_BY_ANNOTATION: &str = "com.grimoire.replaced-by";
+
+/// Read the replacement reference off a manifest's annotation map, or `None`
+/// when absent or whitespace-only. Mirrors [`deprecation_message`] — the
+/// single read seam for [`REPLACED_BY_ANNOTATION`], consumed by the catalog
+/// build and `grim describe`. (Shares the trim/empty-⇒-`None` normalization.)
+pub fn replacement_ref(annotations: &BTreeMap<String, String>) -> Option<String> {
+    annotations
+        .get(REPLACED_BY_ANNOTATION)
+        .and_then(|v| normalize_deprecated(v))
+}
+
 /// An authored `repository` metadata value rejected at publish time.
 ///
 /// Raised at publish time (`grim build` / `grim release`) so a bad value
@@ -241,6 +261,9 @@ pub fn annotations_for_skill(
     if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
     }
+    if let Some(replaced_by) = fm.metadata.get("replaced-by").and_then(|v| normalize_deprecated(v)) {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
+    }
     a
 }
 
@@ -289,6 +312,12 @@ pub fn annotations_for_rule(
     {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
     }
+    if let Some(replaced_by) = string_from_extra(fm, "replaced-by")
+        .as_deref()
+        .and_then(normalize_deprecated)
+    {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
+    }
     a
 }
 
@@ -332,6 +361,9 @@ pub fn annotations_for_agent(
     }
     if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
+    if let Some(replaced_by) = fm.metadata.get("replaced-by").and_then(|v| normalize_deprecated(v)) {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
     a
 }
@@ -380,6 +412,9 @@ pub fn annotations_for_bundle(
     }
     if let Some(deprecated) = metadata.deprecated.as_deref().and_then(normalize_deprecated) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
+    if let Some(replaced_by) = metadata.replaced_by.as_deref().and_then(normalize_deprecated) {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
     a
 }
@@ -716,6 +751,7 @@ mod tests {
             description: Some("Skills and rules for Python work".to_string()),
             repository: None,
             deprecated: None,
+            replaced_by: None,
         };
         let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata, None);
         assert_eq!(a["org.opencontainers.image.title"], "python-stack");
@@ -787,6 +823,78 @@ mod tests {
         // Default (no deprecation) omits the key.
         let plain = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
         assert!(!plain.contains_key(DEPRECATED_ANNOTATION));
+    }
+
+    // ── replaced-by ──────────────────────────────────────────────────
+
+    #[test]
+    fn skill_replaced_by_metadata_becomes_annotation() {
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  replaced-by: ghcr.io/acme/skills/s2\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
+        let a = annotations_for_skill(&fm, "1.0.0", None, None);
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/skills/s2");
+        // Independent of deprecation: replaced-by without deprecated emits
+        // only the replacement key.
+        assert!(!a.contains_key(DEPRECATED_ANNOTATION));
+    }
+
+    #[test]
+    fn skill_absent_or_blank_replaced_by_omits_annotation() {
+        let blank = "---\nname: s\ndescription: d\nmetadata:\n  replaced-by: '   '\n---\n";
+        let fm = SkillFrontmatter::parse_doc(blank, Path::new("SKILL.md")).unwrap();
+        assert!(!annotations_for_skill(&fm, "1.0.0", None, None).contains_key(REPLACED_BY_ANNOTATION));
+        let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
+        assert!(!annotations_for_skill(&plain, "1.0.0", None, None).contains_key(REPLACED_BY_ANNOTATION));
+    }
+
+    #[test]
+    fn rule_replaced_by_from_extra_becomes_annotation() {
+        let doc = "---\npaths: [\"a\"]\nreplaced-by: ghcr.io/acme/rules/r2\n---\n# R\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/rules/r2");
+    }
+
+    #[test]
+    fn agent_replaced_by_metadata_becomes_annotation() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  replaced-by: ghcr.io/acme/agents/a2\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", None, None);
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/agents/a2");
+    }
+
+    #[test]
+    fn bundle_replaced_by_metadata_becomes_annotation_independent_of_deprecated() {
+        let metadata = BundleMetadata {
+            replaced_by: Some("ghcr.io/acme/bundles/stack2".to_string()),
+            ..BundleMetadata::default()
+        };
+        let a = annotations_for_bundle("stack", "1.0.0", 2, None, &metadata, None);
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/bundles/stack2");
+        assert!(
+            !a.contains_key(DEPRECATED_ANNOTATION),
+            "replaced-by does not imply deprecated"
+        );
+        // Default (no replacement) omits the key.
+        let plain = annotations_for_bundle("stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
+        assert!(!plain.contains_key(REPLACED_BY_ANNOTATION));
+    }
+
+    #[test]
+    fn replacement_ref_reads_trims_and_none_on_empty() {
+        let mut ann = BTreeMap::new();
+        assert_eq!(replacement_ref(&ann), None, "absent ⇒ None");
+        ann.insert(
+            REPLACED_BY_ANNOTATION.to_string(),
+            "  ghcr.io/acme/skills/s2  ".to_string(),
+        );
+        assert_eq!(
+            replacement_ref(&ann).as_deref(),
+            Some("ghcr.io/acme/skills/s2"),
+            "trimmed"
+        );
+        ann.insert(REPLACED_BY_ANNOTATION.to_string(), "   ".to_string());
+        assert_eq!(replacement_ref(&ann), None, "whitespace-only ⇒ None");
     }
 
     #[test]

@@ -44,23 +44,26 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 
 ## The Metadata-Location Asymmetry
 
-Where catalog metadata (`summary`, `keywords`, `repository`, `deprecated`)
-is authored differs by kind. This is the #1 authoring confusion — misplaced
-keys are not errors, they just silently never reach the catalog:
+Where catalog metadata (`summary`, `keywords`, `repository`, `deprecated`,
+`replaced-by`) is authored differs by kind. This is the #1 authoring
+confusion — misplaced keys are not errors, they just silently never reach
+the catalog:
 
-| Kind | `summary` / `keywords` / `repository` / `deprecated` live… |
+| Kind | `summary` / `keywords` / `repository` / `deprecated` / `replaced-by` live… |
 |---|---|
 | Skill | inside the `metadata:` map of `SKILL.md` frontmatter |
 | Agent | inside the `metadata:` map of the agent frontmatter |
 | Rule | at the **top level** of the rule frontmatter (not in `metadata`) |
-| MCP server | as **top-level TOML keys**, above the `[server]` table |
+| MCP server | as **top-level TOML keys**, above the `[server]` table (`replaced-by` not read for MCP) |
 | Bundle | as **top-level TOML keys**, above the member tables |
 
 In every kind, `keywords` is one comma-separated string and `repository`
 must be an `https://` URL (anything else fails the release with 65). The
 `deprecated` notice (grim 0.6.x) obeys the same per-kind location; an
 empty or whitespace-only value means *not* deprecated and emits no
-annotation — detail in [Publishing][publishing].
+annotation. `replaced-by` names the successor artifact, authored
+independently of `deprecated`; its value must parse as a reference or the
+release fails with 65 — detail in [Publishing][publishing].
 
 ## Companion: Content Craft
 

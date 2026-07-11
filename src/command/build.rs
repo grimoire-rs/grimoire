@@ -112,6 +112,7 @@ pub fn validate_and_pack(
                 tracing::warn!("{}: {warning}", path.display());
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
+            validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
             let tar = super::grim(pack_skill_dir(path))?;
             let annotations = annotations_for_skill(&fm, version, fallback_source, git);
             Ok(PackedArtifact {
@@ -150,6 +151,10 @@ pub fn validate_and_pack(
                 path,
                 crate::oci::annotations::string_from_extra(&fm, "repository").as_deref(),
             )?;
+            validate_replaced_by(
+                path,
+                crate::oci::annotations::string_from_extra(&fm, "replaced-by").as_deref(),
+            )?;
             let tar = super::grim(pack_rule_file(path))?;
             let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, fallback_source, git);
             Ok(PackedArtifact {
@@ -168,6 +173,7 @@ pub fn validate_and_pack(
                 tracing::warn!("{}: {warning}", path.display());
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
+            validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
             let tar = super::grim(pack_agent_file(path))?;
             let annotations = annotations_for_agent(&fm, version, fallback_source, git);
             Ok(PackedArtifact {
@@ -211,6 +217,21 @@ where
 fn validate_repository(path: &Path, repository: Option<&str>) -> anyhow::Result<()> {
     if let Some(url) = repository {
         super::grim(crate::oci::annotations::validate_repository_url(url).map_err(metadata_invalid(path)))?;
+    }
+    Ok(())
+}
+
+/// Publish-time gate for an authored `replaced-by` metadata value: present
+/// but not a parseable artifact reference ⇒ path-attributed DataError (65).
+/// Absent or whitespace-only ⇒ Ok. Mirrors [`validate_repository`] so a bad
+/// successor reference can never reach a registry.
+fn validate_replaced_by(path: &Path, replaced_by: Option<&str>) -> anyhow::Result<()> {
+    if let Some(value) = replaced_by.map(str::trim).filter(|v| !v.is_empty()) {
+        super::grim(
+            crate::oci::Identifier::parse(value)
+                .map(|_| ())
+                .map_err(metadata_invalid(path)),
+        )?;
     }
     Ok(())
 }
@@ -278,8 +299,10 @@ pub fn read_bundle_members(
     }
     let source = super::grim(crate::config::project_config::BundleSource::from_toml_str(&content))?;
     // Same publish-time gate as skills/rules/agents: a non-HTTPS authored
-    // repository hard-fails before anything can reach a registry.
+    // repository (and an unparseable `replaced-by`) hard-fail before
+    // anything can reach a registry.
     validate_repository(path, source.metadata.repository.as_deref())?;
+    validate_replaced_by(path, source.metadata.replaced_by.as_deref())?;
 
     let mut members = Vec::new();
     for (name, id) in &source.skills {
@@ -528,6 +551,44 @@ mod tests {
             packed.annotations["org.opencontainers.image.source"],
             "https://github.com/acme/s"
         );
+    }
+
+    #[test]
+    fn validate_and_pack_rejects_unparseable_replaced_by() {
+        // A `replaced-by` value that does not parse as an artifact reference
+        // hard-fails the build (65) before anything reaches a registry.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(
+            &dir.join("SKILL.md"),
+            "---\nname: s\ndescription: d\nmetadata:\n  replaced-by: \"not a valid ref\"\n---\n",
+        );
+        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None, None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+
+        // A well-formed fully-qualified reference is accepted and emitted.
+        let ok = tmp.path().join("s2");
+        write(
+            &ok.join("SKILL.md"),
+            "---\nname: s2\ndescription: d\nmetadata:\n  replaced-by: ghcr.io/acme/skills/s3\n---\n",
+        );
+        let packed = validate_and_pack(&ok, ArtifactKind::Skill, "1.0.0", None, None).unwrap();
+        assert_eq!(
+            packed.annotations[crate::oci::annotations::REPLACED_BY_ANNOTATION],
+            "ghcr.io/acme/skills/s3"
+        );
+    }
+
+    #[test]
+    fn read_bundle_members_rejects_unparseable_replaced_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("stack.toml");
+        write(
+            &f,
+            "replaced-by = \"not a valid ref\"\n\n[skills]\ncr = \"ghcr.io/acme/cr:1\"\n",
+        );
+        let err = read_bundle_members(&f).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
     #[test]

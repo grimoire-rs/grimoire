@@ -100,6 +100,24 @@ pub struct FetchToolArgs {
     // resolved scope's configured registries are the boundary (CWE-918).
 }
 
+/// Arguments for the `grim_describe` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DescribeToolArgs {
+    /// The artifact reference to describe: a short id (`skills/code-review`),
+    /// an alias-qualified ref (`myreg/skills/code-review`), or a fully
+    /// qualified one (`ghcr.io/acme/skills/code-review:1`). Defaults to
+    /// `latest` when no tag/digest is given.
+    #[serde(rename = "ref")]
+    pub reference: String,
+
+    /// Per-call scope selection (registry-set derivation only — describe
+    /// never touches install state).
+    #[serde(flatten, default)]
+    pub scope: ScopeToolArgs,
+    // No `registry` override — same SSRF stance as `SearchToolArgs`: the
+    // resolved scope's configured registries are the boundary (CWE-918).
+}
+
 /// Arguments for the `grim_render` tool (write tool, `--allow-writes`).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RenderToolArgs {

@@ -43,6 +43,7 @@ use crate::command::add::AddArgs;
 use crate::command::build::BuildArgs;
 use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
+use crate::command::describe::DescribeArgs;
 use crate::command::fetch::FetchArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
@@ -109,6 +110,9 @@ pub enum Command {
     Search(SearchArgs),
     /// Print an artifact's content without installing it.
     Fetch(FetchArgs),
+    /// Report an artifact's metadata (kind, annotations, tags) without
+    /// downloading its content.
+    Describe(DescribeArgs),
     /// Print the JSON Schema for grimoire.toml or publish.toml.
     Schema(SchemaArgs),
     /// Browse the registry catalog in an interactive TUI.

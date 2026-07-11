@@ -157,6 +157,39 @@ def test_search_surfaces_null_kind_for_unrecognized_manifest(
     assert entry["kind"] is None
 
 
+def test_describe_is_single_object_with_all_fields_present(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`describe` is a single flat object (no `items` envelope, no `error`
+    key); every field is always present, `null` when absent (`revision` /
+    `created` here), and `keywords`/`tags` are arrays, `annotations` a map —
+    the single-object null policy."""
+    repo = f"{unique_repo}/skills/desc"
+    make_artifact(
+        repo,
+        "skill",
+        {"desc/SKILL.md": "---\nname: desc\ndescription: d\n---\n# d\n"},
+        tag="latest",
+        annotations={"com.grimoire.replaced-by": "ghcr.io/acme/skills/desc-2"},
+    )
+    runner = grim_at(project_dir)
+
+    doc = runner.json("describe", f"{registry}/{repo}:latest")
+    assert isinstance(doc, dict)
+    assert "items" not in doc and "error" not in doc
+    for key in (
+        "ref", "digest", "kind", "name", "title", "description", "summary",
+        "version", "license", "repository", "revision", "created", "keywords",
+        "deprecated", "replaced_by", "tags", "annotations",
+    ):
+        assert key in doc, f"single-object report must always carry {key}"
+    assert doc["revision"] is None and doc["created"] is None
+    assert isinstance(doc["keywords"], list)
+    assert isinstance(doc["tags"], list)
+    assert isinstance(doc["annotations"], dict)
+    assert doc["replaced_by"] == "ghcr.io/acme/skills/desc-2"
+
+
 def test_mcp_and_cli_status_share_data_but_differ_in_bytes(
     grim_at, project_dir: Path
 ) -> None:

@@ -153,6 +153,40 @@ def test_search_exposes_repository_url_with_https_guard(
     assert legacy["repository"] is None, "non-URL source ref must be dropped"
 
 
+def test_search_surfaces_replaced_by(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`com.grimoire.replaced-by` surfaces as the JSON `replaced_by` field
+    (always present — null when the artifact names no successor)."""
+    make_artifact(
+        f"{unique_repo}/superseded",
+        "skill",
+        {"superseded/SKILL.md": "---\nname: superseded\n---\n# S\n"},
+        tag="latest",
+        annotations={"com.grimoire.replaced-by": "ghcr.io/acme/skills/successor"},
+    )
+    make_artifact(
+        f"{unique_repo}/current",
+        "skill",
+        {"current/SKILL.md": "---\nname: current\n---\n# C\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+    by_repo = {r["repo"]: r for r in rows}
+    superseded = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/superseded")
+    )
+    current = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/current")
+    )
+    assert superseded["replaced_by"] == "ghcr.io/acme/skills/successor"
+    assert current["replaced_by"] is None, "always-present null when no replacement"
+
+
 def test_search_query_miss_is_empty_array_exit_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

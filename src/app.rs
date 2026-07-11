@@ -115,6 +115,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             render(&r, format)?;
             c
         }
+        Command::Describe(args) => {
+            let (r, c) = crate::command::describe::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
         // `schema` prints a JSON Schema document, not a `Printable` report,
         // so it is wired directly like `tui` (subsystem-cli-api.md exemption).
         Command::Schema(args) => crate::command::schema::run(&args)?,

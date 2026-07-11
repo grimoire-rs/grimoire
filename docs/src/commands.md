@@ -487,7 +487,9 @@ terminal that column is truncated to fit the width; piped output and
 `--format json` keep the full description. The JSON output also carries a
 `repository` field — the artifact's authored
 [repository URL](./publishing.md#metadata-repository), or `null` when the
-artifact has none.
+artifact has none — and a `replaced_by` field — the authored
+[successor reference](./publishing.md#metadata-replaced-by), or `null` when
+none. Neither is shown in the plain table.
 
 A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
 default** — unless it is installed in the active scope (directly or via a
@@ -510,21 +512,28 @@ grim search --refresh --registry ghcr.io/acme
 install**: nothing is materialized, no state is touched. It is the CLI
 port of the MCP [`grim_fetch` tool](#mcp): canonical (as-authored) content
 by default, a `--vendor <claude|opencode|copilot>` projection, or one
-`--path <tree-path>` support file (UTF-8 text only).
+`--path <tree-path>` support file.
 
-Plain output is the **raw content payload** — exact bytes, no table, no
-added trailing newline — so it pipes:
+A `--path` file is UTF-8 text by default. A **binary** support file (e.g. a
+`logo.png`) that fits within the size limit is returned base64-encoded — the
+JSON report gains an `encoding: "base64"` field, and plain output **decodes
+it back to the raw bytes**, so a redirect round-trips byte-identical:
 
 ```sh
 grim fetch skills/code-review > SKILL.md
 grim fetch skills/code-review --path code-review/references/checklist.md
+grim fetch skills/code-review --path code-review/logo.png > logo.png   # binary, byte-identical
 grim fetch skills/code-review --format json | jq '.files[].path'
 ```
 
+Plain output is the **raw content payload** — exact bytes, no table, no
+added trailing newline — so it pipes.
+
 `--format json` emits the full fetch report: `{ref, digest, kind, name,
-vendor, path?, content, truncated?, files?, pointer?, warnings?}` (the
-MCP payload shape — empty/default fields omitted). Warnings print to
-stderr, keeping stdout a pure payload.
+vendor, path?, content, encoding?, truncated?, files?, pointer?, warnings?}`
+(the MCP payload shape — empty/default fields omitted; `encoding` is present
+only for a base64 binary `--path` file). Warnings print to stderr, keeping
+stdout a pure payload.
 
 Unlike the MCP tool — which truncates documents at 256 KiB for tool-result
 budgets — the CLI **never truncates** a printed payload. Two ceilings guard
@@ -534,6 +543,45 @@ declared layer size is checked against the 8 MiB limit *before* download
 declared size then bounds the *actual* streamed bytes — a registry that
 serves more than it declared aborts mid-transfer into a data error (exit
 65) rather than growing an unbounded body in memory.
+
+## grim describe {#describe}
+
+`grim describe <ref>` reports an artifact's **manifest-level metadata** —
+its kind, curated annotations, and tags — **without downloading its
+content**. Where [`grim fetch`](#fetch) pulls the layer to print the
+document, `describe` only resolves the reference, lists the repository's
+tags, and reads the manifest annotations, so it is a cheap way to inspect an
+artifact (or discover its available versions) before fetching or installing.
+It is the CLI port of the MCP [`grim_describe` tool](#mcp) and takes no flags
+beyond the globals.
+
+`--format json` emits a single object with every field always present
+(explicit `null` when absent; `keywords`/`tags` are `[]` when none, and
+`annotations` is the verbatim manifest annotation map):
+
+```
+{ref, digest, kind, name, title, description, summary, version, license,
+ repository, revision, created, keywords, deprecated, replaced_by, tags,
+ annotations}
+```
+
+`kind` is `null` for a foreign / non-Grimoire manifest (describe never
+hard-errors on one). The curated fields follow [`grim search`](#search)
+semantics: `repository` is kept only when the source annotation is an
+`https://` URL, `deprecated` is the deprecation notice or `null`, and
+`replaced_by` is the [successor reference](./publishing.md#metadata-replaced-by)
+or `null`. Plain output is a flat key/value table (like
+[`grim context`](#context)) with `keywords` and `tags` comma-joined.
+
+```sh
+grim describe skills/code-review
+grim describe ghcr.io/acme/skills/code-review:1.2.0 --format json | jq .tags
+```
+
+Errors follow the fetch taxonomy: a missing repository is a not-found
+failure (parity with `grim fetch`), an auth failure exits 80, an offline run
+that cannot reach the registry exits 81, and an unreachable registry exits
+69.
 
 ## grim tui {#tui}
 
@@ -866,13 +914,15 @@ down when the client closes stdin (EOF).
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. Args: scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file; a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, scope. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (`claude`/`opencode`/`copilot`) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, scope. | always |
+| `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
 The scope arguments on each tool are `global` (boolean), `config` (explicit
 `grimoire.toml` path), and `workspace` (directory to start the config
-walk-up from). `grim_fetch` and `grim_render` use them only to decide which
-registries resolve the reference — neither touches install state.
+walk-up from). `grim_fetch`, `grim_describe`, and `grim_render` use them
+only to decide which registries resolve the reference — none touches install
+state.
 
 **Registering with Claude Code** — add to `.mcp.json` in the project root
 (or register globally via `claude mcp add`):

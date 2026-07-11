@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.6
 metadata:
@@ -47,6 +47,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
+| `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |

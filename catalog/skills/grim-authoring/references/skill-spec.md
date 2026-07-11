@@ -49,6 +49,7 @@ rules and bundles, where these keys are top-level):
 | `metadata.keywords` | One comma-separated string — `review,quality`, never a YAML list |
 | `metadata.repository` | `https://` URL only; `git@…` or `http://` fails the release (exit 65) |
 | `metadata.deprecated` | Deprecation notice; non-empty marks the skill deprecated (flagged in search/TUI, warned on `add`). Empty ⇒ not deprecated |
+| `metadata.replaced-by` | Successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
 
 Full annotation mapping: [catalog metadata][pub-metadata] and
 [annotations][annotations].

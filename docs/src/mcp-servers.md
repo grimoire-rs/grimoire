@@ -271,10 +271,10 @@ than leaving a `"mcpServers": {}` husk behind.
 grim's own server is published at `ghcr.io/grimoire-rs/mcp/grim` from
 the source descriptor [`catalog/mcp/grim.toml`][catalog-mcp-grim] shown
 [above](#format), installable the same way as any third-party
-descriptor. Once registered it exposes four tools — `grim_search`,
-`grim_status`, `grim_fetch`, and (behind `--allow-writes`) `grim_render`
-— each taking the install scope as optional per-call arguments; the full
-tool table lives at [`grim mcp`](./commands.md#mcp).
+descriptor. Once registered it exposes five tools — `grim_search`,
+`grim_status`, `grim_fetch`, `grim_describe`, and (behind `--allow-writes`)
+`grim_render` — each taking the install scope as optional per-call
+arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
 
 ## Limitations {#limitations}
 
@@ -293,9 +293,10 @@ tool table lives at [`grim mcp`](./commands.md#mcp).
 - **Copilot CLI's global config skips descriptors with `${VAR}`
   references** — see [Environment references](#env-references). Every
   other client and scope still installs normally.
-- **`grim_fetch` / `grim_render` need the network even with warm blobs.**
-  grim's cache stores blobs but not manifests, so under `GRIM_OFFLINE=1`
-  (or `--offline`) a fetch fails cleanly at the manifest lookup instead of
+- **`grim_fetch` / `grim_describe` / `grim_render` need the network even
+  with warm blobs.** grim's cache stores blobs but not manifests, so under
+  `GRIM_OFFLINE=1` (or `--offline`) these fail cleanly at the manifest
+  lookup (or, for an uncached reference, the digest resolution) instead of
   serving from cache. A manifest cache for true offline fetch is a tracked
   follow-up.
 - **A custom `$OPENCODE_CONFIG` outside every known root cannot be

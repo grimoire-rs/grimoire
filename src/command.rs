@@ -13,6 +13,7 @@ pub mod build;
 pub mod command_error;
 pub mod config;
 pub mod context;
+pub mod describe;
 pub mod fetch;
 pub mod init;
 pub mod install;

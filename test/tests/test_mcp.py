@@ -188,6 +188,52 @@ def test_mcp_status_tool_returns_payload(
     )
 
 
+def test_mcp_describe_tool_matches_cli_json(
+    grim_at: Callable[[Path], GrimRunner],
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """``grim_describe`` MCP tool returns the same payload as
+    ``grim describe --format json`` for the same reference. Both route
+    through ``fetch::describe_artifact``; one source of truth. Needs the
+    network (a manifest lookup), so the server runs non-offline."""
+    repo = f"{unique_repo}/skills/mcp-desc"
+    make_artifact(
+        repo,
+        "skill",
+        {"mcp-desc/SKILL.md": "---\nname: mcp-desc\ndescription: d\n---\n# d\n"},
+        tag="latest",
+        annotations={"com.grimoire.replaced-by": "ghcr.io/acme/skills/mcp-desc-2"},
+    )
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+    ref = f"{registry}/{repo}:latest"
+
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_describe", "arguments": {"ref": ref}},
+            },
+        ],
+        offline=False,
+    )
+
+    call = responses[2]["result"]
+    assert call["isError"] is False, f"grim_describe must not error: {call!r}"
+    mcp_payload = json.loads(call["content"][0]["text"])
+    cli_payload = runner.json("describe", ref)
+    assert mcp_payload == cli_payload, "MCP grim_describe must equal CLI describe --format json"
+    assert mcp_payload["replaced_by"] == "ghcr.io/acme/skills/mcp-desc-2"
+
+
 def test_mcp_allow_writes_gates_grim_render(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path
 ) -> None:
@@ -208,7 +254,7 @@ def test_mcp_allow_writes_gates_grim_render(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
 
-    read_only = {"grim_search", "grim_status", "grim_fetch"}
+    read_only = {"grim_search", "grim_status", "grim_fetch", "grim_describe"}
 
     read_only_responses = _drive(runner, project_dir, list_request, allow_writes=False)
     read_only_names = {t["name"] for t in read_only_responses[2]["result"]["tools"]}

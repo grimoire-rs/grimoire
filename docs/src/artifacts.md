@@ -142,6 +142,25 @@ frontmatter (`user-invocable: true`, `effort: high`) in the file Claude
 Code receives; other clients never see them. The projection rules live in
 [Vendor-Specific Metadata](./vendor-metadata.md#projection-semantics).
 
+### Well-known assets — README, logo {#well-known-assets}
+
+Because a skill packs its **whole** directory tree verbatim, two conventional
+files placed beside `SKILL.md` ride along at no extra cost:
+
+- `README.md` — a human-facing readme for the artifact.
+- `logo.png` / `logo.svg` — an icon for a catalog or gallery UI.
+
+They are ordinary tree files, so they need no frontmatter and no special
+handling: they appear in the [`grim fetch`](./commands.md#fetch) `files[]`
+listing and can be pulled individually with `--path` (a binary `logo.png`
+comes back base64-encoded, decoding to the exact bytes in plain mode). This
+is a **convention, not a schema** — grim reads no meaning from these names;
+they are simply the agreed spot a tool looks for a readme or an icon.
+
+A rule follows the same convention inside its [sibling support
+directory](#rules) (`architecture-guide/README.md`,
+`architecture-guide/logo.png`), which packs into the same layer tree.
+
 ## Rules {#rules}
 
 A rule is a single Markdown file. Frontmatter is entirely optional — a

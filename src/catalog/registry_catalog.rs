@@ -169,6 +169,13 @@ pub struct CatalogEntry {
     /// `None` when not deprecated. Surfaced as the search / TUI highlight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<String>,
+    /// `com.grimoire.replaced-by`, the successor reference when the
+    /// representative tag's manifest names a replacement. `None` otherwise.
+    /// Surfaced in `grim search` and `grim describe`. (Adding this field to
+    /// the `deny_unknown_fields` on-disk shape means an older grim rejects a
+    /// cache a newer grim wrote and rebuilds it — an accepted downgrade.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
     /// Curated extra `org.opencontainers.image.*` annotations (licenses,
     /// authors, url, documentation, vendor) surfaced in the TUI detail pane.
     /// Empty when the manifest carried none of them.
@@ -743,6 +750,7 @@ impl Catalog {
             revision: None,
             created: None,
             deprecated: None,
+            replaced_by: None,
             oci: OciMeta::default(),
             latest_tag,
             version,
@@ -814,6 +822,8 @@ impl Catalog {
                 // A non-empty `com.grimoire.deprecated` marks the artifact
                 // deprecated (the single read seam normalizes/trims).
                 let deprecated = crate::oci::annotations::deprecation_message(&m.annotations);
+                // The successor reference, if the publisher named one.
+                let replaced_by = crate::oci::annotations::replacement_ref(&m.annotations);
                 // Curated standard OCI keys (license/authors/url/…) for the
                 // detail pane; absent on artifacts that don't carry them.
                 let oci = OciMeta::from_annotations(&m.annotations);
@@ -828,6 +838,7 @@ impl Catalog {
                     revision,
                     created,
                     deprecated,
+                    replaced_by,
                     oci,
                     latest_tag: Some(tag.clone()),
                     version: version.clone(),
@@ -1036,6 +1047,7 @@ mod tests {
                 revision: Some("abc123def456-dirty".to_string()),
                 created: Some("2026-06-29T12:00:00+00:00".to_string()),
                 deprecated: Some("use acme/code-review-2".to_string()),
+                replaced_by: Some("ghcr.io/acme/skills/code-review-2".to_string()),
                 oci: OciMeta {
                     licenses: Some("Apache-2.0".to_string()),
                     vendor: Some("Acme Inc".to_string()),
@@ -1074,6 +1086,11 @@ mod tests {
             e.deprecated.as_deref(),
             Some("use acme/code-review-2"),
             "deprecation message round-trips through disk"
+        );
+        assert_eq!(
+            e.replaced_by.as_deref(),
+            Some("ghcr.io/acme/skills/code-review-2"),
+            "replacement reference round-trips through disk"
         );
         assert_eq!(
             e.oci.licenses.as_deref(),
@@ -1119,6 +1136,10 @@ mod tests {
         annotations.insert("com.grimoire.keywords".to_string(), kw.to_string());
         annotations.insert("org.opencontainers.image.description".to_string(), desc.to_string());
         annotations.insert("com.grimoire.summary".to_string(), "short summary".to_string());
+        annotations.insert(
+            "com.grimoire.replaced-by".to_string(),
+            "ghcr.io/acme/skills/code-review-2".to_string(),
+        );
         annotations.insert(
             "org.opencontainers.image.source".to_string(),
             "https://github.com/acme/code-review".to_string(),
@@ -1251,6 +1272,11 @@ mod tests {
         assert_eq!(e.kind.as_deref(), Some("skill"));
         assert_eq!(e.description.as_deref(), Some("Review code."));
         assert_eq!(e.summary.as_deref(), Some("short summary"));
+        assert_eq!(
+            e.replaced_by.as_deref(),
+            Some("ghcr.io/acme/skills/code-review-2"),
+            "replacement reference read off the manifest annotation"
+        );
         assert_eq!(e.keywords, vec!["review", "quality"]);
         assert_eq!(
             e.repository_url.as_deref(),
@@ -1824,6 +1850,7 @@ mod tests {
             revision: None,
             created: None,
             deprecated: None,
+            replaced_by: None,
             oci: OciMeta::default(),
             latest_tag: Some("latest".to_string()),
             version: None,

@@ -149,6 +149,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             latest_tag: r.latest_tag,
             version: r.version,
             deprecated: r.deprecated,
+            replaced_by: r.replaced_by,
             status: r.badge,
         })
         .collect();

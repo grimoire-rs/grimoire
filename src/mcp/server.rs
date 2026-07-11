@@ -26,7 +26,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::mcp::McpArgs;
 use crate::context::Context;
 use crate::mcp::state::McpState;
-use crate::mcp::tool_args::{FetchToolArgs, RenderToolArgs, SearchToolArgs, StatusToolArgs};
+use crate::mcp::tool_args::{DescribeToolArgs, FetchToolArgs, RenderToolArgs, SearchToolArgs, StatusToolArgs};
 
 /// The MCP server handler. Cloned per request by rmcp (a cheap `Arc` bump
 /// plus the router's shared map).
@@ -110,6 +110,19 @@ impl GrimMcpServer {
         }
     }
 
+    /// Report an artifact's manifest-level metadata (kind, curated
+    /// annotations, tags) into the tool result — no content download, no
+    /// install, no state.
+    #[tool(
+        description = "Describe a Grimoire artifact — its kind, curated metadata (title, description, summary, version, license, repository, keywords, deprecation, replacement), tags, and the verbatim manifest annotation map — without downloading its content. Returns the same JSON as `grim describe --format json`. Requires network access. Scope params (`global`/`config`/`workspace`) only select which registries are consulted."
+    )]
+    async fn grim_describe(&self, Parameters(args): Parameters<DescribeToolArgs>) -> Result<String, ErrorData> {
+        match crate::mcp::describe::describe(&self.inner.ctx, &args).await {
+            Ok(report) => to_json(&report),
+            Err(e) => Err(tool_error("describe", &e)),
+        }
+    }
+
     /// Write an artifact's vendor-native files to a destination directory.
     /// Write tool — registered only when the server was launched with
     /// `--allow-writes` (see [`build_router`]).
@@ -186,7 +199,7 @@ mod tests {
     fn read_tools_always_routed() {
         for allow_writes in [false, true] {
             let router = build_router(allow_writes);
-            for tool in ["grim_search", "grim_status", "grim_fetch"] {
+            for tool in ["grim_search", "grim_status", "grim_fetch", "grim_describe"] {
                 assert!(
                     router.has_route(tool),
                     "{tool} must be routed (allow_writes={allow_writes})"

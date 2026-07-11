@@ -77,6 +77,9 @@ pub struct CatalogRow {
     /// The publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the search / TUI deprecation highlight.
     pub deprecated: Option<String>,
+    /// The successor reference when the publisher named a replacement;
+    /// `None` otherwise. Surfaced in `grim search`.
+    pub replaced_by: Option<String>,
     /// Curated extra `org.opencontainers.image.*` annotations shown in the
     /// TUI detail pane. Empty when the artifact carries none of them.
     pub oci: OciMeta,
@@ -241,6 +244,7 @@ pub async fn load_catalog(
                         revision: e.revision.clone(),
                         created: e.created.clone(),
                         deprecated: e.deprecated.clone(),
+                        replaced_by: e.replaced_by.clone(),
                         oci: e.oci.clone(),
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),

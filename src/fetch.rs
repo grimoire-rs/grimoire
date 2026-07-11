@@ -28,10 +28,13 @@
 //! `grim_render` / `grim install` as the escape hatch (a truncated doc is
 //! still useful in-context).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 
 use crate::config::ResolvedRegistry;
@@ -123,8 +126,8 @@ pub struct FetchFileEntry {
 /// The `grim_fetch` tool result payload.
 ///
 /// JSON format: `{ref, digest, kind, name, vendor, path?, content,
-/// truncated?, files?, pointer?, warnings?}` — empty/default fields are
-/// omitted.
+/// encoding?, truncated?, files?, pointer?, warnings?}` — empty/default
+/// fields are omitted.
 #[derive(Debug, Serialize)]
 pub struct FetchReport {
     /// The fully-qualified resolved reference.
@@ -141,8 +144,14 @@ pub struct FetchReport {
     /// The support-file path when one was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// The document content (canonical or projected).
+    /// The document content (canonical or projected), or the base64 of a
+    /// binary support file when [`Self::encoding`] is `"base64"`.
     pub content: String,
+    /// `"base64"` when [`Self::content`] is the base64 of a non-UTF-8
+    /// `--path` support file; omitted (UTF-8 text) otherwise. Plain mode
+    /// decodes it back to the raw bytes so a redirect round-trips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
     /// Whether `content` was truncated at [`FETCH_DOC_SIZE_LIMIT`].
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -290,6 +299,7 @@ pub async fn fetch_with_limit(
         vendor: vendor_client.map_or_else(|| "canonical".to_string(), |v| v.as_str().to_string()),
         path: path.map(str::to_string),
         content: String::new(),
+        encoding: None,
         truncated: false,
         files: Vec::new(),
         pointer: None,
@@ -313,14 +323,16 @@ pub async fn fetch_with_limit(
             };
 
             if let Some(path) = path {
-                // One support file, exact bytes (UTF-8 required).
+                // One support file: UTF-8 text verbatim, or base64 for a
+                // non-UTF-8 (binary) file within the size limit.
                 let entry = entries
                     .iter()
                     .find(|e| e.path == std::path::Path::new(path))
                     .ok_or_else(|| anyhow!("no file '{path}' in this artifact (see the files listing)"))?;
-                let (content, truncated) = entry_content(entry)?;
+                let (content, truncated, encoding) = path_content(entry)?;
                 report.content = content;
                 report.truncated = truncated;
+                report.encoding = encoding;
             } else {
                 let index = entries
                     .iter()
@@ -386,17 +398,159 @@ pub async fn fetch_with_limit(
     }
 
     // Cap whatever content shape was produced (vendor projections and
-    // descriptor documents can exceed the per-entry cap path).
-    let (content, capped) = cap_content(std::mem::take(&mut report.content), doc_limit);
-    report.content = content;
-    if capped {
-        report.truncated = true;
-    }
-    if report.truncated && !report.content.ends_with(TRUNCATION_MARKER) {
-        report.content.push_str(TRUNCATION_MARKER);
+    // descriptor documents can exceed the per-entry cap path). Base64
+    // content is never capped: a truncated base64 payload can't decode back
+    // to the original bytes, so an oversize binary errors upstream instead.
+    if report.encoding.is_none() {
+        let (content, capped) = cap_content(std::mem::take(&mut report.content), doc_limit);
+        report.content = content;
+        if capped {
+            report.truncated = true;
+        }
+        if report.truncated && !report.content.ends_with(TRUNCATION_MARKER) {
+            report.content.push_str(TRUNCATION_MARKER);
+        }
     }
     report.warnings = warnings;
     Ok(report)
+}
+
+/// The `grim describe` report: manifest-level metadata for one artifact,
+/// read without downloading the content layer.
+///
+/// A **single-object report** under the [null policy][crate]: every field is
+/// always present, serializing as an explicit `null` when absent. The two
+/// collection fields are the empty-collection form of that policy —
+/// `keywords`/`tags` are `[]` when none (mirroring `grim context`'s
+/// always-present arrays), and `annotations` is the verbatim manifest
+/// annotation map (`{}` when empty).
+#[derive(Debug, Serialize)]
+pub struct DescribeReport {
+    /// The fully-qualified resolved reference.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The resolved manifest digest.
+    pub digest: String,
+    /// The artifact kind, or `null` for a foreign / non-Grimoire manifest
+    /// (describe never hard-errors on one).
+    pub kind: Option<String>,
+    /// The artifact name (the reference's last path segment).
+    pub name: String,
+    /// `org.opencontainers.image.title`.
+    pub title: Option<String>,
+    /// `org.opencontainers.image.description`.
+    pub description: Option<String>,
+    /// `com.grimoire.summary`, the short catalog blurb.
+    pub summary: Option<String>,
+    /// `org.opencontainers.image.version`.
+    pub version: Option<String>,
+    /// `org.opencontainers.image.licenses`.
+    pub license: Option<String>,
+    /// `org.opencontainers.image.source`, kept only when it is an HTTPS
+    /// repository URL (same guard as `grim search`).
+    pub repository: Option<String>,
+    /// `org.opencontainers.image.revision` (the `--git` publish opt-in).
+    pub revision: Option<String>,
+    /// `org.opencontainers.image.created` (the `--git` publish opt-in).
+    pub created: Option<String>,
+    /// `com.grimoire.keywords` split on commas (trimmed, empties dropped);
+    /// `[]` when none.
+    pub keywords: Vec<String>,
+    /// The `com.grimoire.deprecated` message, or `null` when not deprecated.
+    pub deprecated: Option<String>,
+    /// The `com.grimoire.replaced-by` successor reference, or `null`.
+    pub replaced_by: Option<String>,
+    /// Every tag on the repository, sorted; `[]` when none / unavailable.
+    pub tags: Vec<String>,
+    /// The verbatim manifest annotation map.
+    pub annotations: BTreeMap<String, String>,
+}
+
+/// Resolve `reference` and read its manifest-level metadata — kind, curated
+/// annotations, and tags — **without downloading the content layer**. Powers
+/// the `grim describe` CLI and the MCP `grim_describe` tool.
+///
+/// Sequence: list the repository's tags, resolve the reference to a digest
+/// (a missing repository errors with the same message as `grim fetch`), then
+/// read the manifest annotations. A foreign / non-Grimoire manifest does NOT
+/// hard-error — its `kind` is `null` and the curated fields fall to their
+/// absent values.
+///
+/// # Errors
+///
+/// Reference parse failures, resolution/transport faults (their own
+/// taxonomy: offline 81, auth 80, unreachable 69, …), or a missing tag or
+/// manifest.
+pub async fn describe_artifact(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    reference: &str,
+) -> anyhow::Result<DescribeReport> {
+    let id = wrap(crate::config::resolve_reference(
+        reference,
+        &scope.registries,
+        &scope.short_id_default,
+    ))?;
+    let id = if id.tag().is_none() && id.digest().is_none() {
+        id.clone_with_tag("latest")
+    } else {
+        id
+    };
+    let name = id.name().to_string();
+
+    // Tag listing (no blob), sorted for a stable report. `None` (endpoint
+    // absent / repo has no tags) degrades to an empty list, not an error.
+    let mut tags = wrap(access.list_tags(&id.without_tag()).await)?.unwrap_or_default();
+    tags.sort();
+
+    // Resolve to a digest with `Resolve` (not `Query`): online it delegates
+    // identically, so a genuinely missing repository still errors with
+    // fetch's "not found" message (error parity). Offline, an uncached ref
+    // surfaces `offline-blocked` (81) here rather than the `Query` path's
+    // misleading "not found" — the ref may well exist, the network is just
+    // unreachable.
+    let digest = wrap(access.resolve_digest(&id, Operation::Resolve).await)?
+        .ok_or_else(|| anyhow!("reference '{id}' not found on the registry"))?;
+    let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest))
+        .map_err(|e| anyhow!("resolved digest did not pin '{id}': {e}"))?;
+
+    let manifest = wrap(access.fetch_manifest(&pinned).await)?
+        .ok_or_else(|| anyhow!("manifest for '{pinned}' not found on the registry"))?;
+
+    let a = &manifest.annotations;
+    let get = |k: &str| a.get(k).cloned();
+    let keywords = a
+        .get("com.grimoire.keywords")
+        .map(|k| {
+            k.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(DescribeReport {
+        reference: id.to_string(),
+        digest: pinned.strip_advisory().digest().to_string(),
+        // A foreign manifest yields `None` here rather than erroring.
+        kind: crate::oci::annotations::kind_from_manifest(&manifest).map(|k| k.to_string()),
+        name,
+        title: get("org.opencontainers.image.title"),
+        description: get("org.opencontainers.image.description"),
+        summary: get("com.grimoire.summary"),
+        version: get("org.opencontainers.image.version"),
+        license: get("org.opencontainers.image.licenses"),
+        // Same HTTPS guard as search: older artifacts carry a release ref here.
+        repository: get("org.opencontainers.image.source").filter(|s| s.starts_with("https://")),
+        revision: get("org.opencontainers.image.revision"),
+        created: get("org.opencontainers.image.created"),
+        keywords,
+        deprecated: crate::oci::annotations::deprecation_message(a),
+        replaced_by: crate::oci::annotations::replacement_ref(a),
+        tags,
+        annotations: a.clone(),
+    })
 }
 
 /// Project the index document for `client`; `Ok(None)` when the canonical
@@ -459,6 +613,40 @@ fn entry_content(entry: &TarEntryData) -> anyhow::Result<(String, bool)> {
             "'{}' is not UTF-8 text; use grim_render to write it to disk instead",
             entry.path.display()
         )),
+    }
+}
+
+/// Shape a `--path` support file: UTF-8 text verbatim, or base64 for a
+/// non-UTF-8 (binary) file that fits within the size limit. Returns
+/// `(content, truncated, encoding)` where `encoding` is `Some("base64")`
+/// only for the binary case.
+///
+/// A binary file large enough to be truncated by the layer/doc cap keeps
+/// erroring: a base64 of a prefix can't round-trip back to the original
+/// bytes, so partial binaries are refused rather than silently corrupted.
+///
+/// # Errors
+///
+/// A non-UTF-8 file that exceeds the size limit (its bytes were truncated).
+fn path_content(entry: &TarEntryData) -> anyhow::Result<(String, bool, Option<String>)> {
+    match std::str::from_utf8(&entry.bytes) {
+        Ok(s) => Ok((s.to_string(), entry.truncated, None)),
+        // The cap cut a multi-byte character mid-code-point; the valid
+        // prefix is text (matches `entry_content`'s tolerance).
+        Err(e) if entry.truncated && entry.bytes.len() - e.valid_up_to() < 4 => Ok((
+            String::from_utf8_lossy(&entry.bytes[..e.valid_up_to()]).into_owned(),
+            true,
+            None,
+        )),
+        // A truncated (oversize) binary can't round-trip from a prefix.
+        Err(_) if entry.truncated => Err(anyhow!(
+            "'{}' is binary and exceeds the {}-byte size limit; use grim install to write it to disk",
+            entry.path.display(),
+            FETCH_DOC_SIZE_LIMIT
+        )),
+        // Non-UTF-8 within the size limit: base64 the exact bytes so a plain
+        // `grim fetch … --path x > file` redirect round-trips byte-identical.
+        Err(_) => Ok((BASE64.encode(&entry.bytes), false, Some("base64".to_string()))),
     }
 }
 
@@ -773,6 +961,110 @@ mod tests {
         assert_eq!(full.content, body);
     }
 
+    /// Push a single-layer artifact carrying `annotations`, tagged `latest`
+    /// plus any `extra_tags`, so the describe read path sees a real manifest
+    /// and tag list.
+    async fn publish_annotated(
+        reg: &MemoryRegistry,
+        reference: &str,
+        annotations: &[(&str, &str)],
+        extra_tags: &[&str],
+    ) {
+        use crate::oci::access::OciAccess as _;
+        let id = Identifier::parse(reference).unwrap();
+        let blob = tar_of(&[("x/SKILL.md", b"# x\n")]);
+        let digest = reg.push_blob(&id, &blob).await.unwrap();
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![Descriptor {
+                digest,
+                media_type: "application/vnd.grimoire.content.v1.tar".to_string(),
+                size: blob.len() as u64,
+            }],
+            annotations: annotations
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        let mdigest = reg.push_manifest(&id, &manifest).await.unwrap();
+        reg.put_tag(&id, "latest", &mdigest).await.unwrap();
+        for tag in extra_tags {
+            reg.put_tag(&id, tag, &mdigest).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_reports_all_curated_fields_and_sorted_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish_annotated(
+            &reg,
+            "test.registry/acme/skills/demo:latest",
+            &[
+                (KIND_ANNOTATION, "skill"),
+                ("org.opencontainers.image.title", "demo"),
+                ("org.opencontainers.image.description", "Demo skill."),
+                ("com.grimoire.summary", "terse blurb"),
+                ("org.opencontainers.image.version", "1.2.0"),
+                ("org.opencontainers.image.licenses", "Apache-2.0"),
+                ("org.opencontainers.image.source", "https://github.com/acme/demo"),
+                ("org.opencontainers.image.revision", "abc123-dirty"),
+                ("org.opencontainers.image.created", "2026-06-29T12:00:00+00:00"),
+                ("com.grimoire.keywords", "review, quality"),
+                ("com.grimoire.deprecated", "use acme/demo-2"),
+                ("com.grimoire.replaced-by", "ghcr.io/acme/skills/demo-2"),
+            ],
+            &["1.2.0", "1.0.0"],
+        )
+        .await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let d = describe_artifact(&scope, &access, "test.registry/acme/skills/demo:latest")
+            .await
+            .expect("describe");
+        assert_eq!(d.kind.as_deref(), Some("skill"));
+        assert_eq!(d.name, "demo");
+        assert_eq!(d.title.as_deref(), Some("demo"));
+        assert_eq!(d.description.as_deref(), Some("Demo skill."));
+        assert_eq!(d.summary.as_deref(), Some("terse blurb"));
+        assert_eq!(d.version.as_deref(), Some("1.2.0"));
+        assert_eq!(d.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(d.repository.as_deref(), Some("https://github.com/acme/demo"));
+        assert_eq!(d.revision.as_deref(), Some("abc123-dirty"));
+        assert_eq!(d.created.as_deref(), Some("2026-06-29T12:00:00+00:00"));
+        assert_eq!(d.keywords, vec!["review", "quality"], "split + trimmed");
+        assert_eq!(d.deprecated.as_deref(), Some("use acme/demo-2"));
+        assert_eq!(d.replaced_by.as_deref(), Some("ghcr.io/acme/skills/demo-2"));
+        assert_eq!(d.tags, vec!["1.0.0", "1.2.0", "latest"], "tags sorted");
+        assert!(d.digest.starts_with("sha256:"));
+        // The verbatim annotation map is carried whole.
+        assert_eq!(d.annotations["com.grimoire.replaced-by"], "ghcr.io/acme/skills/demo-2");
+    }
+
+    #[tokio::test]
+    async fn describe_bare_foreign_manifest_nulls_kind_not_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        // No grimoire/OCI annotations at all — a foreign manifest.
+        publish_annotated(&reg, "test.registry/acme/misc/foreign:latest", &[], &[]).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let d = describe_artifact(&scope, &access, "test.registry/acme/misc/foreign:latest")
+            .await
+            .expect("describe must not hard-error on a foreign manifest");
+        assert!(d.kind.is_none(), "foreign manifest ⇒ null kind");
+        assert!(d.title.is_none());
+        assert!(d.description.is_none());
+        assert!(d.summary.is_none());
+        assert!(d.deprecated.is_none());
+        assert!(d.replaced_by.is_none());
+        assert!(d.keywords.is_empty(), "no keywords ⇒ empty array");
+        assert_eq!(d.tags, vec!["latest"]);
+        assert_eq!(d.name, "foreign");
+    }
+
     #[test]
     fn cap_content_is_char_boundary_safe() {
         // A multi-byte char straddling the cap must not split.
@@ -786,6 +1078,75 @@ mod tests {
         let (untouched, truncated) = cap_content("short".to_string(), FETCH_DOC_SIZE_LIMIT);
         assert!(!truncated);
         assert_eq!(untouched, "short");
+    }
+
+    #[tokio::test]
+    async fn fetch_path_base64_encodes_binary_and_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        // A non-UTF-8 (PNG-signature) support file rides the layer tree.
+        let logo: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe];
+        let blob = tar_of(&[("demo/SKILL.md", b"# d\n"), ("demo/assets/logo.png", logo)]);
+        publish(&reg, "test.registry/acme/skills/demo:latest", "skill", &blob).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let report = fetch_with_limit(
+            &scope,
+            &access,
+            "test.registry/acme/skills/demo:latest",
+            None,
+            Some("demo/assets/logo.png"),
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect("fetch binary path");
+        assert_eq!(report.encoding.as_deref(), Some("base64"));
+        assert!(!report.truncated);
+        // The content is the base64 of the exact bytes and decodes back.
+        assert_eq!(report.content, BASE64.encode(logo));
+        assert_eq!(BASE64.decode(report.content.as_bytes()).unwrap(), logo);
+
+        // A UTF-8 support file is unchanged (no encoding field).
+        let text = fetch_with_limit(
+            &scope,
+            &access,
+            "test.registry/acme/skills/demo:latest",
+            None,
+            Some("demo/SKILL.md"),
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect("fetch text path");
+        assert_eq!(text.content, "# d\n");
+        assert!(text.encoding.is_none(), "UTF-8 content carries no encoding field");
+    }
+
+    #[test]
+    fn path_content_errors_on_oversize_binary_and_keeps_text_prefix() {
+        // A truncated (oversize) binary is refused — a base64 of a prefix
+        // would not round-trip.
+        // A leading invalid start byte with a long invalid tail (not a cut
+        // multi-byte char), so it is classified as binary, not truncated text.
+        let binary = TarEntryData {
+            path: PathBuf::from("big.bin"),
+            size: FETCH_DOC_SIZE_LIMIT as u64 * 2,
+            bytes: vec![0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa],
+            truncated: true,
+        };
+        let err = path_content(&binary).expect_err("oversize binary must error");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+
+        // A non-truncated binary within the limit base64-encodes.
+        let ok = TarEntryData {
+            path: PathBuf::from("logo.png"),
+            size: 3,
+            bytes: vec![0x89, 0x50, 0x4e],
+            truncated: false,
+        };
+        let (content, truncated, encoding) = path_content(&ok).expect("binary within limit");
+        assert_eq!(encoding.as_deref(), Some("base64"));
+        assert!(!truncated);
+        assert_eq!(BASE64.decode(content.as_bytes()).unwrap(), vec![0x89, 0x50, 0x4e]);
     }
 
     #[test]

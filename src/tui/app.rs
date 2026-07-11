@@ -3133,6 +3133,7 @@ mod tests {
                 revision: None,
                 created: None,
                 deprecated: None,
+                replaced_by: None,
                 oci: crate::catalog::OciMeta::default(),
                 latest_tag: Some("1.2.3".to_string()),
                 version: Some("1.2.3".to_string()),

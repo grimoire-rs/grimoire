@@ -64,7 +64,7 @@ One row object per item inside `{"items": [...]}`:
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
 | `status` | `{kind, name, source, pinned, state, outputs}` — `pinned` null until locked; `outputs` is `[{client, path}]` (see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action}` — `old` null for a first lock, `new` null for a pruned row | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
-| `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, status}` — `kind` is `null` when the catalog row's manifest declares none; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
+| `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value}` | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
 | `publish` | `{ref, kind, digest, tags, status}` + sibling envelope key `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
@@ -91,16 +91,19 @@ no kind at all, in which case `kind` is `null`.
 | `config set` / `unset` / `registry add` / `rm` / `use` | `{action, key, value, scope}` | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default` |
 | `config registry show` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, state_path, grim_home, offline, offline_source, clients, registries, default_registry}` — see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null |
-| `fetch` | `{ref, digest, kind, name, vendor, path?, content, truncated?, files?, pointer?, warnings?}` — see [grim fetch](#fetch) | — |
+| `describe` | `{ref, digest, kind, name, title, description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
+| `fetch` | `{ref, digest, kind, name, vendor, path?, content, encoding?, truncated?, files?, pointer?, warnings?}` — see [grim fetch](#fetch) | — |
 
 ### The fetch exception {#fetch}
 
 `grim fetch` shares its JSON payload with the MCP `grim_fetch` tool, and
 that shape predates the [null policy](#null-policy): empty or default
-fields (`path`, `truncated`, `files`, `pointer`, `warnings`) are
-**omitted**, not null. Treat a missing key as its default. Its plain mode
-is the raw `content` payload (pipe-able, no report at all) — the one
-payload-plain command; see [grim fetch][commands-fetch].
+fields (`path`, `encoding`, `truncated`, `files`, `pointer`, `warnings`)
+are **omitted**, not null. Treat a missing key as its default. `encoding`
+is present only as `"base64"`, when `content` is the base64 of a non-UTF-8
+`--path` support file (plain mode decodes it back to the raw bytes). Its
+plain mode is the raw `content` payload (pipe-able, no report at all) — the
+one payload-plain command; see [grim fetch][commands-fetch].
 
 ## The error document {#error-document}
 
@@ -208,6 +211,7 @@ can ship in a minor release.
 [commands-status]: ./commands.md#status
 [commands-search]: ./commands.md#search
 [commands-context]: ./commands.md#context
+[commands-describe]: ./commands.md#describe
 [commands-fetch]: ./commands.md#fetch
 [commands-mcp]: ./commands.md#mcp
 [commands-config-json]: ./commands.md#config-json

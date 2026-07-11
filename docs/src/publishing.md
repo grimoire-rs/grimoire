@@ -57,7 +57,7 @@ transformed. A rule with no support directory packs to exactly the single
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
 every match in a table. To make a result legible and findable, an artifact
-carries five pieces of catalog metadata, all optional:
+carries six pieces of catalog metadata, all optional:
 
 | Field | Annotation | Purpose |
 |-------|-----------|---------|
@@ -66,6 +66,7 @@ carries five pieces of catalog metadata, all optional:
 | `description` | `org.opencontainers.image.description` | The full description. |
 | `repository` | `org.opencontainers.image.source` | HTTPS URL of the artifact's source repository ([details](#metadata-repository)). |
 | `deprecated` | `com.grimoire.deprecated` | A deprecation notice; marks the package deprecated and flags it everywhere ([details](#metadata-deprecated)). |
+| `replaced-by` | `com.grimoire.replaced-by` | A reference naming the successor artifact ([details](#metadata-replaced-by)). |
 
 `grim search` shows the `summary` in place of the `description`, truncated to
 fit the terminal; the full description stays in `--format json` and in piped
@@ -243,6 +244,39 @@ manifest, every surface reads it back without unpacking the artifact:
 
 A re-release with the notice removed clears the deprecation — the annotation
 simply stops being emitted.
+
+### Naming a replacement {#metadata-replaced-by}
+
+`replaced-by` points a consumer at the successor artifact. It is authored
+independently of `deprecated` — a package can name a replacement without
+being deprecated (a rename that keeps working), or be deprecated with no
+single successor — so the two keys are emitted and read separately. The
+value must parse as an artifact reference; `grim build` / `grim release`
+reject an unparseable value with exit 65, the same gate as the repository
+URL. An empty or whitespace-only value emits no annotation.
+
+```yaml
+# code-review/SKILL.md (skill / agent: under the metadata map)
+metadata:
+  replaced-by: ghcr.io/acme/skills/code-review-2
+```
+
+```yaml
+# rust-style.md (rule: top-level, like summary)
+replaced-by: ghcr.io/acme/rules/rust-style-2
+```
+
+```toml
+# python-stack.toml (bundle: top-level)
+replaced-by = "ghcr.io/acme/bundles/python-stack-2"
+```
+
+The reference rides the `com.grimoire.replaced-by` annotation on the
+manifest, so [`grim search`](./commands.md#search) and
+[`grim describe`](./commands.md#describe) expose it as a `replaced_by` field
+in `--format json` (`null` when none). It pairs naturally with `deprecated`:
+deprecate the old package and name its replacement, and a consumer sees both
+the notice and where to go next.
 
 ## Validate before you push
 

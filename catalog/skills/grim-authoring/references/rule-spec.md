@@ -32,6 +32,7 @@ round-trip.
 | `keywords` | string | **Top-level** — comma-separated tags (a YAML list is tolerated and comma-joined, but write the string form: it is the only shape valid in every kind) |
 | `repository` | string | **Top-level** — `https://` source URL, hard-gated at release |
 | `deprecated` | string | **Top-level** — deprecation notice; non-empty marks the rule deprecated (flagged in search/TUI, warned on `add`) |
+| `replaced-by` | string | **Top-level** — successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
 | `metadata` | string→string map | Vendor extensions only (e.g. `copilot.exclude-agent`) |
 
 ## The Asymmetry

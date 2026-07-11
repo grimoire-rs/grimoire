@@ -3,7 +3,9 @@
 """`grim fetch` acceptance tests — use != install, payload-plain stdout."""
 from __future__ import annotations
 
+import base64
 import json
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -94,6 +96,56 @@ def test_fetch_bundle_vendor_and_unknown_vendor_error(
     ref = _publish_skill(registry)
     result = runner.plain("fetch", ref, "--vendor", "nonesuch", check=False)
     assert result.returncode != 0
+
+
+# A minimal but non-UTF-8 payload (PNG signature + a 0xFF byte).
+LOGO_BYTES = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE])
+
+
+def _publish_skill_with_logo(registry: str) -> str:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    repo = f"{ns}/skills/logo-demo"
+    make_artifact(
+        repo,
+        "skill",
+        {
+            "logo-demo/SKILL.md": "---\nname: logo-demo\ndescription: d.\n---\n# Logo\n",
+            "logo-demo/assets/logo.png": LOGO_BYTES,
+        },
+        tag="latest",
+    )
+    return f"{registry}/{repo}:latest"
+
+
+def test_fetch_binary_path_is_base64_and_round_trips(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """A binary --path support file comes back base64 (`encoding: "base64"`)
+    in JSON, and plain output decodes back to the exact bytes so a stdout
+    redirect round-trips byte-identical."""
+    ref = _publish_skill_with_logo(registry)
+    runner = grim_at(project_dir)
+
+    doc = runner.json("fetch", ref, "--path", "logo-demo/assets/logo.png")
+    assert doc["encoding"] == "base64"
+    assert base64.b64decode(doc["content"]) == LOGO_BYTES
+    assert doc.get("truncated") is not True
+
+    # Plain redirect (binary): capture stdout to a file and compare bytes.
+    out_file = project_dir / "logo.png"
+    with out_file.open("wb") as fh:
+        subprocess.run(
+            [str(runner.binary), "fetch", ref, "--path", "logo-demo/assets/logo.png"],
+            stdout=fh,
+            env=runner.env,
+            cwd=str(project_dir),
+            check=True,
+        )
+    assert out_file.read_bytes() == LOGO_BYTES, "redirect round-trips byte-identical"
+
+    # A UTF-8 support file is unchanged — no encoding field.
+    text_doc = runner.json("fetch", ref, "--path", "logo-demo/SKILL.md")
+    assert "encoding" not in text_doc
 
 
 def test_fetch_large_content_is_not_truncated(

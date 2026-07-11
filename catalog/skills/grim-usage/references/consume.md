@@ -194,8 +194,15 @@ Two read-only companions:
 - `grim fetch <ref> [--vendor …] [--path …]` prints an artifact's
   content without installing (use != install). Plain output is the raw
   payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
-  adds the digest, kind, and a `files` listing. Confirm flags with
+  adds the digest, kind, and a `files` listing. A binary `--path` file
+  (e.g. `logo.png`) round-trips through a redirect. Confirm flags with
   `grim fetch --help`.
+- `grim describe <ref>` reports an artifact's manifest-level metadata —
+  kind, curated annotations, tags, and the verbatim annotation map —
+  *without* downloading its content, so it is the cheap way to inspect a
+  package or discover its versions. `--format json` is a single object;
+  plain output is a flat key/value table. Confirm with `grim describe
+  --help`.
 
 ## Removing
 

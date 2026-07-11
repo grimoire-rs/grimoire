@@ -264,9 +264,12 @@ TUI: `summary`, `keywords`, `description`, `repository`. A fifth field,
 `deprecated` (grim 0.6.x), retires a package *without* unpublishing it —
 a non-empty notice keeps it resolving and installing while grim flags it
 in `grim search`, the TUI, and on `grim add`; an empty or whitespace
-value means not deprecated. You author them all in the source file
-itself, so a release always publishes what the file says. Two invariants
-hold for every kind:
+value means not deprecated. A sixth, `replaced-by`, names the successor
+artifact (authored independently of `deprecated`) — surfaced as
+`replaced_by` in `grim search` / `grim describe --format json`; the value
+must parse as a reference or the release fails with exit 65. You author
+them all in the source file itself, so a release always publishes what the
+file says. Two invariants hold for every kind:
 
 - `keywords` is a single comma-separated **string** (`rust,lint`), never
   a YAML/TOML list — an OCI annotation value is a string.

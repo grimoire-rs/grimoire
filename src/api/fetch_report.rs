@@ -14,6 +14,8 @@
 
 use std::io::{self, Write};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 
 use crate::cli::printer::Printable;
@@ -26,7 +28,13 @@ pub struct FetchCliReport(pub FetchReport);
 
 impl Printable for FetchCliReport {
     /// Raw content bytes — no trailing newline is added (payload purity).
+    /// A base64-encoded binary support file decodes back to its exact bytes
+    /// so `grim fetch ref --path x/logo.png > logo.png` round-trips.
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
+        if self.0.encoding.as_deref() == Some("base64") {
+            let bytes = BASE64.decode(self.0.content.as_bytes()).map_err(io::Error::other)?;
+            return w.write_all(&bytes);
+        }
         w.write_all(self.0.content.as_bytes())
     }
 
@@ -49,6 +57,7 @@ mod tests {
             vendor: "canonical".to_string(),
             path: None,
             content: content.to_string(),
+            encoding: None,
             truncated: false,
             files: Vec::new(),
             pointer: None,
@@ -61,6 +70,20 @@ mod tests {
         let mut buf = Vec::new();
         report("# Demo").print_plain(&mut buf).unwrap();
         assert_eq!(buf, b"# Demo", "no added newline, no table");
+    }
+
+    #[test]
+    fn plain_decodes_base64_binary_to_raw_bytes() {
+        // A base64-encoded binary support file decodes back byte-identical
+        // in plain mode so a stdout redirect round-trips.
+        let raw: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x00, 0xff];
+        let mut r = report("");
+        r.0.content = BASE64.encode(raw);
+        r.0.encoding = Some("base64".to_string());
+        r.0.path = Some("demo/logo.png".to_string());
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        assert_eq!(buf, raw, "base64 decodes back to the exact bytes");
     }
 
     #[test]

@@ -373,6 +373,10 @@ pub struct BundleMetadata {
     /// Deprecation notice → `com.grimoire.deprecated`. A non-empty message
     /// marks the bundle deprecated; emitted only when present.
     pub deprecated: Option<String>,
+    /// Replacement reference → `com.grimoire.replaced-by`. Names the
+    /// successor artifact; emitted only when present, independent of
+    /// [`Self::deprecated`].
+    pub replaced_by: Option<String>,
 }
 
 /// A parsed bundle source: validated members plus catalog metadata.
@@ -430,6 +434,8 @@ struct RawBundleSource {
     repository: Option<String>,
     #[serde(default)]
     deprecated: Option<String>,
+    #[serde(default, rename = "replaced-by")]
+    replaced_by: Option<String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_member_map`]
@@ -451,6 +457,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
             description: raw.description,
             repository: raw.repository,
             deprecated: raw.deprecated,
+            replaced_by: raw.replaced_by,
         },
     })
 }

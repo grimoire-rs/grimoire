@@ -57,6 +57,9 @@ pub struct SearchEntry {
     /// `None` otherwise. Surfaced as a comma-suffixed `deprecated` on the plain
     /// `Status` cell and a dedicated `deprecated` field in JSON.
     pub deprecated: Option<String>,
+    /// The successor reference when the publisher named a replacement; `None`
+    /// otherwise. JSON-only — never shown as its own plain-table column.
+    pub replaced_by: Option<String>,
     /// How the repository relates to the current scope.
     pub status: StatusBadge,
 }
@@ -64,7 +67,7 @@ pub struct SearchEntry {
 impl Serialize for SearchEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("SearchEntry", 11)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 12)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("summary", &self.summary)?;
@@ -75,6 +78,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("revision", &self.revision)?;
         s.serialize_field("created", &self.created)?;
         s.serialize_field("deprecated", &self.deprecated)?;
+        s.serialize_field("replaced_by", &self.replaced_by)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
     }
@@ -183,6 +187,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: None,
             deprecated: None,
+            replaced_by: None,
             status,
         }
     }
@@ -236,6 +241,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: Some("2.1.0".to_string()),
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -260,6 +266,7 @@ mod tests {
             latest_tag: Some("stable".to_string()),
             version: None,
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -281,6 +288,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: None,
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -303,6 +311,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: None,
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -327,6 +336,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: None,
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -349,6 +359,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: Some("1.2.0".to_string()),
             deprecated: None,
+            replaced_by: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -445,6 +456,30 @@ mod tests {
             .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("deprecated"), "non-deprecated row is unmarked");
+    }
+
+    #[test]
+    fn json_carries_replaced_by_plain_table_does_not() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.replaced_by = Some("ghcr.io/acme/skills/x2".to_string());
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
+        // The full 12-field object still round-trips (manual Serialize count).
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 12);
+        // Absent ⇒ explicit null, key always present for stable consumers.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v["items"][0]["replaced_by"].is_null());
+        // The plain table stays five columns — no replacement leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("x2"), "plain table unchanged");
     }
 
     #[test]

@@ -82,6 +82,8 @@ impl IndexPackage {
             revision: None,
             created: None,
             deprecated: None,
+            // The index phone book carries no replacement metadata.
+            replaced_by: None,
             // The index phone book carries no OCI image annotations.
             oci: crate::catalog::registry_catalog::OciMeta::default(),
             // Phone-book contract: no version data in the index; tags are
