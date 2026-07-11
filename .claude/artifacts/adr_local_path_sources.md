@@ -124,6 +124,15 @@ trades compile-time safety for parser convenience.
    local bundles with REGISTRY members.** Relative member refs in a local
    bundle are rejected (no registry identity to resolve against). Path
    members and `[mcp]` path values → error 65, tracked as follow-ups.
+   **Local-bundle lock wire (recorded 2026-07-11):** a local bundle has no
+   registry `repo`/`tag`/`pinned`, so `LockedBundle` becomes a source
+   discriminant — `Registry { repo, tag, pinned }` XOR `Path { path, hash }`
+   — via a `RawLockedBundle` + `TryFrom` XOR validator that mirrors
+   `LockedSource` / `RawLockedArtifact` (sub-decision 1's pattern). The
+   registry arm serializes byte-identical to the pre-change struct, so
+   registry-only locks and the frozen declaration-hash corpus stay green.
+   Members ride the unchanged registry expand/fetch/install path. Full
+   design + phasing: [`plan_local_bundles_tui_group.md`](../state/plans/plan_local_bundles_tui_group.md).
 6. **Dev-install = `grim install <path>`** writing a normal install record
    marked `dev: true`; `prune_orphans` never reaps dev records; `status`
    lists them, `update` re-packs + re-renders them on drift, `uninstall`
@@ -216,3 +225,4 @@ group → tests/docs/catalog). See plan artifact.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-11 | MH + Claude | Initial accepted version |
+| 2026-07-11 | MH + Claude | Record local-bundle `LockedBundle` source-discriminant wire (sub-decision 5); link implementation plan for the two deferred v1 items (local bundles, TUI Local group) — implement, not defer |
