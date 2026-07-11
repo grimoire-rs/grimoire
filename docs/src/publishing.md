@@ -53,6 +53,38 @@ verbatim for every [client](./concepts.md#clients) — only the index is ever
 transformed. A rule with no support directory packs to exactly the single
 `my-rule.md` it always did.
 
+### Agents with a README and logo {#agent-companions}
+
+An [agent](./agents.md) is a single `.md`, but it may carry a `README.md` and a
+`logo.png`/`logo.svg` from a sibling directory sharing its stem — the same
+discovery as a rule's support directory, restricted to those well-known files:
+
+```
+agents/
+  code-reviewer.md        # the index you pass to build/release
+  code-reviewer/          # optional companion directory, same stem
+    README.md             # human-facing readme (shown by catalog UIs)
+    logo.png              # optional icon
+```
+
+Only `README.md`, `logo.png`, and `logo.svg` ride the layer (any other file in
+the directory is ignored, so an agent never becomes an accidental multi-file
+artifact). They pack under `code-reviewer/…`, so a consumer pulls them with the
+same path shape as a skill or rule:
+
+```sh
+grim fetch ghcr.io/acme/code-reviewer:1.0.0 --path code-reviewer/README.md
+```
+
+The companions are **not** installed to a client — an agent installs as its
+lone `.md` file; they exist for `grim fetch` and catalog UIs. An agent with no
+companion directory packs to exactly the single `code-reviewer.md` it always
+did.
+
+MCP servers and bundles publish a single JSON layer with no file tree, so they
+carry no README/logo companion — a catalog UI reads their `description` and
+`summary` from [`grim describe`](./commands.md#describe) instead.
+
 ## Catalog metadata {#metadata}
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list

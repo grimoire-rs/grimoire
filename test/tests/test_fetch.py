@@ -148,6 +148,54 @@ def test_fetch_binary_path_is_base64_and_round_trips(
     assert "encoding" not in text_doc
 
 
+AGENT_DOC = (
+    "---\n"
+    "name: fetch-agent\n"
+    "description: Demo agent for fetch tests.\n"
+    "---\n"
+    "You review code.\n"
+)
+AGENT_README = "# Fetch Agent\n\nWhat this agent does.\n"
+
+
+def _publish_agent_with_readme(registry: str) -> str:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    repo = f"{ns}/agents/fetch-agent"
+    # An agent's well-known README rides the layer tree under `<name>/`,
+    # exactly like a skill's — a non-skill kind shipping a README.
+    make_artifact(
+        repo,
+        "agent",
+        {
+            "fetch-agent.md": AGENT_DOC,
+            "fetch-agent/README.md": AGENT_README,
+        },
+        tag="latest",
+    )
+    return f"{registry}/{repo}:latest"
+
+
+def test_fetch_agent_readme_listed_and_pullable(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """A non-skill (agent) kind can ship a README that rides the layer tree:
+    it shows in `files[]` and pulls with `--path <name>/README.md`, the same
+    path shape every tree-backed kind uses. This is the contract the VS Code
+    extension's details tab relies on."""
+    ref = _publish_agent_with_readme(registry)
+    runner = grim_at(project_dir)
+
+    doc = runner.json("fetch", ref)
+    assert doc["kind"] == "agent"
+    paths = [f["path"] for f in doc["files"]]
+    assert "fetch-agent.md" in paths
+    assert "fetch-agent/README.md" in paths
+
+    result = runner.plain("fetch", ref, "--path", "fetch-agent/README.md")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == AGENT_README
+
+
 def test_fetch_large_content_is_not_truncated(
     grim_at, project_dir: Path, registry: str
 ) -> None:

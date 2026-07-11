@@ -160,6 +160,41 @@ def test_release_with_kind_agent_publishes_agent_kind(
     )
 
 
+def test_release_agent_packs_wellknown_readme_companion(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``grim release --kind agent`` packs a `README.md` from the sibling
+    companion directory (`agents/<name>/`) into the layer tree, so it round-trips
+    through `grim fetch --path <name>/README.md` — the same path shape a skill
+    or rule uses. A stray file in that directory is NOT packed (allowlist only)."""
+    agent_file = project_dir / "agents" / "my-agent.md"
+    _write(agent_file, _agent_doc("my-agent"))
+    readme = "# my-agent\n\nWhat this agent does and how to use it.\n"
+    _write(project_dir / "agents" / "my-agent" / "README.md", readme)
+    # A non-well-known sibling file must stay out of the layer.
+    _write(project_dir / "agents" / "my-agent" / "notes.txt", "scratch\n")
+
+    repo_path = f"{unique_repo}/my-agent"
+    repo = f"{registry}/{repo_path}"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0")
+    assert out["pushed"] is True
+
+    # files[] lists the index and the README companion, not the stray file.
+    doc = runner.json("fetch", f"{repo}:1.0.0")
+    assert doc["kind"] == "agent"
+    paths = [f["path"] for f in doc["files"]]
+    assert "my-agent.md" in paths
+    assert "my-agent/README.md" in paths
+    assert "my-agent/notes.txt" not in paths, "only well-known companions ride the layer"
+
+    # The README pulls back byte-identical via the uniform `<name>/README.md` path.
+    result = runner.plain("fetch", f"{repo}:1.0.0", "--path", "my-agent/README.md")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == readme
+
+
 # ---------------------------------------------------------------------------
 # b. bare agent-shaped .md WITHOUT --kind → rule + stderr warning
 # ---------------------------------------------------------------------------

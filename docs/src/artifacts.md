@@ -161,6 +161,22 @@ A rule follows the same convention inside its [sibling support
 directory](#rules) (`architecture-guide/README.md`,
 `architecture-guide/logo.png`), which packs into the same layer tree.
 
+An [agent](#agents) — a single `.md` file — carries the same well-known
+files from a sibling directory sharing its stem (`agents/<name>/README.md`,
+`agents/<name>/logo.png`, `agents/<name>/logo.svg`). Unlike a rule's support
+directory, an agent packs **only** those allowlisted files, never an arbitrary
+tree: the agent's identity stays the standalone `<name>.md`, and the companions
+ride the layer purely so a catalog UI can show them. They land under
+`<name>/…` in the layer, so the retrieval path is identical for every tree-backed
+kind — `grim fetch <ref> --path <name>/README.md`. The companions are not
+installed to a client (an agent installs as its lone `.md`); they exist for
+`grim fetch`/catalog consumers.
+
+[MCP servers](#mcp-servers) and [bundles](#bundles) have no file tree — their
+layer is a single JSON document — so they carry no README/logo companion. A
+catalog UI shows their `description`/`summary` (from
+[`grim describe`](./commands.md#describe)) instead.
+
 ## Rules {#rules}
 
 A rule is a single Markdown file. Frontmatter is entirely optional — a
@@ -253,6 +269,12 @@ vendor key lifts to the same native field as a common field (`model`,
 `tools`), the vendor key silently wins for that client — the documented
 override escape hatch
 ([override precedence](./agents.md#override-precedence)).
+
+An agent may ship a `README.md` and a `logo.png`/`logo.svg` from a sibling
+directory sharing its stem (`agents/<name>/`) — the
+[well-known assets](#well-known-assets) convention. Only those allowlisted
+files ride the layer; every other file in that directory is ignored, so the
+installed agent stays the single `<name>.md`.
 
 ### Example — minimal agent {#agent-example-minimal}
 

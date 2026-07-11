@@ -7,10 +7,12 @@
 //!
 //! The pack ↔ install round-trip is a hard contract: `pack_skill_dir`
 //! emits entries rooted at `<name>/`, while `pack_rule_file` and
-//! `pack_agent_file` emit a single `<name>.md` (the rule variant plus an
-//! optional support dir), byte-for-byte what the materializer (and the
-//! acceptance harness `make_artifact`) extracts. The tar entries are
-//! emitted in sorted path order so the layer digest is deterministic.
+//! `pack_agent_file` emit a `<name>.md` index — the rule variant plus an
+//! optional support dir, the agent variant plus any well-known companion
+//! files (`README.md`, `logo.png`, `logo.svg`) — byte-for-byte what the
+//! materializer (and the acceptance harness `make_artifact`) extracts. The
+//! tar entries are emitted in sorted path order so the layer digest is
+//! deterministic.
 
 use std::path::{Path, PathBuf};
 
@@ -275,13 +277,25 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
         .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
 }
 
-/// Pack the agent file at `file` into an uncompressed tar with exactly one
-/// `<name>.md` entry.
+/// Well-known companion files an agent may ship in a sibling directory that
+/// shares its stem (`agents/<name>/`): a human-facing `README.md` and a
+/// `logo.png` / `logo.svg` for a catalog/gallery UI. They ride the layer as
+/// `<name>/<file>` — retrievable with `grim fetch <ref> --path <name>/README.md`,
+/// the same path shape a skill or a rule uses. This is a fixed allowlist, not
+/// a general support dir: any other file in the sibling directory is ignored,
+/// so an agent's identity stays the standalone `<name>.md`.
+const AGENT_COMPANIONS: &[&str] = &["README.md", "logo.png", "logo.svg"];
+
+/// Pack the agent file at `file` into an uncompressed tar: the `<name>.md`
+/// index plus any [well-known companion][AGENT_COMPANIONS] found in a sibling
+/// directory sharing the stem (`agents/<name>/README.md`, `…/logo.png`, …),
+/// each emitted as `<name>/<file>`.
 ///
-/// Unlike [`pack_rule_file`], a sibling directory sharing the stem is
-/// **not** packed — agents have no support-directory contract (every
-/// client reads a standalone agent file). The single stable-header entry
-/// makes the layer digest deterministic.
+/// Unlike [`pack_rule_file`], the sibling directory contributes ONLY those
+/// allowlisted files — never an arbitrary tree — so a client still reads a
+/// standalone agent file. Entries are emitted in sorted path order for a
+/// deterministic digest; an agent with no companions packs byte-identically
+/// to the single `<name>.md` entry it always did.
 ///
 /// # Errors
 ///
@@ -289,13 +303,41 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
 /// [`SkillErrorKind::NameInvalid`] for a stem-less path.
 pub fn pack_agent_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     let name = rule_name(file)?;
-    // Bound the single-file read before pulling it into memory (CWE-400/770).
-    let meta = std::fs::metadata(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
-    check_pack_bounds(file, meta.len(), 1, &PackLimits::DEFAULT)?;
-    let bytes = read_capped(file, PackLimits::DEFAULT.byte_limit)?;
+
+    let limits = &PackLimits::DEFAULT;
+
+    let mut files: Vec<(String, PathBuf)> = vec![(format!("{name}.md"), file.to_path_buf())];
+
+    // The companion dir shares the index's stem: for `agents/<name>.md` it is
+    // `agents/<name>/` (same discovery as a rule's support dir). Only the
+    // allowlisted files ride; everything else there is deliberately ignored.
+    let companion_dir = file.with_extension("");
+    if companion_dir.is_dir() {
+        for well_known in AGENT_COMPANIONS {
+            let candidate = companion_dir.join(well_known);
+            if candidate.is_file() {
+                files.push((format!("{name}/{well_known}"), candidate));
+            }
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Bound the cumulative size before reading any file into memory
+    // (CWE-400/770); the read-side cap below is the TOCTOU backstop.
+    let mut total_bytes: u64 = 0;
+    for (_, abs) in &files {
+        let meta = std::fs::metadata(abs).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+        total_bytes = total_bytes.saturating_add(meta.len());
+    }
+    check_pack_bounds(file, total_bytes, files.len(), limits)?;
+
     let mut builder = tar::Builder::new(Vec::new());
-    append_entry(&mut builder, &format!("{name}.md"), &bytes)
-        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    let mut read_bytes: u64 = 0;
+    for (entry_path, abs) in &files {
+        let bytes = read_capped(abs, limits.byte_limit.saturating_sub(read_bytes))?;
+        read_bytes = read_bytes.saturating_add(bytes.len() as u64);
+        append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+    }
     builder
         .into_inner()
         .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
@@ -761,9 +803,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_agent_ignores_sibling_dir_and_is_deterministic() {
-        // Agents have no support-directory contract: a sibling dir sharing
-        // the stem must NOT be packed (unlike rules).
+    fn pack_agent_ignores_non_wellknown_sibling_and_is_deterministic() {
+        // The sibling dir contributes ONLY the well-known companions: an
+        // arbitrary file there (`extra.md`) must NOT ride, so the agent stays
+        // a standalone `<name>.md`. A no-companion agent is byte-identical to
+        // the historical single-entry pack.
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("my-agent.md");
         write(&f, "---\nname: my-agent\ndescription: d\n---\nbody\n");
@@ -778,6 +822,70 @@ mod tests {
             .materialize(ArtifactKind::Agent, "my-agent", &first, &dest)
             .expect("materialize");
         assert_eq!(written, vec![PathBuf::from("my-agent.md")], "single entry only");
+    }
+
+    #[test]
+    fn pack_agent_with_readme_and_logo_round_trips() {
+        // A README + logo in the sibling companion dir ride the layer as
+        // `<name>/README.md` / `<name>/logo.png`, retrievable via the same
+        // `--path <name>/README.md` shape a skill/rule uses.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("agents/code-reviewer.md");
+        let doc = "---\nname: code-reviewer\ndescription: d\n---\nYou review code.\n";
+        write(&f, doc);
+        write(&tmp.path().join("agents/code-reviewer/README.md"), "# Code Reviewer\n");
+        // A non-UTF-8 logo proves binary companions ride verbatim.
+        std::fs::write(
+            tmp.path().join("agents/code-reviewer/logo.png"),
+            [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff],
+        )
+        .unwrap();
+        // A stray file in the companion dir is ignored (allowlist only).
+        write(&tmp.path().join("agents/code-reviewer/notes.txt"), "ignored\n");
+
+        let tar = pack_agent_file(&f).expect("pack");
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Agent, "code-reviewer", &tar, &dest)
+            .expect("materialize");
+        // The materializer returns `written` sorted as `PathBuf`
+        // (component-wise), so the companion files precede the index file.
+        assert_eq!(
+            written,
+            vec![
+                PathBuf::from("code-reviewer/README.md"),
+                PathBuf::from("code-reviewer/logo.png"),
+                PathBuf::from("code-reviewer.md"),
+            ],
+            "index + well-known companions only; notes.txt excluded"
+        );
+        assert_eq!(std::fs::read_to_string(dest.join("code-reviewer.md")).unwrap(), doc);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("code-reviewer/README.md")).unwrap(),
+            "# Code Reviewer\n"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("code-reviewer/logo.png")).unwrap(),
+            [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff]
+        );
+
+        // Deterministic across repeated packs.
+        assert_eq!(tar, pack_agent_file(&f).unwrap(), "companion pack must be byte-stable");
+    }
+
+    #[test]
+    fn pack_agent_without_companion_dir_is_single_entry() {
+        // The degenerate case (no sibling dir at all) is exactly one entry,
+        // byte-identical to the historical single-file agent pack.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("solo.md");
+        write(&f, "---\nname: solo\ndescription: d\n---\nbody\n");
+        let tar = pack_agent_file(&f).expect("pack");
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Agent, "solo", &tar, &dest)
+            .expect("materialize");
+        assert_eq!(written, vec![PathBuf::from("solo.md")]);
     }
 
     #[test]
