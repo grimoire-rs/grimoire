@@ -35,7 +35,8 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
+use fs4::TryLockError;
 
 use crate::lock::lock_error::{LockError, LockErrorKind};
 
@@ -120,14 +121,15 @@ impl AdvisoryFileLock {
                 Err(e) => return Err(e),
             };
 
-            // fs4's `try_lock_exclusive` returns `Ok(true)` on acquire,
-            // `Ok(false)` on contention (another writer holds it), and `Err`
-            // only for a genuine I/O fault. The tri-state is what makes this
-            // correct on Windows, where `LockFileEx` reports contention as
-            // `ERROR_LOCK_VIOLATION` (os error 33) — fs4 folds that into
-            // `Ok(false)` rather than leaking the raw errno.
-            match FileExt::try_lock_exclusive(&file) {
-                Ok(true) => {
+            // fs4's `try_lock` returns `Ok(())` on acquire,
+            // `Err(TryLockError::WouldBlock)` on contention (another writer
+            // holds it), and `Err(TryLockError::Error(_))` only for a genuine
+            // I/O fault. That split is what makes this correct on Windows,
+            // where `LockFileEx` reports contention as `ERROR_LOCK_VIOLATION`
+            // (os error 33) — fs4 folds that into `WouldBlock` rather than
+            // leaking the raw errno.
+            match FileExt::try_lock(&file) {
+                Ok(()) => {
                     if sidecar_still_current(&file, &sidecar) {
                         return Ok(Self { file, sidecar });
                     }
@@ -135,10 +137,10 @@ impl AdvisoryFileLock {
                     // open and lock) — discard and retry on the live path.
                     continue;
                 }
-                Ok(false) => {
+                Err(TryLockError::WouldBlock) => {
                     return Err(LockError::new(target_path, LockErrorKind::Locked));
                 }
-                Err(e) => last_io = Some(e),
+                Err(TryLockError::Error(e)) => last_io = Some(e),
             }
         }
         Err(LockError::new(
