@@ -105,9 +105,9 @@ jobs:
             args+=("$GRIM_VERSION")
           fi
           gh release download "${args[@]}" --repo "$GITHUB_REPOSITORY" \
-            -p 'grimoire-x86_64-unknown-linux-musl.tar.xz' -D dl
+            -p 'grimoire-x86_64-unknown-linux-musl.tar.gz' -D dl
           stage="$(mktemp -d)"
-          tar -xf dl/grimoire-x86_64-unknown-linux-musl.tar.xz -C "$stage"
+          tar -xf dl/grimoire-x86_64-unknown-linux-musl.tar.gz -C "$stage"
           found="$(find "$stage" -name grim -type f | head -1)"
           if [[ -z "$found" ]]; then
             echo "::error::no grim binary in release archive"

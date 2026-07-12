@@ -116,10 +116,10 @@ Every release publishes archives for macOS, Linux, and Windows on both
 
 | Platform | Asset |
 |----------|-------|
-| macOS (Apple Silicon) | `grimoire-aarch64-apple-darwin.tar.xz` |
-| macOS (Intel) | `grimoire-x86_64-apple-darwin.tar.xz` |
-| Linux (ARM64) | `grimoire-aarch64-unknown-linux-gnu.tar.xz` |
-| Linux (x86-64) | `grimoire-x86_64-unknown-linux-gnu.tar.xz` |
+| macOS (Apple Silicon) | `grimoire-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `grimoire-x86_64-apple-darwin.tar.gz` |
+| Linux (ARM64) | `grimoire-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux (x86-64) | `grimoire-x86_64-unknown-linux-gnu.tar.gz` |
 | Windows (ARM64) | `grimoire-aarch64-pc-windows-msvc.zip` |
 | Windows (x86-64) | `grimoire-x86_64-pc-windows-msvc.zip` |
 
@@ -128,8 +128,8 @@ binary onto your `PATH`. Each archive also carries the license, README, and
 changelog alongside the binary:
 
 ```sh
-curl -LO https://github.com/grimoire-rs/grimoire/releases/latest/download/grimoire-x86_64-unknown-linux-gnu.tar.xz
-tar -xf grimoire-x86_64-unknown-linux-gnu.tar.xz
+curl -LO https://github.com/grimoire-rs/grimoire/releases/latest/download/grimoire-x86_64-unknown-linux-gnu.tar.gz
+tar -xf grimoire-x86_64-unknown-linux-gnu.tar.gz
 install -m 0755 grim ~/.local/bin/grim
 ```
 

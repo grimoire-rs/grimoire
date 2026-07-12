@@ -86,8 +86,8 @@ jobs:
         run: |
           set -euo pipefail
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            -p 'grimoire-*-linux-musl.tar.xz' \
-            -p 'grimoire-*-apple-darwin.tar.xz' \
+            -p 'grimoire-*-linux-musl.tar.gz' \
+            -p 'grimoire-*-apple-darwin.tar.gz' \
             -p 'grimoire-*-pc-windows-msvc.zip' \
             -D dl --clobber
 
@@ -119,7 +119,7 @@ jobs:
           # natively smoke-test the one platform this Linux runner can execute.
           for target in "${!PLATFORM_MAP[@]}"; do
             platform="${PLATFORM_MAP[$target]}"
-            ext=""; aext="tar.xz"
+            ext=""; aext="tar.gz"
             case "$target" in *windows*) ext=".exe"; aext="zip" ;; esac
             archive="dl/grimoire-${target}.${aext}"
             if [ ! -f "$archive" ]; then echo "::error::missing $archive"; exit 1; fi
