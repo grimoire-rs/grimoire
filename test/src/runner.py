@@ -59,6 +59,10 @@ class GrimRunner:
             "GRIM_HOME": str(grim_home),
             "PATH": os.environ.get("PATH", ""),
             "HOME": str(self._home),
+            # grim's home_dir() reads USERPROFILE on Windows, HOME elsewhere;
+            # set both so global-scope installs resolve the isolated home on
+            # every platform.
+            "USERPROFILE": str(self._home),
             "XDG_CONFIG_HOME": str(self._home / ".config"),
         }
         # Windows needs these for subprocess spawning and executable resolution
