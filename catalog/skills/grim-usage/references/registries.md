@@ -164,6 +164,7 @@ lock on every change.
   grim config set   options.show_deprecated true   # show deprecated artifacts by default
   grim config get   options.clients          # bare value on one line; exit 1 if unset
   grim config list                           # every explicitly-set key in this scope
+  grim config list --all                     # every supported key, incl. unset — JSON carries type/title/description/default metadata for tooling
   ```
 
 - **Registries** use lifecycle verbs under `grim config registry`:
