@@ -1,5 +1,3 @@
-<p align="center"><img src="logo.svg" width="128" alt="Grimoire logo" /></p>
-
 # grim-essentials
 
 The first-party Grimoire starter pack: one bundle that installs the three

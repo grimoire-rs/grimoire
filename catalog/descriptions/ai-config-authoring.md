@@ -1,5 +1,3 @@
-<p align="center"><img src="logo.svg" width="128" alt="Grimoire logo" /></p>
-
 # ai-config-authoring
 
 Vendor-neutral craft knowledge for writing effective AI-agent

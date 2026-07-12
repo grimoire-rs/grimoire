@@ -1,5 +1,3 @@
-<p align="center"><img src="logo.svg" width="128" alt="Grimoire logo" /></p>
-
 # grim-usage
 
 Teach your AI agent to drive the [grim CLI](https://grimoire.rs) — the OCI

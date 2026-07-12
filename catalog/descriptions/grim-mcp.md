@@ -1,5 +1,3 @@
-<p align="center"><img src="logo.svg" width="128" alt="Grimoire logo" /></p>
-
 # grim (MCP server)
 
 Run grim as a [Model Context Protocol](https://modelcontextprotocol.io)

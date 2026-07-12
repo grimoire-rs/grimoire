@@ -1,5 +1,3 @@
-<p align="center"><img src="logo.svg" width="128" alt="Grimoire logo" /></p>
-
 # grim-authoring
 
 Author, validate, and package grim-publishable artifacts: skill
