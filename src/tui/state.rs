@@ -338,7 +338,7 @@ impl Default for TuiState {
             view_mode: ViewMode::default(),
             collapsed: BTreeSet::new(),
             group_by_type: false,
-            tree_separators: vec!["/".into()],
+            tree_separators: default_tree_separators(),
             // 0 = fully expanded: unit tests build a bare state and expect the
             // whole tree visible. The runtime value is seeded from config via
             // `set_tree_options`.
@@ -380,8 +380,18 @@ enum SelectionAnchor {
 pub(crate) const HELP_BODY_LINES: u16 = 20;
 
 /// Built-in `[options.tui].expand_levels` default when the key is unset: open
-/// the tree with only the registry roots expanded (level 1).
-pub(crate) const DEFAULT_EXPAND_LEVELS: usize = 1;
+/// the tree with only the registry roots expanded (level 1). Sourced from
+/// [`crate::config::defaults::EXPAND_LEVELS`], the single source of truth.
+pub(crate) const DEFAULT_EXPAND_LEVELS: usize = crate::config::defaults::EXPAND_LEVELS as usize;
+
+/// Built-in `[options.tui].tree_separators` default when unset or empty,
+/// sourced from [`crate::config::defaults::TREE_SEPARATORS`].
+fn default_tree_separators() -> Vec<String> {
+    crate::config::defaults::TREE_SEPARATORS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
 
 impl TuiState {
     /// A fresh state in the loading phase.
@@ -901,9 +911,9 @@ impl TuiState {
     /// it groups by registry (no Registry column) and reads more compactly than
     /// the flat list. An explicit `Some(Flat)` opts back into the flat list.
     pub fn set_view_mode_from_config(&mut self, default_view: Option<crate::config::declaration::DefaultView>) {
-        self.view_mode = match default_view {
-            Some(crate::config::declaration::DefaultView::Flat) => ViewMode::Flat,
-            Some(crate::config::declaration::DefaultView::Tree) | None => ViewMode::Tree,
+        self.view_mode = match default_view.unwrap_or(crate::config::defaults::DEFAULT_VIEW) {
+            crate::config::declaration::DefaultView::Flat => ViewMode::Flat,
+            crate::config::declaration::DefaultView::Tree => ViewMode::Tree,
         };
     }
 
@@ -922,7 +932,7 @@ impl TuiState {
         let anchor = self.selection_anchor();
         self.group_by_type = group_by_type;
         self.tree_separators = if tree_separators.is_empty() {
-            vec!["/".into()]
+            default_tree_separators()
         } else {
             tree_separators
         };

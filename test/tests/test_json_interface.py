@@ -163,6 +163,24 @@ def test_config_get_unset_key_reports_data_not_error(
     }
 
 
+def test_config_list_items_carry_metadata_fields(
+    grim_at, project_dir: Path
+) -> None:
+    """`config list --all --format json` items carry exactly the 8 frozen
+    fields (`key`, `value`, `set`, `type`, `title`, `description`,
+    `default`, `values`) — the always-present-null policy applies to
+    `config list` entries too, not just single-object reports."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    items = runner.json("config", "list", "--all")["items"]
+    assert items, "config list --all on a fresh config must yield rows"
+    item = items[0]
+    assert set(item.keys()) == {
+        "key", "value", "set", "type", "title", "description", "default", "values",
+    }, f"item must carry exactly the 8 frozen fields; got: {sorted(item.keys())}"
+
+
 def test_search_surfaces_null_kind_for_unrecognized_manifest(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

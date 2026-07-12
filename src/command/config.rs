@@ -26,6 +26,7 @@ use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::lock::file_lock::ConfigFileLock;
 
+use super::config_keys::{ConfigKey, KeySpec, RegistryField};
 use super::scope_resolution::{self, lockable_config_path};
 
 /// `grim config` arguments.
@@ -64,7 +65,11 @@ pub enum ConfigCommand {
     ///
     /// Each invocation reads from exactly one scope, so origin information
     /// is implicit (use `--global` or `--config` to select the scope).
-    List,
+    List {
+        /// Include every supported key, including unset ones.
+        #[arg(long)]
+        all: bool,
+    },
     /// Manage `[[registries]]` entries.
     #[command(subcommand_value_name = "REGISTRY_COMMAND")]
     Registry(RegistryArgs),
@@ -132,7 +137,7 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
         ConfigCommand::Get { key } => run_get(ctx, key),
         ConfigCommand::Set { key, value } => run_set(ctx, key, value),
         ConfigCommand::Unset { key } => run_unset(ctx, key),
-        ConfigCommand::List => run_list(ctx),
+        ConfigCommand::List { all } => run_list(ctx, *all),
         ConfigCommand::Registry(r) => match &r.command {
             RegistryCommand::Add {
                 alias,
@@ -151,41 +156,19 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
 // ── Key parsing ──────────────────────────────────────────────────────────────
 
 /// A parsed dotted config key.
+#[derive(Debug, PartialEq, Eq)]
 enum ParsedKey {
-    OptionsClients,
-    OptionsDefaultRegistry,
-    OptionsShowDeprecated,
-    TuiDefaultView,
-    TuiGroupByType,
-    TuiTreeSeparators,
-    TuiExpandLevels,
+    /// One of the 7 fixed `options.*` keys — see [`ConfigKey`].
+    Fixed(ConfigKey),
     /// `registry.<alias>` — valid only for `unset` (removes the whole entry).
-    RegistryAlias {
-        alias: String,
-    },
+    RegistryAlias { alias: String },
     /// `registry.<alias>.<field>`.
-    RegistryAliasField {
-        alias: String,
-        field: RegistryField,
-    },
-}
-
-enum RegistryField {
-    Oci,
-    Index,
-    Default,
+    RegistryAliasField { alias: String, field: RegistryField },
 }
 
 fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
-    match key {
-        "options.clients" => return Ok(ParsedKey::OptionsClients),
-        "options.default_registry" => return Ok(ParsedKey::OptionsDefaultRegistry),
-        "options.show_deprecated" => return Ok(ParsedKey::OptionsShowDeprecated),
-        "options.tui.default_view" => return Ok(ParsedKey::TuiDefaultView),
-        "options.tui.group_by_type" => return Ok(ParsedKey::TuiGroupByType),
-        "options.tui.tree_separators" => return Ok(ParsedKey::TuiTreeSeparators),
-        "options.tui.expand_levels" => return Ok(ParsedKey::TuiExpandLevels),
-        _ => {}
+    if let Some(k) = ConfigKey::parse(key) {
+        return Ok(ParsedKey::Fixed(k));
     }
     if let Some(rest) = key.strip_prefix("registry.") {
         // FIX 2: split at the RIGHTMOST dot so aliases containing dots
@@ -221,10 +204,8 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
         }
     }
     Err(super::config_usage(format!(
-        "unknown config key '{key}'; valid keys: options.clients, \
-         options.default_registry, options.show_deprecated, options.tui.default_view, \
-         options.tui.group_by_type, options.tui.tree_separators, options.tui.expand_levels, \
-         registry.<alias>.oci, registry.<alias>.index, registry.<alias>.default"
+        "unknown config key '{key}'; valid keys: {}",
+        super::config_keys::valid_keys()
     )))
 }
 
@@ -237,21 +218,21 @@ fn scope_to_origin(scope: ConfigScope) -> Origin {
 
 // ── Value getters ─────────────────────────────────────────────────────────────
 
-fn get_value(
-    parsed: &ParsedKey,
-    options: &ConfigOptions,
-    registries: &[RegistryConfig],
-) -> anyhow::Result<Option<String>> {
-    Ok(match parsed {
-        ParsedKey::OptionsClients => {
+/// The effective value of a fixed `options.*` key, or `None` when unset —
+/// including the None-when-default collapse (`false` bools, empty lists)
+/// so a value indistinguishable from its default on disk reads back as
+/// unset, consistent across `get` / `list` / `unset`.
+fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
+    match key {
+        ConfigKey::Clients => {
             if options.clients.is_empty() {
                 None
             } else {
                 Some(options.clients.join(","))
             }
         }
-        ParsedKey::OptionsDefaultRegistry => options.default_registry.clone(),
-        ParsedKey::OptionsShowDeprecated => {
+        ConfigKey::DefaultRegistry => options.default_registry.clone(),
+        ConfigKey::ShowDeprecated => {
             // `false` is the default and indistinguishable from unset on disk —
             // return None so `get` exits 1 and `list` omits the key, consistent
             // with `group_by_type`. Setting to `false` removes the key from the
@@ -262,11 +243,11 @@ fn get_value(
                 None
             }
         }
-        ParsedKey::TuiDefaultView => options.tui.default_view.map(|v| match v {
+        ConfigKey::TuiDefaultView => options.tui.default_view.map(|v| match v {
             DefaultView::Flat => "flat".to_string(),
             DefaultView::Tree => "tree".to_string(),
         }),
-        ParsedKey::TuiGroupByType => {
+        ConfigKey::TuiGroupByType => {
             // `false` is the default and indistinguishable from unset on disk —
             // return None so `get` exits 1 and `list` omits the key, consistent
             // with all other default-valued keys.  Setting to `false` removes the
@@ -277,14 +258,24 @@ fn get_value(
                 None
             }
         }
-        ParsedKey::TuiTreeSeparators => {
+        ConfigKey::TuiTreeSeparators => {
             if options.tui.tree_separators.is_empty() {
                 None
             } else {
                 Some(options.tui.tree_separators.join(","))
             }
         }
-        ParsedKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
+        ConfigKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
+    }
+}
+
+fn get_value(
+    parsed: &ParsedKey,
+    options: &ConfigOptions,
+    registries: &[RegistryConfig],
+) -> anyhow::Result<Option<String>> {
+    Ok(match parsed {
+        ParsedKey::Fixed(k) => fixed_value(*k, options),
         ParsedKey::RegistryAlias { alias } => {
             return Err(super::config_usage(format!(
                 "no registry field specified for '{alias}'; use registry.<alias>.oci or registry.<alias>.default"
@@ -312,57 +303,59 @@ fn apply_set(
     registries: &mut [RegistryConfig],
 ) -> anyhow::Result<String> {
     match parsed {
-        ParsedKey::OptionsClients => {
-            if value_str.is_empty() {
-                options.clients.clear();
-                Ok(String::new())
-            } else {
-                let clients: Vec<String> = value_str.split(',').map(|s| s.trim().to_string()).collect();
-                for c in &clients {
-                    // FIX 3: empty/whitespace-only segment (e.g. "claude, ,opencode"
-                    // after split+trim) → exit 65 so the config never holds a blank
-                    // client name that silently installs nothing.
-                    if c.is_empty() {
-                        return Err(super::config_value(
-                            "options.clients: empty or whitespace-only segment; \
-                             each client name must be non-empty"
-                                .to_string(),
-                        ));
+        ParsedKey::Fixed(k) => match k {
+            ConfigKey::Clients => {
+                if value_str.is_empty() {
+                    options.clients.clear();
+                    Ok(String::new())
+                } else {
+                    let clients: Vec<String> = value_str.split(',').map(|s| s.trim().to_string()).collect();
+                    for c in &clients {
+                        // FIX 3: empty/whitespace-only segment (e.g. "claude, ,opencode"
+                        // after split+trim) → exit 65 so the config never holds a blank
+                        // client name that silently installs nothing.
+                        if c.is_empty() {
+                            return Err(super::config_value(
+                                "options.clients: empty or whitespace-only segment; \
+                                 each client name must be non-empty"
+                                    .to_string(),
+                            ));
+                        }
+                        reject_control_chars(c, "options.clients")?;
                     }
-                    reject_control_chars(c, "options.clients")?;
+                    options.clients.clone_from(&clients);
+                    Ok(clients.join(","))
                 }
-                options.clients.clone_from(&clients);
-                Ok(clients.join(","))
             }
-        }
-        ParsedKey::OptionsDefaultRegistry => {
-            reject_control_chars(value_str, "options.default_registry")?;
-            options.default_registry = Some(value_str.to_string());
-            Ok(value_str.to_string())
-        }
-        ParsedKey::OptionsShowDeprecated => {
-            options.show_deprecated = parse_bool(value_str, "options.show_deprecated")?;
-            Ok(value_str.to_string())
-        }
-        ParsedKey::TuiDefaultView => {
-            options.tui.default_view = Some(parse_default_view(value_str)?);
-            Ok(value_str.to_string())
-        }
-        ParsedKey::TuiGroupByType => {
-            options.tui.group_by_type = parse_bool(value_str, "options.tui.group_by_type")?;
-            Ok(value_str.to_string())
-        }
-        ParsedKey::TuiTreeSeparators => {
-            let seps = parse_tree_separators(value_str)?;
-            let stored = seps.join(",");
-            options.tui.tree_separators = seps;
-            Ok(stored)
-        }
-        ParsedKey::TuiExpandLevels => {
-            let levels = parse_u32(value_str, "options.tui.expand_levels")?;
-            options.tui.expand_levels = Some(levels);
-            Ok(levels.to_string())
-        }
+            ConfigKey::DefaultRegistry => {
+                reject_control_chars(value_str, "options.default_registry")?;
+                options.default_registry = Some(value_str.to_string());
+                Ok(value_str.to_string())
+            }
+            ConfigKey::ShowDeprecated => {
+                options.show_deprecated = parse_bool(value_str, "options.show_deprecated")?;
+                Ok(value_str.to_string())
+            }
+            ConfigKey::TuiDefaultView => {
+                options.tui.default_view = Some(parse_default_view(value_str)?);
+                Ok(value_str.to_string())
+            }
+            ConfigKey::TuiGroupByType => {
+                options.tui.group_by_type = parse_bool(value_str, "options.tui.group_by_type")?;
+                Ok(value_str.to_string())
+            }
+            ConfigKey::TuiTreeSeparators => {
+                let seps = parse_tree_separators(value_str)?;
+                let stored = seps.join(",");
+                options.tui.tree_separators = seps;
+                Ok(stored)
+            }
+            ConfigKey::TuiExpandLevels => {
+                let levels = parse_u32(value_str, "options.tui.expand_levels")?;
+                options.tui.expand_levels = Some(levels);
+                Ok(levels.to_string())
+            }
+        },
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
             "cannot set registry '{alias}' without a field; \
              use registry.<alias>.oci or registry.<alias>.default"
@@ -421,32 +414,16 @@ fn apply_unset(
     registries: &mut Vec<RegistryConfig>,
 ) -> anyhow::Result<()> {
     match parsed {
-        ParsedKey::OptionsClients => {
-            options.clients.clear();
-            Ok(())
-        }
-        ParsedKey::OptionsDefaultRegistry => {
-            options.default_registry = None;
-            Ok(())
-        }
-        ParsedKey::OptionsShowDeprecated => {
-            options.show_deprecated = false;
-            Ok(())
-        }
-        ParsedKey::TuiDefaultView => {
-            options.tui.default_view = None;
-            Ok(())
-        }
-        ParsedKey::TuiGroupByType => {
-            options.tui.group_by_type = false;
-            Ok(())
-        }
-        ParsedKey::TuiTreeSeparators => {
-            options.tui.tree_separators.clear();
-            Ok(())
-        }
-        ParsedKey::TuiExpandLevels => {
-            options.tui.expand_levels = None;
+        ParsedKey::Fixed(k) => {
+            match k {
+                ConfigKey::Clients => options.clients.clear(),
+                ConfigKey::DefaultRegistry => options.default_registry = None,
+                ConfigKey::ShowDeprecated => options.show_deprecated = false,
+                ConfigKey::TuiDefaultView => options.tui.default_view = None,
+                ConfigKey::TuiGroupByType => options.tui.group_by_type = false,
+                ConfigKey::TuiTreeSeparators => options.tui.tree_separators.clear(),
+                ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
+            }
             Ok(())
         }
         ParsedKey::RegistryAlias { alias } => {
@@ -504,72 +481,41 @@ fn apply_unset(
 
 // ── List collector ────────────────────────────────────────────────────────────
 
-fn collect_entries(options: &ConfigOptions, registries: &[RegistryConfig]) -> Vec<ConfigEntry> {
+/// Build one [`ConfigEntry`] from a resolved key/value pair and its static
+/// [`KeySpec`] — the sole adapter between the command layer (which knows
+/// about `KeySpec`) and the API layer (which stays ignorant of it).
+fn entry(key: String, value: Option<String>, spec: &'static KeySpec) -> ConfigEntry {
+    ConfigEntry::new(key, value, spec.value_type, spec.title, spec.description, spec.default)
+}
+
+/// Collect the rows for `grim config list`. `all` widens the row set to
+/// include supported-but-unset keys (fixed keys always unset-eligible;
+/// registry `oci`/`index` locator rows only for existing aliased entries);
+/// it never changes the row shape (see `ConfigEntry`).
+fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryConfig]) -> Vec<ConfigEntry> {
     let mut entries = Vec::new();
-    if let Some(r) = &options.default_registry {
-        entries.push(ConfigEntry {
-            key: "options.default_registry".to_string(),
-            value: r.clone(),
-        });
-    }
-    if !options.clients.is_empty() {
-        entries.push(ConfigEntry {
-            key: "options.clients".to_string(),
-            value: options.clients.join(","),
-        });
-    }
-    if options.show_deprecated {
-        entries.push(ConfigEntry {
-            key: "options.show_deprecated".to_string(),
-            value: "true".to_string(),
-        });
-    }
-    if let Some(dv) = options.tui.default_view {
-        entries.push(ConfigEntry {
-            key: "options.tui.default_view".to_string(),
-            value: match dv {
-                DefaultView::Flat => "flat",
-                DefaultView::Tree => "tree",
-            }
-            .to_string(),
-        });
-    }
-    if options.tui.group_by_type {
-        entries.push(ConfigEntry {
-            key: "options.tui.group_by_type".to_string(),
-            value: "true".to_string(),
-        });
-    }
-    if !options.tui.tree_separators.is_empty() {
-        entries.push(ConfigEntry {
-            key: "options.tui.tree_separators".to_string(),
-            value: options.tui.tree_separators.join(","),
-        });
-    }
-    if let Some(levels) = options.tui.expand_levels {
-        entries.push(ConfigEntry {
-            key: "options.tui.expand_levels".to_string(),
-            value: levels.to_string(),
-        });
+    for k in ConfigKey::ALL {
+        let value = fixed_value(k, options);
+        if value.is_some() || all {
+            entries.push(entry(k.spec().key.to_string(), value, k.spec()));
+        }
     }
     for rc in registries {
         if let Some(alias) = &rc.alias {
-            if let Some(oci) = &rc.oci {
-                entries.push(ConfigEntry {
-                    key: format!("registry.{alias}.oci"),
-                    value: oci.clone(),
-                });
+            let oci_spec = RegistryField::Oci.spec();
+            if rc.oci.is_some() || all {
+                entries.push(entry(format!("registry.{alias}.oci"), rc.oci.clone(), oci_spec));
             }
-            if let Some(index) = &rc.index {
-                entries.push(ConfigEntry {
-                    key: format!("registry.{alias}.index"),
-                    value: index.clone(),
-                });
+            let index_spec = RegistryField::Index.spec();
+            if rc.index.is_some() || all {
+                entries.push(entry(format!("registry.{alias}.index"), rc.index.clone(), index_spec));
             }
-            entries.push(ConfigEntry {
-                key: format!("registry.{alias}.default"),
-                value: rc.default.to_string(),
-            });
+            // `default` always has an effective value — no unset state.
+            entries.push(entry(
+                format!("registry.{alias}.default"),
+                Some(rc.default.to_string()),
+                RegistryField::Default.spec(),
+            ));
         }
     }
     entries
@@ -803,9 +749,9 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
     ))
 }
 
-fn run_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> {
+fn run_list(ctx: &Context, all: bool) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let items = collect_entries(&scope.options, &scope.registries);
+    let items = collect_entries(all, &scope.options, &scope.registries);
     Ok((ConfigReport::List(ConfigListReport { items }), ExitCode::Success))
 }
 
@@ -1015,7 +961,13 @@ mod tests {
         // --show-origin was removed (FIX 4: dead surface — list reads one scope,
         // origin would always be the same constant value).
         let a = parse(&["list"]).expect("list parses");
-        assert!(matches!(a.command, ConfigCommand::List));
+        assert!(matches!(a.command, ConfigCommand::List { all: false }));
+    }
+
+    #[test]
+    fn list_all_flag_parses() {
+        let a = parse(&["list", "--all"]).expect("list --all parses");
+        assert!(matches!(a.command, ConfigCommand::List { all: true }));
     }
 
     #[test]
@@ -1131,27 +1083,11 @@ mod tests {
 
     #[test]
     fn parse_key_all_seven_valid_keys() {
-        assert!(matches!(parse_key("options.clients"), Ok(ParsedKey::OptionsClients)));
-        assert!(matches!(
-            parse_key("options.default_registry"),
-            Ok(ParsedKey::OptionsDefaultRegistry)
-        ));
-        assert!(matches!(
-            parse_key("options.show_deprecated"),
-            Ok(ParsedKey::OptionsShowDeprecated)
-        ));
-        assert!(matches!(
-            parse_key("options.tui.default_view"),
-            Ok(ParsedKey::TuiDefaultView)
-        ));
-        assert!(matches!(
-            parse_key("options.tui.group_by_type"),
-            Ok(ParsedKey::TuiGroupByType)
-        ));
-        assert!(matches!(
-            parse_key("options.tui.tree_separators"),
-            Ok(ParsedKey::TuiTreeSeparators)
-        ));
+        // Loop over every fixed key (closes the latent expand_levels gap:
+        // the original hand-written list never exercised it).
+        for k in ConfigKey::ALL {
+            assert_eq!(parse_key(k.spec().key).ok(), Some(ParsedKey::Fixed(k)));
+        }
         assert!(matches!(
             parse_key("registry.acme.oci"),
             Ok(ParsedKey::RegistryAliasField { alias, field: RegistryField::Oci })
@@ -1182,6 +1118,25 @@ mod tests {
     fn parse_key_unknown_returns_err() {
         assert!(parse_key("unknown.key").is_err());
         assert!(parse_key("optins.clients").is_err());
+    }
+
+    #[test]
+    fn parse_key_unknown_error_names_every_key() {
+        let msg = parse_key("bogus.key").unwrap_err().to_string();
+        for k in ConfigKey::ALL {
+            assert!(
+                msg.contains(k.spec().key),
+                "error must name '{}'; got: {msg}",
+                k.spec().key
+            );
+        }
+        for f in RegistryField::ALL {
+            assert!(
+                msg.contains(f.spec().key),
+                "error must name '{}'; got: {msg}",
+                f.spec().key
+            );
+        }
     }
 
     #[test]
@@ -1267,9 +1222,9 @@ mod tests {
         assert_eq!(options.tui.expand_levels, Some(2));
         assert_eq!(get_value(&key, &options, &registries).unwrap(), Some("2".to_string()));
         assert!(
-            collect_entries(&options, &registries)
+            collect_entries(false, &options, &registries)
                 .iter()
-                .any(|e| e.key == "options.tui.expand_levels" && e.value == "2"),
+                .any(|e| e.key == "options.tui.expand_levels" && e.value.as_deref() == Some("2")),
             "list must surface a set expand_levels"
         );
 
@@ -1280,6 +1235,65 @@ mod tests {
         apply_unset(&key, &mut options, &mut registries).unwrap();
         assert_eq!(options.tui.expand_levels, None);
         assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+    }
+
+    // ── STEP A: collect_entries --all semantics ──────────────────────────────
+
+    #[test]
+    fn collect_entries_all_emits_unset_fixed_keys_with_null_value() {
+        let options = ConfigOptions::default();
+        let registries: Vec<RegistryConfig> = vec![];
+
+        let without_all = collect_entries(false, &options, &registries);
+        assert_eq!(without_all.len(), 0, "flagless list on empty config must emit 0 rows");
+
+        let with_all = collect_entries(true, &options, &registries);
+        assert_eq!(
+            with_all.len(),
+            7,
+            "--all on empty config must emit exactly the 7 fixed keys"
+        );
+        for e in &with_all {
+            assert_eq!(
+                e.value, None,
+                "unset fixed key must serialize a null value; key={}",
+                e.key
+            );
+            assert!(!e.set, "unset fixed key must have set=false; key={}", e.key);
+        }
+    }
+
+    #[test]
+    fn collect_entries_all_emits_registry_locator_null_rows() {
+        let options = ConfigOptions::default();
+        let registries = vec![RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: None,
+            index: Some("https://index.example".to_string()),
+            default: false,
+        }];
+
+        let without_all = collect_entries(false, &options, &registries);
+        assert!(
+            !without_all.iter().any(|e| e.key == "registry.acme.oci"),
+            "flagless list must omit the unset oci locator"
+        );
+        assert!(
+            without_all.iter().any(|e| e.key == "registry.acme.default"),
+            "registry.<alias>.default is always a row, even without --all"
+        );
+
+        let with_all = collect_entries(true, &options, &registries);
+        let oci_row = with_all
+            .iter()
+            .find(|e| e.key == "registry.acme.oci")
+            .expect("--all must add the unset oci locator row");
+        assert_eq!(oci_row.value, None);
+        let default_row = with_all
+            .iter()
+            .find(|e| e.key == "registry.acme.default")
+            .expect("registry.<alias>.default row must be present with --all too");
+        assert_eq!(default_row.value.as_deref(), Some("false"));
     }
 
     #[test]
@@ -1405,7 +1419,7 @@ mod tests {
         };
         let mut registries = vec![];
         let result = apply_set(
-            &ParsedKey::OptionsClients,
+            &ParsedKey::Fixed(ConfigKey::Clients),
             "claude, ,opencode",
             &mut options,
             &mut registries,

@@ -19,7 +19,8 @@ Behaviors covered:
 - Unknown dotted key (typo) exits 64 (UsageError).
 - Invalid enum value exits 65 (DataError).
 - ``unset`` removes a key (subsequent ``get`` exits 1).
-- ``list`` outputs ``key=value`` lines; ``--show-origin`` adds the origin.
+- ``list`` outputs ``key=value`` lines; ``--all`` widens the row set to
+  include supported-but-unset keys (metadata shape unchanged either way).
 - ``--format json`` shapes for ``set`` write-confirmation and ``list``.
 - ``--global`` writes to ``$GRIM_HOME/grimoire.toml``, never the project
   config (scope separation invariant).
@@ -40,6 +41,20 @@ from src.runner import GrimRunner
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# The 7 fixed option keys ``--all`` must surface unset (I3 frozen spec).
+FIXED_OPTION_KEYS = [
+    "options.default_registry",
+    "options.clients",
+    "options.show_deprecated",
+    "options.tui.default_view",
+    "options.tui.group_by_type",
+    "options.tui.tree_separators",
+    "options.tui.expand_levels",
+]
+
+_ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list"}
 
 
 def _minimal_global_config(grim_home: Path) -> None:
@@ -660,6 +675,207 @@ def test_list_on_empty_config_exits_0_with_empty_output(
     assert result == [], f"list on empty config must be empty array; got {result!r}"
     assert len(result) == 0, (
         f"list on empty config must have zero entries; got: {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I2/I3: --all + extended JSON metadata
+# ---------------------------------------------------------------------------
+
+
+def test_list_all_on_empty_config_lists_every_supported_key_unset(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config list --all`` on an empty config surfaces all 7 fixed option
+    keys as unset rows, each carrying full metadata.
+
+    Traces to I3: fixed keys unset -> row only under ``--all``, with
+    ``value: null`` / ``set: false``.  Traces to I2: metadata fields
+    (``title``, ``description``, ``type``) always present.
+    """
+    write_config(project_dir)  # minimal config, no [options] table
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("--format", "json", "config", "list", "--all", check=False)
+    assert result.returncode == 0, (
+        f"list --all on empty config must exit 0; got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    items = json.loads(result.stdout)["items"]
+
+    by_key = {i["key"]: i for i in items if isinstance(i, dict)}
+    for key in FIXED_OPTION_KEYS:
+        assert key in by_key, f"--all must list unset fixed key {key}; got keys: {sorted(by_key)}"
+        item = by_key[key]
+        assert item["value"] is None, f"{key} unset row must have value None; got {item!r}"
+        assert item["set"] is False, f"{key} unset row must have set False; got {item!r}"
+        assert item["title"], f"{key} must carry a non-empty title; got {item!r}"
+        assert item["description"], f"{key} must carry a non-empty description; got {item!r}"
+        assert item["type"] in _ALLOWED_TYPES, (
+            f"{key} type must be one of {_ALLOWED_TYPES}; got {item['type']!r}"
+        )
+
+
+def test_list_all_plain_on_empty_config_exits_0_with_rows(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config list --all`` in plain mode exits 0 and lists every fixed
+    option key name, even though none is set.
+
+    Traces to I3: plain output stays a single table (static ``Key``/
+    ``Value`` headers); ``--all`` only widens the row set.
+    """
+    write_config(project_dir)  # minimal config, no [options] table
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.plain("config", "list", "--all")
+    assert result.returncode == 0, (
+        f"list --all plain on empty config must exit 0; got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    for key in FIXED_OPTION_KEYS:
+        assert key in result.stdout, (
+            f"plain --all output must contain {key}; got:\n{result.stdout}"
+        )
+
+
+def test_list_json_entries_carry_type_title_description_default(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A ``config list`` JSON entry for a set enum key carries its full
+    extended metadata, and the same fields appear with or without ``--all``
+    — the flag only widens the row set, never the row shape.
+
+    Traces to I2: frozen JSON shape, pinned metadata table row for
+    ``options.tui.default_view`` (enum, values ``["flat","tree"]``,
+    default ``"tree"``).
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.tui.default_view", "flat")
+
+    def _get_entry(*extra_args: str) -> dict:
+        items = runner.json("config", "list", *extra_args)["items"]
+        by_key = {i["key"]: i for i in items if isinstance(i, dict)}
+        assert "options.tui.default_view" in by_key, (
+            f"list must contain options.tui.default_view; keys: {sorted(by_key)}"
+        )
+        return by_key["options.tui.default_view"]
+
+    for args, label in ((("--all",), "with --all"), ((), "without --all")):
+        entry = _get_entry(*args)
+        assert entry["type"] == "enum", f"{label}: type must be 'enum'; got {entry!r}"
+        assert entry["values"] == ["flat", "tree"], (
+            f"{label}: values must be ['flat','tree']; got {entry!r}"
+        )
+        assert entry["default"] == "tree", f"{label}: default must be 'tree'; got {entry!r}"
+        assert entry["set"] is True, f"{label}: set must be True; got {entry!r}"
+        assert entry["value"] == "flat", f"{label}: value must be 'flat'; got {entry!r}"
+        assert entry["title"], f"{label}: title must be non-empty; got {entry!r}"
+        assert entry["description"], f"{label}: description must be non-empty; got {entry!r}"
+
+
+def test_list_all_includes_unset_registry_locator_row(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config list --all`` includes an unset ``registry.<alias>.index``
+    row for a registry added without an index locator; without ``--all``
+    that key is absent. ``registry.<alias>.default`` is always a row
+    (today's behavior, no unset state).
+
+    Traces to I3: registry rows — ``.oci``/``.index`` absent -> row only
+    under ``--all`` (``value: null``, ``set: false``); ``.default`` ALWAYS
+    a row, effective value, ``set: true``.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+
+    all_items = runner.json("config", "list", "--all")["items"]
+    all_by_key = {i["key"]: i for i in all_items if isinstance(i, dict)}
+
+    assert "registry.acme.index" in all_by_key, (
+        f"--all must list the unset registry.acme.index row; keys: {sorted(all_by_key)}"
+    )
+    index_entry = all_by_key["registry.acme.index"]
+    assert index_entry["value"] is None, f"unset index row must have value None; got {index_entry!r}"
+    assert index_entry["set"] is False, f"unset index row must have set False; got {index_entry!r}"
+
+    plain_items = runner.json("config", "list")["items"]
+    plain_by_key = {i["key"]: i for i in plain_items if isinstance(i, dict)}
+    assert "registry.acme.index" not in plain_by_key, (
+        f"without --all, unset registry.acme.index must be absent; got keys: {sorted(plain_by_key)}"
+    )
+
+    assert "registry.acme.default" in all_by_key, (
+        "registry.acme.default must always be a row (with --all)"
+    )
+    assert all_by_key["registry.acme.default"]["value"] == "false", (
+        f"registry.acme.default must be 'false'; got {all_by_key['registry.acme.default']!r}"
+    )
+    assert "registry.acme.default" in plain_by_key, (
+        "registry.acme.default must always be a row (without --all)"
+    )
+    assert plain_by_key["registry.acme.default"]["value"] == "false", (
+        f"registry.acme.default must be 'false'; got {plain_by_key['registry.acme.default']!r}"
+    )
+
+
+def test_list_json_empty_string_value_is_set_not_unset(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set options.default_registry ""`` is a *set* empty-string value:
+    the JSON row disambiguates it from unset via ``set: true, value: ""``.
+
+    Pins the documented plain-output caveat (empty Value cell is ambiguous;
+    JSON is not) — the only key where empty string is a reachable set value.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.default_registry", "")
+
+    items = runner.json("config", "list")["items"]
+    by_key = {i["key"]: i for i in items if isinstance(i, dict)}
+    assert "options.default_registry" in by_key, (
+        f"empty-string default_registry must be listed; keys: {sorted(by_key)}"
+    )
+    entry = by_key["options.default_registry"]
+    assert entry["set"] is True, f"empty-string value must report set True; got {entry!r}"
+    assert entry["value"] == "", f"value must be the empty string, not null; got {entry!r}"
+
+
+def test_list_all_shows_bool_set_to_false_as_unset(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set options.show_deprecated false`` collapses to unset: under
+    ``--all`` the row reports ``set: false, value: null`` with the default
+    carried separately in ``default`` — never echoed into ``value``.
+
+    Pins the documented false-is-unset collapse for bool keys.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.show_deprecated", "false")
+
+    items = runner.json("config", "list", "--all")["items"]
+    by_key = {i["key"]: i for i in items if isinstance(i, dict)}
+    entry = by_key["options.show_deprecated"]
+    assert entry["set"] is False, (
+        f"show_deprecated set to false must collapse to unset; got {entry!r}"
+    )
+    assert entry["value"] is None, f"collapsed row must have value None; got {entry!r}"
+    assert entry["default"] == "false", (
+        f"default must carry 'false' separately; got {entry!r}"
     )
 
 
