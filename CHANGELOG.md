@@ -433,6 +433,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+
 [0.9.0]: https://github.com/grimoire-rs/grimoire/compare/v0.8.4..v0.9.0
 [0.8.4]: https://github.com/grimoire-rs/grimoire/compare/v0.8.3..v0.8.4
 [0.8.3]: https://github.com/grimoire-rs/grimoire/compare/v0.8.2..v0.8.3
