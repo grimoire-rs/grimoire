@@ -65,7 +65,7 @@ One row object per item inside `{"items": [...]}`:
 | `status` | `{kind, name, source, pinned, state, outputs}` — `pinned` null until locked; `outputs` is `[{client, path}]` (see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action}` — `old` null for a first lock, `new` null for a pruned row | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
-| `config list` | `{key, value}` | — |
+| `config list` | `{key, value, set, type, title, description, default, values}` | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
 | `publish` | `{ref, kind, digest, tags, status}` + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
@@ -74,6 +74,15 @@ enveloped report except `search`: the other reports resolve a locked or
 otherwise real artifact, so their `kind` is always one of those five
 values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
+
+`config list`'s `type` field is one of `string`, `boolean`, `integer`,
+`enum`, `string-list`, `string-set`. `string-list` is an ordered, open
+list — any value is accepted (e.g. `options.tui.tree_separators`), and its
+`values` stays `null`. `string-set` is an unordered collection of unique
+values, each drawn from the closed `values` list — the same non-null
+shape `enum` rows carry. `options.clients` is the one `string-set` key
+today, so it is the one non-`enum` row whose `values` is a list
+(`["claude","opencode","copilot"]`) rather than `null`.
 
 ### Single-object reports {#shapes-single}
 
@@ -251,6 +260,11 @@ New fields may appear in any minor release; existing fields never change
 type or meaning and are never removed. Readers must ignore unknown
 fields. The full policy, including the install-state schema it also
 covers, lives on the [stability page][stability-additive].
+
+`config list`'s `value` field became nullable in a shape-compatible way:
+`null` is emitted only for unset rows, which only the new `--all` flag
+surfaces — a consumer that never passes `--all` keeps seeing non-null
+values, so the additive-field policy holds.
 
 ## Exit codes and JSON together {#exit-interplay}
 

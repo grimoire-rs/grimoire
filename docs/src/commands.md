@@ -81,6 +81,7 @@ grim config get   options.clients
 grim config set   options.clients claude,opencode
 grim config unset options.tui.default_view
 grim config list
+grim config list --all
 ```
 
 `get` prints the bare value on a single line with no key name or table header, so `$(grim config get options.clients)` works directly in shell. A valid-but-unset key exits `1` with no stdout — the same contract as [`git config`][git-config]: `grim config get options.clients || echo default`. An unknown key (typo or unsupported leaf) exits `64` without reading the config.
@@ -89,11 +90,15 @@ grim config list
 
 `list` shows every explicitly-set key and value for the active scope — keys at their default or absent values are omitted. Each invocation reads from exactly one scope, so origin is implicit in the scope flag used. Scopes are never merged: `grim config --global list` shows only global values, project `list` shows only project values.
 
+`--all` additionally lists every supported key that is unset or at its default (plain: empty `Value` cell; JSON: `value` null, `set` false). Keys whose false/empty value collapses to unset — `options.show_deprecated`, `options.tui.group_by_type`, an empty `options.clients`, an empty `options.tui.tree_separators` — appear unset under `--all` even after being explicitly set to that value. Registry rows appear only for existing aliased `[[registries]]` entries; `registry.<alias>.default` always shows its effective value (no unset state — it is never omitted, `--all` or not); an alias-less `[[registries]]` entry is not dotted-key addressable and is never listed, `--all` or not. In plain output, an empty `Value` cell is ambiguous between unset and an explicit empty-string value (e.g. `options.default_registry` set to `""`) — the JSON `value`/`set` pair disambiguates.
+
+`config list --format json` emits the same per-key metadata (type, title, description, default, enum values) for every row, set or unset — tooling such as editor extensions can drive a settings UI from it without hardcoding the key list.
+
 The supported dotted keys are:
 
 | Key | Value type | Notes |
 |-----|------------|-------|
-| `options.clients` | comma-separated client names | e.g. `claude,opencode`. Empty string clears the list. |
+| `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from `claude`, `opencode`, `copilot` — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
 | `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
 | `options.show_deprecated` | `true` or `false` | `false` is the default (deprecated artifacts are hidden from `grim search` and the TUI unless installed); setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). Seeds the initial state for both `grim search` and `grim tui`; the search `--show-deprecated` flag and the TUI `h` key override it per run. |
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
@@ -142,9 +147,11 @@ shapes are:
 | `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
-| `list` | `{"items": [...]}` of `{"key":"…","value":"…"}` |
+| `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null}` |
 | `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"default":bool}` |
 | `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"default":bool}` |
+
+`list` rows carry all eight fields whether or not `--all` was passed — the flag only widens the row set, never the row shape. `value` is `null` only for an unset row (surfaced only under `--all`); `set` is `value != null`. `type` is one of `string`, `boolean`, `integer`, `enum`, `string-list`, `string-set`; `values` is non-null for `enum` and `string-set` keys (the allowed value set), `null` otherwise. `title` and `description` are fixed per-key metadata, not derived from the current value; `default` is the runtime default in CLI string form, or `null` when the key has no fixed default.
 
 Registry rows always carry both locator keys — exactly one of `oci` /
 `index` is non-null for a valid entry.
@@ -158,7 +165,7 @@ The `action` field in write confirmations takes one of: `set`, `unset`, `registr
 | Success | `0` |
 | `get` of a valid-but-unset key (no stdout) | `1` |
 | Unknown key name / missing or duplicate alias / bad subcommand args | `64` |
-| Invalid value (bad enum, non-boolean, bad separator character) | `65` |
+| Invalid value (bad enum, non-boolean, bad separator character, unrecognized or duplicate string-set entry) | `65` |
 | Write or lock I/O failure | `74` |
 | Concurrent write that can't acquire the config lock | `75` |
 | Config file parse failure | `78` |

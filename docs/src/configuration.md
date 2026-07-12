@@ -41,7 +41,10 @@ into. It accepts a TOML array of client names (`claude`, `opencode`, `copilot`);
 when absent, the **detected** clients for the scope are targeted — every client
 whose vendor directory or marker is present — falling back to all clients when
 none are detected. Unknown keys are rejected on parse, so a typo surfaces
-immediately rather than silently doing nothing.
+immediately rather than silently doing nothing. A hand-authored entry
+outside the closed set, or a repeated entry, is rejected at config
+**load** — exit 78 (`EX_CONFIG`), the same class of error as an invalid
+`tree_separators` entry below — not deferred until `grim install` runs.
 
 The top-level `show_deprecated` boolean (default `false`) controls whether
 [deprecated](./publishing.md#metadata-deprecated) artifacts appear in
