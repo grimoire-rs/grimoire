@@ -45,7 +45,7 @@ runner.plain(*args, **kwargs)                                # run without --for
 runner.home                                                   # isolated $HOME (sibling of grim_home)
 ```
 
-Per-instance `env` dict: `GRIM_HOME`, `PATH`, `HOME` (isolated, sibling of `grim_home`), `XDG_CONFIG_HOME` (`<home>/.config`), plus Windows spawn vars (`SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`) when present. `GRIM_INSECURE_REGISTRIES` is set to the test registry host whenever it differs from grim's built-in HTTP allowlist (`localhost[:5000]`, `127.0.0.1[:5000]`).
+Per-instance `env` dict: `GRIM_HOME`, `PATH`, `HOME` + `USERPROFILE` (both point at the isolated home, sibling of `grim_home` — grim reads `USERPROFILE` on Windows, `HOME` elsewhere), `XDG_CONFIG_HOME` (`<home>/.config`), plus Windows spawn vars (`SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`) when present. `GRIM_INSECURE_REGISTRIES` is set to the test registry host whenever it differs from grim's built-in HTTP allowlist (`localhost[:5000]`, `127.0.0.1[:5000]`).
 
 ## Test Data Helpers
 
