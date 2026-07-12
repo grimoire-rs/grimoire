@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-12
+
+### Fixed
+
+- Advertise z fold toggle in the tree-mode hint bar *(tui)*
+- Drop logo image from published package readmes *(catalog)*
+- Separate changelog link refs from the last list item *(release)*
+
 ## [0.9.0] - 2026-07-12
 
 ### Added
@@ -434,6 +442,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.9.1]: https://github.com/grimoire-rs/grimoire/compare/v0.9.0..v0.9.1
 [0.9.0]: https://github.com/grimoire-rs/grimoire/compare/v0.8.4..v0.9.0
 [0.8.4]: https://github.com/grimoire-rs/grimoire/compare/v0.8.3..v0.8.4
 [0.8.3]: https://github.com/grimoire-rs/grimoire/compare/v0.8.2..v0.8.3
