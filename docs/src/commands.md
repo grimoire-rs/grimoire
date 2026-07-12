@@ -250,7 +250,9 @@ defaults to the artifact's own name (a skill's frontmatter `name`, or a
 rule/agent file's stem) rather than a reference path segment. A relative CLI
 path is rewritten to be relative to the config file's directory before it is
 declared, so the recorded value is portable when a co-worker clones the
-repo; an absolute path is declared verbatim, and a project-scope config
+repo; an absolute path is declared verbatim (on Windows, `\` separators in
+the CLI argument are normalized to `/` — the declared value is always the
+forward-slash form the config grammar accepts), and a project-scope config
 carrying one gets a warning on every subsequent command — it is not portable
 to another machine (global scope, being machine-local already, stays quiet).
 A relative path source whose `../..` chain resolves outside the workspace
@@ -297,7 +299,8 @@ grim install --client claude,copilot
 ### Dev-install a local path {#install-dev}
 
 `grim install <path>` — a [local path](./concepts.md#references-tags-and-digests)
-positional argument (`./…`, `../…`, or absolute) — renders a skill, rule, or
+positional argument (`./…`, `../…`, or absolute; Windows `\` separators are
+accepted and normalized) — renders a skill, rule, or
 agent straight from disk into your clients **without** touching
 `grimoire.toml` or `grimoire.lock`. It is a throwaway test loop: edit the
 source, re-run the same command, see the change land, with nothing declared.

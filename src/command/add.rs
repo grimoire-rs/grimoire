@@ -119,8 +119,11 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 
     // A `./`/`../`-prefixed or absolute reference is a local path source —
     // declared verbatim, pinned by content hash, no registry round-trip.
-    if crate::config::is_path_value(&args.reference) {
-        return add_path_source(ctx, &scope, args).await;
+    // OS-native separators (`.\x`, `C:\x`) are normalized to the
+    // forward-slash form first; an OCI reference never contains `\`.
+    let reference = crate::config::path_source::normalize_cli_path(&args.reference);
+    if crate::config::is_path_value(&reference) {
+        return add_path_source(ctx, &scope, args, &reference).await;
     }
 
     // Resolve the reference against the scope's registry set: a qualified
@@ -306,15 +309,16 @@ fn reject_dev_install_collision(
 /// Declare a local path source: detect the kind by shape (or honor
 /// `--kind`), validate + pack once (early failure, intrinsic name),
 /// rewrite a relative CLI path to be config-dir-relative, then reuse the
-/// declare → write-config → relock → install pipeline.
+/// declare → write-config → relock → install pipeline. `raw` is the
+/// CLI reference with OS-native separators already normalized.
 async fn add_path_source(
     ctx: &Context,
     scope: &super::scope_resolution::ResolvedScope,
     args: &AddArgs,
+    raw: &str,
 ) -> anyhow::Result<(AddReport, ExitCode)> {
     use crate::config::path_source::{PathSource, relative_to};
 
-    let raw = args.reference.as_str();
     let cli_path = std::path::Path::new(raw);
     let abs = if cli_path.is_absolute() {
         cli_path.to_path_buf()

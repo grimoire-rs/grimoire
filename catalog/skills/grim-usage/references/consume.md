@@ -101,7 +101,9 @@ directory with `SKILL.md` is a skill, a bare `.md` is a rule; pass
 `--kind agent` for an agent). A relative CLI path is rewritten
 config-dir-relative before it is declared, so it stays portable across
 clones; an absolute path is declared verbatim and warns in project scope
-(not portable to another machine). A bundle has no path form via `add` —
+(not portable to another machine). Windows `\` separators in a CLI path
+are accepted and normalized — the declared value is always the
+forward-slash form. A bundle has no path form via `add` —
 declare it in `[bundles]` directly and run `grim lock` instead; see
 [Bundles](#bundles) below.
 

@@ -25,6 +25,20 @@ pub fn is_path_value(value: &str) -> bool {
     value.starts_with("./") || value.starts_with("../") || Path::new(value).is_absolute()
 }
 
+/// Normalize an OS-native CLI path argument into the forward-slash form
+/// [`PathSource::parse`] accepts: on Windows `\` separators become `/`
+/// (`.\x` → `./x`, `C:\x` → `C:/x`); elsewhere the value passes through
+/// untouched (`\` is an ordinary filename byte on POSIX). Only CLI
+/// arguments take this path — config-file values stay strict so a
+/// committed config remains portable across platforms.
+pub fn normalize_cli_path(raw: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) && raw.contains('\\') {
+        std::borrow::Cow::Owned(raw.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    }
+}
+
 /// A validated local path source: the raw declared string, guaranteed to
 /// start with `./` or `../` or be absolute, non-empty, and free of
 /// backslashes (forward slashes only, so a committed config is portable
@@ -190,6 +204,20 @@ pub enum PathSourceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_cli_path_is_a_windows_only_separator_rewrite() {
+        // POSIX: `\` is an ordinary filename byte — never rewritten.
+        // Windows: OS-native separators become the forward-slash form
+        // `parse` accepts.
+        if cfg!(windows) {
+            assert_eq!(normalize_cli_path(r".\skills\x"), "./skills/x");
+            assert_eq!(normalize_cli_path(r"C:\Users\me\skill"), "C:/Users/me/skill");
+        } else {
+            assert_eq!(normalize_cli_path(r".\skills\x"), r".\skills\x");
+        }
+        assert_eq!(normalize_cli_path("./skills/x"), "./skills/x");
+    }
 
     #[test]
     fn is_path_value_table() {

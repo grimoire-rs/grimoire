@@ -124,9 +124,13 @@ async fn dev_install(
     args: &InstallArgs,
     raw: &str,
 ) -> anyhow::Result<(InstallReport, ExitCode)> {
-    use crate::config::path_source::{PathSource, relative_to};
+    use crate::config::path_source::{PathSource, normalize_cli_path, relative_to};
     use crate::lock::locked_source::LockedSource;
     use crate::oci::ArtifactKind;
+
+    // OS-native separators (`.\x`, `C:\x`) → the forward-slash form the
+    // path-source grammar accepts; no-op outside Windows.
+    let raw = &*normalize_cli_path(raw);
 
     if !crate::config::is_path_value(raw) {
         return Err(anyhow::Error::from(crate::error::Error::from(
