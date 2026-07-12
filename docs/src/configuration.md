@@ -55,7 +55,7 @@ the `h` toggle is never written back to the file.
 ### `[options.tui]` {#options-tui}
 
 The optional `[options.tui]` sub-table tunes the interactive catalog browser
-launched by [`grim tui`][grim-tui]. All three fields are opt-in —
+launched by [`grim tui`][grim-tui]. All four fields are opt-in —
 an absent `[options.tui]` leaves the TUI at its built-in defaults.
 
 ```toml
@@ -63,6 +63,7 @@ an absent `[options.tui]` leaves the TUI at its built-in defaults.
 default_view = "tree"
 group_by_type = true
 tree_separators = ["/", "-"]
+expand_levels = 2
 ```
 
 | Field | Type | Default | Description |
@@ -70,6 +71,7 @@ tree_separators = ["/", "-"]
 | `default_view` | `"flat"` or `"tree"` | `"tree"` | The view mode the browser opens in. Absent, it opens in the collapsible grouped tree (which needs no Registry column and reads compactly); set `"flat"` to open in the plain list instead. An unrecognised value is a config parse error — the enum is strict. The runtime `t` key still toggles between modes ephemerally; the config is never auto-rewritten. |
 | `group_by_type` | boolean | `false` | When `true`, inserts an extra type-level group — `skill`, `rule`, `agent`, or `bundle` — between the registry root and the repository path segments in tree view. Has no effect in flat mode. |
 | `tree_separators` | array of single-character strings | (absent or `[]`) | The characters on which a repository path is split into nested tree groups. Omitting the field (or setting it to `[]`) leaves the array empty in the config file; at runtime, an empty array normalizes to `["/"]`. Add `"-"` to split on hyphens as well, so `code-review` becomes `code` → `review`. Each entry must be exactly one character; empty or multi-character entries are a parse error. |
+| `expand_levels` | non-negative integer | `1` | How many levels of the grouped tree open expanded, so a large catalog does not flood the screen. `1` (the default when absent) shows only the registry roots; `2` also expands their direct children, and so on. `0` opens the tree fully expanded. Every group below the opening depth starts collapsed, so expanding one reveals its children still folded — you drill down one level at a time. The runtime `z` key folds between this depth and fully-expanded; `→`/`←` still expand or collapse a single group. Has no effect in flat mode. |
 
 Configuration parse errors — including an unrecognised `default_view` value or an invalid `tree_separators` entry — exit 78 (`EX_CONFIG`).
 

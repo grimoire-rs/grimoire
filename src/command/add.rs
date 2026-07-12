@@ -844,6 +844,9 @@ pub(crate) fn write_config(
                 .join(", ");
             let _ = writeln!(out, "tree_separators = [{list}]");
         }
+        if let Some(levels) = options.tui.expand_levels {
+            let _ = writeln!(out, "expand_levels = {levels}");
+        }
         out.push('\n');
     }
     // Preserve declared `[[registries]]` verbatim — re-serializing the
@@ -1093,7 +1096,7 @@ mod tests {
     #[test]
     fn write_config_tui_options_round_trips() {
         // A fully-populated [options.tui] block must survive write → parse with
-        // all three fields intact.
+        // all four fields intact.
         use crate::config::declaration::{DefaultView, TuiOptions};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("grimoire.toml");
@@ -1106,6 +1109,7 @@ mod tests {
                 default_view: Some(DefaultView::Tree),
                 group_by_type: true,
                 tree_separators: vec!["/".to_string(), "-".to_string()],
+                expand_levels: Some(2),
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();
@@ -1123,6 +1127,11 @@ mod tests {
             cfg.options.tui.tree_separators,
             vec!["/".to_string(), "-".to_string()],
             "tree_separators must round-trip verbatim"
+        );
+        assert_eq!(
+            cfg.options.tui.expand_levels,
+            Some(2),
+            "expand_levels must round-trip through the manual serializer (regression: it was dropped on write)"
         );
     }
 
@@ -1176,6 +1185,7 @@ mod tests {
                 default_view: Some(DefaultView::Tree),
                 group_by_type: false,
                 tree_separators: vec!["/".to_string()],
+                expand_levels: None,
             },
         };
         write_config(&path, &opts, &registries, &set).unwrap();
@@ -1219,6 +1229,7 @@ mod tests {
                 default_view: None,
                 group_by_type: false,
                 tree_separators: vec!["\\".to_string()],
+                expand_levels: None,
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();

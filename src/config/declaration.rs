@@ -116,6 +116,12 @@ pub struct TuiOptions {
     /// parse error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tree_separators: Vec<String>,
+    /// How many levels of the grouped tree are expanded when the browser
+    /// opens. `1` (the built-in default when absent) shows only the registry
+    /// roots; `2` also expands their direct children, and so on. `0` opens the
+    /// tree fully expanded. Has no effect in flat mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand_levels: Option<u32>,
 }
 
 impl TuiOptions {

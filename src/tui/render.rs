@@ -1336,7 +1336,7 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 /// Every browse-mode keybinding shown in the `?` help overlay, as
 /// `(keys, description)` rows. A free function so a unit test can assert the
 /// overlay documents every action the event loop handles.
-fn help_entries() -> [(&'static str, &'static str); 17] {
+fn help_entries() -> [(&'static str, &'static str); 18] {
     [
         ("↑ / ↓", "move the selection (always — detail open or not)"),
         ("j / k", "scroll the detail pane line by line (no focus needed)"),
@@ -1350,6 +1350,7 @@ fn help_entries() -> [(&'static str, &'static str); 17] {
         ("t", "toggle tree / flat view"),
         ("h", "show / hide deprecated artifacts"),
         ("→ / ←", "expand / collapse selected group (tree mode)"),
+        ("z", "fold: collapse to level / expand all (tree mode)"),
         ("/", "search; type to filter, enter to commit"),
         ("enter", "open the detail pane"),
         ("r", "refresh the catalog from the registry"),

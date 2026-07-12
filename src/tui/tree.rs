@@ -670,6 +670,38 @@ fn compress(node: Node, exempt: &BTreeSet<(usize, String)>, depth: usize) -> Nod
     }
 }
 
+/// The group keys to seed [`crate::tui::state::TuiState::collapsed`] with so
+/// only the top `expand_levels` levels of the tree are expanded on open.
+///
+/// **Every** group at or below the boundary depth (`depth >= expand_levels - 1`)
+/// is collapsed — not just the boundary row. So expanding a collapsed group
+/// reveals its children still collapsed, and the user drills down one level at
+/// a time rather than unfolding a whole subtree at once. `expand_levels == 0`
+/// returns an empty set (the tree opens fully expanded).
+///
+/// Depth is the compressed-tree depth (`build` path-compresses single-child
+/// chains), matching the depths [`flatten`] renders.
+pub fn default_collapsed(tree: &Tree, expand_levels: usize) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(boundary) = expand_levels.checked_sub(1) else {
+        return out; // expand_levels == 0 → fully expanded
+    };
+    fn walk(nodes: &[Node], boundary: usize, out: &mut BTreeSet<String>) {
+        for node in nodes {
+            if let Node::Group(g) = node {
+                if g.depth >= boundary {
+                    out.insert(g.key.clone());
+                }
+                // Always recurse: deeper groups are collapsed too, so an
+                // expand reveals the next level still folded.
+                walk(&g.children, boundary, out);
+            }
+        }
+    }
+    walk(&tree.roots, boundary, &mut out);
+    out
+}
+
 /// Flatten the tree to the visible lines: a preorder walk where a
 /// collapsed group emits its header but not its descendants.
 ///
@@ -2255,6 +2287,54 @@ mod tests {
         );
         assert!(matches!(&flat[1], DisplayRow::Leaf { .. }), "second row is a leaf");
         assert!(matches!(&flat[2], DisplayRow::Leaf { .. }), "third row is a leaf");
+    }
+
+    // ── default_collapsed ────────────────────────────────────────────────────
+
+    /// A two-org tree: reg(0) → {acme(1) → lint(2), beta(1) → format(2)}.
+    /// The registry root keeps two group children so it does not path-compress.
+    fn two_org_tree() -> Tree {
+        let rows = vec![
+            row2("reg", "acme/lint", "skill", ArtifactState::NotInstalled),
+            row2("reg", "beta/format", "skill", ArtifactState::NotInstalled),
+        ];
+        let filtered: Vec<usize> = (0..rows.len()).collect();
+        build(&rows, &filtered, &opts_default(None))
+    }
+
+    #[test]
+    fn default_collapsed_zero_is_fully_expanded() {
+        assert!(default_collapsed(&two_org_tree(), 0).is_empty());
+    }
+
+    #[test]
+    fn default_collapsed_one_collapses_every_group() {
+        // expand_levels=1 shows only the registry root, and every group below
+        // it (org level and deeper) starts collapsed — so expanding the root
+        // reveals its children still folded, one level at a time.
+        let keys = default_collapsed(&two_org_tree(), 1);
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["reg".to_string(), "reg/acme".to_string(), "reg/beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_collapsed_two_collapses_org_level_and_below() {
+        // expand_levels=2 keeps the root expanded but collapses the org level
+        // (and anything deeper).
+        let keys = default_collapsed(&two_org_tree(), 2);
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["reg/acme".to_string(), "reg/beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_collapsed_deeper_than_tree_is_empty() {
+        // Boundary depth 2 holds only leaves (no groups) → nothing to collapse,
+        // so a branch shallower than expand_levels opens fully expanded.
+        assert!(default_collapsed(&two_org_tree(), 3).is_empty());
     }
 }
 

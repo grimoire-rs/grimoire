@@ -230,7 +230,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     state.set_registry_order(registry_order(&ctx));
     // Seed the tree display options from the resolved config.
     state.set_view_mode_from_config(ctx.tui_options.default_view);
-    state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
+    state.set_tree_options(
+        ctx.tui_options.group_by_type,
+        ctx.tui_options.tree_separators.clone(),
+        resolved_expand_levels(&ctx),
+    );
     // Seed the deprecated-hiding filter: default config (`show_deprecated =
     // false`) hides them. The `h` key toggles this live and, unlike the
     // structural tree options above, is NOT re-seeded on a scope swap.
@@ -529,7 +533,13 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // `[options.tui]` (the two scopes may differ). The runtime
                     // `t` view-mode choice is deliberately NOT re-seeded from
                     // config here, so a view toggled with `t` survives the swap.
-                    state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
+                    // The collapse set is likewise preserved — only `expand_levels`
+                    // is re-synced so a later `z` uses the new scope's level.
+                    state.set_tree_options(
+                        ctx.tui_options.group_by_type,
+                        ctx.tui_options.tree_separators.clone(),
+                        resolved_expand_levels(&ctx),
+                    );
                     recompute_states(&ctx, &mut state);
                     // Invalidate the bundle-member cache: the new scope has a
                     // different lock/install state and a different scope_label key.
@@ -1061,6 +1071,10 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
 ///   transient "refreshing catalog…" / "loading catalog…" message on success
 ///   so the status falls through to the registry-health line (D-DEGRADE) or
 ///   marked-count.  Any caller that skips this call will regress B1.
+/// - `apply_default_collapse` seeds the collapse set from `expand_levels` so the
+///   tree opens folded to the configured depth. On the **load** path only — the
+///   background-refresh path (`merge_catalog_rows`) never calls this, so a live
+///   refresh keeps the user's manual expand/collapse.
 fn apply_catalog_results(
     state: &mut TuiState,
     rows: Vec<TuiRow>,
@@ -1077,6 +1091,9 @@ fn apply_catalog_results(
     state.set_default_registry(elision);
     // Keep the tree-root precedence order in sync with the resolved set (F13).
     state.set_registry_order(order);
+    // Fold the freshly-loaded tree to the configured `expand_levels` depth.
+    // Load path only (not background refresh) — see the invariant note above.
+    state.apply_default_collapse();
     state.set_registry_health(health);
     state.set_truncated(truncated);
     // Store URL → alias labels so the flat list's Registry column and tree
@@ -2700,6 +2717,15 @@ fn split_repo(repo: &str) -> Option<(String, String)> {
 /// consume via [`TuiState::set_registry_order`].
 fn registry_order(ctx: &TuiContext) -> Vec<String> {
     ctx.registries.iter().map(|r| r.url.clone()).collect()
+}
+
+/// The resolved `[options.tui].expand_levels`, falling back to
+/// [`DEFAULT_EXPAND_LEVELS`] when the key is unset.
+fn resolved_expand_levels(ctx: &TuiContext) -> usize {
+    ctx.tui_options
+        .expand_levels
+        .map(|n| n as usize)
+        .unwrap_or(super::state::DEFAULT_EXPAND_LEVELS)
 }
 
 /// The registry whose root prefix is elided from tree labels — `Some` only

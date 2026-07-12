@@ -492,6 +492,12 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.toggle_view_mode();
             TuiAction::None
         }
+        TuiInput::Char('z') => {
+            // Fold toggle: expand everything if anything is collapsed, else
+            // collapse back to the configured `expand_levels` depth.
+            state.toggle_collapse_all();
+            TuiAction::None
+        }
         TuiInput::Expand => {
             // Expand a group if selected; for bundle leaves, insert the leaf
             // key into expanded_bundles and trigger a lazy member-list fetch
@@ -1924,5 +1930,45 @@ mod tree_event_tests {
             "collapsed-group→parent: selection must jump to acme (pos 0)"
         );
         assert!(s.selected_is_group(), "position 0 must be the acme group");
+    }
+
+    // `z` folds the tree to the configured `expand_levels` depth, then expands
+    // everything on the next press.
+    #[test]
+    fn z_folds_and_unfolds_the_tree() {
+        let row = |repository: &str| TuiRow {
+            oci: crate::catalog::OciMeta::default(),
+            kind: "skill".to_string(),
+            registry: "reg".to_string(),
+            repository: repository.to_string(),
+            repo: format!("reg/{repository}"),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            revision: None,
+            created: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            deprecated: None,
+            pinned_version: None,
+            state: crate::tui::state::ArtifactState::NotInstalled,
+            source: None,
+        };
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        // Two orgs keep the "reg" root from path-compressing (default_registry
+        // unset → the registry stays the depth-0 root).
+        s.set_rows(vec![row("acme/lint"), row("beta/format")]);
+        s.expand_levels = 1;
+        handle(&mut s, TuiInput::ViewToggle); // → Tree
+        let full = s.flattened().len();
+        assert!(full > 1, "precondition: tree opens fully expanded here");
+        // `z` collapses to level 1 → only the registry root row remains.
+        assert_eq!(handle(&mut s, TuiInput::Char('z')), TuiAction::None);
+        assert_eq!(s.flattened().len(), 1, "z collapses to expand_levels=1");
+        // `z` again expands everything.
+        handle(&mut s, TuiInput::Char('z'));
+        assert_eq!(s.flattened().len(), full, "z expands the whole tree");
     }
 }

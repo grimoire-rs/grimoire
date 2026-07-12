@@ -99,6 +99,7 @@ The supported dotted keys are:
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
+| `options.tui.expand_levels` | non-negative integer | How many tree levels open expanded: `1` (default when unset) shows only registry roots, `0` opens fully expanded. Non-integer or negative values exit `65`. Setting it stores the value; a subsequent `get` echoes it (unlike the default-valued keys above, an explicit value is always kept). |
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
@@ -696,6 +697,7 @@ like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
 | `t` | Toggle between flat list and tree view. |
 | `→` | Expand the selected group (reveal its children). Tree mode only. |
 | `←` | Collapse the selected group. On an already-collapsed group or on a leaf entry, jump to the parent group instead (ARIA-style navigation). Tree mode only. |
+| `z` | Fold the whole tree: if anything is collapsed, expand everything; otherwise collapse back to the configured [`expand_levels`][options-tui] depth. Tree mode only. |
 | `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle); on a leaf entry, open the detail pane as usual. |
 | `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
 | `i` / `u` / `d` on a group | Install, update, or uninstall every leaf in the subtree (when no other rows are individually marked). Batch behavior follows the same selection precedence as the flat view. |
@@ -738,9 +740,9 @@ An active search (started with `/`) reveals matching entries even when their
 parent group is collapsed — the tree stays navigable in search mode and does
 not force a switch to flat view.
 
-Three config fields under `[options.tui]` in `grimoire.toml` let you set
-the opening view mode and control how paths are split into groups. See
-[`[options.tui]`][options-tui] for the full reference.
+Four config fields under `[options.tui]` in `grimoire.toml` let you set
+the opening view mode, how many tree levels open expanded, and how paths are
+split into groups. See [`[options.tui]`][options-tui] for the full reference.
 
 Like `grim search`, the TUI browses **every** registry declared in
 `[[registries]]`, grouping entries under one collapsible root per registry.

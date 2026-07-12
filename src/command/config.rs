@@ -158,6 +158,7 @@ enum ParsedKey {
     TuiDefaultView,
     TuiGroupByType,
     TuiTreeSeparators,
+    TuiExpandLevels,
     /// `registry.<alias>` — valid only for `unset` (removes the whole entry).
     RegistryAlias {
         alias: String,
@@ -183,6 +184,7 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
         "options.tui.default_view" => return Ok(ParsedKey::TuiDefaultView),
         "options.tui.group_by_type" => return Ok(ParsedKey::TuiGroupByType),
         "options.tui.tree_separators" => return Ok(ParsedKey::TuiTreeSeparators),
+        "options.tui.expand_levels" => return Ok(ParsedKey::TuiExpandLevels),
         _ => {}
     }
     if let Some(rest) = key.strip_prefix("registry.") {
@@ -221,7 +223,7 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     Err(super::config_usage(format!(
         "unknown config key '{key}'; valid keys: options.clients, \
          options.default_registry, options.show_deprecated, options.tui.default_view, \
-         options.tui.group_by_type, options.tui.tree_separators, \
+         options.tui.group_by_type, options.tui.tree_separators, options.tui.expand_levels, \
          registry.<alias>.oci, registry.<alias>.index, registry.<alias>.default"
     )))
 }
@@ -282,6 +284,7 @@ fn get_value(
                 Some(options.tui.tree_separators.join(","))
             }
         }
+        ParsedKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
         ParsedKey::RegistryAlias { alias } => {
             return Err(super::config_usage(format!(
                 "no registry field specified for '{alias}'; use registry.<alias>.oci or registry.<alias>.default"
@@ -354,6 +357,11 @@ fn apply_set(
             let stored = seps.join(",");
             options.tui.tree_separators = seps;
             Ok(stored)
+        }
+        ParsedKey::TuiExpandLevels => {
+            let levels = parse_u32(value_str, "options.tui.expand_levels")?;
+            options.tui.expand_levels = Some(levels);
+            Ok(levels.to_string())
         }
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
             "cannot set registry '{alias}' without a field; \
@@ -435,6 +443,10 @@ fn apply_unset(
         }
         ParsedKey::TuiTreeSeparators => {
             options.tui.tree_separators.clear();
+            Ok(())
+        }
+        ParsedKey::TuiExpandLevels => {
+            options.tui.expand_levels = None;
             Ok(())
         }
         ParsedKey::RegistryAlias { alias } => {
@@ -534,6 +546,12 @@ fn collect_entries(options: &ConfigOptions, registries: &[RegistryConfig]) -> Ve
             value: options.tui.tree_separators.join(","),
         });
     }
+    if let Some(levels) = options.tui.expand_levels {
+        entries.push(ConfigEntry {
+            key: "options.tui.expand_levels".to_string(),
+            value: levels.to_string(),
+        });
+    }
     for rc in registries {
         if let Some(alias) = &rc.alias {
             if let Some(oci) = &rc.oci {
@@ -577,6 +595,14 @@ fn parse_bool(s: &str, key: &str) -> anyhow::Result<bool> {
             "invalid value for {key}: '{s}'; must be true or false"
         ))),
     }
+}
+
+fn parse_u32(s: &str, key: &str) -> anyhow::Result<u32> {
+    s.trim().parse::<u32>().map_err(|_| {
+        super::config_value(format!(
+            "invalid value for {key}: '{s}'; must be a non-negative integer"
+        ))
+    })
 }
 
 fn parse_tree_separators(s: &str) -> anyhow::Result<Vec<String>> {
@@ -1212,6 +1238,48 @@ mod tests {
         assert!(parse_tree_separators("/").is_ok());
         assert!(parse_tree_separators("-").is_ok());
         assert!(parse_tree_separators("/,-").is_ok());
+    }
+
+    #[test]
+    fn parse_u32_valid_and_invalid() {
+        assert_eq!(parse_u32("0", "k").unwrap(), 0);
+        assert_eq!(parse_u32("3", "k").unwrap(), 3);
+        assert_eq!(parse_u32("  2 ", "k").unwrap(), 2, "surrounding whitespace tolerated");
+        assert!(parse_u32("-1", "k").is_err(), "negative rejected");
+        assert!(parse_u32("x", "k").is_err(), "non-numeric rejected");
+        assert!(parse_u32("", "k").is_err(), "empty rejected");
+        assert!(parse_u32("1.5", "k").is_err(), "non-integer rejected");
+    }
+
+    #[test]
+    fn expand_levels_set_get_unset_round_trip() {
+        use crate::config::declaration::{ConfigOptions, RegistryConfig};
+        let key = parse_key("options.tui.expand_levels").unwrap();
+        let mut options = ConfigOptions::default();
+        let mut registries: Vec<RegistryConfig> = vec![];
+
+        // Unset by default → get returns None (so `get` exits 1, `list` omits).
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+
+        // Set stores the value; get echoes it back.
+        let stored = apply_set(&key, "2", &mut options, &mut registries).unwrap();
+        assert_eq!(stored, "2");
+        assert_eq!(options.tui.expand_levels, Some(2));
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), Some("2".to_string()));
+        assert!(
+            collect_entries(&options, &registries)
+                .iter()
+                .any(|e| e.key == "options.tui.expand_levels" && e.value == "2"),
+            "list must surface a set expand_levels"
+        );
+
+        // A bad value is rejected (config_value → exit 65).
+        assert!(apply_set(&key, "nope", &mut options, &mut registries).is_err());
+
+        // Unset clears it back to None.
+        apply_unset(&key, &mut options, &mut registries).unwrap();
+        assert_eq!(options.tui.expand_levels, None);
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
     }
 
     #[test]

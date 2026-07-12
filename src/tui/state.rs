@@ -256,6 +256,11 @@ pub struct TuiState {
     /// Characters (each a `String`) on which the repository path is split
     /// into nested groups. Defaults to `["/"]`.
     pub tree_separators: Vec<String>,
+    /// How many levels of the grouped tree open expanded, seeded from
+    /// `[options.tui].expand_levels` (falling back to [`DEFAULT_EXPAND_LEVELS`]
+    /// when unset). `0` means fully expanded. Drives [`Self::apply_default_collapse`]
+    /// on catalog load and the `z` fold toggle ([`Self::toggle_collapse_all`]).
+    pub expand_levels: usize,
     /// The resolved registries in precedence order (F13). Threaded into
     /// [`super::tree::TreeBuildOptions`] so the tree's registry roots follow
     /// resolution precedence (not alphabetical order) and every resolved
@@ -334,6 +339,10 @@ impl Default for TuiState {
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: vec!["/".into()],
+            // 0 = fully expanded: unit tests build a bare state and expect the
+            // whole tree visible. The runtime value is seeded from config via
+            // `set_tree_options`.
+            expand_levels: 0,
             registry_order: Vec::new(),
             bundle_members: HashMap::new(),
             expanded_bundles: BTreeSet::new(),
@@ -368,7 +377,11 @@ enum SelectionAnchor {
 /// separator, and one row per keybinding entry. Single source for help-scroll
 /// clamping; the entry text lives in [`super::render::help_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
-pub(crate) const HELP_BODY_LINES: u16 = 19;
+pub(crate) const HELP_BODY_LINES: u16 = 20;
+
+/// Built-in `[options.tui].expand_levels` default when the key is unset: open
+/// the tree with only the registry roots expanded (level 1).
+pub(crate) const DEFAULT_EXPAND_LEVELS: usize = 1;
 
 impl TuiState {
     /// A fresh state in the loading phase.
@@ -895,7 +908,12 @@ impl TuiState {
     }
 
     /// Seed the tree build options from resolved config values.
-    pub fn set_tree_options(&mut self, group_by_type: bool, tree_separators: Vec<String>) {
+    ///
+    /// `expand_levels` is cached for the `z` fold toggle and the load-time
+    /// [`Self::apply_default_collapse`]; it does not itself reseed the collapse
+    /// set (that happens on catalog load), so a scope swap re-syncs the level
+    /// without discarding the user's in-flight expand/collapse choices.
+    pub fn set_tree_options(&mut self, group_by_type: bool, tree_separators: Vec<String>, expand_levels: usize) {
         // The grouping / separator change reshapes the flattened tree, so the
         // pre-change `selected` (a flattened display index in tree mode) would
         // point at a different row — including a different *group* whose
@@ -908,7 +926,39 @@ impl TuiState {
         } else {
             tree_separators
         };
+        self.expand_levels = expand_levels;
         self.restore_selection(anchor);
+    }
+
+    /// Seed [`Self::collapsed`] so only the top `expand_levels` levels of the
+    /// tree open expanded. Called on catalog load (initial + manual reload) —
+    /// not on background refresh, so a live refresh never discards the user's
+    /// manual expand/collapse. A no-op when `expand_levels == 0`.
+    pub fn apply_default_collapse(&mut self) {
+        let opts = super::tree::TreeBuildOptions {
+            default_registry: self.default_registry.clone(),
+            group_by_type: self.group_by_type,
+            separators: self.tree_separators.clone(),
+            registry_order: self.registry_order.clone(),
+        };
+        let tree = super::tree::build(&self.rows, &self.filtered, &opts);
+        self.collapsed = super::tree::default_collapsed(&tree, self.expand_levels);
+    }
+
+    /// The `z` fold toggle (tree mode only): if anything is collapsed, expand
+    /// everything; otherwise collapse back to the configured `expand_levels`
+    /// depth. Re-clamps the selection after the visible set shrinks.
+    pub fn toggle_collapse_all(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        if self.collapsed.is_empty() {
+            self.apply_default_collapse();
+        } else {
+            self.collapsed.clear();
+        }
+        let new_len = self.flattened().len();
+        self.clamp_tree_selection_to(new_len);
     }
 
     /// Toggle between [`ViewMode::Flat`] and [`ViewMode::Tree`]. Ephemeral —
@@ -2110,6 +2160,75 @@ mod tests {
         assert!(s.is_row_marked(0), "mark must survive the tree→flat toggle");
     }
 
+    // `apply_default_collapse` folds the tree to the configured depth: level 1
+    // shows only the root group; level 0 leaves it fully expanded.
+    #[test]
+    fn apply_default_collapse_folds_to_expand_levels() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree; flattened = [acme(0), alpha(1), beta(1)]
+        s.expand_levels = 1;
+        s.apply_default_collapse();
+        assert_eq!(s.flattened().len(), 1, "expand_levels=1 → only the root group visible");
+        s.expand_levels = 0;
+        s.apply_default_collapse();
+        assert_eq!(s.flattened().len(), 3, "expand_levels=0 → group + 2 leaves visible");
+    }
+
+    // `z` cycles: collapse a fully-expanded tree to the configured level, then
+    // expand everything on the next press.
+    #[test]
+    fn toggle_collapse_all_cycles_expand_and_collapse() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.expand_levels = 1;
+        assert!(s.collapsed.is_empty(), "precondition: fully expanded");
+        s.toggle_collapse_all();
+        assert_eq!(s.flattened().len(), 1, "z on an expanded tree collapses to level 1");
+        s.toggle_collapse_all();
+        assert!(s.collapsed.is_empty(), "z on a collapsed tree expands everything");
+        assert_eq!(s.flattened().len(), 3);
+    }
+
+    // `z` is a no-op in flat mode (nothing to fold).
+    #[test]
+    fn toggle_collapse_all_noop_in_flat_mode() {
+        let mut s = tree_seeded(); // Flat
+        s.expand_levels = 1;
+        s.toggle_collapse_all();
+        assert!(s.collapsed.is_empty(), "flat mode: z does nothing");
+    }
+
+    // Drill-down: with expand_levels=1 every group below the root also opens
+    // collapsed, so expanding the root reveals its child groups still folded
+    // (their leaves stay hidden) rather than unfolding the whole subtree.
+    #[test]
+    fn apply_default_collapse_drills_down_one_level_at_a_time() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        // registry "reg" kept as the depth-0 root (no default_registry elision);
+        // two orgs each with a leaf → reg(0) → {acme(1)→lint(2), beta(1)→format(2)}.
+        s.set_rows(vec![
+            tree_row("reg/acme/lint", "skill", ArtifactState::NotInstalled),
+            tree_row("reg/beta/format", "skill", ArtifactState::NotInstalled),
+        ]);
+        s.toggle_view_mode(); // → Tree
+        s.expand_levels = 1;
+        s.apply_default_collapse();
+        assert_eq!(s.flattened().len(), 1, "only the registry root is visible on open");
+
+        // Expand the root: its two org groups appear, but they are STILL
+        // collapsed — the leaves stay hidden.
+        s.selected = 0;
+        s.expand_selected();
+        let flat = s.flattened();
+        assert_eq!(flat.len(), 3, "root + 2 org groups, no leaves yet");
+        assert!(
+            flat.iter()
+                .all(|r| matches!(r, crate::tui::tree::DisplayRow::Group { .. })),
+            "every visible row is a group — no leaf unfolded by expanding the root"
+        );
+    }
+
     // `selected_is_group()` returns true on a group line, false on a leaf.
     #[test]
     fn selected_is_group_returns_true_for_group_false_for_leaf() {
@@ -2267,7 +2386,7 @@ mod tests {
         s.selected = 2; // beta leaf
         assert_eq!(s.selected_row().map(|r| r.repo.as_str()), Some("reg/acme/beta"));
         // Enable group_by_type: shape becomes [skill(0), acme(1), alpha(2), beta(3)].
-        s.set_tree_options(true, vec!["/".to_string()]);
+        s.set_tree_options(true, vec!["/".to_string()], 0);
         assert_eq!(
             s.selected_row().map(|r| r.repo.as_str()),
             Some("reg/acme/beta"),
@@ -2374,7 +2493,7 @@ mod tests {
         assert!(s.selected_is_group(), "precondition: a group is selected");
         let y_idx = s.rows.iter().position(|r| r.repo == "reg/zeta/y").unwrap();
         // Enable group_by_type → the tree reshapes (a type level is inserted).
-        s.set_tree_options(true, vec!["/".to_string()]);
+        s.set_tree_options(true, vec!["/".to_string()], 0);
         let targets = s.action_targets();
         assert!(!targets.is_empty(), "selection must stay actionable after a reshape");
         assert!(
@@ -2630,7 +2749,7 @@ mod tests {
         let mut s = TuiState::new();
 
         // Empty vec → normalized to ["/"].
-        s.set_tree_options(true, vec![]);
+        s.set_tree_options(true, vec![], 0);
         assert_eq!(
             s.tree_separators,
             vec!["/"],
@@ -2638,7 +2757,7 @@ mod tests {
         );
 
         // Non-empty vec passes through unchanged.
-        s.set_tree_options(false, vec![".".to_string(), "/".to_string()]);
+        s.set_tree_options(false, vec![".".to_string(), "/".to_string()], 0);
         assert_eq!(
             s.tree_separators,
             vec![".", "/"],
