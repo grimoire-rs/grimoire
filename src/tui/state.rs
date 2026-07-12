@@ -256,10 +256,12 @@ pub struct TuiState {
     /// Characters (each a `String`) on which the repository path is split
     /// into nested groups. Defaults to `["/"]`.
     pub tree_separators: Vec<String>,
-    /// How many levels of the grouped tree open expanded, seeded from
-    /// `[options.tui].expand_levels` (falling back to [`DEFAULT_EXPAND_LEVELS`]
-    /// when unset). `0` means fully expanded. Drives [`Self::apply_default_collapse`]
-    /// on catalog load and the `z` fold toggle ([`Self::toggle_collapse_all`]).
+    /// How many levels of the grouped tree open expanded, seeded from the
+    /// already-resolved `[options.tui].expand_levels`
+    /// ([`crate::config::resolved::ResolvedOptions::expand_levels`] —
+    /// unset-fallback happens there, not here). `0` means fully expanded.
+    /// Drives [`Self::apply_default_collapse`] on catalog load and the `z`
+    /// fold toggle ([`Self::toggle_collapse_all`]).
     pub expand_levels: usize,
     /// The resolved registries in precedence order (F13). Threaded into
     /// [`super::tree::TreeBuildOptions`] so the tree's registry roots follow
@@ -379,13 +381,11 @@ enum SelectionAnchor {
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
 pub(crate) const HELP_BODY_LINES: u16 = 20;
 
-/// Built-in `[options.tui].expand_levels` default when the key is unset: open
-/// the tree with only the registry roots expanded (level 1). Sourced from
-/// [`crate::config::defaults::EXPAND_LEVELS`], the single source of truth.
-pub(crate) const DEFAULT_EXPAND_LEVELS: usize = crate::config::defaults::EXPAND_LEVELS as usize;
-
-/// Built-in `[options.tui].tree_separators` default when unset or empty,
-/// sourced from [`crate::config::defaults::TREE_SEPARATORS`].
+/// The bare-state default for `tree_separators`, used only by
+/// [`TuiState::default`] — a state that was never seeded from config (unit
+/// tests constructing a bare state directly). The real runtime value always
+/// comes from [`TuiState::set_tree_options`], fed by
+/// [`crate::config::resolved::ResolvedOptions::tree_separators`].
 fn default_tree_separators() -> Vec<String> {
     crate::config::defaults::TREE_SEPARATORS
         .iter()
@@ -906,18 +906,23 @@ impl TuiState {
         self.is_multi_registry() && self.view_mode != ViewMode::Tree
     }
 
-    /// Seed the view mode from a typed [`crate::config::declaration::DefaultView`]
-    /// config value. When unset (`None`) the browse view defaults to **Tree**:
-    /// it groups by registry (no Registry column) and reads more compactly than
-    /// the flat list. An explicit `Some(Flat)` opts back into the flat list.
-    pub fn set_view_mode_from_config(&mut self, default_view: Option<crate::config::declaration::DefaultView>) {
-        self.view_mode = match default_view.unwrap_or(crate::config::defaults::DEFAULT_VIEW) {
+    /// Seed the view mode from an already-resolved
+    /// [`crate::config::declaration::DefaultView`] (see
+    /// [`crate::config::resolved::ResolvedOptions::default_view`] — the
+    /// unset-fallback to **Tree** happens there, not here; this setter only
+    /// maps the resolved variant onto [`ViewMode`]).
+    pub fn set_view_mode_from_config(&mut self, default_view: crate::config::declaration::DefaultView) {
+        self.view_mode = match default_view {
             crate::config::declaration::DefaultView::Flat => ViewMode::Flat,
             crate::config::declaration::DefaultView::Tree => ViewMode::Tree,
         };
     }
 
-    /// Seed the tree build options from resolved config values.
+    /// Seed the tree build options from already-resolved config values (see
+    /// [`crate::config::resolved::ResolvedOptions`] — `tree_separators`
+    /// arrives pre-normalized to a non-empty list, `expand_levels`
+    /// pre-defaulted; this setter applies them as-is with no further
+    /// fallback).
     ///
     /// `expand_levels` is cached for the `z` fold toggle and the load-time
     /// [`Self::apply_default_collapse`]; it does not itself reseed the collapse
@@ -931,11 +936,7 @@ impl TuiState {
         // cursor by stable leaf/group identity across the reshape.
         let anchor = self.selection_anchor();
         self.group_by_type = group_by_type;
-        self.tree_separators = if tree_separators.is_empty() {
-            default_tree_separators()
-        } else {
-            tree_separators
-        };
+        self.tree_separators = tree_separators;
         self.expand_levels = expand_levels;
         self.restore_selection(anchor);
     }
@@ -2729,50 +2730,21 @@ mod tests {
         );
     }
 
-    // set_view_mode_from_config routes correctly. Unset defaults to Tree; an
-    // explicit Flat opts back into the flat list.
-    //   Some(Tree)  → ViewMode::Tree
-    //   None        → ViewMode::Tree (the startup default)
-    //   Some(Flat)  → ViewMode::Flat
+    // set_view_mode_from_config maps an already-resolved DefaultView onto
+    // ViewMode. The None→Tree unset-fallback moved to
+    // `config::resolved::tests::default_view_routes_unset_to_tree` (T2) —
+    // this setter no longer sees an `Option`.
     #[test]
-    fn set_view_mode_from_config_resolves_default_view() {
+    fn set_view_mode_from_config_maps_resolved_variants() {
         use crate::config::declaration::DefaultView;
+
         let mut s = TuiState::new();
+        s.set_view_mode_from_config(DefaultView::Tree);
+        assert_eq!(s.view_mode, ViewMode::Tree, "Tree must set Tree view mode");
 
-        s.set_view_mode_from_config(Some(DefaultView::Tree));
-        assert_eq!(s.view_mode, ViewMode::Tree, "Some(Tree) must set Tree view mode");
-
-        // Unset (None) selects the Tree default.
         let mut s2 = TuiState::new();
-        s2.set_view_mode_from_config(None);
-        assert_eq!(s2.view_mode, ViewMode::Tree, "None must default to Tree view mode");
-
-        // Some(Flat) opts back into the flat list.
-        let mut s3 = TuiState::new();
-        s3.set_view_mode_from_config(Some(DefaultView::Flat));
-        assert_eq!(s3.view_mode, ViewMode::Flat, "Some(Flat) must set Flat view mode");
-    }
-
-    // Gap (b): set_tree_options normalizes empty separator list to ["/"].
-    #[test]
-    fn set_tree_options_normalizes_empty_separators_to_slash() {
-        let mut s = TuiState::new();
-
-        // Empty vec → normalized to ["/"].
-        s.set_tree_options(true, vec![], 0);
-        assert_eq!(
-            s.tree_separators,
-            vec!["/"],
-            "empty tree_separators must normalize to [\"/\"]"
-        );
-
-        // Non-empty vec passes through unchanged.
-        s.set_tree_options(false, vec![".".to_string(), "/".to_string()], 0);
-        assert_eq!(
-            s.tree_separators,
-            vec![".", "/"],
-            "non-empty tree_separators must be stored as-is"
-        );
+        s2.set_view_mode_from_config(DefaultView::Flat);
+        assert_eq!(s2.view_mode, ViewMode::Flat, "Flat must set Flat view mode");
     }
 
     // ── C-3 Cache lifecycle ────────────────────────────────────────────────────

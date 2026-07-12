@@ -106,7 +106,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
                 clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
                 label: scope_label(other.scope).to_string(),
                 roots: other.roots,
-                tui_options: other.options.tui.clone(),
+                resolved_options: other.options.resolved(),
                 registries: alt_registries,
                 primary_registry: alt_primary,
             }
@@ -128,7 +128,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         scope_label: scope_label(scope.scope).to_string(),
         alt,
         roots: scope.roots,
-        tui_options: scope.options.tui.clone(),
+        resolved_options: scope.options.resolved(),
         // Effective initial deprecated visibility: the `--show-deprecated`
         // flag OR the scope's config default. The live `h` toggle persists
         // across a project⇄global swap (a filter preference), so `ScopeSwap`

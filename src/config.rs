@@ -18,6 +18,7 @@ pub mod hash;
 pub mod path_source;
 pub mod project_config;
 pub mod registry_resolve;
+pub mod resolved;
 pub mod scope;
 
 #[allow(unused_imports)]
@@ -34,6 +35,8 @@ pub use path_source::{PathSource, PathSourceError, is_path_value};
 pub use project_config::{DiscoveredConfig, ProjectConfig};
 #[allow(unused_imports)]
 pub use registry_resolve::{ResolvedRegistry, primary_registry, resolve_reference, resolve_registries};
+#[allow(unused_imports)]
+pub use resolved::ResolvedOptions;
 #[allow(unused_imports)]
 pub use scope::ConfigScope;
 

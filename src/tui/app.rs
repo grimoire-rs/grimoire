@@ -29,11 +29,11 @@ use crate::catalog::registry_catalog::Catalog;
 use crate::command::add::{bundle_members_lock, declare, relock_declared, single_entry_lock, write_config};
 use crate::command::grim;
 use crate::command::uninstall::undeclare_and_unlock;
-use crate::config::ResolvedRegistry;
 use crate::config::declaration::{ConfigOptions, DesiredSet};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
+use crate::config::{ResolvedOptions, ResolvedRegistry};
 use crate::env::grim_home;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
@@ -113,8 +113,9 @@ pub struct TuiContext {
     /// Global ⇄ Project toggle. `None` ⇒ toggle is a no-op (e.g. no
     /// project config discoverable).
     pub alt: Option<ScopeSwap>,
-    /// Resolved TUI display options from `[options.tui]` in the config.
-    pub tui_options: crate::config::declaration::TuiOptions,
+    /// This scope's config options, fully resolved (unset keys defaulted) —
+    /// computed once via [`ConfigOptions::resolved`] at context construction.
+    pub resolved_options: ResolvedOptions,
     /// The effective initial deprecated-visibility (`--show-deprecated` flag
     /// OR `[options].show_deprecated`). Seeds the state's `hide_deprecated`
     /// once; the live `h` toggle owns it thereafter and persists across a
@@ -144,10 +145,10 @@ pub struct ScopeSwap {
     pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
     /// Human label (`project` / `global`).
     pub label: String,
-    /// This scope's resolved `[options.tui]` display options. Structural
-    /// options (`group_by_type` / `tree_separators`) follow the active scope
-    /// on a toggle; the runtime `t` view-mode choice stays ephemeral.
-    pub tui_options: crate::config::declaration::TuiOptions,
+    /// This scope's config options, fully resolved. Structural tree options
+    /// (`group_by_type` / `tree_separators`) follow the active scope on a
+    /// toggle; the runtime `t` view-mode choice stays ephemeral.
+    pub resolved_options: ResolvedOptions,
     /// The ordered registry set for this scope (mirrors `TuiContext::registries`).
     pub registries: Vec<ResolvedRegistry>,
     /// The primary registry for this scope (mirrors `TuiContext::primary_registry`).
@@ -172,7 +173,7 @@ impl TuiContext {
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
-            tui_options: std::mem::replace(&mut self.tui_options, alt.tui_options),
+            resolved_options: std::mem::replace(&mut self.resolved_options, alt.resolved_options),
             registries: std::mem::replace(&mut self.registries, alt.registries),
             primary_registry: std::mem::replace(&mut self.primary_registry, alt.primary_registry),
         };
@@ -229,11 +230,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // tree-root ordering (F13) and the empty-registry roots (D-EMPTY).
     state.set_registry_order(registry_order(&ctx));
     // Seed the tree display options from the resolved config.
-    state.set_view_mode_from_config(ctx.tui_options.default_view);
+    state.set_view_mode_from_config(ctx.resolved_options.default_view);
     state.set_tree_options(
-        ctx.tui_options.group_by_type,
-        ctx.tui_options.tree_separators.clone(),
-        resolved_expand_levels(&ctx),
+        ctx.resolved_options.group_by_type,
+        ctx.resolved_options.tree_separators.clone(),
+        ctx.resolved_options.expand_levels as usize,
     );
     // Seed the deprecated-hiding filter: default config (`show_deprecated =
     // false`) hides them. The `h` key toggles this live and, unlike the
@@ -536,9 +537,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // The collapse set is likewise preserved — only `expand_levels`
                     // is re-synced so a later `z` uses the new scope's level.
                     state.set_tree_options(
-                        ctx.tui_options.group_by_type,
-                        ctx.tui_options.tree_separators.clone(),
-                        resolved_expand_levels(&ctx),
+                        ctx.resolved_options.group_by_type,
+                        ctx.resolved_options.tree_separators.clone(),
+                        ctx.resolved_options.expand_levels as usize,
                     );
                     recompute_states(&ctx, &mut state);
                     // Invalidate the bundle-member cache: the new scope has a
@@ -2719,15 +2720,6 @@ fn registry_order(ctx: &TuiContext) -> Vec<String> {
     ctx.registries.iter().map(|r| r.url.clone()).collect()
 }
 
-/// The resolved `[options.tui].expand_levels`, falling back to
-/// [`DEFAULT_EXPAND_LEVELS`] when the key is unset.
-fn resolved_expand_levels(ctx: &TuiContext) -> usize {
-    ctx.tui_options
-        .expand_levels
-        .map(|n| n as usize)
-        .unwrap_or(super::state::DEFAULT_EXPAND_LEVELS)
-}
-
 /// The registry whose root prefix is elided from tree labels — `Some` only
 /// when exactly one browse source is in scope (D-ELIDE); `None` otherwise so
 /// each root names its own registry and namespaced roots stay
@@ -3826,7 +3818,7 @@ mod tests {
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
-            tui_options: Default::default(),
+            resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
         }
     }
@@ -4065,7 +4057,7 @@ mod tests {
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
-            tui_options: Default::default(),
+            resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
         }
     }
@@ -5148,7 +5140,7 @@ mod tests {
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
-            tui_options: Default::default(),
+            resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
         };
         (tmp, ctx)
@@ -5561,7 +5553,7 @@ mod p2_app_member_node_tests {
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
-            tui_options: Default::default(),
+            resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
         }
     }
