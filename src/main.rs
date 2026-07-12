@@ -60,7 +60,7 @@ use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
 use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
-use crate::error::{classify_error, classify_reason};
+use crate::error::classify;
 
 #[derive(Parser)]
 #[command(
@@ -167,9 +167,10 @@ fn main() -> std::process::ExitCode {
             // stderr (a `tracing::error!` here would duplicate the line —
             // the default filter also writes to stderr).
             eprintln!("{err:#}");
-            let code = classify_error(&err);
-            emit_error_document(format, code, &format!("{err:#}"), classify_reason(&err));
-            code.into()
+            let classification = classify(&err);
+            let reason = classification.reason.map(|r| r.to_string());
+            emit_error_document(format, classification.exit, &format!("{err:#}"), reason.as_deref());
+            classification.exit.into()
         }
     }
 }
@@ -191,10 +192,11 @@ fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reas
 }
 
 /// Build the error-document value. `reason` is the optional machine-readable
-/// subtype (`classify_reason`); when `None` the key is omitted, matching the
-/// fetch `encoding` omit-empty precedent so a consumer distinguishes an old
-/// grim (no key) from an unclassified error (still no key — the same, by
-/// design: reasons are purely additive over the existing `code`/`exit`).
+/// subtype (`error::classify`'s `Classification::reason`, rendered via its
+/// `Display`); when `None` the key is omitted, matching the fetch `encoding`
+/// omit-empty precedent so a consumer distinguishes an old grim (no key)
+/// from an unclassified error (still no key — the same, by design: reasons
+/// are purely additive over the existing `code`/`exit`).
 fn error_document(code: ExitCode, message: &str, reason: Option<&str>) -> serde_json::Value {
     let mut error = serde_json::json!({
         "code": code.slug(),
