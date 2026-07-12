@@ -189,19 +189,24 @@ def test_parent_relative_source_works(grim_at, tmp_path: Path) -> None:
 def test_absolute_source_warns_in_project_scope(
     grim_at, project_dir: Path
 ) -> None:
+    # Declared forward-slash (`as_posix`): a TOML basic string treats `\U`
+    # as a unicode escape, and the config grammar is forward-slash-only.
     skill = _skill(project_dir, "my-skill")
-    _config(project_dir, "skills", "my-skill", str(skill))
+    _config(project_dir, "skills", "my-skill", skill.as_posix())
 
     runner = _offline(grim_at(project_dir))
     result = runner.run("lock")
     assert "absolute path source" in result.stderr, result.stderr
     lock = (project_dir / "grimoire.lock").read_text()
-    assert f'path = "{skill}"' in lock
+    assert f'path = "{skill.as_posix()}"' in lock
 
 
 def test_mixed_registry_and_path_config(
-    grim_at, project_dir: Path, unique_repo: str
+    grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    # `registry` fixture: skips (not errors) when no registry is reachable
+    # (e.g. the Windows CI runner, which cannot host the Linux registry
+    # container).
     # A registry entry and a path entry coexist; the registry line keeps
     # its pinned form and the path line its path/hash form.
     from src.helpers import make_artifact
@@ -309,7 +314,9 @@ def test_global_scope_path_dep(grim_at, grim_home: Path, tmp_path: Path) -> None
         "---\nname: my-skill\ndescription: Personal.\n---\n# Mine\n",
     )
     grim_home.mkdir(parents=True, exist_ok=True)
-    _write(grim_home / "grimoire.toml", f'[skills]\nmy-skill = "{shared}"\n')
+    # `as_posix`: config values are forward-slash-only (and `\U` in a TOML
+    # basic string is a unicode escape).
+    _write(grim_home / "grimoire.toml", f'[skills]\nmy-skill = "{shared.as_posix()}"\n')
 
     runner = _offline(grim_at(tmp_path))
     result = runner.run("--global", "lock")
