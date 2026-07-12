@@ -6,6 +6,12 @@ Additional coverage (review-fix round 1):
 - D2: group_by_type set→get→unset, tree_separators round-trip, list on empty.
 - F4: Concurrency smoke — two simultaneous ``config set`` calls.
 
+``options.clients`` is a ``string-set`` (closed vocabulary, unordered
+semantically): each comma segment must name a supported ``ClientTarget``
+(``claude``/``opencode``/``copilot``); an unknown or duplicate name exits
+65 (DataError). Input order is preserved on store/echo; the JSON ``values``
+metadata field always lists the canonical ``ClientTarget::ALL`` order.
+
 
 Specification-phase suite: every test expresses expected behavior from
 ``adr_grim_config_command.md`` and ``plan_grim_config.md``.  All tests
@@ -54,7 +60,11 @@ FIXED_OPTION_KEYS = [
     "options.tui.expand_levels",
 ]
 
-_ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list"}
+_ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list", "string-set"}
+
+# The canonical ClientTarget::ALL order — every ``options.clients`` "values"
+# JSON field pins this order regardless of the order the user supplied.
+CLIENT_VALUE_NAMES = ["claude", "opencode", "copilot"]
 
 
 def _minimal_global_config(grim_home: Path) -> None:
@@ -102,6 +112,43 @@ def test_set_get_round_trip_options_clients_project_scope(
     )
     assert "opencode" in result.stdout, (
         f"plain get must include 'opencode' in output; got: {result.stdout!r}"
+    )
+
+
+def test_set_clients_multi_valid_round_trips_preserving_input_order(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set options.clients claude,copilot`` round-trips through ``get`` and
+    ``list``, preserving the exact input order.
+
+    ``options.clients`` is a ``string-set`` (unordered, closed vocabulary),
+    but storage/echo preserves what the user typed rather than reordering
+    to the canonical ``ClientTarget::ALL`` order (``claude, opencode,
+    copilot``) — only the metadata ``values`` field uses that canonical
+    order.
+
+    Traces to the frozen contract: "Input order preserved on store".
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "set", "options.clients", "claude,copilot")
+
+    get_result = runner.plain("config", "get", "options.clients")
+    assert get_result.returncode == 0, (
+        f"get of set options.clients must exit 0; got {get_result.returncode}\n"
+        f"stderr: {get_result.stderr.strip()}"
+    )
+    assert get_result.stdout.strip() == "claude,copilot", (
+        f"get must echo the input order verbatim, not the canonical "
+        f"ClientTarget::ALL order; got: {get_result.stdout!r}"
+    )
+
+    list_items = runner.json("config", "list")["items"]
+    entry = next(i for i in list_items if i["key"] == "options.clients")
+    assert entry["value"] == "claude,copilot", (
+        f"list value must preserve the input order; got: {entry!r}"
     )
 
 
@@ -611,6 +658,234 @@ def test_set_clients_empty_segment_exits_65(
 
 
 # ---------------------------------------------------------------------------
+# options.clients is a closed string-set: unknown/duplicate names rejected
+# ---------------------------------------------------------------------------
+
+
+def test_set_clients_unknown_name_exits_65(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config set options.clients`` with an unrecognized client name exits
+    65 (DataError); the message names the bad value and lists the valid set.
+
+    ``options.clients`` is a ``string-set`` drawn from the closed
+    ``ClientTarget`` vocabulary — each comma segment must parse via
+    ``ClientTarget::from_str``. ``vscode`` is not a supported client.
+
+    Traces to the frozen validation: unknown name → DataError 65, message
+    ``"invalid value for options.clients: '<name>'; valid values: claude,
+    opencode, copilot"``.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "options.clients", "claude,vscode", check=False
+    )
+    assert result.returncode == 65, (
+        f"unknown client name must exit 65 (DataError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "invalid value for options.clients: 'vscode'" in result.stderr, (
+        f"message must name the unknown value (parse_default_view template); "
+        f"got: {result.stderr!r}"
+    )
+    assert "valid values: claude, opencode, copilot" in result.stderr, (
+        f"message must list the valid client names; got: {result.stderr!r}"
+    )
+
+
+def test_set_clients_duplicate_exits_65(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config set options.clients`` with a duplicate segment exits 65
+    (DataError); the message names the duplicated client.
+
+    ``options.clients`` is a set of *unique* values — repeating a client
+    name in the comma-separated list is rejected rather than silently
+    de-duplicated.
+
+    Traces to the frozen validation: duplicate segment → DataError 65,
+    message ``"options.clients: duplicate client '<name>'"``.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "options.clients", "claude,opencode,claude",
+        check=False,
+    )
+    assert result.returncode == 65, (
+        f"duplicate client must exit 65 (DataError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "duplicate client 'claude'" in result.stderr, (
+        f"message must name the duplicated client; got: {result.stderr!r}"
+    )
+    assert "each client may appear once" in result.stderr, (
+        f"message must carry the remediation hint; got: {result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Load-time options.clients validation (hand-authored TOML)
+#
+# Set-time validation (config set) already rejects unknown/duplicate clients
+# at exit 65. A hand-edited grimoire.toml bypasses that path entirely, so an
+# unknown or duplicate client would previously load clean and only surface as
+# a confusing failure at install time. validate_clients runs in the config
+# parser (beside validate_tree_separators), so ANY config-loading command
+# rejects it up front — a typed ConfigError (exit 78), never a panic.
+# ---------------------------------------------------------------------------
+
+
+def _assert_not_a_panic(result: subprocess.CompletedProcess[str]) -> None:
+    """A clean typed rejection, never a Rust panic (exit 101 / SIGABRT)."""
+    assert "panicked" not in result.stderr.lower(), (
+        f"config load must reject cleanly, not panic; got: {result.stderr!r}"
+    )
+    assert result.returncode not in (101, 134, 139), (
+        f"exit code must be a typed error, not a panic/abort/segfault; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+
+
+def test_load_clients_unknown_name_project_exits_78(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored project config with an unknown client exits 78.
+
+    ``clients = ["vscode"]`` is structurally valid TOML, so the rejection
+    fires only in grim's post-parse validator (``validate_clients``), which
+    classifies as ConfigError (exit 78) — the same class and exit code an
+    invalid authored ``tree_separators`` produces (test_config_tui_options
+    ``test_invalid_tree_separator_is_rejected``).
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["vscode"]\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored unknown client must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "vscode" in result.stderr, (
+        f"error must name the offending client; got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
+def test_load_clients_duplicate_project_exits_78(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored project config with a duplicate client exits 78.
+
+    ``options.clients`` is a set of unique values; a repeated entry in the
+    authored array is rejected at load time, not silently de-duplicated.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["claude", "claude"]\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored duplicate client must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "claude" in result.stderr, (
+        f"error must name the duplicated client; got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
+def test_load_clients_blank_project_exits_78(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored project config with a blank client entry exits 78.
+
+    ``clients = ["claude", ""]`` is structurally valid TOML; the empty
+    string is rejected by the same shared ``check_clients`` validator that
+    guards unknown and duplicate entries.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["claude", ""]\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored blank client must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    _assert_not_a_panic(result)
+
+
+def test_load_clients_control_char_project_exits_78_no_raw_escape(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored client name with a control byte is rejected safely.
+
+    The name is authored via the TOML ``\\u001b`` escape (a raw control byte
+    is rejected by the TOML parser itself, so the escape is the real vector),
+    which decodes to ESC + ``[2J`` — a terminal clear-screen sequence. It must
+    exit 78 like any other invalid authored client, but the load-time error
+    must NOT echo the raw ESC byte to stderr — otherwise merely running a
+    config command inside an untrusted repo injects a control sequence into
+    the user's terminal.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["\\u001b[2Jvscode"]\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored control-char client must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\x1b" not in result.stderr, (
+        f"error must not echo the raw ESC byte to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
+def test_load_clients_unknown_name_global_exits_78(
+    grim_binary: Path,
+    grim_home: Path,
+) -> None:
+    """A hand-authored *global* config with an unknown client exits 78.
+
+    The global config (``$GRIM_HOME/grimoire.toml``) routes through the same
+    shared parser, so ``validate_clients`` fires for ``config --global list``
+    exactly as it does for the project scope.
+    """
+    (grim_home / "grimoire.toml").write_text(
+        '[options]\nclients = ["vscode"]\n'
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+
+    result = runner.run("config", "--global", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored unknown client (global) must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "vscode" in result.stderr, (
+        f"error must name the offending client; got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
+# ---------------------------------------------------------------------------
 # FIX A regression: zero-width separator rejected at CLI (no lockout)
 # ---------------------------------------------------------------------------
 
@@ -777,6 +1052,56 @@ def test_list_json_entries_carry_type_title_description_default(
         assert entry["value"] == "flat", f"{label}: value must be 'flat'; got {entry!r}"
         assert entry["title"], f"{label}: title must be non-empty; got {entry!r}"
         assert entry["description"], f"{label}: description must be non-empty; got {entry!r}"
+
+
+def test_list_json_entry_clients_is_string_set_with_canonical_values(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """The ``config list`` JSON entry for ``options.clients`` carries
+    ``type: "string-set"`` and ``values`` in the canonical
+    ``ClientTarget::ALL`` order (``["claude","opencode","copilot"]``) —
+    regardless of the order the user supplied to ``set``, and whether the
+    key is unset or set. ``default`` stays ``null`` (no fixed default).
+
+    Traces to the frozen ``StringSet`` variant: ``as_str()`` ->
+    ``"string-set"``; ``values()`` returns ``Some(values)`` for
+    ``StringSet``; ``default_str()`` maps ``default.map(|s| s.join(","))``
+    (``None`` here).
+    """
+    write_config(project_dir)  # no [options] table — clients unset
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    unset_items = runner.json("config", "list", "--all")["items"]
+    unset_entry = next(i for i in unset_items if i["key"] == "options.clients")
+    assert unset_entry["type"] == "string-set", (
+        f"options.clients type must be 'string-set'; got: {unset_entry!r}"
+    )
+    assert unset_entry["values"] == CLIENT_VALUE_NAMES, (
+        f"options.clients values must be the canonical ClientTarget::ALL "
+        f"order; got: {unset_entry!r}"
+    )
+    assert unset_entry["default"] is None, (
+        f"options.clients has no fixed default; got: {unset_entry!r}"
+    )
+    assert unset_entry["set"] is False, f"unset row must have set False; got {unset_entry!r}"
+    assert unset_entry["value"] is None, f"unset row must have value None; got {unset_entry!r}"
+
+    # Supplied in non-canonical order — the "values" metadata still pins
+    # the canonical order; only "value" echoes what the user typed.
+    runner.run("config", "set", "options.clients", "copilot,claude")
+    set_items = runner.json("config", "list")["items"]
+    set_entry = next(i for i in set_items if i["key"] == "options.clients")
+    assert set_entry["type"] == "string-set", (
+        f"options.clients type must stay 'string-set' once set; got: {set_entry!r}"
+    )
+    assert set_entry["values"] == CLIENT_VALUE_NAMES, (
+        f"options.clients values must stay the canonical order once set; "
+        f"got: {set_entry!r}"
+    )
+    assert set_entry["value"] == "copilot,claude", (
+        f"value must echo the input order verbatim; got: {set_entry!r}"
+    )
 
 
 def test_list_all_includes_unset_registry_locator_row(

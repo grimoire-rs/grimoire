@@ -21,6 +21,7 @@ use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::config::declaration::DeclaredSource;
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::path_source::PathSource;
+use crate::install::client_target::ClientTarget;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
 use crate::oci::member_ref::{MemberRef, MemberRefError};
@@ -190,6 +191,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     validate_registries(&raw.registries, &path)?;
     validate_tree_separators(&raw.options.tui.tree_separators, &path)?;
+    validate_clients(&raw.options.clients, &path)?;
     let skills = parse_artifact_map(&raw.skills, &path, PathValues::Allowed)?;
     let rules = parse_artifact_map(&raw.rules, &path, PathValues::Allowed)?;
     // Agent and bundle references validate exactly like skills/rules: a
@@ -355,6 +357,83 @@ fn validate_tree_separators(separators: &[String], path: &Path) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// Why an `options.clients` list is invalid — the shared verdict of
+/// [`check_clients`], rendered into a layer-appropriate message by each
+/// caller.
+pub(crate) enum ClientsInvalid {
+    /// An entry is empty or whitespace-only.
+    Blank,
+    /// An entry contains a control character. Carries the raw value, which
+    /// every caller must render escaped — a raw control byte (e.g. ESC) echoed
+    /// to a terminal is a control-sequence-injection vector.
+    ControlChar(String),
+    /// An entry names a client outside the closed [`ClientTarget`] set.
+    Unknown(String),
+    /// An entry repeats a client already listed.
+    Duplicate(String),
+}
+
+/// Validate an `options.clients` list: every entry non-blank, drawn from the
+/// closed [`ClientTarget::VALUE_NAMES`] set, and unique. Returns the first
+/// offending reason.
+///
+/// The single source of truth shared by set-time (`config set`, exit 65) and
+/// load-time ([`validate_clients`], exit 78) validation, so the accepted set
+/// can never drift between the two paths.
+pub(crate) fn check_clients(clients: &[String]) -> Result<(), ClientsInvalid> {
+    let mut seen = std::collections::BTreeSet::new();
+    for c in clients {
+        // Reject control characters FIRST, before any arm below can embed the
+        // raw value into a message bound for stderr — a hand-authored
+        // `clients = ["\x1b[2Jvscode"]` must never echo the ESC byte into the
+        // terminal of anyone running a config-loading command. Mirrors
+        // `reject_control_chars`, but here so load-time and set-time share it.
+        if c.chars().any(char::is_control) {
+            return Err(ClientsInvalid::ControlChar(c.clone()));
+        }
+        if c.trim().is_empty() {
+            return Err(ClientsInvalid::Blank);
+        }
+        // String containment against the closed vocabulary — no FromStr /
+        // ClientTarget construction needed to reject an unknown name.
+        if !ClientTarget::VALUE_NAMES.contains(&c.as_str()) {
+            return Err(ClientsInvalid::Unknown(c.clone()));
+        }
+        if !seen.insert(c.as_str()) {
+            return Err(ClientsInvalid::Duplicate(c.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the authored `options.clients` list at load time.
+///
+/// A hand-edited `grimoire.toml` bypasses `config set`, so without this an
+/// unknown or duplicate client would load clean and only surface as a
+/// confusing failure at install time. Reuses [`check_clients`] so the
+/// accepted set matches the setter exactly; classifies as a config error
+/// (exit 78), mirroring [`validate_tree_separators`].
+fn validate_clients(clients: &[String], path: &Path) -> Result<(), ConfigError> {
+    check_clients(clients).map_err(|reason| {
+        let detail = match reason {
+            ClientsInvalid::Blank => "blank client name; each entry must be non-empty".to_string(),
+            // `escape_debug` renders the control byte as `\u{…}`; the raw byte
+            // never reaches stderr. See `ClientsInvalid::ControlChar`.
+            ClientsInvalid::ControlChar(c) => {
+                format!("client name contains control characters: '{}'", c.escape_debug())
+            }
+            ClientsInvalid::Unknown(c) => {
+                format!(
+                    "unknown client '{c}'; valid values: {}",
+                    ClientTarget::VALUE_NAMES.join(", ")
+                )
+            }
+            ClientsInvalid::Duplicate(c) => format!("duplicate client '{c}'; each client may appear once"),
+        };
+        ConfigError::new(path.to_path_buf(), ConfigErrorKind::ClientsInvalid { detail })
+    })
 }
 
 /// Catalog metadata authored at the top of a bundle source file
@@ -1395,6 +1474,92 @@ tree_separators = ["/", "::"]
         let cfg = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{00b7}\"]\n")
             .expect("U+00B7 middle dot tree_separator must be accepted");
         assert_eq!(cfg.options.tui.tree_separators, vec!["\u{00b7}".to_string()]);
+    }
+
+    // ── options.clients load-time validation ─────────────────────────────────
+
+    #[test]
+    fn clients_unknown_name_rejected_at_load() {
+        // A hand-authored config with a client outside the closed set is a
+        // typed config error at parse time (exit 78), not a silent load that
+        // fails confusingly at install time.
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"vscode\"]\n")
+            .expect_err("unknown authored client must be rejected");
+        let ConfigErrorKind::ClientsInvalid { detail } = &err.kind else {
+            panic!("expected ClientsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            detail.contains("vscode"),
+            "detail must name the offending client: {detail}"
+        );
+        // Pin the rendered message prefix — no other test asserts the
+        // variant's static `#[error]` text, so a typo would ship silently.
+        assert!(
+            err.kind.to_string().starts_with("invalid options.clients: "),
+            "rendered kind must carry the ClientsInvalid prefix: {}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn clients_duplicate_rejected_at_load() {
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"claude\", \"claude\"]\n")
+            .expect_err("duplicate authored client must be rejected");
+        let ConfigErrorKind::ClientsInvalid { detail } = &err.kind else {
+            panic!("expected ClientsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            detail.contains("claude"),
+            "detail must name the duplicated client: {detail}"
+        );
+    }
+
+    #[test]
+    fn clients_blank_rejected_at_load() {
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"claude\", \"\"]\n")
+            .expect_err("blank authored client must be rejected");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ClientsInvalid { .. }),
+            "expected ClientsInvalid, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn clients_control_char_rejected_without_echoing_raw_byte() {
+        // A hand-authored client name carrying a control character (here ESC
+        // + `[2J`, a terminal clear-screen sequence) is rejected as a config
+        // error — and, critically, the rendered message must NOT contain the
+        // raw ESC byte, or merely loading the config would inject a control
+        // sequence into the terminal of anyone running a config command.
+        //
+        // The ESC is authored as a TOML backslash-u001b escape: a raw control
+        // byte is rejected by the TOML parser itself, so the escape is the
+        // genuine vector that decodes to ESC and reaches `check_clients`.
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"\\u001b[2Jvscode\"]\n")
+            .expect_err("client name with a control character must be rejected");
+        let ConfigErrorKind::ClientsInvalid { detail } = &err.kind else {
+            panic!("expected ClientsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            !detail.contains('\u{1b}'),
+            "rendered detail must not embed the raw ESC byte: {detail:?}"
+        );
+        assert!(
+            !err.kind.to_string().contains('\u{1b}'),
+            "rendered kind must not embed the raw ESC byte: {:?}",
+            err.kind.to_string()
+        );
+    }
+
+    #[test]
+    fn clients_valid_set_accepted_at_load() {
+        let cfg = ProjectConfig::from_toml_str("[options]\nclients = [\"claude\", \"opencode\", \"copilot\"]\n")
+            .expect("a valid authored clients set must parse");
+        assert_eq!(
+            cfg.options.clients,
+            vec!["claude".to_string(), "opencode".to_string(), "copilot".to_string()]
+        );
     }
 
     #[test]

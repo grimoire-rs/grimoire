@@ -250,19 +250,29 @@ pub enum ValueType {
         /// The runtime default.
         default: &'static str,
     },
-    /// A comma-joined list of strings.
+    /// A comma-joined list of strings. Ordered, open — values need not come
+    /// from a closed set. Contrast [`Self::StringSet`].
     StringList {
+        /// The runtime default, `None` when there is no fixed default.
+        default: Option<&'static [&'static str]>,
+    },
+    /// A comma-joined set of unique strings, each drawn from the closed
+    /// [`Self::values`] list. Unordered, closed — contrast [`Self::StringList`]
+    /// (ordered, open).
+    StringSet {
+        /// The allowed values.
+        values: &'static [&'static str],
         /// The runtime default, `None` when there is no fixed default.
         default: Option<&'static [&'static str]>,
     },
 }
 
 impl ValueType {
-    /// The allowed values for an [`Self::Enum`] key, `None` for every other
-    /// variant.
+    /// The allowed values for an [`Self::Enum`] or [`Self::StringSet`] key,
+    /// `None` for every other variant.
     pub fn values(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Enum { values, .. } => Some(values),
+            Self::Enum { values, .. } | Self::StringSet { values, .. } => Some(values),
             Self::String { .. } | Self::Bool { .. } | Self::U32 { .. } | Self::StringList { .. } => None,
         }
     }
@@ -275,7 +285,7 @@ impl ValueType {
             Self::Bool { default } => Some(default.to_string()),
             Self::U32 { default } => Some(default.to_string()),
             Self::Enum { default, .. } => Some(default.to_string()),
-            Self::StringList { default } => default.map(|values| values.join(",")),
+            Self::StringList { default } | Self::StringSet { default, .. } => default.map(|values| values.join(",")),
         }
     }
 
@@ -287,6 +297,7 @@ impl ValueType {
             Self::U32 { .. } => "integer",
             Self::Enum { .. } => "enum",
             Self::StringList { .. } => "string-list",
+            Self::StringSet { .. } => "string-set",
         }
     }
 }
@@ -754,6 +765,25 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&ValueType::StringList { default: None }).unwrap()).unwrap();
         assert_eq!(v, "string-list");
+    }
+
+    #[test]
+    fn string_set_display_serde_values_and_default() {
+        let t = ValueType::StringSet {
+            values: &["claude", "opencode", "copilot"],
+            default: None,
+        };
+        assert_eq!(t.to_string(), "string-set");
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(v, "string-set");
+        assert_eq!(t.values(), Some(&["claude", "opencode", "copilot"][..]));
+        assert_eq!(t.default_str(), None);
+
+        let with_default = ValueType::StringSet {
+            values: &["claude", "opencode", "copilot"],
+            default: Some(&["claude", "opencode"]),
+        };
+        assert_eq!(with_default.default_str(), Some("claude,opencode".to_string()));
     }
 
     #[test]

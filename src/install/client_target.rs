@@ -77,13 +77,20 @@ impl ClientTarget {
     /// [`std::str::FromStr`]. Used to compare against the stored
     /// [`super::install_state::ClientOutput::client`] string without an
     /// intermediate allocation.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
         }
     }
+
+    /// The stable lowercase identifier for each variant, in declaration
+    /// order — the single list `command::config_keys` presents as the
+    /// `options.clients` config key's allowed values (mirrors
+    /// [`crate::config::declaration::DefaultView::VALUE_NAMES`]).
+    pub const VALUE_NAMES: &'static [&'static str] =
+        &[Self::Claude.as_str(), Self::OpenCode.as_str(), Self::Copilot.as_str()];
 }
 
 /// One file produced for an client target.

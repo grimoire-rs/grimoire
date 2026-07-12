@@ -136,6 +136,17 @@ pub enum ConfigErrorKind {
     /// whitespace, and zero-width / wide entries are all rejected.
     #[error("invalid tree_separators entry {entry:?}: each entry must be a single printable single-column character")]
     TreeSeparatorInvalid { entry: String },
+
+    /// An authored `options.clients` entry is blank, names a client outside
+    /// the closed `ClientTarget` set, or repeats one already listed.
+    ///
+    /// Mirrors the load-time discipline of [`Self::TreeSeparatorInvalid`]:
+    /// `config set options.clients` validates at write time (exit 65), but a
+    /// hand-edited config bypasses the setter — this fires in the parser so
+    /// the bad value is a typed config error up front, not a confusing
+    /// install-time failure.
+    #[error("invalid options.clients: {detail}")]
+    ClientsInvalid { detail: String },
 }
 
 #[cfg(test)]

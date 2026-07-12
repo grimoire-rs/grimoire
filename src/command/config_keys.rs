@@ -23,6 +23,7 @@
 use crate::api::ValueType;
 use crate::config::declaration::DefaultView;
 use crate::config::defaults;
+use crate::install::client_target::ClientTarget;
 
 /// Static metadata for one dotted config key.
 pub struct KeySpec {
@@ -75,7 +76,10 @@ impl ConfigKey {
         };
         const CLIENTS: KeySpec = KeySpec {
             key: "options.clients",
-            value_type: ValueType::StringList { default: None },
+            value_type: ValueType::StringSet {
+                values: ClientTarget::VALUE_NAMES,
+                default: None,
+            },
             title: "Clients",
             description: "AI client targets install/update materialize into when `--client` is absent.",
         };
@@ -353,7 +357,7 @@ mod tests {
                 schema_has_type(node, "string"),
                 "{spec_key}: expected string schema type; got {node}"
             ),
-            ValueType::StringList { .. } => assert!(
+            ValueType::StringList { .. } | ValueType::StringSet { .. } => assert!(
                 schema_has_type(node, "array"),
                 "{spec_key}: expected array schema type; got {node}"
             ),

@@ -182,7 +182,8 @@ fn classify_config(err: &ConfigError) -> ExitCode {
         ConfigErrorKind::TomlParse(_)
         | ConfigErrorKind::FileTooLarge { .. }
         | ConfigErrorKind::RegistryInvalid { .. }
-        | ConfigErrorKind::TreeSeparatorInvalid { .. } => ExitCode::ConfigError,
+        | ConfigErrorKind::TreeSeparatorInvalid { .. }
+        | ConfigErrorKind::ClientsInvalid { .. } => ExitCode::ConfigError,
         ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
         ConfigErrorKind::ArtifactValueMissingRegistry { .. }
         | ConfigErrorKind::ArtifactValueInvalid { .. }

@@ -24,6 +24,7 @@ use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
 use crate::config::project_config::validate_registries;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
+use crate::install::client_target::ClientTarget;
 use crate::lock::file_lock::ConfigFileLock;
 
 use super::config_keys::{ConfigKey, KeySpec, RegistryField};
@@ -307,19 +308,16 @@ fn apply_set(
                     Ok(String::new())
                 } else {
                     let clients: Vec<String> = value_str.split(',').map(|s| s.trim().to_string()).collect();
+                    // Reject control characters before any error message could echo one
+                    // into the terminal (the unknown-value message quotes the segment).
                     for c in &clients {
-                        // FIX 3: empty/whitespace-only segment (e.g. "claude, ,opencode"
-                        // after split+trim) → exit 65 so the config never holds a blank
-                        // client name that silently installs nothing.
-                        if c.is_empty() {
-                            return Err(super::config_value(
-                                "options.clients: empty or whitespace-only segment; \
-                                 each client name must be non-empty"
-                                    .to_string(),
-                            ));
-                        }
                         reject_control_chars(c, "options.clients")?;
                     }
+                    // Shared closed-set + uniqueness + non-blank check: the single source
+                    // of truth with load-time `validate_clients`, so `config set` and a
+                    // hand-edited config accept exactly the same set. Set-time keeps its
+                    // exit-65 (DataError) mapping and its own message wording.
+                    crate::config::project_config::check_clients(&clients).map_err(clients_set_error)?;
                     options.clients.clone_from(&clients);
                     Ok(clients.join(","))
                 }
@@ -519,6 +517,34 @@ fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryCon
 }
 
 // ── Value-parsing helpers ─────────────────────────────────────────────────────
+
+/// Render a shared [`ClientsInvalid`] verdict as a set-time data error
+/// (exit 65). Load-time validation renders its own message and uses the
+/// config-error class (exit 78); the accepted set is shared via
+/// [`crate::config::project_config::check_clients`] so the two cannot drift.
+fn clients_set_error(reason: crate::config::project_config::ClientsInvalid) -> anyhow::Error {
+    use crate::config::project_config::ClientsInvalid;
+    match reason {
+        ClientsInvalid::Blank => super::config_value(
+            "options.clients: empty or whitespace-only segment; each client name must be non-empty".to_string(),
+        ),
+        // Unreachable at set time — `reject_control_chars` runs first in the
+        // Clients arm of `apply_set` and rejects the value before it reaches
+        // `check_clients`. Kept for exhaustiveness and defense in depth;
+        // renders the value escaped so no raw control byte reaches stderr.
+        ClientsInvalid::ControlChar(c) => super::config_value(format!(
+            "options.clients: client name contains control characters: '{}'",
+            c.escape_debug()
+        )),
+        ClientsInvalid::Unknown(c) => super::config_value(format!(
+            "invalid value for options.clients: '{c}'; valid values: {}",
+            ClientTarget::VALUE_NAMES.join(", ")
+        )),
+        ClientsInvalid::Duplicate(c) => super::config_value(format!(
+            "options.clients: duplicate client '{c}'; each client may appear once"
+        )),
+    }
+}
 
 fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
     DefaultView::ALL.into_iter().find(|v| v.as_str() == s).ok_or_else(|| {
@@ -1142,6 +1168,13 @@ mod tests {
         assert!(matches!(parse_default_view("tree"), Ok(DefaultView::Tree)));
         assert!(parse_default_view("bogus").is_err());
         assert!(parse_default_view("Flat").is_err());
+        // Pin the error text: it must enumerate the valid views so a variant
+        // rename or a lost VALUE_NAMES entry is caught here.
+        let msg = parse_default_view("bogus").unwrap_err().to_string();
+        assert!(
+            msg.contains("valid values: flat, tree"),
+            "error must enumerate the valid views; got: {msg}"
+        );
     }
 
     #[test]
@@ -1293,6 +1326,24 @@ mod tests {
     }
 
     #[test]
+    fn collect_entries_emits_explicit_zero_expand_levels() {
+        // u32 has no false-is-unset collapse: `expand_levels = Some(0)` is an
+        // explicitly-set value, so `list` (even without --all) emits a SET row
+        // with value "0" — unlike the bool / empty-list keys that collapse a
+        // default-valued setting to unset.
+        let mut options = ConfigOptions::default();
+        options.tui.expand_levels = Some(0);
+        let registries: Vec<RegistryConfig> = vec![];
+
+        let row = collect_entries(false, &options, &registries)
+            .into_iter()
+            .find(|e| e.key == "options.tui.expand_levels")
+            .expect("expand_levels = Some(0) must emit a row without --all");
+        assert_eq!(row.value.as_deref(), Some("0"), "explicit zero is the emitted value");
+        assert!(row.set, "explicit zero is a SET row, not unset");
+    }
+
+    #[test]
     fn registry_use_enforces_at_most_one_default() {
         use crate::config::declaration::RegistryConfig;
         let mut registries = vec![
@@ -1427,6 +1478,91 @@ mod tests {
             msg.contains("empty") || msg.contains("segment"),
             "error must describe the empty segment; got: {msg}"
         );
+    }
+
+    // ── options.clients: closed-set validation (StringSet) ───────────────────
+
+    fn fresh_options() -> ConfigOptions {
+        use crate::config::declaration::TuiOptions;
+        ConfigOptions {
+            clients: vec![],
+            default_registry: None,
+            show_deprecated: false,
+            tui: TuiOptions::default(),
+        }
+    }
+
+    #[test]
+    fn apply_set_clients_rejects_unknown_client() {
+        let mut options = fresh_options();
+        let mut registries = vec![];
+        let result = apply_set(
+            &ParsedKey::Fixed(ConfigKey::Clients),
+            "claude,vscode",
+            &mut options,
+            &mut registries,
+        );
+        let msg = result.expect_err("unknown client must be rejected").to_string();
+        assert!(
+            msg.contains("invalid value for options.clients: 'vscode'"),
+            "error must name the offending value (parse_default_view template); got: {msg}"
+        );
+        assert!(
+            msg.contains("valid values: claude, opencode, copilot"),
+            "error must list the valid values; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_set_clients_rejects_duplicate_client() {
+        let mut options = fresh_options();
+        let mut registries = vec![];
+        let result = apply_set(
+            &ParsedKey::Fixed(ConfigKey::Clients),
+            "claude,opencode,claude",
+            &mut options,
+            &mut registries,
+        );
+        let msg = result.expect_err("duplicate client must be rejected").to_string();
+        assert!(
+            msg.contains("duplicate client 'claude'"),
+            "error must name the duplicated client; got: {msg}"
+        );
+        assert!(
+            msg.contains("each client may appear once"),
+            "error must carry the remediation hint; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_set_clients_valid_multi_round_trips_in_input_order() {
+        let mut options = fresh_options();
+        let mut registries = vec![];
+        let stored = apply_set(
+            &ParsedKey::Fixed(ConfigKey::Clients),
+            "opencode,claude",
+            &mut options,
+            &mut registries,
+        )
+        .expect("valid multi-value set must succeed");
+        // Input order preserved on store — not ClientTarget::ALL canonical order.
+        assert_eq!(stored, "opencode,claude");
+        assert_eq!(options.clients, vec!["opencode".to_string(), "claude".to_string()]);
+        assert_eq!(
+            get_value(&ParsedKey::Fixed(ConfigKey::Clients), &options, &registries).unwrap(),
+            Some("opencode,claude".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_set_clients_empty_value_still_clears() {
+        let mut options = fresh_options();
+        options.clients = vec!["claude".to_string()];
+        let mut registries = vec![];
+        let stored = apply_set(&ParsedKey::Fixed(ConfigKey::Clients), "", &mut options, &mut registries)
+            .expect("empty value must clear, not error");
+        assert_eq!(stored, "");
+        assert!(options.clients.is_empty());
     }
 
     #[test]
