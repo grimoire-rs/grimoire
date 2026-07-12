@@ -36,10 +36,11 @@ pub enum CommandError {
     LoginInput(&'static str),
 
     /// `add` could not infer the artifact kind: the reference did not
-    /// resolve to a manifest carrying a Grimoire OCI `artifactType` (a
-    /// non-Grimoire image, or an offline cache miss). The user must pass
-    /// `--kind`.
-    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|bundle")]
+    /// resolve to a manifest carrying a Grimoire kind — the
+    /// `com.grimoire.kind` annotation, or the legacy `artifactType`/config
+    /// media type on older artifacts (a non-Grimoire image, or an offline
+    /// cache miss). The user must pass `--kind`.
+    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp")]
     KindInferenceFailed { reference: String },
 
     /// `add` declared a `(kind, name)` that already exists in the config

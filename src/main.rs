@@ -115,7 +115,7 @@ pub enum Command {
     /// Report an artifact's metadata (kind, annotations, tags) without
     /// downloading its content.
     Describe(DescribeArgs),
-    /// Print the JSON Schema for grimoire.toml or publish.toml.
+    /// Print the JSON Schema for grimoire.toml, publish.toml, or grimoire.lock.
     Schema(SchemaArgs),
     /// Browse the registry catalog in an interactive TUI.
     Tui(TuiArgs),

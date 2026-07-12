@@ -64,7 +64,8 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
 - `--kind` (skill, rule, agent, bundle, mcp) is normally inferred from the
-  artifact's OCI `artifactType`, set at release time. If grim cannot
+  artifact's kind metadata set at release time (the `com.grimoire.kind`
+  annotation; legacy `artifactType` on older artifacts). If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
 - `--name` defaults to the reference's last path segment. A name that is
   already declared for that kind under a *different* reference refuses

@@ -107,9 +107,10 @@ Kind is inferred from shape — and agents break the pattern:
   `.toml` is **always a bundle** by shape — an MCP server descriptor
   requires `--kind mcp` (grim errors with a `--kind mcp` hint when the
   TOML carries a `[server]` table).
-- At `add`: kind is read from the published artifact's OCI
-  `artifactType`. A non-Grimoire image cannot be inferred — `add`
-  errors and asks for `--kind`.
+- At `add`: kind is read from the published manifest's kind metadata
+  (the `com.grimoire.kind` annotation; legacy `artifactType` on older
+  artifacts). A non-Grimoire image cannot be inferred — `add` errors
+  and asks for `--kind`.
 
 ## Offline Failures
 

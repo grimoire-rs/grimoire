@@ -3,10 +3,11 @@
 """`grim add` kind-inference and name-override acceptance tests.
 
 `grim add <reference>` now requires only the reference.  When `--kind` is
-omitted, the kind is inferred from the manifest's OCI `artifactType`.  When
-`--name` is omitted, the binding name defaults to the reference's last path
-segment.  Both flags remain overridable.  A reference that cannot be
-resolved yields exit 65 (DataError / KindInferenceFailed).
+omitted, the kind is inferred from the manifest's kind metadata (the
+`com.grimoire.kind` annotation; legacy `artifactType`/config media type
+fallbacks).  When `--name` is omitted, the binding name defaults to the
+reference's last path segment.  Both flags remain overridable.  A reference
+that cannot be resolved yields exit 65 (DataError / KindInferenceFailed).
 """
 from __future__ import annotations
 

@@ -135,8 +135,10 @@ pub struct CatalogEntry {
     pub registry: String,
     /// The repository path within the registry.
     pub repository: String,
-    /// The artifact kind from the OCI `artifactType` (`skill`/`rule`/`bundle`),
-    /// if the manifest declared it.
+    /// The artifact kind (`skill`/`rule`/`agent`/`bundle`/`mcp`) as read
+    /// from the manifest — the `com.grimoire.kind` annotation, or the
+    /// legacy `artifactType`/config media type — if the manifest declared
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// `org.opencontainers.image.description`, if present.

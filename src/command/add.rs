@@ -9,9 +9,11 @@
 //! `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project config
 //! `[options].default_registry` > global config; the persisted config/lock
 //! always carry the fully-qualified name. The artifact **kind** is inferred
-//! from the pulled manifest's OCI `artifactType` when `--kind` is omitted,
-//! and the binding **name** defaults to the reference's last path segment
-//! when `--name` is omitted.
+//! from the pulled manifest's `com.grimoire.kind` annotation when `--kind`
+//! is omitted (legacy `artifactType`/config media type fallbacks type
+//! pre-`adr_oci_empty_config_compat.md` artifacts), and the binding
+//! **name** defaults to the reference's last path segment when `--name`
+//! is omitted.
 //!
 //! Edits the discovered config's `[skills]`/`[rules]`/`[bundles]` table
 //! (re-serializing the parsed config is acceptable — minimal formatting
@@ -58,7 +60,7 @@ pub struct AddArgs {
     pub reference: String,
 
     /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, or `mcp`).
-    /// Inferred from the published manifest's OCI `artifactType` when
+    /// Inferred from the published manifest's kind annotation when
     /// omitted.
     #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: Option<String>,
@@ -154,9 +156,10 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
     // The kind: an explicit --kind wins; otherwise infer it from the
-    // published manifest's OCI `artifactType` (the kind is persisted in the
-    // OCI artifact type at release time). The value_parser above constrains
-    // the string to a known kind, so from_kind_str never returns None here.
+    // published manifest (the `com.grimoire.kind` annotation written at
+    // release time; legacy `artifactType`/config media type still type
+    // older artifacts). The value_parser above constrains the string to a
+    // known kind, so from_kind_str never returns None here.
     let (kind, manifest) = match args.kind.as_deref() {
         Some(k) => (
             ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule),
@@ -703,8 +706,11 @@ pub(crate) async fn relock_entry(
     }
 }
 
-/// Infer the artifact kind from the published manifest's OCI `artifactType`
-/// (falling back to the config descriptor's media type).
+/// Infer the artifact kind from the published manifest: current grim
+/// carries it in the `com.grimoire.kind` annotation (the push path never
+/// writes `artifactType` — see `registry_client.rs`); the OCI
+/// `artifactType` and config media type are read first only to type
+/// pre-`adr_oci_empty_config_compat.md` artifacts.
 ///
 /// Resolves the reference to a digest (a pure `Query` — offline returns a
 /// cache miss as `Ok(None)`), fetches the manifest, and reads the kind. A

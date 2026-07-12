@@ -22,7 +22,8 @@ A bare `.md` path is indistinguishable from a rule by shape, and grim
 never guesses from content — without the flag your agent **silently
 packs as a rule**. This is not an error; the only signal is a warning
 when a rule carries both `name` and `description`. Consumers need no
-flag: `grim add` infers the kind from the published `artifactType`.
+flag: `grim add` infers the kind from the published manifest's kind
+metadata (the `com.grimoire.kind` annotation).
 
 ## File Shape
 
