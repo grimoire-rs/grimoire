@@ -243,10 +243,7 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
                 None
             }
         }
-        ConfigKey::TuiDefaultView => options.tui.default_view.map(|v| match v {
-            DefaultView::Flat => "flat".to_string(),
-            DefaultView::Tree => "tree".to_string(),
-        }),
+        ConfigKey::TuiDefaultView => options.tui.default_view.map(|v| v.as_str().to_string()),
         ConfigKey::TuiGroupByType => {
             // `false` is the default and indistinguishable from unset on disk —
             // return None so `get` exits 1 and `list` omits the key, consistent
@@ -485,7 +482,7 @@ fn apply_unset(
 /// [`KeySpec`] — the sole adapter between the command layer (which knows
 /// about `KeySpec`) and the API layer (which stays ignorant of it).
 fn entry(key: String, value: Option<String>, spec: &'static KeySpec) -> ConfigEntry {
-    ConfigEntry::new(key, value, spec.value_type, spec.title, spec.description, spec.default)
+    ConfigEntry::new(key, value, spec.value_type, spec.title, spec.description)
 }
 
 /// Collect the rows for `grim config list`. `all` widens the row set to
@@ -524,13 +521,12 @@ fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryCon
 // ── Value-parsing helpers ─────────────────────────────────────────────────────
 
 fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
-    match s {
-        "flat" => Ok(DefaultView::Flat),
-        "tree" => Ok(DefaultView::Tree),
-        _ => Err(super::config_value(format!(
-            "invalid value for options.tui.default_view: '{s}'; valid values: flat, tree"
-        ))),
-    }
+    DefaultView::ALL.into_iter().find(|v| v.as_str() == s).ok_or_else(|| {
+        super::config_value(format!(
+            "invalid value for options.tui.default_view: '{s}'; valid values: {}",
+            DefaultView::VALUE_NAMES.join(", ")
+        ))
+    })
 }
 
 fn parse_bool(s: &str, key: &str) -> anyhow::Result<bool> {

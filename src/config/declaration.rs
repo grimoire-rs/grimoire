@@ -89,6 +89,25 @@ pub enum DefaultView {
     Tree,
 }
 
+impl DefaultView {
+    /// Every declared view mode, in declaration order.
+    pub const ALL: [DefaultView; 2] = [DefaultView::Flat, DefaultView::Tree];
+
+    /// The stable lowercase identifier for each variant (matching the
+    /// `#[serde(rename_all = "lowercase")]` mapping above), in [`Self::ALL`]
+    /// order — the single list `command::config_keys` presents as the
+    /// enum's allowed values.
+    pub const VALUE_NAMES: &'static [&'static str] = &[Self::Flat.as_str(), Self::Tree.as_str()];
+
+    /// The stable lowercase identifier for this variant.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Tree => "tree",
+        }
+    }
+}
+
 /// TUI-specific display options, nested under `[options.tui]`.
 ///
 /// `#[serde(deny_unknown_fields)]` so an unknown key (e.g. a typo'd field

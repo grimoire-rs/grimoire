@@ -4,11 +4,15 @@
 //! The typed registry of `grim config` dotted keys.
 //!
 //! Single source of truth for the 7 fixed `options.*` keys and the 3
-//! per-registry field names: their [`crate::api::ValueType`], title,
-//! description, and runtime default. `command::config` drives
-//! `parse_key`, `collect_entries`, and the unknown-key error message off
-//! this registry instead of hand-maintained lists, so adding a key here
-//! cannot drift out of sync with the CLI surface.
+//! per-registry field names: their [`crate::api::ValueType`] (which
+//! carries the runtime default alongside the type), title, and
+//! description. `command::config` drives `parse_key`, `collect_entries`,
+//! and the unknown-key error message off this registry instead of
+//! hand-maintained lists, so adding a key here cannot drift out of sync
+//! with the CLI surface. Each `ValueType`'s default references
+//! `config::defaults`'s consts directly, so the spec table and the
+//! runtime fallback can never drift apart — no separate tripwire test
+//! needed.
 //!
 //! Descriptions are the first sentence of the doc comment on the matching
 //! field in `config::declaration` (whitespace-normalized), authored here
@@ -17,20 +21,20 @@
 //! stay byte-identical).
 
 use crate::api::ValueType;
+use crate::config::declaration::DefaultView;
+use crate::config::defaults;
 
 /// Static metadata for one dotted config key.
 pub struct KeySpec {
     /// The dotted key, e.g. `options.tui.default_view`.
     pub key: &'static str,
-    /// The key's declared value type.
+    /// The key's declared value type, which also carries the runtime
+    /// default (see [`crate::api::ValueType::default_str`]).
     pub value_type: ValueType,
     /// Short human title, e.g. `"Default view"`.
     pub title: &'static str,
     /// One-sentence description.
     pub description: &'static str,
-    /// The runtime default in CLI string form, `None` when there is no
-    /// fixed default.
-    pub default: Option<&'static str>,
 }
 
 /// The 7 fixed `options.*` config keys, in listing order.
@@ -63,56 +67,60 @@ impl ConfigKey {
     pub fn spec(self) -> &'static KeySpec {
         const DEFAULT_REGISTRY: KeySpec = KeySpec {
             key: "options.default_registry",
-            value_type: ValueType::String,
+            value_type: ValueType::String { default: None },
             title: "Default registry",
             description: "Default registry for short identifiers (lower priority than \
                            `GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in \
                            `command::resolve_default_registry`).",
-            default: None,
         };
         const CLIENTS: KeySpec = KeySpec {
             key: "options.clients",
-            value_type: ValueType::StringList,
+            value_type: ValueType::StringList { default: None },
             title: "Clients",
             description: "AI client targets install/update materialize into when `--client` is absent.",
-            default: None,
         };
         const SHOW_DEPRECATED: KeySpec = KeySpec {
             key: "options.show_deprecated",
-            value_type: ValueType::Bool,
+            value_type: ValueType::Bool {
+                default: defaults::SHOW_DEPRECATED,
+            },
             title: "Show deprecated",
             description: "When false (default), deprecated artifacts are hidden from `grim search` and \
                            the TUI catalog unless installed; true shows them everywhere.",
-            default: Some("false"),
         };
         const TUI_DEFAULT_VIEW: KeySpec = KeySpec {
             key: "options.tui.default_view",
-            value_type: ValueType::Enum(&["flat", "tree"]),
+            value_type: ValueType::Enum {
+                values: DefaultView::VALUE_NAMES,
+                default: defaults::DEFAULT_VIEW.as_str(),
+            },
             title: "Default view",
             description: "The view mode to open with.",
-            default: Some("tree"),
         };
         const TUI_GROUP_BY_TYPE: KeySpec = KeySpec {
             key: "options.tui.group_by_type",
-            value_type: ValueType::Bool,
+            value_type: ValueType::Bool {
+                default: defaults::GROUP_BY_TYPE,
+            },
             title: "Group by type",
             description: "When true, insert a type-level group (skill / rule / agent / bundle) between \
                            the registry root and the path segments in tree view.",
-            default: Some("false"),
         };
         const TUI_TREE_SEPARATORS: KeySpec = KeySpec {
             key: "options.tui.tree_separators",
-            value_type: ValueType::StringList,
+            value_type: ValueType::StringList {
+                default: Some(defaults::TREE_SEPARATORS),
+            },
             title: "Tree separators",
             description: "Characters on which the repository path is split into nested groups in tree view.",
-            default: Some("/"),
         };
         const TUI_EXPAND_LEVELS: KeySpec = KeySpec {
             key: "options.tui.expand_levels",
-            value_type: ValueType::U32,
+            value_type: ValueType::U32 {
+                default: defaults::EXPAND_LEVELS,
+            },
             title: "Expand levels",
             description: "How many levels of the grouped tree are expanded when the browser opens.",
-            default: Some("1"),
         };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
@@ -151,26 +159,26 @@ impl RegistryField {
     pub fn spec(self) -> &'static KeySpec {
         const OCI: KeySpec = KeySpec {
             key: "registry.<alias>.oci",
-            value_type: ValueType::String,
+            value_type: ValueType::String { default: None },
             title: "OCI registry ref",
             description: "A plain OCI registry ref — host (and optional namespace), e.g. `ghcr.io` or `ghcr.io/acme`.",
-            default: None,
         };
         const INDEX: KeySpec = KeySpec {
             key: "registry.<alias>.index",
-            value_type: ValueType::String,
+            value_type: ValueType::String { default: None },
             title: "Package-index locator",
             description: "A package-index locator replacing the `_catalog` listing: an `http(s)://` base \
                            serving compiled static files (`all.json`), or a git repository (`git+…`, \
                            `ssh://`, `git@…`, or a URL ending in `.git`) holding `index/**/metadata.json`.",
-            default: None,
         };
+        // Not an `[options]`/`[options.tui]` key, so there is no matching
+        // `config::defaults` const — this literal instead mirrors
+        // `RegistryConfig`'s own serde-derived `bool` default (`false`).
         const DEFAULT: KeySpec = KeySpec {
             key: "registry.<alias>.default",
-            value_type: ValueType::Bool,
+            value_type: ValueType::Bool { default: false },
             title: "Default registry flag",
             description: "Marks this registry as the primary one short identifiers expand against.",
-            default: Some("false"),
         };
         match self {
             Self::Oci => &OCI,
@@ -210,6 +218,19 @@ mod tests {
             );
         }
         assert_eq!(ConfigKey::parse("bogus.key"), None);
+    }
+
+    /// Tripwire: `registry.<alias>.default` is the one spec default that
+    /// cannot be compile-linked to a `config::defaults` const (it mirrors
+    /// `RegistryConfig`'s serde-derived `bool` default, which is not
+    /// const-evaluable) — pin the literal against the real derived default.
+    #[test]
+    fn registry_default_spec_matches_registry_config_derived_default() {
+        use crate::config::declaration::RegistryConfig;
+        assert_eq!(
+            RegistryField::Default.spec().value_type.default_str(),
+            Some(RegistryConfig::default().default.to_string())
+        );
     }
 
     /// Whitespace-normalize like the metadata: collapse newlines/multiple
@@ -320,23 +341,23 @@ mod tests {
 
     fn assert_schema_type_matches(value_type: ValueType, node: &serde_json::Value, spec_key: &str) {
         match value_type {
-            ValueType::Bool => assert!(
+            ValueType::Bool { .. } => assert!(
                 schema_has_type(node, "boolean"),
                 "{spec_key}: expected boolean schema type; got {node}"
             ),
-            ValueType::U32 => assert!(
+            ValueType::U32 { .. } => assert!(
                 schema_has_type(node, "integer"),
                 "{spec_key}: expected integer schema type; got {node}"
             ),
-            ValueType::String => assert!(
+            ValueType::String { .. } => assert!(
                 schema_has_type(node, "string"),
                 "{spec_key}: expected string schema type; got {node}"
             ),
-            ValueType::StringList => assert!(
+            ValueType::StringList { .. } => assert!(
                 schema_has_type(node, "array"),
                 "{spec_key}: expected array schema type; got {node}"
             ),
-            ValueType::Enum(values) => {
+            ValueType::Enum { values, .. } => {
                 let expected: BTreeSet<String> = values.iter().map(|s| s.to_string()).collect();
                 assert_eq!(
                     schema_enum_values(node),
@@ -395,58 +416,5 @@ mod tests {
             let type_node = unwrap_nullable(&schema, node);
             assert_schema_type_matches(spec.value_type, type_node, spec.key);
         }
-    }
-
-    // ── DRIFT TEST 3: KeySpec defaults vs `config::defaults` runtime consts ──
-
-    /// Tripwire: every `KeySpec.default` presentation string must equal the
-    /// runtime default it documents, rendered from `config::defaults`'
-    /// typed consts (the single source of truth — see that module's doc
-    /// comment). A runtime-default change that forgets to update the
-    /// matching `KeySpec` literal above breaks this test.
-    #[test]
-    fn key_spec_defaults_match_config_defaults_module() {
-        use crate::config::declaration::RegistryConfig;
-        use crate::config::defaults;
-
-        assert_eq!(
-            ConfigKey::TuiExpandLevels.spec().default,
-            Some(defaults::EXPAND_LEVELS.to_string()).as_deref()
-        );
-
-        // Render via serde (respects `#[serde(rename_all = "lowercase")]`)
-        // rather than hand-formatting the variant name.
-        let default_view_str = serde_json::to_value(defaults::DEFAULT_VIEW)
-            .expect("DefaultView must serialize")
-            .as_str()
-            .expect("a fieldless enum serializes as a bare string")
-            .to_string();
-        assert_eq!(
-            ConfigKey::TuiDefaultView.spec().default,
-            Some(default_view_str).as_deref()
-        );
-
-        assert_eq!(
-            ConfigKey::TuiTreeSeparators.spec().default,
-            Some(defaults::TREE_SEPARATORS.join(",")).as_deref()
-        );
-
-        assert_eq!(
-            ConfigKey::ShowDeprecated.spec().default,
-            Some(defaults::SHOW_DEPRECATED.to_string()).as_deref()
-        );
-
-        assert_eq!(
-            ConfigKey::TuiGroupByType.spec().default,
-            Some(defaults::GROUP_BY_TYPE.to_string()).as_deref()
-        );
-
-        // `registry.<alias>.default` has no dedicated const (it is not a
-        // `[options]`/`[options.tui]` key) — pin it against `RegistryConfig`'s
-        // own derived bool default instead.
-        assert_eq!(
-            RegistryField::Default.spec().default,
-            Some(RegistryConfig::default().default.to_string()).as_deref()
-        );
     }
 }

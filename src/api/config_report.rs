@@ -229,15 +229,32 @@ impl Printable for ConfigListReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     /// A single string value.
-    String,
+    String {
+        /// The runtime default, `None` when there is no fixed default.
+        default: Option<&'static str>,
+    },
     /// `"true"` or `"false"`.
-    Bool,
+    Bool {
+        /// The runtime default.
+        default: bool,
+    },
     /// A non-negative integer.
-    U32,
+    U32 {
+        /// The runtime default.
+        default: u32,
+    },
     /// A closed set of string values, listed in [`Self::values`].
-    Enum(&'static [&'static str]),
+    Enum {
+        /// The allowed values.
+        values: &'static [&'static str],
+        /// The runtime default.
+        default: &'static str,
+    },
     /// A comma-joined list of strings.
-    StringList,
+    StringList {
+        /// The runtime default, `None` when there is no fixed default.
+        default: Option<&'static [&'static str]>,
+    },
 }
 
 impl ValueType {
@@ -245,19 +262,31 @@ impl ValueType {
     /// variant.
     pub fn values(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Enum(values) => Some(values),
-            Self::String | Self::Bool | Self::U32 | Self::StringList => None,
+            Self::Enum { values, .. } => Some(values),
+            Self::String { .. } | Self::Bool { .. } | Self::U32 { .. } | Self::StringList { .. } => None,
+        }
+    }
+
+    /// The runtime default in CLI string form, `None` when there is no
+    /// fixed default.
+    pub fn default_str(self) -> Option<String> {
+        match self {
+            Self::String { default } => default.map(String::from),
+            Self::Bool { default } => Some(default.to_string()),
+            Self::U32 { default } => Some(default.to_string()),
+            Self::Enum { default, .. } => Some(default.to_string()),
+            Self::StringList { default } => default.map(|values| values.join(",")),
         }
     }
 
     /// The stable JSON/plain identifier for this type.
     fn as_str(self) -> &'static str {
         match self {
-            Self::String => "string",
-            Self::Bool => "boolean",
-            Self::U32 => "integer",
-            Self::Enum(_) => "enum",
-            Self::StringList => "string-list",
+            Self::String { .. } => "string",
+            Self::Bool { .. } => "boolean",
+            Self::U32 { .. } => "integer",
+            Self::Enum { .. } => "enum",
+            Self::StringList { .. } => "string-list",
         }
     }
 }
@@ -298,24 +327,24 @@ pub struct ConfigEntry {
     pub description: &'static str,
     /// The runtime default in CLI string form, `None` when there is no
     /// fixed default.
-    pub default: Option<&'static str>,
+    pub default: Option<String>,
     /// The allowed values for an enum key, `None` otherwise.
     pub values: Option<&'static [&'static str]>,
 }
 
 impl ConfigEntry {
     /// Build an entry, deriving [`Self::set`] from `value` and
-    /// [`Self::values`] from `value_type`.
+    /// [`Self::values`] / [`Self::default`] from `value_type`.
     pub fn new(
         key: String,
         value: Option<String>,
         value_type: ValueType,
         title: &'static str,
         description: &'static str,
-        default: Option<&'static str>,
     ) -> Self {
         let set = value.is_some();
         let values = value_type.values();
+        let default = value_type.default_str();
         Self {
             key,
             value,
@@ -584,10 +613,9 @@ mod tests {
             items: vec![ConfigEntry::new(
                 "options.clients".to_string(),
                 Some("claude".to_string()),
-                ValueType::StringList,
+                ValueType::StringList { default: None },
                 "Clients",
                 "AI client targets install/update materialize into when `--client` is absent.",
-                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -609,10 +637,9 @@ mod tests {
             items: vec![ConfigEntry::new(
                 "options.clients".to_string(),
                 Some("claude".to_string()),
-                ValueType::StringList,
+                ValueType::StringList { default: None },
                 "Clients",
                 "AI client targets install/update materialize into when `--client` is absent.",
-                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -630,10 +657,12 @@ mod tests {
         let enum_entry = ConfigEntry::new(
             "options.tui.default_view".to_string(),
             Some("tree".to_string()),
-            ValueType::Enum(&["flat", "tree"]),
+            ValueType::Enum {
+                values: &["flat", "tree"],
+                default: "tree",
+            },
             "Default view",
             "The view mode to open with.",
-            Some("tree"),
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&enum_entry).unwrap()).unwrap();
         let obj = v.as_object().expect("entry must serialize as an object");
@@ -658,10 +687,9 @@ mod tests {
         let bool_entry = ConfigEntry::new(
             "options.show_deprecated".to_string(),
             Some("true".to_string()),
-            ValueType::Bool,
+            ValueType::Bool { default: false },
             "Show deprecated",
             "When false (default), deprecated artifacts are hidden from `grim search` and the TUI catalog unless installed; true shows them everywhere.",
-            Some("false"),
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&bool_entry).unwrap()).unwrap();
         assert_eq!(v["type"], "boolean");
@@ -676,10 +704,9 @@ mod tests {
         let r = ConfigEntry::new(
             "options.default_registry".to_string(),
             None,
-            ValueType::String,
+            ValueType::String { default: None },
             "Default registry",
             "Default registry for short identifiers.",
-            None,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert!(v["value"].is_null());
@@ -692,10 +719,9 @@ mod tests {
             items: vec![ConfigEntry::new(
                 "options.default_registry".to_string(),
                 None,
-                ValueType::String,
+                ValueType::String { default: None },
                 "Default registry",
                 "Default registry for short identifiers.",
-                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -713,13 +739,20 @@ mod tests {
 
     #[test]
     fn value_type_display_matches_serde() {
-        assert_eq!(ValueType::String.to_string(), "string");
-        assert_eq!(ValueType::Bool.to_string(), "boolean");
-        assert_eq!(ValueType::U32.to_string(), "integer");
-        assert_eq!(ValueType::Enum(&["flat", "tree"]).to_string(), "enum");
-        assert_eq!(ValueType::StringList.to_string(), "string-list");
+        assert_eq!(ValueType::String { default: None }.to_string(), "string");
+        assert_eq!(ValueType::Bool { default: false }.to_string(), "boolean");
+        assert_eq!(ValueType::U32 { default: 0 }.to_string(), "integer");
+        assert_eq!(
+            ValueType::Enum {
+                values: &["flat", "tree"],
+                default: "flat"
+            }
+            .to_string(),
+            "enum"
+        );
+        assert_eq!(ValueType::StringList { default: None }.to_string(), "string-list");
         let v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&ValueType::StringList).unwrap()).unwrap();
+            serde_json::from_str(&serde_json::to_string(&ValueType::StringList { default: None }).unwrap()).unwrap();
         assert_eq!(v, "string-list");
     }
 
