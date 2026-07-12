@@ -148,7 +148,7 @@ pointers into an index repository rather than reading them — see
 
 ## Managing Config {#managing-config}
 
-`grim config` (0.6.2+) reads and writes `grimoire.toml`, modeled on `git
+`grim config` reads and writes `grimoire.toml`, modeled on `git
 config`, so you rarely hand-edit the file. It covers **settings**
 (`[options]`, `[options.tui]`) and **named registries** (`[[registries]]`) —
 but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[bundles]`),
@@ -304,10 +304,16 @@ resolved scope's `options.show_deprecated`.
 `grim tui` browses your declared registries' catalogs interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
 detail pane per entry. Press `t` to toggle between the flat list and a
-grouped collapsible tree view; the tree's opening mode and path-splitting
-characters are configurable via `[options.tui]` in `grimoire.toml`
-(`default_view`, `group_by_type`, `tree_separators` — set them with `grim
+grouped collapsible tree view; the tree's opening mode, opening depth, and
+path-splitting characters are configurable via `[options.tui]` in
+`grimoire.toml` (`default_view`, `group_by_type`, `tree_separators`,
+`expand_levels` — how many tree levels open expanded; the `z` key folds
+between that depth and fully-expanded at runtime. Set them with `grim
 config set options.tui.<key>`, see [Managing Config](#managing-config)).
+Declared local path sources and dev-installs have no registry to root
+under — they group under a top-level **Local** tree root, where install/
+update/delete route to the local seams (re-pack and re-materialize)
+instead of the registry ones.
 When `[[registries]]`
 are configured, the TUI browses all of them, one collapsible root per
 registry; with exactly one it elides that root. A `--registry` flag collapses
@@ -330,7 +336,8 @@ and can call these tools:
 |------|-----------------|------|
 | `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override). Args: `query?`, `refresh?`, scope | always |
 | `grim_status` | Same JSON as `grim status --format json` for the requested scope. Args: scope | always |
-| `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path`; a `files` listing is always included. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, scope | always |
+| `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path` (binary → base64 with `encoding: "base64"`); a `files` listing is always included. `description` fetches the repository's description companion instead (every member inline); `digest_only` resolves `{ref, digest}` with no download and composes with `description`. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope | always |
+| `grim_describe` | Same JSON as `grim describe --format json` — manifest-level metadata (kind, curated annotations, tags, `has_description`) without downloading content. Args: `ref`, scope | always |
 | `grim_render` | Writes an artifact's vendor-native files into `dest_dir` (created if absent) — no install state. Args: `ref`, `vendor`, `dest_dir`, scope | `--allow-writes` |
 
 The install scope is chosen **per tool call**: optional `global` /

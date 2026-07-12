@@ -18,16 +18,23 @@ no stderr parsing needed:
 |---|---|---|
 | 0 | Success | — |
 | 1 | Failure | unclassified fall-through |
-| 64 | Usage error | bad invocation; `grim init` when the config already exists |
+| 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace |
 | 65 | Data error | validation failures of any kind — see below |
 | 69 | Unavailable | registry unreachable, resolve timeout |
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
 | 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, unsupported client, credential helper missing |
-| 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing |
+| 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing; a missing description companion on `grim fetch --description` |
 | 80 | Auth error | registry authentication failed |
-| 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) |
+| 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) — includes `fetch`/`describe` against an uncached reference, which is 81, not 79 |
+
+Under `--format json`, a failure emits a `{"error": {code, exit,
+message}}` document on stdout; some failures add a machine-readable
+`reason` field (e.g. `stale-lock` with exit 65 when a partial
+`grim update <name>` is refused — retry with a full `grim update`). New
+reasons are additive — treat an unknown one as absent. Full list: the
+[JSON interface][json-interface] docs page.
 
 ## Exit 65: Data Errors
 
@@ -64,7 +71,7 @@ Common causes, roughly in order of frequency:
   or with `git` missing from `PATH`, is a data error — the flag
   hard-fails when it cannot read provenance. Note too that `--git` makes
   a re-release from a different commit change the digest, refused without
-  `--force`. New in 0.6.x; confirm with `grim release --help`.
+  `--force`. Confirm with `grim release --help`.
 
 Fix the named input and re-run `grim build` until it exits 0 before
 trying `grim release` again.
@@ -139,3 +146,4 @@ Exit 80 is the registry rejecting your credential. Things to know:
 [commands]: https://grimoire.rs/commands.html
 [auth]: https://grimoire.rs/authentication.html
 [config]: https://grimoire.rs/configuration.html
+[json-interface]: https://grimoire.rs/json-interface.html

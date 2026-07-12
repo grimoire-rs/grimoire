@@ -7,9 +7,9 @@ need to refresh it against a newer grim release.
 
 1. Run `grim --version` and `grim <cmd> --help` for every command this
    package narrates (init, config, add, lock, install, update, status,
-   remove, uninstall, search, schema, tui, mcp, build, release, publish,
-   login, logout). Diff the help output against what the reference files
-   claim.
+   context, fetch, describe, remove, uninstall, search, schema, tui, mcp,
+   build, release, publish, login, logout). Diff the help output against
+   what the reference files claim.
 2. Re-read the docs pages each reference file distills (links below) and
    diff against the file's claims — especially lifecycle semantics
    (pruning, effective declarations, integrity gates, deprecation

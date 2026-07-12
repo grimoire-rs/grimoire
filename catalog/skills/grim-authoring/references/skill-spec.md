@@ -66,6 +66,16 @@ package predictably:
 Keep `SKILL.md` an index that routes into these; relative links from the
 skill root, forward slashes only.
 
+Two **well-known assets** beside `SKILL.md` ride the tree at no extra
+cost: `README.md` (human-facing readme) and `logo.png`/`logo.svg` (a
+catalog/gallery icon). They are ordinary tree files — no frontmatter, no
+schema meaning — that catalog UIs look for by convention and consumers
+can pull with `grim fetch <ref> --path README.md`
+([well-known assets][well-known]). For a readme at the *repository*
+level (uniform across every kind, not installed with the tree), publish
+a description companion instead — see
+[release-checklist.md](release-checklist.md#description-companion).
+
 ## Client-Agnostic Content
 
 One published skill serves Claude Code, OpenCode, and Copilot. The
@@ -147,6 +157,7 @@ All hard errors exit 65 (DataError) at `grim build` / `grim release`.
 [annotations]: https://grimoire.rs/artifacts.html#annotations
 [vendor-ext]: https://grimoire.rs/artifacts.html#vendor-extensions
 [empty-registries]: https://grimoire.rs/vendor-metadata.html#empty-registries
+[well-known]: https://grimoire.rs/artifacts.html#well-known-assets
 [projection]: https://grimoire.rs/vendor-metadata.html#projection-semantics
 [migration]: https://grimoire.rs/vendor-metadata.html#migration
 [agentskills]: https://agentskills.io/specification

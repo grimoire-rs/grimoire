@@ -53,7 +53,7 @@ Values may reference host environment variables with the canonical
 per client at install time (`{env:VAR}` for OpenCode, `${env:VAR}` for
 the VS Code config; Claude reads `${VAR}` natively).
 
-- `${VAR:-default}` is **rejected** (grim 0.7.x) — only Claude supports
+- `${VAR:-default}` is **rejected** — only Claude supports
   defaults natively, so a default would behave differently per client.
 - Copilot CLI's global `mcp-config.json` supports no substitution at
   all: a descriptor that uses `${VAR}` skips that client with a warning
@@ -92,7 +92,12 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - `description` missing or whitespace-only → 65.
 - `url` on a stdio server, or `command`/`args`/`env` on a remote one → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
-- Not a bundle member: MCP descriptors cannot be listed in a bundle
-  (grim 0.7.x) — declare them directly.
+- Not a bundle member: bundles carry only `[skills]`/`[rules]`/`[agents]`
+  tables — MCP descriptors cannot be listed in one; declare them directly.
+
+An MCP descriptor's layer is a single JSON document — it carries no
+in-tree README. For a readme/logo/changelog on the *repository*, publish
+a description companion — see
+[release-checklist.md](release-checklist.md#description-companion).
 
 [mcp-docs]: https://grimoire.rs/mcp-servers.html

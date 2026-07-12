@@ -88,6 +88,14 @@ Publish **members first, bundle last**. A bundle stores references —
 nothing checks at bundle-release time that members exist, so a bundle
 pushed first resolves to 404s on the consumer's `grim lock`. `--pin`
 enforces the order naturally: pinning must resolve every member.
+Batch-publishing from a `publish.toml` manifest gets this for free:
+`grim publish` releases in a fixed kind order with bundles last — see
+[release-checklist.md](release-checklist.md#batch-publish).
+
+A bundle's layer is a single JSON document with no file tree, so it
+carries no in-tree README; a repository-level readme/logo ships as a
+description companion instead
+([release-checklist.md](release-checklist.md#description-companion)).
 
 ## Example
 

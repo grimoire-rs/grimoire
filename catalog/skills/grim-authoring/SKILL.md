@@ -2,7 +2,7 @@
 name: grim-authoring
 description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding claude, opencode, or copilot vendor keys; or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.6
+compatibility: grim>=0.9
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,bundle,packaging
@@ -59,7 +59,7 @@ the catalog:
 
 In every kind, `keywords` is one comma-separated string and `repository`
 must be an `https://` URL (anything else fails the release with 65). The
-`deprecated` notice (grim 0.6.x) obeys the same per-kind location; an
+`deprecated` notice obeys the same per-kind location; an
 empty or whitespace-only value means *not* deprecated and emits no
 annotation. `replaced-by` names the successor artifact, authored
 independently of `deprecated`; its value must parse as a reference or the
@@ -83,6 +83,29 @@ grim add ghcr.io/grimoire-rs/skills/ai-config-authoring:0   # installs by defaul
 # fresh project (no grimoire.toml yet): run `grim init` first
 ```
 
+## The Local Dev Loop
+
+Iterate on an artifact **before** its first release with local path
+sources — no registry round-trip:
+
+- `grim install <path>` — **dev-install**: renders the working tree into
+  the clients without declaring anything (`grimoire.toml` and
+  `grimoire.lock` stay untouched). The record is marked `dev` in
+  `grim status`, refreshed by `grim update`, removed by `grim uninstall`.
+- `grim add <path>` — declares the local path in the config and pins it
+  by content hash, like any other source.
+
+A path is anything starting `./` or `../`, or absolute. Both commands
+cover **skills, rules, and agents** only; kind is inferred from the
+path's shape exactly as `grim build` infers it (directory → skill, bare
+`.md` → rule, `--kind agent` for agents). A local *bundle* is declared
+directly in the config's `[bundles]` table instead (`grim add --kind
+bundle <path>` refuses with a hint); its members must be registry
+references — a local bundle has no registry identity to resolve a
+relative member against. Typical loop: edit → `grim build <path>`
+(validation) → `grim install <path>` (see it in a real client) →
+repeat → release. Confirm flags with `grim install --help`.
+
 ## Routing Table
 
 | Read… | …when |
@@ -93,7 +116,7 @@ grim add ghcr.io/grimoire-rs/skills/ai-config-authoring:0   # installs by defaul
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
 | [references/vendor-metadata.md](references/vendor-metadata.md) | Adding `claude.*` / `opencode.*` / `copilot.*` keys |
-| [references/release-checklist.md](references/release-checklist.md) | Before `grim release`, or triaging an exit-65 failure |
+| [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, batch manifests, description companions, or triaging an exit-65 failure |
 | [references/updating.md](references/updating.md) | Maintaining this skill package itself |
 
 ## Schema Authority
@@ -102,7 +125,10 @@ This skill teaches the craft and the pitfalls; the authoritative schema
 reference is the Grimoire docs site. When a field table here feels
 incomplete, the docs page is the source of truth:
 [Artifact Reference][artifacts] · [Vendor-Specific Metadata][vendor] ·
-[Publishing][publishing] · [Agent Artifacts][agents].
+[Publishing][publishing] · [Agent Artifacts][agents]. For the TOML
+surfaces, `grim schema --kind <config|publish|lock>` prints the JSON
+Schema generated from grim's own parsers — bind it in your editor to
+catch manifest typos before any command runs.
 
 ## Verify Before Acting
 
@@ -113,7 +139,7 @@ trust the tool. Treat this skill as the map, not the territory.
 
 ---
 
-Verified against grim 0.6.1.
+Verified against grim 0.9.0.
 
 [artifacts]: https://grimoire.rs/artifacts.html
 [vendor]: https://grimoire.rs/vendor-metadata.html

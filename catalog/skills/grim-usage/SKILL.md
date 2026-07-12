@@ -2,7 +2,7 @@
 name: grim-usage
 description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.6
+compatibility: grim>=0.9
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
@@ -24,7 +24,7 @@ entry, never the file.
 
 Before composing any non-trivial grim command:
 
-1. Run `grim --version`. This guide is written against grim 0.6.x; on a
+1. Run `grim --version`. This guide is written against grim 0.9.x; on a
    different minor, treat every flag mentioned here as a hypothesis.
 2. Run `grim <command> --help` before using flags you have not verified
    this session — it is the authoritative, always-current flag list.
@@ -57,15 +57,16 @@ full reference is `--help` plus the docs site linked below.
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
 | `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` | [publish](references/publish.md) |
 
-> **Deprecation (0.6.x):** a publisher can retire a package without
+> **Deprecation:** a publisher can retire a package without
 > unpublishing it; `add` and `status` flag it as deprecated (an `add` of a
 > deprecated reference still succeeds). `search` and `tui` **hide**
 > deprecated artifacts by default unless they are installed — reveal them
 > with `grim search --show-deprecated`, the TUI `h` key, or by setting
 > `options.show_deprecated = true` (`grim config set options.show_deprecated
-> true`). See [Publishing][publishing].
+> true`). A `replaced-by` successor reference, when the publisher named
+> one, surfaces in `grim search` / `grim describe`. See [Publishing][publishing].
 >
-> **Git provenance (0.6.x):** `build`, `release`, and `publish` can embed
+> **Git provenance:** `build`, `release`, and `publish` can embed
 > the publishing commit, date, and origin as OCI annotations via opt-in
 > `--git`; confirm with `grim release --help`.
 
@@ -127,4 +128,4 @@ multi-registry browse behavior in
 
 ---
 
-Verified against grim 0.6.2.
+Verified against grim 0.9.0.

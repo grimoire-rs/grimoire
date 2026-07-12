@@ -74,8 +74,13 @@ Full matrix: [emit matrix][emit-matrix].
 - **No object-valued vendor fields** — `metadata` is string-valued, so
   Claude's `mcpServers`/`hooks`, OpenCode's `permission`, and Copilot's
   `mcp-servers` cannot be authored; add them post-install.
-- **No support directory** — an agent packs to exactly one `<name>.md`;
-  a sibling folder sharing the stem is **silently ignored**.
+- **No support directory** — an agent installs as exactly one
+  `<name>.md`. A sibling directory sharing the stem is read **only** for
+  the well-known companions `README.md`, `logo.png`, and `logo.svg`:
+  those three ride the published layer (under `<name>/…`, for
+  `grim fetch --path` and catalog UIs) but are never installed to a
+  client; every other file in that directory is ignored
+  ([well-known assets][well-known]).
 - **No model translation** — see vendor overrides above.
 
 ## Minimal Example
@@ -100,7 +105,7 @@ You are a code reviewer. Examine the diff...
 | `name` ≠ file stem | Hard error, exit 65 — name mismatch |
 | Known vendor key, bad literal (`claude.permission-mode: yolo`) | Hard error, exit 65 — publish stops |
 | Typo'd own-namespace key (`opencode.temprature`) | Warning + dropped |
-| Sibling dir sharing the stem | Silently ignored — agents have no support dir |
+| Sibling dir sharing the stem | Only `README.md`/`logo.png`/`logo.svg` pack (catalog companions, never installed); everything else silently ignored |
 | Vendor key shadowing a common field | Silent override per vendor — a feature, but a surprise when unintended |
 | `repository` not `https://` | Hard error, exit 65 |
 
@@ -114,6 +119,7 @@ You are a code reviewer. Examine the diff...
 
 [agents-doc]: https://grimoire.rs/agents.html
 [artifacts-agents]: https://grimoire.rs/artifacts.html#agents
+[well-known]: https://grimoire.rs/artifacts.html#well-known-assets
 [precedence]: https://grimoire.rs/agents.html#override-precedence
 [emit-matrix]: https://grimoire.rs/agents.html#emit-matrix
 [registries]: https://grimoire.rs/vendor-metadata.html#claude-agent-registry

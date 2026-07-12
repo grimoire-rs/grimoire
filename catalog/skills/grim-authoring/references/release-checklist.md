@@ -4,7 +4,8 @@ You loaded this file because you are about to `grim release` an
 artifact, or a build/release just failed and you need the triage table.
 
 Contents: [Pre-Release](#pre-release) ·
-[Release Mechanics](#release-mechanics) · [Exit-65 Triage](#exit-65-triage)
+[Release Mechanics](#release-mechanics) · [Batch Publish](#batch-publish) ·
+[Description Companion](#description-companion) · [Exit-65 Triage](#exit-65-triage)
 
 ## Pre-Release
 
@@ -17,7 +18,9 @@ reaches a registry:
    the per-kind location: skill/agent → `metadata` map; rule → top-level
    frontmatter; mcp/bundle → top-level TOML. If this release retires a
    package, set the `deprecated` notice in the same location (a re-release
-   without it clears the flag).
+   without it clears the flag), and point consumers at the successor with
+   `replaced-by` — authored independently of `deprecated`, must parse as
+   a reference (65 otherwise), surfaced by `grim search`/`grim describe`.
 2. **`grim build <path>` exits 0** — and read the *warnings* too:
    warn-and-drop vendor keys and migration nudges are silent data loss
    if shipped.
@@ -51,6 +54,60 @@ reaches a registry:
   release time for a self-contained, reproducible bundle
   ([pinning][pin]).
 
+## Batch Publish
+
+`grim publish` releases every package declared in a `publish.toml`
+manifest: whole-manifest validation before any push, then a fixed kind
+order (skills → rules → agents → mcp → bundles) so bundle members always
+exist first. Semantics to know ([full reference][batch-publish]):
+
+- **One version for the catalog.** A top-level `version` covers every
+  entry that omits its own (or writes the literal `${version}`); an
+  explicit per-entry `version` always wins. An entry with no version from
+  any source is a data error (65).
+- **`--version <ref>` overrides per run** — the CI shape: publish at the
+  git tag. The manifest's `version_prefix` (default `"v"`) is stripped
+  first, so `--version v1.2.3` publishes `1.2.3`. A semver value cascades
+  per entry; a **non-semver** value (`canary`, `edge`) is a movable
+  channel tag applied to every entry uniformly, with no cascade.
+- **Skip-existing by default.** Entries whose exact-version tag already
+  exists are skipped; `--force` moves diverging tags deliberately.
+  Channel tags obey the same rule. `--only <name>` (repeatable) publishes
+  a subset.
+- **Strict schema.** Unknown manifest keys are a hard parse error; entry
+  names must match `[a-z0-9][a-z0-9._-]*`. Bind
+  `grim schema --kind publish` in your editor to catch typos early.
+- Confirm flags with `grim publish --help`; `--dry-run` prints the full
+  plan (including planned description companions) with zero registry
+  writes.
+
+## Description Companion
+
+`grim publish` also (re)publishes a **repository description companion**
+— a README/logo/changelog channel that works for *every* kind, including
+mcp and bundle — to the reserved `__grimoire` tag of each entry's
+repository. It is not an artifact: it never installs or resolves, and
+the reserved tag is hidden from tag listings. Consumers read it with
+`grim fetch <repo> --description`; `grim describe` reports
+`has_description` ([full reference][description-companion]).
+
+- **Zero config**: files named `README.md`, `CHANGELOG.md`,
+  `assets/logo.*` or `logo.*` next to `publish.toml` publish
+  automatically. Probe misses are silent.
+- **`[description]` table** decouples layout: `readme`/`logo`/`changelog`
+  map onto fixed wire names; `include` globs add extra assets (each keeps
+  its manifest-relative path — README-referenced images keep working).
+- **Per-entry `[<kind>.<name>.description]` REPLACES the top-level table**
+  (it is not merged — repeat shared members); `description = false` opts
+  one entry out; top-level `publish = false` kills the companion
+  manifest-wide.
+- **Hard gates**: an explicit path that does not exist, a table resolving
+  to zero files, or any companion path escaping the manifest directory
+  (`..`, absolute, symlink escape) is a data error (65). A user-supplied
+  tag colliding with the `__grimoire` namespace is a usage error (64).
+  A `--dry-run` validates and packs every companion — a bad companion
+  fails the dry run too.
+
 ## Exit-65 Triage
 
 `grim build`/`grim release` validation failures exit 65 (DataError).
@@ -68,6 +125,8 @@ Symptom → cause → fix:
 | Invalid version / missing tag | Release ref has no tag or a malformed version | Release as `repo:X.Y.Z` |
 | Tag exists | Exact-version tag points at different bytes | Bump the version; `--force` only for deliberate rewrites |
 | `--git` on a non-git path | `--git` passed to build/release on an artifact path not inside a git repository, or no `git` on the host | Build/release an artifact that lives inside a git repo (with `git` installed), or drop `--git` (confirm with `grim release --help`) |
+| Entry has no version | `publish.toml` entry with no per-entry `version`, no top-level `version`, no `--version` | Set the top-level `version` (or the entry's own) |
+| Companion path missing / escapes | Explicit `[description]` path that does not exist, resolves to zero files, or reaches outside the manifest dir (`..`, absolute, symlink) | Move the file inside the manifest directory; copy root-level assets in before publishing |
 
 Bundle source errors (typo'd key, non-qualified member ref, > 512
 members) surface as config/parse failures rather than 65 — see
@@ -86,3 +145,5 @@ members) surface as config/parse failures rather than 65 — see
 [cascade]: https://grimoire.rs/publishing.html#cascade-tags
 [pin]: https://grimoire.rs/publishing.html#pin
 [publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation
+[batch-publish]: https://grimoire.rs/publishing.html#batch-publish
+[description-companion]: https://grimoire.rs/publishing.html#description-companion

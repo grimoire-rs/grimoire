@@ -12,7 +12,7 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Description Companion](#description-companion) ·
 [Authentication](#authentication)
 
-Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.9.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## Build, Then Release
@@ -263,7 +263,7 @@ pinned release to roll members forward.
 
 Four optional fields make an artifact findable in `grim search` and the
 TUI: `summary`, `keywords`, `description`, `repository`. A fifth field,
-`deprecated` (grim 0.6.x), retires a package *without* unpublishing it —
+`deprecated`, retires a package *without* unpublishing it —
 a non-empty notice keeps it resolving and installing while grim flags it
 in `grim search`, the TUI, and on `grim add`; an empty or whitespace
 value means not deprecated. A sixth, `replaced-by`, names the successor
@@ -324,6 +324,11 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
 - There is no separate publish command for it — re-running `grim publish`
   after a docs-only edit re-points the companion; the artifacts themselves
   skip-existing as usual.
+- The companion's tag namespace is machine-owned: `grim release` /
+  `grim publish` reject a user-supplied tag colliding with the reserved
+  `__grimoire` namespace as a usage error (exit 64), before any network
+  work. Companion paths that escape the manifest directory (`..`, absolute,
+  or a symlink pointing outside) are a data error (exit 65).
 
 Confirm the current schema with `grim schema --kind publish` and flags
 with `grim publish --help`.

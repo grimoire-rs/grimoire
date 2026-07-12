@@ -9,7 +9,7 @@ Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
 [Removing](#removing) · [Bundles](#bundles)
 
-Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.9.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## The Loop
@@ -38,7 +38,7 @@ canonical way to set a default registry via a `default = true` entry, or
 `grim config registry use <alias>`), an `[options]` table for other defaults
 (`clients`, `[options.tui]` for the interactive browser), and `[skills]` /
 `[rules]` / `[agents]` / `[bundles]` tables mapping a binding name to a
-reference. Manage settings and registries with `grim config` (0.6.2+) rather
+reference. Manage settings and registries with `grim config` rather
 than by hand — see [registries.md](registries.md#managing-config); it never
 touches the declaration tables, which stay under `grim add` / `grim remove`.
 You may still edit by hand (run `grim lock` afterwards), but note that any
@@ -168,12 +168,22 @@ locally, in which case it is kept and reported as `kept-modified` until
 you re-run with `--force`. Your local edits are never silently
 discarded.
 
+Update also refreshes every **local path source**: declared path
+dependencies and dev-installed records alike are re-packed, and a changed
+content hash re-materializes them — the local equivalent of a floating
+tag rolling forward. `grim status` surfaces that drift ahead of time as
+`outdated`; a path source that has gone missing (or no longer packs)
+reports `outdated` too, never a false `installed`. A dev record is never
+pruned — see [Installing](#installing).
+
 ## Inspecting
 
 `grim status` reports each declared artifact's state — installed,
 outdated, locally modified, integrity-missing, or not installed. The
-`Source` column shows provenance: `direct`, or the bundle the artifact
-came from. Pair with `--format json` to drive automation — its `outputs`
+`Source` column shows provenance: `direct`, the bundle the artifact came
+from, `path: <path>` for a declared local path source, or
+`path: <path> (dev)` for a dev-install. Pair with `--format json` to
+drive automation — its `outputs`
 array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
 vendor layout itself is not a stable contract).
@@ -182,33 +192,47 @@ Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
 `config list`, `config registry list`, `publish`) wrap their rows in a
 uniform `{"items": [...]}` envelope under `--format json` — read the
 array from `items`, never the top level. Failures under `--format json`
-emit a structured `{"error": {code, exit, message}}` document on stdout.
-Full contract: the [JSON interface][json-interface] docs page.
+emit a structured `{"error": {code, exit, message}}` document on stdout;
+some failures add a machine-readable `reason` (e.g. `stale-lock` when a
+partial `grim update <name>` is refused because the lock no longer matches
+the declaration — retry with a full `grim update`). Full contract: the
+[JSON interface][json-interface] docs page.
 
 Two read-only companions:
 
 - `grim context` reports the resolved invocation context — scope,
   config/lock/state paths (with existence flags), effective client set
   (names only), registry browse set, default registry, offline mode —
-  so scripts need not reimplement walk-up or precedence rules.
+  so scripts need not reimplement walk-up or precedence rules. Each JSON
+  `registries` entry carries an `authenticated` boolean: whether the
+  docker-compatible credential store holds an entry for that registry's
+  host (a file-only probe — it never invokes a credential helper, so a
+  global `credsStore` alone reads as `false`).
 - `grim fetch <ref> [--vendor …] [--path …]` prints an artifact's
   content without installing (use != install). Plain output is the raw
   payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
   adds the digest, kind, and a `files` listing. A binary `--path` file
-  (e.g. `logo.png`) round-trips through a redirect. `--description`
+  (e.g. `logo.png`) comes back base64 in JSON (an `encoding: "base64"`
+  field marks it) while plain output decodes to the raw bytes, so a
+  redirect round-trips byte-identical. `--description`
   retargets the fetch to the repository's description companion (README,
   logo, CHANGELOG) instead of the artifact — JSON inlines every member,
   plain requires `--out <dir>` to unpack the tree (no single payload to
   print). `--digest-only` resolves a digest without downloading anything —
   a cheap cache probe — and composes with `--description` to probe the
-  companion tag instead. Confirm flags with `grim fetch --help`.
+  companion tag instead. A missing artifact *or companion* is not-found
+  (exit 79); offline against an uncached reference is 81, not a
+  misleading 79. Confirm flags with `grim fetch --help`.
 - `grim describe <ref>` reports an artifact's manifest-level metadata —
   kind, curated annotations, tags, and the verbatim annotation map —
   *without* downloading its content, so it is the cheap way to inspect a
   package or discover its versions. It also reports `has_description` —
   whether the repository has a description companion — derived from the
-  tag listing it already fetches, at zero extra network cost. `--format
-  json` is a single object; plain output is a flat key/value table.
+  tag listing it already fetches, at zero extra network cost. Curated
+  fields include `deprecated` (the notice, or null) and `replaced_by`
+  (the successor reference, or null); `tags[]` hides grim-internal
+  companion tags. `--format json` is a single object with every field
+  always present; plain output is a flat key/value table.
   Confirm with `grim describe --help`.
 
 ## Removing

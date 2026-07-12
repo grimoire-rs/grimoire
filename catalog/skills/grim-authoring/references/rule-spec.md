@@ -62,7 +62,10 @@ rules/
 Both pack into one layer and install side by side (`rules/my-rule.md` +
 `rules/my-rule/…`), so the index's relative links resolve on the
 consumer. Support files are copied verbatim for every client — only the
-index is ever transformed ([support directories][support-dir]).
+index is ever transformed ([support directories][support-dir]). The
+[well-known assets][well-known] convention applies here too: a
+`README.md` or `logo.png`/`logo.svg` inside the support directory is
+where catalog UIs look for a readme or icon.
 
 ## Per-Client Transforms
 
@@ -130,3 +133,4 @@ Prefer `&str` over `String` parameters...
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
 [rule-vendor-ex]: https://grimoire.rs/vendor-metadata.html#rule-authoring-example
 [common-unique]: https://grimoire.rs/vendor-metadata.html#common-vs-unique
+[well-known]: https://grimoire.rs/artifacts.html#well-known-assets
