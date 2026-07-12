@@ -5,27 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-07-12
 
 ### Added
 
-- Carry keywords and summary through the package index so index-backed search matches them *(index)*
-- Repository description companion: `publish.toml` `[description]` table (`readme`/`logo`/`changelog`/`include`), with a conventional-file auto-probe (`README.md`, `CHANGELOG.md`, `logo.*`) and per-entry override/opt-out *(publish)*
-- `grim fetch --description` (the description companion, every file inline; `--out` unpacks it to disk) and `--digest-only` (a resolve-only cache probe, composes with `--description`) *(fetch)*
-- `has_description` field on `grim describe`, derived from the tag listing at zero extra network cost *(describe)*
+- Surface curated OCI metadata in the detail pane *(tui)*
+- Hide deprecated artifacts by default in search and TUI
+- Refuse to clobber untracked destinations *(install)*
+- Refuse conflicting same-name re-declaration *(add)*
+- Report per-client output paths in --format json *(status)*
+- Wrap list reports in an items envelope *(cli)* **BREAKING**
+- **Migration:** --format json consumers must read the items array from the envelope object instead of the top-level array; publish JSON key entries is now items. MCP grim_search/grim_status payloads follow.
+- Emit structured JSON error document on failure *(cli)* **BREAKING**
+- **Migration:** JSON consumers should treat a top-level "error" key on stdout as the error document.
+- Preserve the #:schema directive across config rewrites *(config)*
+- Seed the #:schema directive in new configs *(init)*
+- Add --kind lock for the grimoire.lock schema *(schema)*
+- Add read-only resolution introspection command *(context)*
+- Port the MCP grim_fetch tool as a CLI command *(fetch)*
+- NDJSON progress events via --progress json *(progress)*
+- Unify publish/release version and cascade interface *(publish)* **BREAKING**
+- **Migration:** `grim publish --tag <x>` is removed; use `grim publish --version <x>` instead. A channel re-publish now requires --force to move an existing tag instead of moving it silently.
+- Warn when an install shadows the same name at the other scope *(install)*
+- Enforce the artifact-name charset on skill/rule/agent bindings *(add)*
+- Add path-source core types for local path dependencies *(config)*
+- Parse local path values into DeclaredSource across the pipeline *(config)*
+- Pin lock entries and install records to a LockedSource *(lock)*
+- Pin, install, and update local path sources end to end *(resolve)*
+- Declare local path sources via grim add <path> *(add)*
+- Dev-install a local path with grim install <path> *(install)*
+- Local-path bundles and TUI Local group *(local-path)*
+- Grim describe, replaced_by metadata, and binary fetch payloads *(cli)*
+- Annotate stale-lock refusals with a machine-readable reason *(errors)*
+- Report per-registry authentication in grim context *(context)*
+- Pack well-known README/logo companions into the agent layer *(agents)*
+- Carry keywords and summary through the package index *(index)*
+- Repository description companion for every artifact kind **BREAKING**
+- **Migration:** grim publish now auto-publishes a description companion when conventional files are present; opt out with publish = false under [description] or per-entry description = false.
+- Collapse tree to configurable depth on open + z fold toggle *(tui)*
+- Typed config-key registry and config list --all with settings metadata *(cli)*
+- Closed string-set semantics for options.clients *(cli)*
 
 ### Changed
 
-- `grim publish` auto-publishes a description companion when conventional files (`README.md`, `CHANGELOG.md`, `logo.*`) are present in the manifest directory; opt out with the manifest-wide `publish = false` or a per-entry `description = false` *(publish)* **BREAKING**
-- A missing artifact or description companion on `grim fetch` / `grim describe` now classifies as not-found (exit 79), matching the documented contract *(fetch)*
-- `grim fetch` / `grim fetch --description` against an uncached reference under `--offline` now exits offline-blocked (exit 81) instead of a misleading not-found (exit 79) *(fetch)*
-- `[description]` companion paths that escape the manifest directory — an explicit `readme`/`logo`/`changelog` or an `include` glob hit reaching outside via `..`, an absolute path, or a symlink — are now a data error (exit 65) instead of being silently packed *(publish)*
-- `grim release` and `grim publish` reject a user-supplied tag colliding with grim's reserved `__grimoire` namespace as a usage error (exit 64), before any network work, so a machine-owned companion tag can never be overwritten *(publish)*
-- `grim fetch --vendor` combined with `--description` is now a usage error (exit 64) — the companion is vendor-neutral, so the projection does not apply *(fetch)*
+- Collapse redeclared scope flags onto GlobalOptions *(cli)*
+- Extract neutral fetch core, break command↔mcp cycle *(fetch)*
+- Dedupe error-wrapping into a local helper *(fetch)*
+- Typed ErrorReason via unified classify *(errors)*
+- Fold typed defaults into ValueType variants *(cli)*
+- Add ResolvedOptions view with compile-time tripwire *(config)*
 
-### Removed
+### Documentation
 
-- `grim desc` (introduced this cycle, never released) — description companions now publish through `grim publish` and read through `grim fetch --description` *(desc)*
+- Document the 1.0 stability contract
+- Add JSON interface reference for the 1.0 contract
+- Correct frozen-contract drift before 1.0 *(json-interface)*
+- Document the two-ceiling fetch download cap *(commands)*
+- Record the fetch-service extraction and blob-size hardening *(adr)*
+- Link SearchEntry manual serialize count to its guard test *(api)*
+- Document config list --all, string-set metadata, and validation
+
+### Fixed
+
+- Keep install status readable in the catalog list *(tui)*
+- Aggregate bundle install progress across members *(tui)*
+- Show full artifact detail for catalog-backed bundle members *(tui)*
+- Release search focus on arrow keys *(tui)*
+- Correct ocx catalog link to ocx.sh/catalog/grim *(docs)*
+- Exit 79 for missing explicit --config path *(cli)*
+- Resolve login/logout through [[registries]] *(registry)*
+- Serialize optional report fields as explicit null *(cli)* **BREAKING**
+- **Migration:** registry list/show rows always carry both oci and index keys (exactly one non-null); publish announce carries url: null off the pull-request outcome.
+- Bound blob download against a lying descriptor (CWE-770) *(oci)*
+- Gate install and render against oversized layer descriptors (CWE-770) *(oci)*
+- Classify pre-download oversize as a data error *(fetch)*
+- Materialize --name-rebound artifacts and rewrite skill name *(install)*
+- Harden packing, source-loss status, pins, and dev intent *(local-path)*
+- Correct bundle removal, dev-install collision, and status source *(local-path)*
+- Close lock-integrity and reverse-order collision gaps *(local-path)*
+- Correct stale kind-inference wording and schema help string *(cli)*
+- Accept OS-native path separators for local path CLI args *(cli)*
 
 ## [0.8.4] - 2026-07-07
 
@@ -68,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Machine-readable announce outcome + GitLab job-token push fallback *(publish)* **BREAKING**
+- **Migration:** `grim publish --format json` now emits
 - BUMP/VERSION selection for release:prepare *(release)*
 
 ### Documentation
@@ -91,6 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Register mcp servers in client configs *(install)*
 - Publish grim mcp descriptor *(catalog)*
 - Per-call scope for MCP tools; drop --global/--config from grim mcp *(mcp)* **BREAKING**
+- **Migration:** grim mcp --global / --config exit 64 (the root-level scope flags are rejected with a migration hint). Migration: pass the scope inside each tool call's arguments instead.  Design record: .claude/artifacts/adr_mcp_percall_scope_fetch_render.md. SearchArgs/StatusArgs gain a non-CLI #[arg(skip)] workspace seed; the CLI surface is unchanged. grim_status now takes an all-optional args object; empty-object calls stay valid (serde(default), no deny_unknown_fields — SSRF inert-key contract retained).
 - Grim_fetch read tool (in-context artifact content) *(mcp)*
 - Grim_render write tool gated behind --allow-writes *(mcp)*
 
@@ -114,6 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename registry `url` key to `oci` and seed index-first init defaults *(config)* **BREAKING**
 - Add index/oci source-type step to the init dialog *(tui)*
 - Forge-API announce with CI auto-detection *(publish)* **BREAKING**
+- **Migration:** non-GitHub announces previously wrote pointers under index/github.com/ — they now land under the real index/<host>/ (delete stale entries); the gh-CLI namespace fallback is gone (set [announce] namespace or rely on CI env / GitHub token).
 
 ### Documentation
 
@@ -259,8 +321,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allow non-version tags without cascade *(release)*
 - Infer artifact kind from manifest annotation *(oci)*
 - Replace editor option with clients array *(config)* **BREAKING**
+- **Migration:** config key `editor` renamed to `clients` (array); CLI flag `--target` renamed to `--client`.
 - Infer kind, optional name, honor default registry *(add)*
 - Discriminate artifact kind by OCI artifactType *(oci)* **BREAKING**
+- **Migration:** published manifests change shape (new digests) and the com.grimoire.kind annotation is removed. No migration is provided (provisional project).
 - Support multi-file rules with a sibling support dir *(install)*
 - In-file metadata with summary column and width-aware search *(catalog)*
 - Render skills and rules per client with vendor env overrides *(install)*
@@ -324,6 +388,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Collapse access modes to online/offline *(access)* **BREAKING**
+- **Migration:** the `--remote` flag and `GRIM_REMOTE` environment variable are removed. Online resolution (always fresh) is now the default; no flag is needed. Use `--offline` for cache-only behaviour.
 
 ### Documentation
 
@@ -368,6 +433,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.9.0]: https://github.com/grimoire-rs/grimoire/compare/v0.8.4..v0.9.0
 [0.8.4]: https://github.com/grimoire-rs/grimoire/compare/v0.8.3..v0.8.4
 [0.8.3]: https://github.com/grimoire-rs/grimoire/compare/v0.8.2..v0.8.3
 [0.8.2]: https://github.com/grimoire-rs/grimoire/compare/v0.8.1..v0.8.2
