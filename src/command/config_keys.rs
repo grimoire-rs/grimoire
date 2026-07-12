@@ -229,6 +229,21 @@ mod tests {
     /// `RegistryConfig`'s serde-derived `bool` default, which is not
     /// const-evaluable) — pin the literal against the real derived default.
     #[test]
+    fn registry_typed_defaults_render_expected_strings() {
+        // Pin the typed defaults' rendered CLI string form — a StringList
+        // default renders comma-joined, a U32 default renders its decimal
+        // digits — against the values `config::defaults` actually holds.
+        assert_eq!(
+            ConfigKey::TuiTreeSeparators.spec().value_type.default_str(),
+            Some("/".to_string())
+        );
+        assert_eq!(
+            ConfigKey::TuiExpandLevels.spec().value_type.default_str(),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
     fn registry_default_spec_matches_registry_config_derived_default() {
         use crate::config::declaration::RegistryConfig;
         assert_eq!(
@@ -286,6 +301,49 @@ mod tests {
         assert_eq!(
             flattened, expected,
             "every ConfigOptions field (fully populated) must have exactly one ConfigKey spec, and vice versa"
+        );
+    }
+
+    #[test]
+    fn registry_field_completeness_matches_registry_config() {
+        // DRIFT TEST: a fully-populated RegistryConfig (every field
+        // set/non-empty/true, so no serde skip fires) must produce exactly
+        // the field-name set RegistryField::ALL declares, once the alias
+        // selector key (the `registry.<alias>` segment itself, not an
+        // addressable field) is removed.
+        use crate::config::declaration::RegistryConfig;
+        let config = RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: Some("https://index.example".to_string()),
+            default: true,
+        };
+        let value = serde_json::to_value(&config).expect("RegistryConfig must serialize");
+        let mut fields: BTreeSet<String> = value
+            .as_object()
+            .expect("RegistryConfig must serialize as an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            fields.remove("alias"),
+            "alias selector key must be present before removal"
+        );
+
+        let expected: BTreeSet<String> = RegistryField::ALL
+            .iter()
+            .map(|f| {
+                f.spec()
+                    .key
+                    .strip_prefix("registry.<alias>.")
+                    .expect("registry field key must carry the registry.<alias>. prefix")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            fields, expected,
+            "every RegistryConfig field (fully populated, alias removed) must have exactly one RegistryField \
+             spec, and vice versa"
         );
     }
 

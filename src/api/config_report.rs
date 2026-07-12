@@ -501,6 +501,7 @@ impl Printable for RegistryShowReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::client_target::ClientTarget;
 
     #[test]
     fn origin_display_matches_serde_rename() {
@@ -624,7 +625,10 @@ mod tests {
             items: vec![ConfigEntry::new(
                 "options.clients".to_string(),
                 Some("claude".to_string()),
-                ValueType::StringList { default: None },
+                ValueType::StringSet {
+                    values: ClientTarget::VALUE_NAMES,
+                    default: None,
+                },
                 "Clients",
                 "AI client targets install/update materialize into when `--client` is absent.",
             )],
@@ -648,7 +652,10 @@ mod tests {
             items: vec![ConfigEntry::new(
                 "options.clients".to_string(),
                 Some("claude".to_string()),
-                ValueType::StringList { default: None },
+                ValueType::StringSet {
+                    values: ClientTarget::VALUE_NAMES,
+                    default: None,
+                },
                 "Clients",
                 "AI client targets install/update materialize into when `--client` is absent.",
             )],

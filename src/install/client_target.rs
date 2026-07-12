@@ -396,6 +396,14 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    fn value_names_match_all_and_round_trip() {
+        assert_eq!(ClientTarget::VALUE_NAMES.len(), ClientTarget::ALL.len());
+        for (name, target) in ClientTarget::VALUE_NAMES.iter().zip(ClientTarget::ALL) {
+            assert_eq!(ClientTarget::from_str(name).unwrap(), target);
+        }
+    }
+
+    #[test]
     fn from_str_and_display_round_trip_lowercase() {
         for (s, t) in [
             ("claude", ClientTarget::Claude),
