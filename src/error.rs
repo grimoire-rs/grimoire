@@ -3,10 +3,12 @@
 
 //! Top-level error type and the error → exit-code classifier.
 //!
-//! [`classify_error`] is a free function (not a trait method) so the
-//! dependency direction stays clean: errors do not depend on the exit-code
-//! taxonomy. It walks the `anyhow` chain, downcasts to [`Error`], and maps
-//! each known kind to a typed [`ExitCode`].
+//! [`classify`] is a free function (not a trait method) so the dependency
+//! direction stays clean: errors do not depend on the exit-code taxonomy.
+//! It walks the `anyhow` chain once, downcasts to [`Error`], and maps each
+//! known kind to a [`Classification`] (exit code plus an optional
+//! machine-readable [`ErrorReason`]). [`classify_error`] is a thin wrapper
+//! kept for callers that only need the exit code.
 
 use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
@@ -78,32 +80,71 @@ pub enum Error {
     Announce(#[from] AnnounceError),
 }
 
-/// Maps an error chain to a process exit code.
+/// Machine-readable failure `reason` subtype for the JSON error envelope
+/// (`docs/src/json-interface.md`).
 ///
-/// Walks `err.chain()`, downcasts each cause to [`Error`], and
+/// Kebab-case via [`std::fmt::Display`] — the wire path (`main.rs`
+/// `error_document`) builds the JSON `reason` string through that
+/// rendering, not a `Serialize` derive. Additive and forward-compatible:
+/// consumers must tolerate both absence and unknown future values. Only
+/// the stale-lock refusal is annotated today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorReason {
+    /// A resolve was refused because the lock's recorded hash no longer
+    /// matches what the registry currently serves.
+    StaleLock,
+}
+
+impl std::fmt::Display for ErrorReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::StaleLock => "stale-lock",
+        })
+    }
+}
+
+/// The result of classifying an error chain: the process exit code plus
+/// an optional machine-readable [`ErrorReason`] subtype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Classification {
+    pub exit: ExitCode,
+    pub reason: Option<ErrorReason>,
+}
+
+impl Classification {
+    /// A classification carrying no reason subtype — the common case.
+    fn new(exit: ExitCode) -> Self {
+        Self { exit, reason: None }
+    }
+}
+
+/// Maps an error chain to a [`Classification`] (exit code + optional
+/// reason subtype).
+///
+/// Walks `err.chain()` once, downcasts each cause to [`Error`], and
 /// exhaustively maps every Phase 1 variant. Anything not classified falls
-/// through to [`ExitCode::Failure`]; the fall-through is locked by a test
-/// so it cannot silently change.
-pub fn classify_error(err: &anyhow::Error) -> ExitCode {
+/// through to [`ExitCode::Failure`] with no reason; the fall-through is
+/// locked by a test so it cannot silently change.
+pub fn classify(err: &anyhow::Error) -> Classification {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<Error>() {
             // Exhaustive match: a new variant fails to compile until it is
             // explicitly classified here.
             return match e {
-                Error::Identifier(_) => ExitCode::DataError,
-                Error::Digest(_) => ExitCode::DataError,
-                Error::PinnedIdentifier(_) => ExitCode::DataError,
-                Error::Config(ce) => classify_config(ce),
-                Error::Lock(le) => classify_lock(le),
-                Error::Access(ae) => classify_access(ae),
+                Error::Identifier(_) => Classification::new(ExitCode::DataError),
+                Error::Digest(_) => Classification::new(ExitCode::DataError),
+                Error::PinnedIdentifier(_) => Classification::new(ExitCode::DataError),
+                Error::Config(ce) => Classification::new(classify_config(ce)),
+                Error::Lock(le) => Classification::new(classify_lock(le)),
+                Error::Access(ae) => Classification::new(classify_access(ae)),
                 Error::Resolve(re) => classify_resolve(re),
-                Error::Install(ie) => classify_install(ie),
-                Error::Anchor(ae) => classify_anchor(ae),
-                Error::Skill(se) => classify_skill(se),
-                Error::Release(re) => classify_release(re),
-                Error::Catalog(ce) => classify_catalog(ce),
-                Error::Auth(ae) => classify_auth(ae),
-                Error::Command(ce) => match ce {
+                Error::Install(ie) => Classification::new(classify_install(ie)),
+                Error::Anchor(ae) => Classification::new(classify_anchor(ae)),
+                Error::Skill(se) => Classification::new(classify_skill(se)),
+                Error::Release(re) => Classification::new(classify_release(re)),
+                Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
+                Error::Auth(ae) => Classification::new(classify_auth(ae)),
+                Error::Command(ce) => Classification::new(match ce {
                     CommandError::LockMissing { .. } => ExitCode::NotFound,
                     CommandError::LockStale { .. } => ExitCode::DataError,
                     CommandError::NoLoginRegistry => ExitCode::ConfigError,
@@ -113,17 +154,26 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                     CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
                     CommandError::ConfigUsage(_) => ExitCode::UsageError,
                     CommandError::ConfigValue(_) => ExitCode::DataError,
-                },
+                }),
                 // Announce needs remote resources (the index repository, the
                 // GitHub API); a local I/O fault classifies as I/O.
-                Error::Announce(ae) => match ae {
+                Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
                     AnnounceError::Git { .. } | AnnounceError::OwnerLookup { .. } => ExitCode::Unavailable,
-                },
+                }),
             };
         }
     }
-    ExitCode::Failure
+    Classification::new(ExitCode::Failure)
+}
+
+/// Maps an error chain to a process exit code.
+///
+/// Thin wrapper over [`classify`] for callers that only need the exit
+/// code, kept so the many exit-code-only call sites across the codebase
+/// need no changes.
+pub fn classify_error(err: &anyhow::Error) -> ExitCode {
+    classify(err).exit
 }
 
 /// Map a config-tier error to an exit code.
@@ -173,18 +223,26 @@ fn classify_access(err: &AccessError) -> ExitCode {
     }
 }
 
-/// Map a resolution-tier error to an exit code.
-fn classify_resolve(err: &ResolveError) -> ExitCode {
+/// Map a resolution-tier error to a classification. The only arm carrying
+/// a reason subtype is `StaleLock` — assigned right here, in the same
+/// match arm that decides its exit code, so the two can never drift apart.
+fn classify_resolve(err: &ResolveError) -> Classification {
     match &err.kind {
-        ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound => ExitCode::NotFound,
-        ResolveErrorKind::AuthFailure(_) => ExitCode::AuthError,
-        ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => ExitCode::Unavailable,
-        ResolveErrorKind::StaleLock { .. } | ResolveErrorKind::BundleInvalid(_) | ResolveErrorKind::LocalSource(_) => {
-            ExitCode::DataError
+        ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound => Classification::new(ExitCode::NotFound),
+        ResolveErrorKind::AuthFailure(_) => Classification::new(ExitCode::AuthError),
+        ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => {
+            Classification::new(ExitCode::Unavailable)
+        }
+        ResolveErrorKind::StaleLock { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::StaleLock),
+        },
+        ResolveErrorKind::BundleInvalid(_) | ResolveErrorKind::LocalSource(_) => {
+            Classification::new(ExitCode::DataError)
         }
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
-        ResolveErrorKind::BundleConflict { .. } => ExitCode::ConfigError,
+        ResolveErrorKind::BundleConflict { .. } => Classification::new(ExitCode::ConfigError),
     }
 }
 
@@ -284,27 +342,6 @@ fn classify_auth(err: &AuthError) -> ExitCode {
             _ => ExitCode::AuthError,
         },
     }
-}
-
-/// Maps an error chain to a machine-readable failure `reason`, or `None`
-/// when no specific subtype applies.
-///
-/// A companion to [`classify_error`]: same free-function shape and same
-/// chain walk (first cause that downcasts to [`Error`] decides), but it
-/// yields the optional `reason` subtype the JSON error envelope carries
-/// alongside `code`/`exit`. The string is kebab-case and additive —
-/// consumers must tolerate both absence and unknown future values. Only
-/// the stale-lock refusal is annotated today; every other error is `None`.
-pub fn classify_reason(err: &anyhow::Error) -> Option<&'static str> {
-    for cause in err.chain() {
-        if let Some(e) = cause.downcast_ref::<Error>() {
-            return match e {
-                Error::Resolve(re) if matches!(re.kind, ResolveErrorKind::StaleLock { .. }) => Some("stale-lock"),
-                _ => None,
-            };
-        }
-    }
-    None
 }
 
 /// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
@@ -594,7 +631,13 @@ mod tests {
         ))
         .into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
-        assert_eq!(classify_reason(&err), Some("stale-lock"));
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::DataError,
+                reason: Some(ErrorReason::StaleLock),
+            }
+        );
     }
 
     #[test]
@@ -602,14 +645,14 @@ mod tests {
         // A representative data error and a not-found error both classify to
         // an exit code but to no reason subtype — the field must stay absent.
         let data: anyhow::Error = Error::from(DigestError::Invalid("nope".to_string())).into();
-        assert_eq!(classify_reason(&data), None);
+        assert_eq!(classify(&data).reason, None);
 
         let usage: anyhow::Error = Error::from(CommandError::LoginInput("bad input")).into();
-        assert_eq!(classify_reason(&usage), None);
+        assert_eq!(classify(&usage).reason, None);
 
         // A non-Grimoire error (the classify_error fall-through case) also
         // has no reason.
-        assert_eq!(classify_reason(&anyhow::anyhow!("unrelated")), None);
+        assert_eq!(classify(&anyhow::anyhow!("unrelated")).reason, None);
     }
 
     #[test]
@@ -629,7 +672,7 @@ mod tests {
             },
         )))
         .context("while re-resolving the lock");
-        assert_eq!(classify_reason(&err), Some("stale-lock"));
+        assert_eq!(classify(&err).reason, Some(ErrorReason::StaleLock));
     }
 
     #[test]
