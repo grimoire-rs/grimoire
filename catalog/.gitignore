@@ -1,0 +1,4 @@
+# Release-time copies made by `task catalog:release` for the description
+# companions (companion paths must resolve inside the manifest dir).
+/CHANGELOG.md
+/logo.svg

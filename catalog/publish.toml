@@ -14,24 +14,52 @@
 # the same path any contributor uses).
 
 registry = "ghcr.io"
-version = "0.8.4"
+version = "0.9.0"
 
 [announce]
 repository = "https://github.com/grimoire-rs/index"
 namespace = "grimoire-rs"
 owner_id = 298895348
 
+# Description companions: every entry declares an explicit per-entry
+# [description] table (a per-entry table REPLACES the top-level one, so
+# each repeats logo + changelog). Keep it that way — an entry without a
+# table would fall back to the conventional probe and ship the maintainer
+# README.md next to this manifest. `logo.svg` and `CHANGELOG.md` are
+# copied in from the repo root by `task catalog:release` (gitignored);
+# a direct `grim publish --manifest` without that copy fails loudly (65).
+
 [skills.grim-usage]
 repository = "grimoire-rs/skills/grim-usage"
+[skills.grim-usage.description]
+readme = "descriptions/grim-usage.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
 
 [skills.ai-config-authoring]
 repository = "grimoire-rs/skills/ai-config-authoring"
+[skills.ai-config-authoring.description]
+readme = "descriptions/ai-config-authoring.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
 
 [skills.grim-authoring]
 repository = "grimoire-rs/skills/grim-authoring"
+[skills.grim-authoring.description]
+readme = "descriptions/grim-authoring.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
 
 [mcp.grim]
 repository = "grimoire-rs/mcp/grim"
+[mcp.grim.description]
+readme = "descriptions/grim-mcp.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
 
 [bundles.grim-essentials]
 repository = "grimoire-rs/bundles/grim-essentials"
+[bundles.grim-essentials.description]
+readme = "descriptions/grim-essentials.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"

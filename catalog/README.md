@@ -11,12 +11,24 @@ authored here, validated by `grim build` in CI, published to
 catalog/
 ├── publish.toml        # grim publish manifest: registry + catalog-wide version + package tables
 ├── taskfile.yml        # catalog: subsystem tasks (verify, release)
+├── descriptions/<pkg>.md # consumer-facing README per package (description companion)
 ├── skills/<name>/      # one dir per skill package (SKILL.md + references/)
 ├── bundles/<name>.toml # one file per bundle package
 ├── mcp/<name>.toml     # one file per MCP server descriptor package
 ├── rules/<name>.md     # (when the first rule package lands)
 └── agents/<name>.md    # (when the first agent package lands)
 ```
+
+## Description companions
+
+Every `publish.toml` entry declares an explicit per-entry `[description]`
+table: a consumer-facing README from `descriptions/<pkg>.md`, plus
+`logo.svg` and `CHANGELOG.md` copied in from the repo root by
+`task catalog:release` (gitignored — a direct `grim publish --manifest`
+without that copy fails loudly with exit 65). Keep the tables explicit on
+every entry: a per-entry table replaces the top-level one, and an entry
+*without* a table falls back to the conventional probe — which would ship
+this maintainer README to the package repository.
 
 Skill internals follow the [agentskills.io specification] best practices:
 supporting docs in `references/`, executable helpers in `scripts/`, static

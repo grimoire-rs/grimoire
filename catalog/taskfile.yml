@@ -68,4 +68,10 @@ tasks:
     desc: Publish catalog packages per publish.toml via grim publish (pass flags after -- e.g. -- --dry-run)
     deps: [.ensure-grim]
     cmds:
+      # Description companions reference CHANGELOG.md and logo.svg relative
+      # to publish.toml (companion paths must resolve inside the manifest
+      # dir), so copy them in from the repo root before every publish.
+      # Both copies are gitignored (catalog/.gitignore).
+      - cp "{{.ROOT_DIR}}/CHANGELOG.md" "{{.TASKFILE_DIR}}/CHANGELOG.md"
+      - cp "{{.ROOT_DIR}}/assets/logo.svg" "{{.TASKFILE_DIR}}/logo.svg"
       - '"{{.GRIM_BINARY}}" publish --manifest {{.TASKFILE_DIR}}/publish.toml {{.CLI_ARGS}}'
