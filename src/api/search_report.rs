@@ -67,6 +67,10 @@ pub struct SearchEntry {
 impl Serialize for SearchEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
+        // Manual impl (not derive) because `status` projects through Display.
+        // Field count below is asserted by
+        // `json_carries_replaced_by_plain_table_does_not` — adding a field
+        // here requires bumping both, or the test fails.
         let mut s = serializer.serialize_struct("SearchEntry", 12)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
@@ -466,7 +470,9 @@ mod tests {
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 12-field object still round-trips (manual Serialize count).
+        // The full 12-field object still round-trips. This count is linked to
+        // the manual `Serialize for SearchEntry` impl's serialize_struct count
+        // — the two must move together.
         assert_eq!(v["items"][0].as_object().unwrap().len(), 12);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
