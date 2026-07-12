@@ -853,11 +853,11 @@ pub fn frame(state: &TuiState) -> RenderModel {
     //   - `→/← expand/collapse` appears only in tree mode (inert in flat mode).
     let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
         vec![
-            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand/collapse · / search · ? help · q quit"
+            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand/collapse · z fold · / search · ? help · q quit"
                 .to_string(),
-            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand · / search · ? help · q quit".to_string(),
-            "↑↓ move · i/u/d act · v ver · g scope · t tree · →/← expand · / search · ? help · q quit".to_string(),
-            "↑↓ i/u/d g t →/← / ? help q".to_string(),
+            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand · z fold · / search · ? help · q quit".to_string(),
+            "↑↓ move · i/u/d act · v ver · g scope · t tree · →/← expand · z fold · / search · ? help · q quit".to_string(),
+            "↑↓ i/u/d g t →/← z / ? help q".to_string(),
             "i/u/d v g t / ? q".to_string(),
             "? help".to_string(),
         ]
@@ -2617,6 +2617,12 @@ mod tests {
             "flat: NO tier must contain 'expand'; tiers: {:?}",
             m_flat.hint_tiers
         );
+        // `z` fold is inert in flat mode and must not be advertised.
+        assert!(
+            m_flat.hint_tiers.iter().all(|t| !t.contains("z fold")),
+            "flat: NO tier must contain 'z fold'; tiers: {:?}",
+            m_flat.hint_tiers
+        );
 
         // ── Tree mode ──────────────────────────────────────────────────────────
         s.toggle_view_mode();
@@ -2631,6 +2637,11 @@ mod tests {
         assert!(
             widest_tree.contains("expand"),
             "tree: widest tier must contain 'expand'; tier: {widest_tree:?}"
+        );
+        // `z` fold must be advertised in tree mode.
+        assert!(
+            widest_tree.contains("z fold"),
+            "tree: widest tier must contain 'z fold'; tier: {widest_tree:?}"
         );
         // At least two tiers must mention "t tree".
         let tiers_with_tree = m_tree.hint_tiers.iter().filter(|t| t.contains("t tree")).count();
