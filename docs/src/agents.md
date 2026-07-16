@@ -48,7 +48,7 @@ verbatim for every client.
 
 | Field | Required | Type | Validation |
 |---|---|---|---|
-| `name` | yes | string | Must equal the file stem (`code-reviewer.md` ⇒ `code-reviewer`); lowercase letters, digits, hyphens |
+| `name` | yes | string | Must equal the file stem (`code-reviewer.md` ⇒ `code-reviewer`); lowercase letters, digits, hyphens, periods — see [Names](./artifacts.md#names) |
 | `description` | yes | string | Free text — when a client should delegate to this agent |
 | `model` | no | string | Passed through verbatim to each client; **no alias translation** |
 | `tools` | no | string | Comma-separated tool list, projected into each client's native shape |

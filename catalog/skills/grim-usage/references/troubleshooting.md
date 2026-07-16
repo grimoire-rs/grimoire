@@ -41,10 +41,10 @@ reasons are additive — treat an unknown one as absent. Full list: the
 65 is the validation class — the artifact or input itself is wrong.
 Common causes, roughly in order of frequency:
 
-- **Invalid name.** Names are lowercase letters, digits, and hyphens
-  only; max 64 chars; no leading, trailing, or consecutive hyphens.
-  Applies to skill directory names, rule/agent file stems, and the
-  frontmatter `name`.
+- **Invalid name.** Names are lowercase letters, digits, hyphens, and
+  periods only; max 64 chars; no leading, trailing, or adjacent
+  separators (`--`, `..`, `.-` all invalid). Applies to skill directory
+  names, rule/agent file stems, and the frontmatter `name`.
 - **Skill structure.** Missing `SKILL.md`; missing or unclosed `---`
   frontmatter fence; missing `name` or `description`; frontmatter
   `name` not equal to the directory name; description empty or over

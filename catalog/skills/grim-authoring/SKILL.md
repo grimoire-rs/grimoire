@@ -33,12 +33,19 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 
 ## Universal Invariants
 
-- Names use `[a-z0-9-]` only — non-empty, ≤ 64 chars, no leading or
-  trailing hyphen, no consecutive hyphens (`a--b` is invalid).
+- Names are `[a-z0-9]` runs joined by single hyphens or periods
+  (`[a-z0-9]+([.-][a-z0-9]+)*`) — non-empty, ≤ 64 chars, no leading or
+  trailing separator, no adjacent separators (`a--b` and `a..b` are
+  invalid). Periods are a grim superset of the Agent Skills standard
+  (`[a-z0-9-]`) — prefer hyphens when portability to strict-standard
+  tooling matters.
 - A skill's `name` must equal its directory name; an agent's `name` must
-  equal its file stem. Rule and bundle names come from the file stem and
-  obey the same character rules.
-- Any violation fails `grim build`/`grim release` with exit code 65.
+  equal its file stem. Rule names come from the file stem and obey the
+  same character rules. Bundle and MCP names also come from the file stem
+  but are not charset-validated at build; bundle *member* names are
+  validated against the same rules at resolve time.
+- Any violation of the validated names fails `grim build`/`grim release`
+  with exit code 65.
 - Unknown top-level frontmatter keys are *preserved* round-trip (forward
   compatibility) — never rejected, so a typo'd optional key is silent.
 

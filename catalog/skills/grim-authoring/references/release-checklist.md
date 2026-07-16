@@ -115,7 +115,7 @@ Symptom → cause → fix:
 
 | Symptom (error mentions…) | Cause | Fix |
 |---|---|---|
-| name "must contain only lowercase…" / hyphen rules | Charset, leading/trailing or consecutive hyphens, > 64 chars | Rename to `[a-z0-9-]`, fix hyphens |
+| name "must contain only lowercase…" / separator rules | Charset, leading/trailing or adjacent separators (`--`, `..`, `.-`), > 64 chars | Rename to `[a-z0-9]` runs joined by single `.` or `-` |
 | Name mismatch | Skill `name` ≠ directory name, or agent `name` ≠ file stem | Make them equal (rename file/dir or edit frontmatter) |
 | Missing frontmatter | Skill without `---` fence, unclosed fence, or agent with no frontmatter | Add the fenced block with required fields |
 | Frontmatter parse | Malformed YAML; missing `name`/`description`; empty or > 1024-char description | Fix the YAML; supply required fields |

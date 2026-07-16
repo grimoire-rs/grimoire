@@ -3,12 +3,17 @@
 
 //! The validated skill name newtype.
 //!
-//! Per the Agent Skills standard a skill name is 1–64 characters of
-//! `[a-z0-9-]`, with no leading/trailing hyphen and no consecutive
-//! hyphens, and must equal the name of the directory that contains its
-//! `SKILL.md`. This type enforces the charset/length rules; the
-//! directory-equality check lives in [`crate::skill::skill_package`] where
-//! the path is known.
+//! A name is 1–64 characters matching `[a-z0-9]+([.-][a-z0-9]+)*`:
+//! lowercase alphanumeric runs joined by single hyphens or periods —
+//! no leading/trailing separator, no two adjacent separators (which
+//! also rejects `.`, `..`, and hidden-file names). This is a deliberate
+//! superset of the Agent Skills standard, which allows only `[a-z0-9-]`
+//! (periods added for names like `socket.io`, issue #40); it stays a
+//! strict subset of the OCI repository-segment grammar so every valid
+//! name composes into a pushable `skills/<name>` repository path. A
+//! skill's name must additionally equal the name of the directory that
+//! contains its `SKILL.md`; that directory-equality check lives in
+//! [`crate::skill::skill_package`] where the path is known.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,14 +28,22 @@ pub struct SkillName(String);
 /// The maximum skill-name length (Agent Skills standard).
 const MAX_SKILL_NAME_LEN: usize = 64;
 
+/// Whether `c` is a name separator (`-` or `.`).
+fn is_separator(c: char) -> bool {
+    c == '-' || c == '.'
+}
+
 impl SkillName {
     /// Validate and construct a [`SkillName`].
     ///
+    /// The grammar is `[a-z0-9]+([.-][a-z0-9]+)*`, max 64 characters.
+    ///
     /// # Errors
     ///
-    /// Returns a lowercase, no-period reason string when `raw` is empty,
-    /// longer than 64 characters, contains a character outside
-    /// `[a-z0-9-]`, or has a leading/trailing/consecutive hyphen.
+    /// Returns a lowercase reason string (no trailing period) when `raw`
+    /// is empty, longer than 64 characters, contains a character outside
+    /// `[a-z0-9.-]`, starts or ends with a separator, or contains two
+    /// adjacent separators.
     pub fn parse(raw: &str) -> Result<Self, String> {
         if raw.is_empty() {
             return Err("skill name is empty".to_string());
@@ -40,17 +53,30 @@ impl SkillName {
         }
         if !raw
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || is_separator(c))
         {
             return Err(format!(
-                "skill name '{raw}' must contain only lowercase letters, digits, and hyphens"
+                "skill name '{raw}' must contain only lowercase letters, digits, hyphens, and periods"
             ));
         }
-        if raw.starts_with('-') || raw.ends_with('-') {
-            return Err(format!("skill name '{raw}' must not start or end with a hyphen"));
+        // Separator edge rules keep every name filesystem-safe (no
+        // hidden-file leading dot, no `.`/`..`, no Windows-invalid
+        // trailing dot) and a strict subset of the OCI segment grammar.
+        if raw.starts_with(is_separator) || raw.ends_with(is_separator) {
+            return Err(format!(
+                "skill name '{raw}' must not start or end with a hyphen or period"
+            ));
         }
-        if raw.contains("--") {
-            return Err(format!("skill name '{raw}' must not contain consecutive hyphens"));
+        // The charset check above guarantees ASCII, so byte windows are
+        // exact character pairs.
+        if raw
+            .as_bytes()
+            .windows(2)
+            .any(|w| matches!(w[0], b'-' | b'.') && matches!(w[1], b'-' | b'.'))
+        {
+            return Err(format!(
+                "skill name '{raw}' must not contain consecutive hyphens or periods"
+            ));
         }
         Ok(Self(raw.to_string()))
     }
@@ -92,7 +118,21 @@ mod tests {
 
     #[test]
     fn accepts_canonical_names() {
-        for ok in ["code-review", "a", "x1", "rust-style-2", "0", "a-b-c"] {
+        for ok in [
+            "code-review",
+            "a",
+            "x1",
+            "rust-style-2",
+            "0",
+            "a-b-c",
+            // Dotted names: deliberate superset of the Agent Skills
+            // standard (issue #40).
+            "code.review",
+            "socket.io",
+            "a.b.c",
+            "vue.js-tips",
+            "x1.2",
+        ] {
             assert!(SkillName::parse(ok).is_ok(), "{ok} should be valid");
         }
     }
@@ -108,21 +148,39 @@ mod tests {
         assert!(SkillName::parse(&long).is_err());
         let max = "a".repeat(64);
         assert!(SkillName::parse(&max).is_ok());
+        let dotted_long = format!("{}.b", "a".repeat(63));
+        assert!(
+            SkillName::parse(&dotted_long).is_err(),
+            "65-char dotted name must be rejected"
+        );
     }
 
     #[test]
     fn rejects_uppercase_and_bad_charset() {
         assert!(SkillName::parse("Code-Review").is_err());
         assert!(SkillName::parse("code_review").is_err());
-        assert!(SkillName::parse("code.review").is_err());
         assert!(SkillName::parse("code review").is_err());
     }
 
     #[test]
-    fn rejects_hyphen_edges_and_doubles() {
-        assert!(SkillName::parse("-code").is_err());
-        assert!(SkillName::parse("code-").is_err());
-        assert!(SkillName::parse("co--de").is_err());
+    fn rejects_separator_edges_and_doubles() {
+        // Edge/adjacency rules also keep names filesystem-safe: no hidden
+        // files ('.hidden'), no '.'/'..' traversal, no trailing dot
+        // (invalid on Windows).
+        for bad in [
+            "-code",
+            "code-",
+            "co--de",
+            ".hidden",
+            "trailing.",
+            "a..b",
+            "a.-b",
+            "-.a",
+            ".",
+            "..",
+        ] {
+            assert!(SkillName::parse(bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]

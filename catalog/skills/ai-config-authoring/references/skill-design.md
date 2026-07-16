@@ -18,7 +18,7 @@ Portable frontmatter (the Agent Skills open standard):
 
 | Field | Required | Constraints |
 |---|---|---|
-| `name` | yes | 1–64 chars; lowercase letters, digits, hyphens; no leading/trailing/consecutive hyphens; must equal the directory name |
+| `name` | yes | 1–64 chars; lowercase letters, digits, hyphens; no leading/trailing/consecutive hyphens; must equal the directory name (grim also accepts periods as a superset — prefer hyphens for portability) |
 | `description` | yes | 1–1024 chars; what the skill does + when to use it — see [descriptions.md](descriptions.md) |
 | `license` | no | License name or pointer to a bundled license file |
 | `compatibility` | no | ≤ 500 chars; environment needs — most skills do not need it |

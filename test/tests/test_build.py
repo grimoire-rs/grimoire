@@ -87,3 +87,40 @@ def test_build_rejects_missing_description(grim_at, project_dir: Path) -> None:
         f"missing description must exit 65, got {result.returncode}; "
         f"{result.stderr}"
     )
+
+
+def test_build_dotted_skill_dir(grim_at, project_dir: Path) -> None:
+    """Issue #40: a dotted skill name is valid and must build."""
+    skill = project_dir / "socket.io"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: socket.io\ndescription: Socket helpers.\n---\n# Body\n",
+    )
+    runner = grim_at(project_dir)
+    out = runner.json("build", str(skill))
+    assert out["kind"] == "skill"
+    assert out["name"] == "socket.io"
+    assert out["status"] == "built"
+
+
+def test_build_dotted_rule_stem(grim_at, project_dir: Path) -> None:
+    """Issue #40: a dotted rule file stem ('vue.js.md' -> 'vue.js') builds."""
+    rule = project_dir / "vue.js.md"
+    _write(rule, "---\npaths: ['**/*.vue']\n---\n# Vue Style\nBody.\n")
+    runner = grim_at(project_dir)
+    out = runner.json("build", str(rule))
+    assert out["kind"] == "rule"
+    assert out["name"] == "vue.js"
+    assert out["status"] == "built"
+
+
+def test_build_rejects_leading_dot_skill_dir(grim_at, project_dir: Path) -> None:
+    """Issue #40 guard rail: a leading-dot name (hidden dir) stays a data
+    error (65) after the dotted-name relaxation."""
+    skill = project_dir / ".hidden"
+    _write(skill / "SKILL.md", "---\nname: .hidden\ndescription: d\n---\n# Body\n")
+    runner = grim_at(project_dir)
+    result = runner.run("build", str(skill), check=False)
+    assert result.returncode == 65, (
+        f"leading-dot name must exit 65, got {result.returncode}; {result.stderr}"
+    )

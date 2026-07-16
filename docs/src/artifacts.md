@@ -48,15 +48,24 @@ is required (see [MCP Server Artifacts](./mcp-servers.md#publishing)).
 ## Names {#names}
 
 Every skill and agent carries a `name` in frontmatter, and grim validates
-it at build time. The same character rules apply to rule and bundle names
-taken from the file stem.
+it at build time. The same character rules apply to rule names taken from
+the file stem. Bundle and MCP names also come from the file stem but are
+not charset-validated at build; bundle *member* names are validated
+against the same rules at resolve time.
 
-A valid name:
+A valid name matches `[a-z0-9]+([.-][a-z0-9]+)*`:
 
-- contains only lowercase letters, digits, and hyphens (`[a-z0-9-]`),
-- does not start or end with a hyphen,
-- does not contain consecutive hyphens,
-- is not empty.
+- contains only lowercase letters, digits, hyphens, and periods,
+- does not start or end with a hyphen or period,
+- does not contain two adjacent separators (`a--b`, `a..b`, and `a.-b`
+  are all invalid),
+- is 1–64 characters.
+
+Periods are a deliberate superset of the
+[Agent Skills standard][agentskills-spec], which allows only `[a-z0-9-]`.
+A dotted name such as `socket.io` publishes and installs fine with grim,
+but tooling that enforces the strict standard may reject it — prefer
+hyphens when portability across vendors matters.
 
 For skills the `name` must equal the directory name containing `SKILL.md`;
 for agents it must equal the file stem (`reviewer.md` → `name: reviewer`).

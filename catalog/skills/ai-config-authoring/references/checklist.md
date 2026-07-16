@@ -24,7 +24,8 @@ package before publishing it — or before installing someone else's.
 ## Structure
 
 - [ ] Frontmatter `name` equals the directory name (lowercase letters,
-      digits, hyphens; ≤ 64 chars; no edge or double hyphens)
+      digits, hyphens — periods work in grim but hurt portability;
+      ≤ 64 chars; no edge or adjacent separators)
 - [ ] Every relative link resolves to a file inside the package
 - [ ] Every bundled file is referenced from the root with explicit
       when-to-read (or run-vs-read) guidance

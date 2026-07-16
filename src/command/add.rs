@@ -788,6 +788,19 @@ fn preserved_schema_directive(path: &std::path::Path) -> Option<String> {
     None
 }
 
+/// Render a binding name as a TOML table key: bare when bare-key safe
+/// (`[A-Za-z0-9_-]+`), quoted otherwise. Dotted binding names (issue #40,
+/// e.g. `socket.io`) must be quoted — a bare dotted key parses as a
+/// nested table (`skills.socket.io`) and corrupts the config.
+fn toml_key(name: &str) -> String {
+    let bare_safe = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if bare_safe {
+        name.to_string()
+    } else {
+        toml::Value::String(name.to_string()).to_string()
+    }
+}
+
 /// Re-serialize the declaration to `path` as the shared
 /// `[options]`/`[bundles]`/`[skills]`/`[rules]` schema. Atomic via the
 /// store primitive so a crash never truncates the config. The `[bundles]`
@@ -880,28 +893,28 @@ pub(crate) fn write_config(
     if !set.bundles.is_empty() {
         out.push_str("[bundles]\n");
         for (name, id) in &set.bundles {
-            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+            let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
         }
         out.push('\n');
     }
     out.push_str("[skills]\n");
     for (name, id) in &set.skills {
-        let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+        let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
     }
     out.push_str("\n[rules]\n");
     for (name, id) in &set.rules {
-        let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+        let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
     }
     if !set.agents.is_empty() {
         out.push_str("\n[agents]\n");
         for (name, id) in &set.agents {
-            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+            let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
         }
     }
     if !set.mcp.is_empty() {
         out.push_str("\n[mcp]\n");
         for (name, id) in &set.mcp {
-            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
+            let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
         }
     }
 
@@ -1014,6 +1027,13 @@ mod tests {
             "code-review".to_string(),
             DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/code-review:stable").unwrap()),
         );
+        // Dotted binding (issue #40): must be emitted as a quoted key —
+        // bare `socket.io = ...` parses as a nested `skills.socket.io`
+        // table and corrupts the config for every later command.
+        skills.insert(
+            "socket.io".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/socket.io:stable").unwrap()),
+        );
         let mut rules = BTreeMap::new();
         rules.insert(
             "rust-style".to_string(),
@@ -1029,10 +1049,15 @@ mod tests {
         write_config(&path, &opts, &[], &set).unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("\"socket.io\" = "),
+            "dotted binding must be a quoted TOML key, got:\n{body}"
+        );
         let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
         // The clients list round-trips as a TOML array.
         assert_eq!(cfg.options.clients, vec!["claude".to_string(), "opencode".to_string()]);
-        assert_eq!(cfg.set.skills.len(), 1);
+        assert_eq!(cfg.set.skills.len(), 2);
+        assert!(cfg.set.skills.contains_key("socket.io"), "dotted key must round-trip");
         assert_eq!(cfg.set.rules.len(), 1);
         assert_eq!(cfg.options.default_registry.as_deref(), Some("ghcr.io/acme"));
     }

@@ -201,12 +201,13 @@ different name. Re-declaring the exact same reference stays a no-op
 overwrite.
 
 A skill, rule, or agent binding name becomes the install directory or
-file name, so it must satisfy the Agent Skills name rules: 1–64
-characters of lowercase letters, digits, and hyphens. A name outside
-that charset — whether passed via `--name` or derived from the
-reference — refuses with exit 64 (lowercase-only also keeps bindings
-collision-free on case-insensitive filesystems). Bundle and MCP binding
-names are unrestricted.
+file name, so it must satisfy the [artifact name
+rules](./artifacts.md#names): 1–64 characters of lowercase letters,
+digits, hyphens, and periods, with no leading, trailing, or adjacent
+separators. A name outside that grammar — whether passed via `--name` or
+derived from the reference — refuses with exit 64 (lowercase-only also
+keeps bindings collision-free on case-insensitive filesystems). Bundle
+and MCP binding names are unrestricted.
 
 A renamed skill installs under the binding name, and the installed
 `SKILL.md` frontmatter `name` is rewritten to match it (the Agent Skills

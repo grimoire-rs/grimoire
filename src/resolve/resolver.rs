@@ -1723,6 +1723,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expand_bundles_accepts_dotted_member_name() {
+        // Issue #40: a dotted member name is a valid artifact name and
+        // must pass the registry-branch CWE-22 guard.
+        let bm = BundleManifest::new(vec![bundle_member(
+            ArtifactKind::Skill,
+            "socket.io",
+            "ghcr.io/acme/skills/socket.io:1",
+        )]);
+        let access = make_bundle_access(&bm);
+        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
+            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
+        )
+        .unwrap();
+
+        let (members, _snapshots) = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
+            .await
+            .expect("dotted member name must be accepted");
+        assert_eq!(members[0].name, "socket.io");
+    }
+
+    #[tokio::test]
+    async fn expand_bundles_rejects_hidden_member_name() {
+        // A leading-dot member name would materialize a hidden install
+        // dir; the guard must keep rejecting it after the dotted-name
+        // relaxation (issue #40).
+        let bm = BundleManifest::new(vec![bundle_member(
+            ArtifactKind::Skill,
+            ".hidden",
+            "ghcr.io/acme/skills/x:1",
+        )]);
+        let access = make_bundle_access(&bm);
+        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
+            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
+        )
+        .unwrap();
+
+        let err = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
+            .await
+            .expect_err("hidden member name must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains(".hidden")),
+            "must be BundleInvalid naming the offending member name, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_bundle_members_returns_members_in_manifest_order() {
         // C-1: happy path — members are returned in the order they appear in
         // the BundleManifest (sorted by (kind, name) at build time).
@@ -1976,6 +2022,30 @@ mod tests {
         let err = validate_local_members(&bundle_ref, &members).expect_err("traversal member name must be rejected");
         assert!(
             matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("../../evil")),
+            "must be BundleInvalid naming the offending member name, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_local_members_accepts_dotted_member_name() {
+        // Issue #40: dotted names are valid artifact names.
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members = vec![bundle_member(ArtifactKind::Skill, "a.b", "ghcr.io/acme/a.b:1")];
+        assert!(
+            validate_local_members(&bundle_ref, &members).is_ok(),
+            "a dotted member name must be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_local_members_rejects_hidden_member_name() {
+        // A leading-dot name stays rejected after the dotted-name
+        // relaxation (issue #40) — it would materialize a hidden dir.
+        let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
+        let members = vec![bundle_member(ArtifactKind::Skill, ".hidden", "ghcr.io/acme/x:1")];
+        let err = validate_local_members(&bundle_ref, &members).expect_err("hidden member name must be rejected");
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains(".hidden")),
             "must be BundleInvalid naming the offending member name, got {err:?}"
         );
     }

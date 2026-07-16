@@ -208,3 +208,87 @@ def test_add_missing_reference_kind_inference_fails_exit_65(
         f"kind inference failure for an unresolvable reference must exit 65, "
         f"got {result.returncode}; stderr: {result.stderr}"
     )
+
+
+def test_add_dotted_name_installs_end_to_end(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #40: a dotted repo segment ('socket.io') derives a valid dotted
+    binding, declares it under the dotted config key, and installs the tree
+    under the dotted directory."""
+    sk = make_artifact(
+        f"{unique_repo}/socket.io",
+        "skill",
+        {"socket.io/SKILL.md": "---\nname: socket.io\ndescription: d\n---\n# S\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    out = runner.json("add", sk.fq)
+    assert out["kind"] == "skill"
+    assert out["name"] == "socket.io", (
+        f"binding must default to the dotted segment, got {out['name']!r}"
+    )
+    assert out["status"] == "added"
+
+    cfg = (project_dir / "grimoire.toml").read_text()
+    skills_section = cfg.split("[skills]")[1].split("[rules]")[0]
+    assert '"socket.io" = "' in skills_section, (
+        f"config skills section must quote the dotted binding key "
+        f"(a bare dotted key parses as a nested table), got:\n{skills_section}"
+    )
+    index = project_dir / ".claude/skills/socket.io/SKILL.md"
+    assert index.is_file(), "dotted skill must materialize under the dotted dir"
+
+    # A second invocation forces a re-read of the written grimoire.toml —
+    # regression guard: a bare dotted key made every follow-up command fail
+    # with 'invalid TOML ... invalid type: map, expected a string' (exit 78).
+    rows = runner.json("status")["items"]
+    assert any(row["name"] == "socket.io" for row in rows), (
+        f"re-read config must surface the dotted binding, got: {rows}"
+    )
+
+
+def test_add_accepts_dotted_name_override(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #40: an explicit dotted `--name` is a valid binding."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    out = runner.json("add", "--no-install", sk.fq, "--name", "my.alias")
+    assert out["name"] == "my.alias", (
+        f"--name 'my.alias' must be accepted, got {out['name']!r}"
+    )
+
+
+def test_add_rejects_dotted_edge_binding_names(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #40 guard rails: dotted names with separator-edge violations
+    ('.hidden', 'a..b') stay refused with exit 64 — they would materialize
+    hidden or traversal-adjacent install paths."""
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    for bad in (".hidden", "a..b"):
+        result = runner.run("add", sk.fq, "--name", bad, check=False)
+        assert result.returncode == 64, (
+            f"binding {bad!r} must exit 64, got {result.returncode}; "
+            f"stderr: {result.stderr}"
+        )
+        cfg = (project_dir / "grimoire.toml").read_text()
+        assert bad not in cfg, f"refused add must not write binding {bad!r}"
