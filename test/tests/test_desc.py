@@ -307,6 +307,31 @@ def test_readme_escaping_manifest_dir_is_data_error_nothing_pushed(
     _assert_tag_absent(f"skills/{name}", "1.0.0")
 
 
+def test_readme_with_leading_dot_slash_publishes(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression for issue #36: a `[description]` readme written with a
+    leading `./` (idiomatic in hand-written manifests, join-neutral) must not
+    be rejected as out of bounds — the publish succeeds and the companion is
+    pushed."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-dotslash"
+    _skill(project_dir, name)
+    _write(project_dir / "README.md", README)
+    _manifest(
+        project_dir,
+        registry,
+        '\n[description]\nreadme = "./README.md"\n' f'\n[skills.{name}]\nversion = "1.0.0"\n',
+    )
+
+    runner = grim_at(project_dir)
+    out = runner.json("publish")
+    descs = out["descriptions"]["items"]
+    assert len(descs) == 1, f"one companion expected, got {descs}"
+    assert descs[0]["repository"] == f"{registry}/skills/{name}"
+    assert descs[0]["files"] == ["README.md"]
+
+
 def test_include_glob_escaping_manifest_dir_is_data_error(
     grim_at, project_dir: Path, registry: str, unique_repo: str, tmp_path: Path
 ) -> None:

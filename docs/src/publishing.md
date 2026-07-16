@@ -143,7 +143,8 @@ wire. An explicit `readme`/`logo`/`changelog` path that does not exist is a
 data error (exit 65) — an explicit config must not silently skip. A companion
 path — a well-known member or an `include` hit — that resolves *outside* the
 manifest directory (a `..` segment, an absolute path, or a symlink whose target
-escapes the tree) is likewise a data error (exit 65), checked before any push.
+escapes the tree) is likewise a data error (exit 65), checked before any push;
+a leading `./` is accepted (`./README.md` ≡ `README.md`).
 A `[description]` table that resolves to zero files is a data error too;
 `publish = false` disables the auto-companion for the whole manifest.
 

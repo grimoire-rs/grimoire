@@ -6,14 +6,21 @@
 //!
 //! The pure core of the same algorithm the install side runs in
 //! [`crate::install::path_anchor::AnchoredPath::resolve`]
-//! (`src/install/path_anchor.rs`) — Layer 1 rejects a non-`Normal` or empty
-//! `relative` before touching the filesystem; Layer 2 canonicalizes both sides
-//! and asserts `starts_with` when the candidate exists, so a symlink whose
-//! target escapes the tree is caught. This module keeps the algorithm free of
-//! the anchor-roots machinery so publish's `[description]` companion path checks
-//! can reuse it against an arbitrary base directory. Unifying the two behind
-//! this core (retrofitting `AnchoredPath` onto it) is deferred — the contracts
-//! are kept identical so that move stays behavior-preserving.
+//! (`src/install/path_anchor.rs`) — Layer 1 rejects `ParentDir`/`RootDir`/
+//! `Prefix` components (and a path with no `Normal` component) before touching
+//! the filesystem; Layer 2 canonicalizes both sides and asserts `starts_with`
+//! when the candidate exists, so a symlink whose target escapes the tree is
+//! caught. This module keeps the algorithm free of the anchor-roots machinery
+//! so publish's `[description]` companion path checks can reuse it against an
+//! arbitrary base directory.
+//!
+//! Deliberate contract divergence from `AnchoredPath::resolve`: this guard
+//! **ignores** `CurDir` components (a leading `./` in a user-authored manifest
+//! is idiomatic and join-neutral), while `resolve` rejects them — its input is
+//! grim-written state whose store path strips `CurDir`, so one surviving there
+//! is a tamper signal (path_anchor.rs §1.2). Any future unification behind
+//! this core must preserve that stricter `CurDir` rejection on the install
+//! side.
 //!
 //! Residual risk: when the candidate does not yet exist Layer 2 is skipped and
 //! the plain join is returned, so a caller that later reads that path carries a
@@ -27,8 +34,9 @@ use std::path::{Component, Path, PathBuf};
 /// Why a `relative` path failed containment under its base directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ContainmentError {
-    /// `relative` was empty, or carried a non-`Normal` component (`..`, `.`, a
-    /// root, or a drive prefix) — rejected pre-filesystem by Layer 1.
+    /// `relative` carried a `..`, root, or drive-prefix component, or named no
+    /// file at all (empty, `.`, `./`) — rejected pre-filesystem by Layer 1.
+    /// `CurDir` components themselves are ignored (join-neutral).
     #[error("path escapes the base directory (not a plain in-tree path)")]
     Traversal,
     /// The candidate exists but canonicalizes outside `base` — e.g. a symlink
@@ -53,21 +61,30 @@ pub enum ContainmentError {
 ///
 /// # Errors
 ///
-/// [`ContainmentError::Traversal`] for an empty or non-`Normal` `relative`;
+/// [`ContainmentError::Traversal`] for a `relative` that carries a `..`, root,
+/// or drive-prefix component or has no `Normal` component (empty, `.`, `./`);
 /// [`ContainmentError::Escaped`] when an existing candidate canonicalizes
 /// outside `base`; [`ContainmentError::Io`] when canonicalization fails.
 pub fn contain(base: &Path, relative: &Path) -> Result<PathBuf, ContainmentError> {
-    // Layer 1 (always, even for absent paths): every component of `relative`
-    // must be `Normal`. An absolute path (`RootDir`/`Prefix`), a `..`
-    // (`ParentDir`), a `.` (`CurDir`), or an empty path can never be a plain
-    // in-tree path — reject before the filesystem is touched.
-    if relative.as_os_str().is_empty() {
-        return Err(ContainmentError::Traversal);
-    }
+    // Layer 1 (always, even for absent paths): an absolute path
+    // (`RootDir`/`Prefix`) or a `..` (`ParentDir`) can never be a plain
+    // in-tree path — reject before the filesystem is touched. A `.` (`CurDir`)
+    // is skipped: a leading `./` is idiomatic in hand-written manifests,
+    // interior `.` is already normalized away by `components()`, and joining
+    // it is escape-neutral (`base/./x` == `base/x`). Requiring at least one
+    // `Normal` component rejects paths that name no file ("", ".", "./").
+    let mut saw_normal = false;
     for component in relative.components() {
-        if !matches!(component, Component::Normal(_)) {
-            return Err(ContainmentError::Traversal);
+        match component {
+            Component::Normal(_) => saw_normal = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ContainmentError::Traversal);
+            }
         }
+    }
+    if !saw_normal {
+        return Err(ContainmentError::Traversal);
     }
 
     let candidate = base.join(relative);
@@ -138,6 +155,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(
             contain(tmp.path(), Path::new("")),
+            Err(ContainmentError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn accepts_leading_curdir_path() {
+        // Regression test for issue #36: a leading `./` is join-neutral
+        // (`base/./x` == `base/x`) and must not be rejected as a traversal.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/readme.md"), "# r\n").unwrap();
+        let resolved = contain(dir, Path::new("./docs/readme.md")).expect("leading ./ in-tree path resolves");
+        assert!(resolved.ends_with("readme.md"));
+    }
+
+    #[test]
+    fn rejects_bare_curdir() {
+        // "." and "./" carry no Normal component — they name the base itself,
+        // never a file inside it, and stay rejected.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            contain(tmp.path(), Path::new(".")),
+            Err(ContainmentError::Traversal)
+        ));
+        assert!(matches!(
+            contain(tmp.path(), Path::new("./")),
+            Err(ContainmentError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn rejects_curdir_then_parent_traversal() {
+        // Skipping CurDir must not open a hole for a following ParentDir.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            contain(tmp.path(), Path::new("./../x")),
             Err(ContainmentError::Traversal)
         ));
     }
