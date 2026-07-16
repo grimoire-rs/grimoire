@@ -361,3 +361,51 @@ def test_release_reserved_tag_is_usage_error_before_network(
     )
     # Refused before the push: the reserved tag must stay absent on the registry.
     _assert_tag_absent(f"{unique_repo}/code-review", "__grimoire")
+
+
+def test_release_push_registry_splits_push_and_baked_source(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #39: `grim release --push-registry` pushes to the endpoint while
+    every baked/reported name keeps the reference's registry (the pull
+    name): the report `ref`, the source-annotation fallback. The pull host
+    is the reserved-unresolvable `pull.invalid`, so any network call that
+    mistakenly targets the pull name fails loudly."""
+    skill = _local_skill(project_dir)
+    pull_repo = f"{unique_repo}/code-review"
+    pull_ref = f"pull.invalid/{pull_repo}:1.0.0"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", str(skill), pull_ref, "--push-registry", registry)
+    assert out["pushed"] is True
+    assert out["ref"] == pull_ref, f"report ref must keep the pull name, got {out['ref']!r}"
+    assert out["pushed_to"] == f"{registry}/{pull_repo}:1.0.0", (
+        f"pushed_to must carry the push-side reference, got {out['pushed_to']!r}"
+    )
+
+    # The artifact (and its full semver cascade) is live on the push endpoint.
+    manifest = fetch_manifest(pull_repo, "1.0.0")
+    assert tag_digest(pull_repo, "latest") == out["manifest_digest"], (
+        "the cascade tags must land on the push endpoint too"
+    )
+    annotations = manifest.get("annotations") or {}
+    assert annotations.get("org.opencontainers.image.source") == f"pull.invalid/{pull_repo}", (
+        "the source-annotation fallback must bake the PULL registry/repository, "
+        f"got {annotations.get('org.opencontainers.image.source')!r}"
+    )
+
+
+def test_release_without_push_registry_reports_null_pushed_to(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Behavior lock: without `--push-registry` the release is unchanged and
+    the additive `pushed_to` field is an explicit null."""
+    skill = _local_skill(project_dir)
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", str(skill), f"{registry}/{repo_path}:1.0.0")
+    assert out["pushed"] is True
+    assert "pushed_to" in out, "pushed_to must always be present (additive-field policy)"
+    assert out["pushed_to"] is None
+    assert tag_digest(repo_path, "1.0.0") == out["manifest_digest"]

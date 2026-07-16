@@ -88,6 +88,81 @@ pub struct ReleaseArgs {
     /// fails, 65).
     #[arg(long)]
     pub git: bool,
+
+    /// Push to this registry endpoint (`host[/prefix]`) instead of the
+    /// reference's registry, while every baked and reported name — the
+    /// source-annotation fallback, pinned bundle member ids, the report
+    /// `ref` — keeps the reference's registry (the canonical PULL name).
+    /// For publishing through a staging endpoint or an internal push URL
+    /// that mirrors to the public pull name. Unset: push == pull (today's
+    /// behavior). A malformed value is a data error (65).
+    #[arg(long, value_name = "HOST[/PREFIX]")]
+    pub push_registry: Option<String>,
+}
+
+/// The resolved `--push-registry` endpoint: network operations target
+/// `host[/prefix]`-rewritten identifiers while every baked/reported value
+/// keeps the pull name (issue #39).
+#[derive(Debug)]
+pub(crate) struct PushTarget {
+    host: String,
+    prefix: Option<String>,
+}
+
+impl PushTarget {
+    /// Rewrite a pull-named identifier to its push-side location.
+    fn rewrite(&self, id: &Identifier) -> Identifier {
+        id.with_registry(&self.host, self.prefix.as_deref())
+    }
+}
+
+/// Split and validate a `--push-registry host[/prefix]` value.
+///
+/// The first `/` splits host from an optional repository prefix, mirroring
+/// the `--registry host[/prefix]` semantics in `grim publish`. An empty
+/// host or a prefix violating the OCI repository grammar is a data error
+/// (65), attributed to `path` — same tier as the publish-side gates
+/// (`validate_registry_value` / `validate_repository_path`).
+///
+/// # Errors
+///
+/// Data error (65) for an empty host or an invalid prefix.
+pub(crate) fn parse_push_registry(value: &str, path: &std::path::Path) -> anyhow::Result<PushTarget> {
+    let (host, prefix) = match value.split_once('/') {
+        Some((host, prefix)) => (host, Some(prefix)),
+        None => (value, None),
+    };
+    if host.is_empty() {
+        return Err(push_registry_error(
+            path,
+            format!("--push-registry '{value}': must be 'host[/prefix]' with a non-empty registry host"),
+        ));
+    }
+    if let Some(p) = prefix
+        && crate::oci::identifier::repository_path_issue(p).is_some()
+    {
+        return Err(push_registry_error(
+            path,
+            format!(
+                "--push-registry '{value}': prefix '{p}' is not a valid OCI repository path — \
+                 [a-z0-9] runs joined by '.', '_', '__', or '-', with no leading, trailing, or doubled separator"
+            ),
+        ));
+    }
+    Ok(PushTarget {
+        host: host.to_string(),
+        prefix: prefix.map(str::to_string),
+    })
+}
+
+/// A DataError (65) attributed to the artifact path for a malformed
+/// `--push-registry` value, matching how `grim publish` classifies its
+/// registry-value gates.
+fn push_registry_error(path: &std::path::Path, msg: String) -> anyhow::Error {
+    anyhow::Error::from(crate::error::Error::from(crate::skill::SkillError::new(
+        path,
+        crate::skill::SkillErrorKind::ValidationFailed(msg),
+    )))
 }
 
 /// Run `grim release`.
@@ -114,15 +189,27 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     super::grim(crate::oci::description::validate_user_tag(&version))?;
     let tags = super::grim(publish_tags(&version, resolve_cascade(args.cascade, args.no_cascade)))?;
 
+    // `--push-registry` (issue #39): resolve the push endpoint split before
+    // any packing or network work so a malformed value fails fast (65).
+    // `push_repo` targets every network call; `repo`/`source`/the report
+    // reference keep the pull name baked into descriptive metadata.
+    let push = args
+        .push_registry
+        .as_deref()
+        .map(|v| parse_push_registry(v, &args.path))
+        .transpose()?;
+
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
     let repo = id.without_tag();
     let source = repo.registry_repository();
+    let push_repo = push.as_ref().map_or_else(|| repo.clone(), |p| p.rewrite(&repo));
+    let pushed_to = push.as_ref().map(|p| p.rewrite(&id).to_string());
 
     if kind == ArtifactKind::Bundle {
-        return release_bundle(ctx, args, &id, &repo, &version, &tags, &source).await;
+        return release_bundle(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
     }
     if kind == ArtifactKind::Mcp {
-        return release_mcp(ctx, args, &id, &repo, &version, &tags, &source).await;
+        return release_mcp(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
     }
 
     // `--git` (opt-in): derive provenance once before packing; a non-git path
@@ -155,16 +242,17 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // pushed. A lookup failure counts as "absent" — the push path surfaces
     // real transport errors.
     if args.skip_existing
-        && let Some(existing) = resolve_existing_version(&access, &repo, &version).await
+        && let Some(existing) = resolve_existing_version(&access, &push_repo, &version).await
     {
-        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        let report =
+            ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
     if args.dry_run {
         // No push: report the plan with a deterministic preview digest.
         let preview = preview_manifest_digest(&manifest);
-        let report = ReleaseReport::new(id.to_string(), preview, tags, false);
+        let report = ReleaseReport::new(id.to_string(), preview, tags, false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
@@ -172,22 +260,22 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // re-push of identical content is an idempotent no-op that yields the
     // same `manifest_digest` — nothing observable changes until a tag is
     // moved.
-    super::grim(access.push_blob(&repo, &packed.tar).await)?;
-    let manifest_digest = super::grim(access.push_manifest(&repo, &manifest).await)?;
+    super::grim(access.push_blob(&push_repo, &packed.tar).await)?;
+    let manifest_digest = super::grim(access.push_manifest(&push_repo, &manifest).await)?;
 
     // Overwrite guard: if the exact-version tag already resolves to a
     // *different* manifest digest, refuse unless --force (a published
     // version is immutable by default; an identical re-release is a
     // no-op success).
     if !args.force {
-        super::grim(guard_existing_version(&access, &repo, &version, &manifest_digest).await)?;
+        super::grim(guard_existing_version(&access, &push_repo, &version, &manifest_digest).await)?;
     }
 
     // Move the exact version tag FIRST, then the wider floating tags last
     // (crash safety: `1.2.3` exists before `1.2`/`1`/`latest` move to it).
-    super::grim(move_tags(&access, &repo, &tags, &version, &manifest_digest).await)?;
+    super::grim(move_tags(&access, &push_repo, &tags, &version, &manifest_digest).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags, true);
+    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags, true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -203,8 +291,11 @@ async fn release_bundle(
     version: &str,
     tags: &[String],
     source: &str,
+    push: Option<&PushTarget>,
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
     let (name, mut members, metadata) = read_bundle_members(&args.path)?;
+    let push_repo = push.map_or_else(|| repo.clone(), |p| p.rewrite(repo));
+    let pushed_to = push.map(|p| p.rewrite(id).to_string());
 
     // `--git` (opt-in): derive provenance FIRST so a non-git path fails here
     // (65) before any registry work — no network side effects (the
@@ -217,9 +308,10 @@ async fn release_bundle(
 
     // Same --skip-existing semantics as the skill/rule/agent path.
     if args.skip_existing
-        && let Some(existing) = resolve_existing_version(&access, repo, version).await
+        && let Some(existing) = resolve_existing_version(&access, &push_repo, version).await
     {
-        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        let report =
+            ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
@@ -246,7 +338,7 @@ async fn release_bundle(
     // Pinning deliberately freezes a relative member to its absolute,
     // digest-pinned form — reproducibility forfeits late binding.
     if args.pin {
-        super::grim(pin_members(&access, &mut members, repo).await)?;
+        super::grim(pin_members(&access, &mut members, repo, push).await)?;
     }
 
     let manifest = BundleManifest::new(members);
@@ -279,19 +371,20 @@ async fn release_bundle(
 
     if args.dry_run {
         let preview = preview_manifest_digest(&oci_manifest);
-        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false);
+        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
-    super::grim(access.push_blob(repo, &layer).await)?;
-    let manifest_digest = super::grim(access.push_manifest(repo, &oci_manifest).await)?;
+    super::grim(access.push_blob(&push_repo, &layer).await)?;
+    let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
 
     if !args.force {
-        super::grim(guard_existing_version(&access, repo, version, &manifest_digest).await)?;
+        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest).await)?;
     }
-    super::grim(move_tags(&access, repo, tags, version, &manifest_digest).await)?;
+    super::grim(move_tags(&access, &push_repo, tags, version, &manifest_digest).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true);
+    let report =
+        ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -309,8 +402,11 @@ async fn release_mcp(
     version: &str,
     tags: &[String],
     source: &str,
+    push: Option<&PushTarget>,
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
     let (name, descriptor) = read_mcp_descriptor(&args.path)?;
+    let push_repo = push.map_or_else(|| repo.clone(), |p| p.rewrite(repo));
+    let pushed_to = push.map(|p| p.rewrite(id).to_string());
 
     // `--git` first: a non-git path fails (65) before any registry work —
     // same ordering rationale as `release_bundle`.
@@ -319,9 +415,10 @@ async fn release_mcp(
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
     if args.skip_existing
-        && let Some(existing) = resolve_existing_version(&access, repo, version).await
+        && let Some(existing) = resolve_existing_version(&access, &push_repo, version).await
     {
-        let report = ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false);
+        let report =
+            ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
@@ -345,19 +442,20 @@ async fn release_mcp(
 
     if args.dry_run {
         let preview = preview_manifest_digest(&oci_manifest);
-        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false);
+        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
 
-    super::grim(access.push_blob(repo, &layer).await)?;
-    let manifest_digest = super::grim(access.push_manifest(repo, &oci_manifest).await)?;
+    super::grim(access.push_blob(&push_repo, &layer).await)?;
+    let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
 
     if !args.force {
-        super::grim(guard_existing_version(&access, repo, version, &manifest_digest).await)?;
+        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest).await)?;
     }
-    super::grim(move_tags(&access, repo, tags, version, &manifest_digest).await)?;
+    super::grim(move_tags(&access, &push_repo, tags, version, &manifest_digest).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true);
+    let report =
+        ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -367,10 +465,19 @@ async fn release_mcp(
 /// A `./`/`../`-relative member resolves against the release target `repo`
 /// first (issue #31) — `--pin` freezes it to the absolute, digest-pinned
 /// form (reproducibility forfeits late binding, documented).
+///
+/// Under a `--push-registry` split the baked id keeps the PULL name while
+/// the digest is resolved via the push endpoint — but only for members on
+/// the release target's own registry (the split maps exactly that name); a
+/// member on a foreign registry resolves where it lives, unchanged. The
+/// pin is therefore only as good as the mirror: it verifies content on the
+/// push endpoint and trusts the pull name to serve identical bytes
+/// (OCI content addressing makes that sound for true mirrors).
 async fn pin_members(
     access: &Arc<dyn OciAccess>,
     members: &mut [crate::oci::bundle::BundleMember],
     repo: &Identifier,
+    push: Option<&PushTarget>,
 ) -> Result<(), ResolveError> {
     for member in members.iter_mut() {
         let mid = crate::oci::member_ref::MemberRef::parse(&member.id)
@@ -384,8 +491,14 @@ async fn pin_members(
         if mid.digest().is_some() {
             continue;
         }
+        // Network id: push-rewritten only when the member lives on the pull
+        // registry the split maps; foreign registries resolve as named.
+        let net_id = match push {
+            Some(p) if mid.registry() == repo.registry() => p.rewrite(&mid),
+            _ => mid.clone(),
+        };
         let digest = access
-            .resolve_digest(&mid, Operation::Resolve)
+            .resolve_digest(&net_id, Operation::Resolve)
             .await
             .map_err(|e| member_error(member, ResolveErrorKind::RegistryUnreachable(e)))?
             .ok_or_else(|| member_error(member, ResolveErrorKind::TagNotFound))?;
@@ -692,7 +805,7 @@ mod tests {
             name: "x".to_string(),
             id: "../skills/x:0".to_string(),
         }];
-        pin_members(&access, &mut members, &release_target)
+        pin_members(&access, &mut members, &release_target, None)
             .await
             .expect("relative member must resolve then pin");
         assert_eq!(
@@ -715,9 +828,243 @@ mod tests {
             name: "x".to_string(),
             id: "../skills/x:0".to_string(),
         }];
-        let err = pin_members(&access, &mut members, &release_target)
+        let err = pin_members(&access, &mut members, &release_target, None)
             .await
             .expect_err("escaping member must fail");
         assert!(matches!(err.kind, ResolveErrorKind::BundleInvalid(_)), "got {err:?}");
+    }
+
+    // ── push/pull registry split (issue #39) ──────────────────────────
+
+    #[test]
+    fn parse_push_registry_splits_host_and_prefix() {
+        let p = std::path::Path::new("skill");
+        let t = parse_push_registry("push.example", p).expect("plain host valid");
+        assert_eq!(t.host, "push.example");
+        assert_eq!(t.prefix, None);
+        let t = parse_push_registry("localhost:5000/group/project", p).expect("host/prefix valid");
+        assert_eq!(t.host, "localhost:5000");
+        assert_eq!(t.prefix.as_deref(), Some("group/project"));
+    }
+
+    #[test]
+    fn parse_push_registry_rejects_malformed_values_as_data_error() {
+        let p = std::path::Path::new("skill");
+        for bad in [
+            "",
+            "/leading",
+            "push.example/Bad/Prefix",
+            "push.example/p//q",
+            "push.example/-x",
+        ] {
+            let err = parse_push_registry(bad, p).expect_err("malformed value must reject");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                crate::cli::exit_code::ExitCode::DataError,
+                "'{bad}' must classify to DataError (65)"
+            );
+        }
+    }
+
+    /// Under push≠pull, `--pin` resolves the member digest via the PUSH
+    /// endpoint but bakes the PULL-named absolute digest-pinned id.
+    #[tokio::test]
+    async fn pin_members_push_split_bakes_pull_named_ids() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let registry = MemoryRegistry::new();
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        // The member artifact exists ONLY at its push-side location.
+        let push_member_repo = Identifier::parse("push.example/mirror/acme/skills/x").unwrap();
+        let tar = b"member tar".to_vec();
+        let manifest = manifest_of(&tar);
+        access.push_blob(&push_member_repo, &tar).await.unwrap();
+        let digest = access.push_manifest(&push_member_repo, &manifest).await.unwrap();
+        access.put_tag(&push_member_repo, "0", &digest).await.unwrap();
+
+        let release_target = Identifier::parse("pull.example/acme/bundles/tools").unwrap();
+        let push = PushTarget {
+            host: "push.example".to_string(),
+            prefix: Some("mirror".to_string()),
+        };
+        let mut members = vec![crate::oci::bundle::BundleMember {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "x".to_string(),
+            id: "../skills/x:0".to_string(),
+        }];
+        pin_members(&access, &mut members, &release_target, Some(&push))
+            .await
+            .expect("member must resolve via the push endpoint");
+        assert_eq!(
+            members[0].id,
+            format!("pull.example/acme/skills/x:0@{digest}"),
+            "the baked id keeps the pull name; only the digest lookup used the push endpoint"
+        );
+    }
+
+    /// A member on a FOREIGN registry is untouched by the split: it
+    /// resolves where it lives.
+    #[tokio::test]
+    async fn pin_members_push_split_leaves_foreign_registry_members_alone() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let registry = MemoryRegistry::new();
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        let foreign_repo = Identifier::parse("other.example/acme/skills/y").unwrap();
+        let tar = b"foreign member".to_vec();
+        let manifest = manifest_of(&tar);
+        access.push_blob(&foreign_repo, &tar).await.unwrap();
+        let digest = access.push_manifest(&foreign_repo, &manifest).await.unwrap();
+        access.put_tag(&foreign_repo, "1", &digest).await.unwrap();
+
+        let release_target = Identifier::parse("pull.example/acme/bundles/tools").unwrap();
+        let push = PushTarget {
+            host: "push.example".to_string(),
+            prefix: None,
+        };
+        let mut members = vec![crate::oci::bundle::BundleMember {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "y".to_string(),
+            id: "other.example/acme/skills/y:1".to_string(),
+        }];
+        pin_members(&access, &mut members, &release_target, Some(&push))
+            .await
+            .expect("a foreign-registry member resolves where it lives");
+        assert_eq!(members[0].id, format!("other.example/acme/skills/y:1@{digest}"));
+    }
+
+    /// Write a minimal valid skill source at `dir/<name>/SKILL.md`.
+    fn write_skill(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: A test skill.\n---\n# {name}\n"),
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    fn release_args(path: std::path::PathBuf, reference: &str, push_registry: Option<&str>) -> ReleaseArgs {
+        ReleaseArgs {
+            path,
+            reference: reference.to_string(),
+            kind: Some("skill".to_string()),
+            dry_run: false,
+            force: false,
+            skip_existing: false,
+            pin: false,
+            cascade: false,
+            no_cascade: false,
+            git: false,
+            push_registry: push_registry.map(str::to_string),
+        }
+    }
+
+    /// E2E through `run`: with `--push-registry` every network effect lands
+    /// on the push-named repository, nothing on the pull name, and the
+    /// report keeps the pull `ref` with `pushed_to` carrying the push side.
+    #[tokio::test]
+    async fn run_push_registry_pushes_to_endpoint_and_reports_pull_ref() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "split-skill");
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let args = release_args(
+            skill,
+            "pull.example/acme/split-skill:1.2.3",
+            Some("push.example/mirror"),
+        );
+        let (report, exit) = run(&ctx, &args).await.expect("release must succeed");
+        assert_eq!(exit, ExitCode::Success);
+        assert_eq!(report.reference, "pull.example/acme/split-skill:1.2.3");
+        assert_eq!(
+            report.pushed_to.as_deref(),
+            Some("push.example/mirror/acme/split-skill:1.2.3")
+        );
+
+        let access: Arc<dyn OciAccess> = Arc::new(registry);
+        let push_id = Identifier::parse("push.example/mirror/acme/split-skill:1.2.3").unwrap();
+        let resolved = access
+            .resolve_digest(&push_id, crate::oci::access::Operation::Query)
+            .await
+            .unwrap()
+            .expect("the exact tag must exist at the push-named repository");
+        assert_eq!(resolved.to_string(), report.manifest_digest);
+        // The baked source-annotation fallback keeps the PULL name even
+        // though the bytes were pushed to the push endpoint.
+        let pinned = crate::oci::PinnedIdentifier::try_from(push_id.clone_with_digest(resolved)).unwrap();
+        let pushed_manifest = access.fetch_manifest(&pinned).await.unwrap().expect("manifest stored");
+        assert_eq!(
+            pushed_manifest.annotations.get("org.opencontainers.image.source"),
+            Some(&"pull.example/acme/split-skill".to_string()),
+            "the source fallback must bake the pull registry/repository"
+        );
+        let pull_id = Identifier::parse("pull.example/acme/split-skill:1.2.3").unwrap();
+        assert!(
+            access
+                .resolve_digest(&pull_id, crate::oci::access::Operation::Query)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing may land under the pull name"
+        );
+    }
+
+    /// Skip-existing consults the PUSH repository under the split: a tag
+    /// existing only at the push-named repo turns the release into a
+    /// success no-op.
+    #[tokio::test]
+    async fn run_push_registry_skip_existing_consults_push_repo() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "skip-skill");
+        let registry = MemoryRegistry::new();
+
+        // Seed the exact-version tag at the PUSH-named repo only.
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        let push_repo = Identifier::parse("push.example/acme/skip-skill").unwrap();
+        let manifest = manifest_of(b"prior content");
+        let digest = access.push_manifest(&push_repo, &manifest).await.unwrap();
+        access.put_tag(&push_repo, "1.0.0", &digest).await.unwrap();
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry);
+        let mut args = release_args(skill, "pull.example/acme/skip-skill:1.0.0", Some("push.example"));
+        args.skip_existing = true;
+        let (report, exit) = run(&ctx, &args).await.expect("skip-existing must no-op");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(!report.pushed, "an existing push-side tag must skip the release");
+        assert_eq!(report.reference, "pull.example/acme/skip-skill:1.0.0");
+        assert_eq!(report.pushed_to.as_deref(), Some("push.example/acme/skip-skill:1.0.0"));
+    }
+
+    /// The overwrite guard consults the PUSH repository: a different digest
+    /// already tagged there refuses the release without --force.
+    #[tokio::test]
+    async fn run_push_registry_overwrite_guard_consults_push_repo() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "guard-skill");
+        let registry = MemoryRegistry::new();
+
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        let push_repo = Identifier::parse("push.example/acme/guard-skill").unwrap();
+        let manifest = manifest_of(b"DIFFERENT prior content");
+        let digest = access.push_manifest(&push_repo, &manifest).await.unwrap();
+        access.put_tag(&push_repo, "1.0.0", &digest).await.unwrap();
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry);
+        let args = release_args(skill, "pull.example/acme/guard-skill:1.0.0", Some("push.example"));
+        let err = run(&ctx, &args)
+            .await
+            .expect_err("a conflicting push-side tag must refuse without --force");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError
+        );
     }
 }

@@ -106,6 +106,16 @@ pub struct PublishArgs {
     /// `[announce] repository`; default: `https://github.com/grimoire-rs/index`.
     #[arg(long, value_name = "REPO_URL", requires = "announce")]
     pub announce_repo: Option<String>,
+
+    /// Push to this registry endpoint (`host[/prefix]`) instead of the
+    /// manifest's `registry`, while every baked and reported name — the
+    /// source-annotation fallback, pinned bundle member ids, announce
+    /// pointers, the report `ref` — keeps the manifest `registry` (the
+    /// canonical PULL name). Overrides the manifest's `push_registry`.
+    /// Unset (both): push == pull, byte-identical to today. A malformed
+    /// value is a data error (65).
+    #[arg(long, value_name = "HOST[/PREFIX]")]
+    pub push_registry: Option<String>,
 }
 
 /// The optional `[announce]` table in `publish.toml`.
@@ -293,6 +303,14 @@ pub struct PublishManifest {
     /// stays a plain host (namespace in the manifest belongs to
     /// `repository_prefix`).
     pub registry: String,
+
+    /// Optional push endpoint (`host[/prefix]`) the artifacts are pushed to
+    /// when it deviates from `registry`. `registry` stays the canonical PULL
+    /// name baked into every reference, annotation, and report; this field
+    /// only names where the bytes land on the network (a staging endpoint,
+    /// an internal push URL mirrored to the public pull name). Overridden
+    /// for a run by `grim publish --push-registry`. Unset: push == pull.
+    pub push_registry: Option<String>,
 
     /// Optional catalog-wide version applied to every entry that omits its
     /// `version` (or sets the literal `${version}`). May carry the
@@ -755,6 +773,23 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         validate_repository_path(prefix, "--registry prefix", &args.manifest)?;
     }
 
+    // Push/pull split (issue #39): resolve + validate the deviating push
+    // endpoint before any planning or push. `push` drives only the network
+    // side (release pushes, companion pushes, announce metadata read-back);
+    // every planned reference stays pull-named.
+    let push = resolve_push_registry(args.push_registry.as_deref(), manifest.push_registry.as_deref());
+    if let Some((host, prefix)) = &push {
+        validate_registry_value(host, &args.manifest)?;
+        if let Some(p) = prefix.as_deref() {
+            validate_repository_path(p, "push_registry prefix", &args.manifest)?;
+        }
+    }
+    // The raw `host[/prefix]` value forwarded verbatim to each release.
+    let push_value = push.as_ref().map(|(host, prefix)| match prefix {
+        Some(p) => format!("{host}/{p}"),
+        None => host.clone(),
+    });
+
     let manifest_dir = args
         .manifest
         .parent()
@@ -849,6 +884,9 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             // the tag set. A channel tag never cascades regardless.
             cascade: args.cascade,
             no_cascade: args.no_cascade,
+            // The already-validated push endpoint: release rewrites its
+            // network calls to it while the reference stays pull-named.
+            push_registry: push_value.clone(),
         };
 
         match super::release::run(ctx, &release_args).await {
@@ -885,6 +923,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     digest: None,
                     tags: Vec::new(),
                     status: PublishStatus::Failed,
+                    pushed_to: None,
                 };
                 report_entries.push(failed_entry);
                 let code = classify_error(&err);
@@ -912,7 +951,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             });
             continue;
         }
-        match push_one_description(ctx, pd).await {
+        match push_one_description(ctx, pd, push.as_ref()).await {
             Ok(digest) => {
                 eprintln!("description: published {reference}");
                 description_items.push(crate::api::publish_report::PublishDescription {
@@ -940,7 +979,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         if args.dry_run {
             eprintln!("announce: skipped (dry run)");
         } else {
-            match run_announce(ctx, args, &manifest, &entries).await {
+            match run_announce(ctx, args, &manifest, &entries, push.as_ref()).await {
                 Ok(section) => announce_section = Some(section),
                 Err(err) => {
                     // The publish itself succeeded — keep the report, surface the
@@ -971,16 +1010,28 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
 /// `__grimoire` tag at the pre-built bytes via
 /// [`crate::oci::description::push_description_companion`].
 ///
+/// Under a push/pull split the companion pushes to the push-rewritten
+/// repository; the report item keeps the pull `repository`/`ref` (like
+/// every other baked/reported name).
+///
 /// # Errors
 ///
 /// A registry/auth failure (69/80) propagates via the typed error chain.
-async fn push_one_description(ctx: &Context, pd: &PackedDescription) -> anyhow::Result<crate::oci::Digest> {
+async fn push_one_description(
+    ctx: &Context,
+    pd: &PackedDescription,
+    push: Option<&(String, Option<String>)>,
+) -> anyhow::Result<crate::oci::Digest> {
     let id = super::grim(crate::oci::Identifier::parse(&format!(
         "{}:{}",
         pd.repository,
         crate::oci::description::DESC_TAG
     )))?;
     let repo = id.without_tag();
+    let repo = match push {
+        Some((host, prefix)) => repo.with_registry(host, prefix.as_deref()),
+        None => repo,
+    };
     let access = super::access_seam(ctx)?;
     super::grim(crate::oci::description::push_description_companion(access.as_ref(), &repo, &pd.tar).await)
 }
@@ -990,11 +1041,17 @@ async fn push_one_description(ctx: &Context, pd: &PackedDescription) -> anyhow::
 /// access seam), then hand the set to
 /// [`crate::catalog::index_announce::announce`]. Returns the report
 /// section carrying the machine-readable outcome (`--format json`).
+///
+/// Under a push/pull split the pointer `reference` keeps the PULL name
+/// (it names where consumers resolve the package) while the metadata
+/// read-back targets the push-rewritten id — the artifact is live there
+/// even before any mirror sync.
 async fn run_announce(
     ctx: &Context,
     args: &PublishArgs,
     manifest: &PublishManifest,
     entries: &[PlannedEntry],
+    push: Option<&(String, Option<String>)>,
 ) -> anyhow::Result<crate::api::publish_report::PublishAnnounce> {
     use crate::api::publish_report::{AnnounceStatus, PublishAnnounce};
     use crate::catalog::forge::{self, CiEnv, ForgeKind};
@@ -1064,7 +1121,13 @@ async fn run_announce(
         let id = crate::oci::Identifier::parse(&planned.reference)
             .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
         let reference = format!("{}/{}", id.registry(), id.repository());
-        let meta = crate::catalog::index_announce::pointer_metadata(access.as_ref(), &id).await;
+        // Metadata read-back targets the push endpoint under a split — the
+        // pointer `reference` above stays the pull name.
+        let net_id = match push {
+            Some((host, prefix)) => id.with_registry(host, prefix.as_deref()),
+            None => id.clone(),
+        };
+        let meta = crate::catalog::index_announce::pointer_metadata(access.as_ref(), &net_id).await;
         packages.push(AnnouncePackage {
             name: planned.name.clone(),
             kind: kind_str(planned.kind).to_string(),
@@ -1166,6 +1229,19 @@ fn resolve_publish_registry(ctx: &Context, manifest_registry: &str) -> (String, 
         },
         None => (manifest_registry.to_string(), None),
     }
+}
+
+/// Resolve the PUSH endpoint deviating from the pull `registry`, if any:
+/// the `--push-registry` flag wins over the manifest's `push_registry`
+/// (flag > manifest, mirroring [`resolve_publish_registry`]). The value
+/// splits at the first `/` into `(host, optional repository prefix)` —
+/// the same `host[/prefix]` shape the `--registry` flag carries. `None`
+/// when the knob is unset (push == pull, today's behavior).
+fn resolve_push_registry(flag: Option<&str>, manifest_push_registry: Option<&str>) -> Option<(String, Option<String>)> {
+    flag.or(manifest_push_registry).map(|v| match v.split_once('/') {
+        Some((host, prefix)) => (host.to_string(), Some(prefix.to_string())),
+        None => (v.to_string(), None),
+    })
 }
 
 /// Load and deserialize the publish manifest from `path`, enforcing the
@@ -1864,6 +1940,9 @@ fn publish_entry_from_release(
         digest: Some(report.manifest_digest.clone()),
         tags: report.tags.clone(),
         status,
+        // The push-side reference release actually used (null when the
+        // push/pull split is inactive) — report actual results.
+        pushed_to: report.pushed_to.clone(),
     }
 }
 
@@ -3300,6 +3379,146 @@ mod tests {
         );
     }
 
+    // ── resolve_push_registry (push/pull split, issue #39) ────────────────
+
+    #[test]
+    fn resolve_push_registry_none_without_knob() {
+        // Behavior lock: no flag, no manifest field ⇒ no split — every
+        // network call keeps targeting the pull name, byte-identical to
+        // the pre-knob behavior.
+        assert_eq!(resolve_push_registry(None, None), None);
+    }
+
+    #[test]
+    fn resolve_push_registry_uses_manifest_value() {
+        assert_eq!(
+            resolve_push_registry(None, Some("push.example")),
+            Some(("push.example".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn resolve_push_registry_flag_wins_over_manifest() {
+        assert_eq!(
+            resolve_push_registry(Some("flag.example"), Some("manifest.example")),
+            Some(("flag.example".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn resolve_push_registry_splits_host_and_prefix() {
+        assert_eq!(
+            resolve_push_registry(Some("localhost:5000/group/project"), None),
+            Some(("localhost:5000".to_string(), Some("group/project".to_string())))
+        );
+    }
+
+    #[test]
+    fn push_registry_invalid_values_are_data_errors() {
+        // The resolved host/prefix run through the same 65-tier gates as
+        // the --registry flag value (empty host, bad prefix charset).
+        let p = Path::new("publish.toml");
+        for bad in ["", "/x"] {
+            let (host, _prefix) = resolve_push_registry(Some(bad), None).unwrap();
+            let err = validate_registry_value(&host, p).expect_err("empty host must reject");
+            assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        }
+        let (_, prefix) = resolve_push_registry(Some("push.example/Bad/Prefix"), None).unwrap();
+        let err = validate_repository_path(prefix.as_deref().unwrap(), "push_registry prefix", p)
+            .expect_err("bad prefix must reject");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn run_push_registry_pushes_to_endpoint_and_reports_pull_refs() {
+        // E2E through run(): with the manifest knob set the artifact lands
+        // ONLY at the push-named repository while the report `ref` stays
+        // pull-named and `pushed_to` carries the push-side reference. The
+        // plan (references) is pull-named throughout.
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"pull.example\"\npush_registry = \"localhost:5000/mirror\"\n\n\
+             [skills.test-skill]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let args = make_publish_args(manifest_path, vec![], None, false, false);
+        let (report, exit) = run(&ctx, &args).await.expect("publish must succeed");
+        assert_eq!(exit, crate::cli::exit_code::ExitCode::Success);
+        assert_eq!(
+            report.items()[0].reference,
+            "pull.example/skills/test-skill:0.1.0",
+            "the report ref keeps the pull name"
+        );
+        assert_eq!(
+            report.items()[0].pushed_to.as_deref(),
+            Some("localhost:5000/mirror/skills/test-skill:0.1.0"),
+            "pushed_to carries the push-side reference"
+        );
+
+        let access: std::sync::Arc<dyn crate::oci::access::OciAccess> = std::sync::Arc::new(registry);
+        let push_id = crate::oci::Identifier::parse("localhost:5000/mirror/skills/test-skill:0.1.0").unwrap();
+        assert!(
+            access
+                .resolve_digest(&push_id, crate::oci::access::Operation::Query)
+                .await
+                .unwrap()
+                .is_some(),
+            "the artifact must exist at the push-named repository"
+        );
+        let pull_id = crate::oci::Identifier::parse("pull.example/skills/test-skill:0.1.0").unwrap();
+        assert!(
+            access
+                .resolve_digest(&pull_id, crate::oci::access::Operation::Query)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing may land under the pull name"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_without_push_registry_is_byte_identical_and_pushed_to_null() {
+        // Behavior lock: an unset knob keeps every push on the pull name
+        // and reports pushed_to as null.
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let args = make_publish_args(manifest_path, vec![], None, false, false);
+        let (report, _exit) = run(&ctx, &args).await.expect("publish must succeed");
+        assert_eq!(report.items()[0].pushed_to, None, "pushed_to is null without the knob");
+
+        let access: std::sync::Arc<dyn crate::oci::access::OciAccess> = std::sync::Arc::new(registry);
+        let pull_id = crate::oci::Identifier::parse("localhost:5000/skills/test-skill:0.1.0").unwrap();
+        assert!(
+            access
+                .resolve_digest(&pull_id, crate::oci::access::Operation::Query)
+                .await
+                .unwrap()
+                .is_some(),
+            "without the knob the artifact lands at the pull name, as always"
+        );
+    }
+
     // ── plan_entries contract tests (truthful names, formerly "batch_*") ──
 
     #[cfg(test)]
@@ -3436,6 +3655,7 @@ mod tests {
             git: false,
             announce: false,
             announce_repo: None,
+            push_registry: None,
         }
     }
 
@@ -3593,6 +3813,7 @@ mod tests {
             git: false,
             announce: false,
             announce_repo: None,
+            push_registry: None,
         };
         let err = run(&ctx, &args).await.expect_err("--cascade + channel must error");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);

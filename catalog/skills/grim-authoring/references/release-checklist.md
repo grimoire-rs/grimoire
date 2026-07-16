@@ -77,6 +77,15 @@ exist first. Semantics to know ([full reference][batch-publish]):
 - **Strict schema.** Unknown manifest keys are a hard parse error; entry
   names must match `[a-z0-9][a-z0-9._-]*`. Bind
   `grim schema --kind publish` in your editor to catch typos early.
+- **Push vs pull registries.** The manifest `registry` is the canonical
+  PULL name baked into every reference, source-annotation fallback,
+  pinned member id, announce pointer, and report `ref`. An optional
+  `push_registry = "host[/prefix]"` (or `--push-registry`, which wins —
+  also on `grim release`) redirects only the network pushes to a
+  deviating endpoint (staging registry, internal push URL fronted by a
+  mirror). Report entries carry the push-side reference in the
+  always-present `pushed_to` field (`null` when inactive). Malformed
+  value: 65 before any push.
 - Confirm flags with `grim publish --help`; `--dry-run` prints the full
   plan (including planned description companions) with zero registry
   writes.

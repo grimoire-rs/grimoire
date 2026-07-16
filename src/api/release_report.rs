@@ -6,8 +6,10 @@
 //! Plain format: a single-row 4-column table
 //! (Ref | Manifest Digest | Tags | Pushed).
 //!
-//! JSON format: a single object `{ref, manifest_digest, tags, pushed}`
-//! (not an array — `release` concerns exactly one artifact reference).
+//! JSON format: a single object `{ref, manifest_digest, tags, pushed,
+//! pushed_to}` (not an array — `release` concerns exactly one artifact
+//! reference). `pushed_to` is always present and `null` unless a
+//! `--push-registry` split was active (`ref` stays the pull name).
 
 use std::io::{self, Write};
 
@@ -28,17 +30,31 @@ pub struct ReleaseReport {
     /// `true` when the artifact was actually pushed; `false` for
     /// `--dry-run`.
     pub pushed: bool,
+    /// The push-side reference actually used when a `--push-registry`
+    /// split was active; `null` when push == pull (the knob unset).
+    /// Additive always-present field — never absent from the JSON.
+    pub pushed_to: Option<String>,
 }
 
 impl ReleaseReport {
-    /// Build from operation results.
+    /// Build from operation results. `pushed_to` starts `None` (push ==
+    /// pull); attach a push-side reference via [`Self::with_pushed_to`].
     pub fn new(reference: String, manifest_digest: String, tags: Vec<String>, pushed: bool) -> Self {
         Self {
             reference,
             manifest_digest,
             tags,
             pushed,
+            pushed_to: None,
         }
+    }
+
+    /// Attach the push-side reference used under a `--push-registry` split
+    /// (consuming builder). `None` keeps the field null (split inactive).
+    #[must_use]
+    pub fn with_pushed_to(mut self, pushed_to: Option<String>) -> Self {
+        self.pushed_to = pushed_to;
+        self
     }
 }
 
@@ -104,5 +120,23 @@ mod tests {
         assert_eq!(v["manifest_digest"], "sha256:def");
         assert_eq!(v["pushed"], false);
         assert_eq!(v["tags"][0], "1.0.0");
+        // Additive-field lock: pushed_to is always present, null when the
+        // push/pull split is inactive.
+        let pushed_to = v.get("pushed_to").expect("pushed_to key must always be present");
+        assert!(pushed_to.is_null(), "pushed_to must be explicit null when unset");
+    }
+
+    #[test]
+    fn json_pushed_to_carries_push_side_reference_when_split_active() {
+        let r = ReleaseReport::new(
+            "pull.example/x:1.0.0".to_string(),
+            "sha256:def".to_string(),
+            vec!["1.0.0".to_string()],
+            true,
+        )
+        .with_pushed_to(Some("push.example/mirror/x:1.0.0".to_string()));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ref"], "pull.example/x:1.0.0", "ref stays the pull name");
+        assert_eq!(v["pushed_to"], "push.example/mirror/x:1.0.0");
     }
 }

@@ -8,7 +8,9 @@
 //!
 //! JSON format: `{"items": [...], "descriptions": {...}, "announce": ...}`
 //! (uniform `items` envelope, per subsystem-cli-api.md). `items` is the
-//! per-entry array (`{kind, ref, digest, tags, status}`); `descriptions` is a
+//! per-entry array (`{kind, ref, digest, tags, status, pushed_to}` —
+//! `pushed_to` is always present and `null` unless a `--push-registry` /
+//! manifest `push_registry` split was active); `descriptions` is a
 //! sibling `{"items": [...]}` of published description companions
 //! (`{ref, repository, digest, files}`, digest `null` under `--dry-run`);
 //! `announce` is `{outcome, branch, url}` when the `--announce` step
@@ -146,6 +148,10 @@ pub struct PublishEntry {
     pub tags: Vec<String>,
     /// The outcome of this entry.
     pub status: PublishStatus,
+    /// The push-side reference actually used when a push/pull registry
+    /// split (`push_registry` / `--push-registry`) was active; `null`
+    /// when push == pull. Additive always-present field.
+    pub pushed_to: Option<String>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -293,6 +299,7 @@ mod tests {
                 "latest".to_string(),
             ],
             status: PublishStatus::Pushed,
+            pushed_to: None,
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -323,6 +330,7 @@ mod tests {
             digest: None,
             tags: vec![],
             status: PublishStatus::DryRun,
+            pushed_to: None,
         }])
         .with_descriptions(vec![PublishDescription {
             reference: "registry.example/acme/s:__grimoire".to_string(),
@@ -369,6 +377,7 @@ mod tests {
             digest: None,
             tags: vec![],
             status: PublishStatus::DryRun,
+            pushed_to: None,
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -389,6 +398,7 @@ mod tests {
             digest: None,
             tags: vec![],
             status: PublishStatus::Pushed,
+            pushed_to: None,
         };
         let pr = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
             outcome: AnnounceStatus::PullRequest,
@@ -423,6 +433,7 @@ mod tests {
             digest: None,
             tags: vec![],
             status: PublishStatus::Pushed,
+            pushed_to: None,
         }])
         .with_announce(Some(PublishAnnounce {
             outcome: AnnounceStatus::UpToDate,

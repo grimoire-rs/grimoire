@@ -906,3 +906,48 @@ def test_publish_announce_succeeds_without_home(
     result = runner.run("publish", "--announce", check=False)
     assert result.returncode == 0, f"announce must not need HOME: {result.stderr}"
     _announce_branch(bare)
+
+
+# ── push/pull registry split (issue #39) ────────────────────────────────────
+
+
+def test_announce_pointer_keeps_pull_reference(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """Under a push/pull split the announce pointer `ref` keeps the PULL
+    name while the metadata read-back succeeded via the push endpoint:
+    the pointer carries the real published description (not the degraded
+    fallback), even though the pull host is the reserved-unresolvable
+    `pull.invalid`."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-split"
+    description = "Announced via the push endpoint."
+    _make_skill_source(project_dir, name, description)
+    _write(
+        project_dir / "publish.toml",
+        f'registry = "pull.invalid"\n'
+        f'push_registry = "{REGISTRY_HOST}"\n'
+        f'repository_prefix = "{ns}"\n'
+        f"\n[announce]\n"
+        f'repository = "{INDEX_URL}"\n'
+        f'namespace = "acme"\n'
+        f"owner_id = 42\n"
+        f"\n[skills.{name}]\n"
+        f'version = "0.1.0"\n',
+    )
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, f"publish --announce under the split failed: {result.stderr}"
+
+    branch = _announce_branch(bare)
+    blob = _git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json")
+    meta = json.loads(blob)
+    assert meta["ref"] == f"pull.invalid/{ns}/{name}", (
+        f"the pointer ref must keep the pull name, got {meta['ref']!r}"
+    )
+    assert meta["description"] == description, (
+        "the metadata read-back must have succeeded via the push endpoint "
+        f"(a pull-name lookup would degrade to the fallback), got {meta['description']!r}"
+    )

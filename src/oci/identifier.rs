@@ -201,6 +201,26 @@ impl Identifier {
         }
     }
 
+    /// Returns a new identifier on a different registry endpoint: `host`
+    /// replaces the registry and an optional `prefix` prepends to the
+    /// repository path. Tag and digest are preserved.
+    ///
+    /// This is the push/pull split primitive (issue #39): a pull-named
+    /// identifier rewritten to the deviating push endpoint for network
+    /// operations, while every baked/reported value keeps the original.
+    pub fn with_registry(&self, host: &str, prefix: Option<&str>) -> Self {
+        let repository = match prefix {
+            Some(p) => format!("{p}/{}", self.repository),
+            None => self.repository.clone(),
+        };
+        Self {
+            registry: host.to_string(),
+            repository,
+            tag: self.tag.clone(),
+            digest: self.digest.clone(),
+        }
+    }
+
     /// Strips the tag, preserving registry, repository, and digest.
     pub fn without_tag(&self) -> Self {
         Self {
@@ -657,6 +677,44 @@ mod tests {
         let with = id.clone_with_digest(digest.clone());
         assert_eq!(with.tag(), Some("tag"));
         assert_eq!(with.digest(), Some(digest));
+    }
+
+    // ── with_registry (push/pull split rewrite) ──────────────────────
+
+    #[test]
+    fn with_registry_swaps_host_preserving_repository_and_tag() {
+        let id = Identifier::parse("pull.example/acme/code-review:1.2.3").unwrap();
+        let pushed = id.with_registry("push.example", None);
+        assert_eq!(pushed.registry(), "push.example");
+        assert_eq!(pushed.repository(), "acme/code-review");
+        assert_eq!(pushed.tag(), Some("1.2.3"));
+        assert_eq!(pushed.digest(), None);
+    }
+
+    #[test]
+    fn with_registry_prefix_nests_repository() {
+        let id = Identifier::parse("pull.example/skills/hearth:0.1.0").unwrap();
+        let pushed = id.with_registry("push.example", Some("group/project"));
+        assert_eq!(pushed.registry(), "push.example");
+        assert_eq!(pushed.repository(), "group/project/skills/hearth");
+        assert_eq!(pushed.to_string(), "push.example/group/project/skills/hearth:0.1.0");
+    }
+
+    #[test]
+    fn with_registry_accepts_port_carrying_push_host() {
+        let id = Identifier::parse("pull.example/acme/tool").unwrap();
+        let pushed = id.with_registry("localhost:5000", Some("staging"));
+        assert_eq!(pushed.registry(), "localhost:5000");
+        assert_eq!(pushed.to_string(), "localhost:5000/staging/acme/tool");
+    }
+
+    #[test]
+    fn with_registry_preserves_digest_pin() {
+        let hex = "a".repeat(64);
+        let id = Identifier::parse(&format!("pull.example/acme/tool:1.0.0@sha256:{hex}")).unwrap();
+        let pushed = id.with_registry("push.example", None);
+        assert_eq!(pushed.tag(), Some("1.0.0"));
+        assert_eq!(pushed.digest(), id.digest());
     }
 
     #[test]

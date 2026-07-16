@@ -1486,3 +1486,267 @@ def test_publish_missing_version_everywhere_exits_65(
     assert skill_name in result.stderr, (
         f"error must name the entry, got: {result.stderr.strip()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests: push/pull registry split (issue #39)
+# ---------------------------------------------------------------------------
+
+# The canonical PULL name baked into references/annotations/reports. The
+# `.invalid` TLD is reserved (RFC 2606) and never resolvable — any network
+# call that mistakenly targets the pull name fails loudly instead of
+# silently passing against a real host.
+PULL_HOST = "pull.invalid"
+
+
+def test_publish_push_registry_pushes_to_endpoint_and_bakes_pull_refs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """With `push_registry` set, the bytes land ONLY on the push endpoint
+    while every baked/reported name keeps the manifest `registry` (the pull
+    name): the report `ref`, the source-annotation fallback, and the
+    description-companion report item. `pushed_to` carries the push side."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    # A conventional README so the description companion publishes too.
+    _write(project_dir / "README.md", "# split readme\n")
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{PULL_HOST}"\n'
+        f'push_registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+
+    result = runner.run("publish", "--manifest", str(manifest_path), format="json", check=False)
+    assert result.returncode == 0, (
+        f"publish with push_registry must exit 0, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    report = json.loads(result.stdout)
+    row = report["items"][0]
+    assert row["status"] == "pushed", f"entry must push, got {row}"
+    assert row["ref"] == f"{PULL_HOST}/skills/{skill_name}:0.1.0", (
+        f"report ref must keep the pull name, got {row['ref']!r}"
+    )
+    assert row["pushed_to"] == f"{registry}/skills/{skill_name}:0.1.0", (
+        f"pushed_to must carry the push-side reference, got {row['pushed_to']!r}"
+    )
+
+    # The artifact is live on the push endpoint under the pull repository path.
+    manifest = fetch_manifest(f"skills/{skill_name}", "0.1.0")
+    annotations = manifest.get("annotations") or {}
+    assert annotations.get("org.opencontainers.image.source") == (
+        f"{PULL_HOST}/skills/{skill_name}"
+    ), (
+        "the source-annotation fallback must bake the PULL registry/repository, "
+        f"got {annotations.get('org.opencontainers.image.source')!r}"
+    )
+
+    # The description companion landed on the push endpoint too, while its
+    # report item keeps the pull name.
+    assert tag_digest(f"skills/{skill_name}", "__grimoire"), (
+        "the description companion must exist on the push registry"
+    )
+    desc = report["descriptions"]["items"][0]
+    assert desc["repository"] == f"{PULL_HOST}/skills/{skill_name}", (
+        f"the companion report item must keep the pull name, got {desc['repository']!r}"
+    )
+
+
+def test_publish_push_registry_flag_overrides_manifest(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """--push-registry beats the manifest `push_registry` field. The manifest
+    names an unresolvable endpoint; only the flag winning lets the push
+    succeed against the live fixture registry."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{PULL_HOST}"\n'
+        f'push_registry = "push-manifest.invalid"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+
+    result = runner.run(
+        "publish",
+        "--manifest", str(manifest_path),
+        "--push-registry", registry,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--push-registry must win over the manifest field, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    row = json.loads(result.stdout)["items"][0]
+    assert row["pushed_to"] == f"{registry}/skills/{skill_name}:0.1.0"
+    assert tag_digest(f"skills/{skill_name}", "0.1.0") == row["digest"], (
+        "the artifact must land on the flag's push endpoint"
+    )
+
+
+def test_publish_push_registry_rerun_skip_existing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A second run with the knob set exits 0 with status=skipped —
+    skip-existing consults the PUSH registry, not the (unreachable) pull
+    name."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{PULL_HOST}"\n'
+        f'push_registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+
+    first = runner.json("publish", "--manifest", str(manifest_path))["items"]
+    assert first[0]["status"] == "pushed", f"first run must push, got {first}"
+
+    result = runner.run("publish", "--manifest", str(manifest_path), format="json", check=False)
+    assert result.returncode == 0, (
+        f"re-run must exit 0 (skip-existing via the push endpoint), got "
+        f"{result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    second = json.loads(result.stdout)["items"]
+    assert second[0]["status"] == "skipped", (
+        f"re-run must skip (the tag exists on the push registry), got {second}"
+    )
+
+
+def test_publish_pin_bundle_under_push_registry_bakes_pull_member_ids(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A pinned bundle under the split bakes PULL-named absolute
+    digest-pinned member ids; the digests were resolved via the push
+    endpoint (the pull host is unresolvable)."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    bundle_name = f"{prefix}-bundle"
+    # The member reference is PULL-named — the only name a consumer sees.
+    member_ref = f"{PULL_HOST}/skills/{skill_name}:0.1.0"
+    _make_skill_source(project_dir, skill_name)
+    _make_bundle_source(project_dir, bundle_name, member_ref)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{PULL_HOST}"\n'
+        f'push_registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n\n'
+        f"[bundles.{bundle_name}]\n"
+        f'version = "0.1.0"\n'
+        f"pin = true\n"
+    )
+
+    rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
+    assert {r["status"] for r in rows} == {"pushed"}, f"both entries must push, got {rows}"
+
+    # Read the bundle layer back from the PUSH registry.
+    oci_manifest = fetch_manifest(f"bundles/{bundle_name}", "0.1.0")
+    layer_digest = oci_manifest["layers"][0]["digest"]
+    blob_url = f"{REGISTRY_BASE}/v2/bundles/{bundle_name}/blobs/{layer_digest}"
+    with urllib.request.urlopen(urllib.request.Request(blob_url)) as resp:
+        members_doc = json.loads(resp.read())
+    member_id = members_doc["members"][0]["id"]
+    assert member_id.startswith(f"{member_ref}@sha256:"), (
+        "the pinned member id must keep the PULL name with the digest resolved "
+        f"via the push endpoint, got {member_id!r}"
+    )
+
+
+def test_publish_push_registry_invalid_value_exits_65(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A malformed `push_registry` (empty, bad prefix charset — manifest
+    field or flag) aborts with 65 before any push."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+
+    for bad in ["", f"{registry}/UPPER/prefix", f"{registry}/p//q"]:
+        manifest_path.write_text(
+            f'registry = "{registry}"\n'
+            f'push_registry = "{bad}"\n\n'
+            f"[skills.{skill_name}]\n"
+            f'version = "0.1.0"\n'
+        )
+        result = runner.run("publish", "--manifest", str(manifest_path), check=False)
+        assert result.returncode == 65, (
+            f"push_registry {bad!r} must exit 65, got {result.returncode}; "
+            f"stderr: {result.stderr.strip()}"
+        )
+
+    # The flag form fails the same way (empty host).
+    manifest_path.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+    result = runner.run(
+        "publish", "--manifest", str(manifest_path), "--push-registry", "/x", check=False
+    )
+    assert result.returncode == 65, (
+        f"--push-registry '/x' must exit 65, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+
+    # Nothing was pushed by any of the refused runs.
+    try:
+        digest = tag_digest(f"skills/{skill_name}", "0.1.0")
+        pytest.fail(f"refused runs must push nothing; tag resolved to {digest}")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 404
+
+
+def test_publish_dry_run_reports_pushed_to(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The dry-run JSON shows the push-side reference in `pushed_to` when
+    the knob is set — and an explicit null when it is unset (additive-field
+    lock for older consumers)."""
+    prefix = unique_repo.split("/")[-1]
+    runner = grim_at(project_dir)
+
+    skill_name = f"{prefix}-skill"
+    _make_skill_source(project_dir, skill_name)
+    manifest_path = project_dir / "publish.toml"
+    manifest_path.write_text(
+        f'registry = "{PULL_HOST}"\n'
+        f'push_registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+    row = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"][0]
+    assert row["status"] == "dry-run"
+    assert row["pushed_to"] == f"{registry}/skills/{skill_name}:0.1.0", (
+        f"dry-run must preview the push-side reference, got {row['pushed_to']!r}"
+    )
+
+    manifest_path.write_text(
+        f'registry = "{registry}"\n\n'
+        f"[skills.{skill_name}]\n"
+        f'version = "0.1.0"\n'
+    )
+    row = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"][0]
+    assert "pushed_to" in row, "pushed_to must always be present (additive-field policy)"
+    assert row["pushed_to"] is None, (
+        f"pushed_to must be explicit null when the knob is unset, got {row['pushed_to']!r}"
+    )

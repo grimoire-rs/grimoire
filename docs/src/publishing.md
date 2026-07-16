@@ -793,6 +793,57 @@ invalid prefix or repository aborts the whole manifest before any push.
 A manifest with neither field is unchanged: `ghcr.io/skills/grim-usage`
 style paths are the default and remain fully backward compatible.
 
+### Push vs pull registries {#batch-publish-push-registry}
+
+Some pipelines push through one endpoint while consumers pull from another
+name — a staging registry that syncs to the public one, an internal push
+URL fronted by a read-only mirror. By default grim uses the manifest's
+`registry` for both roles. The optional `push_registry` field (or the
+`--push-registry <host[/prefix]>` flag, which overrides it — flag >
+manifest) splits them:
+
+```toml
+registry = "ghcr.io"                      # the canonical PULL name
+push_registry = "staging.example/mirror"  # where the bytes actually land
+```
+
+The manifest `registry` stays the **canonical pull name** baked into every
+descriptive surface: the `org.opencontainers.image.source` fallback
+annotation, pinned bundle member ids, [announce](./package-index.md)
+pointer references, and the report `ref`. `push_registry` names only the
+**network push endpoint** — every push, skip-existing lookup, overwrite
+guard, pin digest resolution, description-companion push, and announce
+metadata read-back targets the push-rewritten location instead. An
+optional `/prefix` after the host nests every pushed repository under it
+(the same `host[/prefix]` shape as the [`--registry`
+flag](#batch-publish-namespace)), so `ghcr.io/skills/grim-usage` pushes to
+`staging.example/mirror/skills/grim-usage` in the example above.
+
+The JSON report gains an always-present `pushed_to` field per entry — the
+push-side reference actually used, `null` when the split is inactive
+([Report output](#batch-publish-report)). With the knob unset, behavior is
+byte-identical to before the field existed. A malformed value (empty host,
+invalid prefix charset) exits 65 before any push. `grim release` carries
+the same `--push-registry` flag for single-artifact releases.
+
+Two trade-offs to know:
+
+- **Pinned bundles verify on the push endpoint.** A `pin = true` bundle
+  bakes pull-named `registry/repo@sha256:…` member ids whose digests were
+  resolved via the push endpoint. OCI content addressing makes that sound
+  for a true mirror (identical bytes ⇒ identical digests) — but if the
+  pull name does not serve the same content, the pin fails at install.
+  Without the split, pins carry the old resolves-where-pushed guarantee.
+- **Adopting the knob changes the baked source annotation once.** If you
+  previously redirected pushes with `--registry`, the source fallback used
+  to bake the push name; under the split it bakes the pull name, so the
+  first re-publish produces a different digest and the overwrite guard
+  refuses it without `--force`.
+
+The [replication caveat](#description-replication) still applies: the
+description companion lands on the push registry under the `__grimoire`
+tag, and only a full-repository sync carries it to the pull name.
+
 ### Conventional source layout {#batch-publish-layout}
 
 When `path` is omitted, grim derives the source path from the entry name and
@@ -845,6 +896,7 @@ special-cased always-moving tag.
 | `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
+| `--push-registry <host[/prefix]>` | Push to this endpoint instead of the (pull) `registry`, keeping every baked and reported name on the pull registry. Overrides the manifest's `push_registry`. A malformed value exits 65 before any push. See [Push vs pull registries](#batch-publish-push-registry). |
 | `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
@@ -904,7 +956,8 @@ wrapper object on stdout:
       "kind": "skill",
       "digest": "sha256:…",
       "tags": ["1.2.0", "1.2", "1", "latest"],
-      "status": "pushed"
+      "status": "pushed",
+      "pushed_to": null
     }
   ],
   "descriptions": {
@@ -926,7 +979,10 @@ wrapper object on stdout:
 ```
 
 `items` carries one object per manifest entry processed, in publish
-order. `descriptions` carries the [description companion](#description-companion)
+order. `pushed_to` is always present: the push-side reference actually
+used under a [push/pull registry split](#batch-publish-push-registry),
+`null` when the split is inactive (`ref` always stays the pull name).
+`descriptions` carries the [description companion](#description-companion)
 pushes this run, one per distinct target repository, in the same
 `{"items": [...]}` envelope as every multi-item report; `items` is empty
 when no companion was resolved for this run. Each entry's `digest` is

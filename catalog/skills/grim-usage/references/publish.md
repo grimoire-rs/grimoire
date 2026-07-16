@@ -145,6 +145,16 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   field itself stays a plain host (a path inside it exits 65). Lets a CI
   pipeline force a publish run under a namespace without editing the
   manifest.
+- **Push vs pull registries.** An optional manifest `push_registry`
+  (or `--push-registry <host[/prefix]>`, which wins) pushes every entry
+  to a different endpoint — a staging registry, an internal push URL
+  mirrored to the public name — while the manifest `registry` stays the
+  canonical PULL name baked into every reference, annotation (source
+  fallback), pinned bundle member id, announce pointer, and report `ref`.
+  The JSON report's always-present `pushed_to` field carries the
+  push-side reference (`null` when the split is inactive). A malformed
+  value exits 65 before any push. `grim release` takes the same
+  `--push-registry` flag.
 
 Common flags — confirm current spelling with `grim publish --help`:
 

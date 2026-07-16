@@ -860,8 +860,13 @@ bumped versions pushed. A `.toml` path publishes a
 freezes floating members to digests. `--git` embeds
 [git provenance](./publishing.md#git-provenance) (commit revision, date,
 and `origin` remote) as OCI annotations; it is off by default so an
-ordinary re-release stays idempotent. See [Publishing](./publishing.md)
-for the full workflow.
+ordinary re-release stays idempotent. `--push-registry <host[/prefix]>`
+pushes to a different endpoint while every baked and reported name — the
+source-annotation fallback, pinned bundle member ids, the report `ref` —
+keeps the reference's registry (the canonical pull name); a malformed
+value exits 65 — see
+[Push vs pull registries](./publishing.md#batch-publish-push-registry).
+See [Publishing](./publishing.md) for the full workflow.
 
 Pointing `grim release` at a `publish.toml` (a file with a top-level
 `registry` key) produces a hint to use `grim publish` instead. The mirror
@@ -920,6 +925,10 @@ The [global `--registry` flag][global-options] overrides the manifest's
 `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not**
 override the manifest — the manifest's `registry` field is explicit input, and
 only the flag tier wins.
+`--push-registry <host[/prefix]>` (or the manifest's `push_registry`; the
+flag wins) pushes every entry to a different endpoint while all baked and
+reported names keep the manifest `registry` — the canonical pull name —
+see [Push vs pull registries](./publishing.md#batch-publish-push-registry).
 
 Exit codes from the release path propagate per entry. Validation failures
 exit 65 (data error). The report renders for all completed entries plus
