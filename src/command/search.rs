@@ -157,9 +157,10 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // An online browse that comes back empty is most often a registry that
     // gates the `_catalog` endpoint (GitLab SaaS, GHCR, Docker Hub), not a
     // fault — point at the registry-compatibility docs so an empty list is not
-    // read as "nothing published". Offline (serves the cache) and any hit stay
-    // quiet.
-    if warn_unsupported_browse(ctx.offline(), entries.is_empty()) {
+    // read as "nothing published". Offline (serves the cache), any hit, and an
+    // index-only browse set (no `_catalog` involved) stay quiet.
+    let any_registry_source = registries.iter().any(|r| !r.kind.is_index());
+    if warn_unsupported_browse(ctx.offline(), entries.is_empty(), any_registry_source) {
         tracing::warn!(
             "no catalog entries; some registries ({CATALOG_GATED_REGISTRIES}) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS_URL}"
         );
@@ -170,11 +171,14 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
 ///
-/// Gate: online (an offline browse legitimately serves the local cache) AND
-/// the result is empty (any hit proves browse works). Extracted so the gate is
-/// unit-testable without a live registry.
-fn warn_unsupported_browse(offline: bool, result_empty: bool) -> bool {
-    !offline && result_empty
+/// Gate: online (an offline browse legitimately serves the local cache), the
+/// result is empty (any hit proves browse works), AND at least one browsed
+/// source is a plain OCI registry — an index-only set never touches
+/// `_catalog`, and a failed index fetch already gets its own per-source
+/// "package index fetch failed" warn, so this hint would misdiagnose it.
+/// Extracted so the gate is unit-testable without a live registry.
+fn warn_unsupported_browse(offline: bool, result_empty: bool, any_registry_source: bool) -> bool {
+    !offline && result_empty && any_registry_source
 }
 
 /// Whether a catalog row survives the deprecated-hiding filter.
@@ -212,27 +216,26 @@ fn resolve_scope(
     // is resolved on this path, so the config `show_deprecated` default is
     // `false` (only the `--show-deprecated` flag can reveal them).
     if !args.registry.is_empty() {
+        // The fallback tier is reachable here only via all-empty flag
+        // values (`--registry ""`); a browse fallback must be the index,
+        // never a `_catalog`-gated registry.
         let registries =
-            crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_REGISTRY, None);
+            crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_INDEX, None);
         let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
         return (registries, lock, state, roots, active, false);
     }
 
     let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
     else {
-        // No scope resolves: browse the flag/env/fallback registry (no
-        // config tiers) with empty badge inputs. With no scope to detect
-        // against, treat every client as active (no output is filtered).
-        // Only the flag collapses the set; env is the tier-3 head.
-        let registries = crate::config::resolve_registries(
-            ctx.registry_flags(),
-            &[],
-            None,
-            &[],
-            None,
-            super::FALLBACK_REGISTRY,
-            ctx.registry_env(),
-        );
+        // No scope resolves: browse the flag/env/global fallback chain via
+        // `registries_global_fallback` — the same seam the TUI and fetch
+        // use — so the global `[[registries]]`/default tiers are honored
+        // and the final tier is the built-in package index (issue #41: a
+        // hand-rolled chain here browsed the push-side GHCR fallback,
+        // which gates `_catalog`). Badge inputs are empty; with no scope
+        // to detect against, treat every client as active (no output is
+        // filtered).
+        let registries = super::registries_global_fallback(ctx);
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
         return (
             registries,
@@ -292,13 +295,20 @@ mod tests {
 
     #[test]
     fn warn_unsupported_browse_only_when_online_and_empty() {
-        // Online + empty → warn (likely a `_catalog`-gated registry).
-        assert!(warn_unsupported_browse(false, true));
+        // Online + empty + a registry-kind source → warn (likely a
+        // `_catalog`-gated registry). Mixed sets (index + registry) still
+        // warn — the registry half may be gated.
+        assert!(warn_unsupported_browse(false, true, true));
+        // Online + empty but index-only browse set → quiet: `_catalog` was
+        // never involved, and a failed index fetch has its own warn.
+        assert!(!warn_unsupported_browse(false, true, false));
         // Online + hits → quiet (browse works).
-        assert!(!warn_unsupported_browse(false, false));
+        assert!(!warn_unsupported_browse(false, false, true));
+        assert!(!warn_unsupported_browse(false, false, false));
         // Offline → quiet regardless (the cache is the source of truth).
-        assert!(!warn_unsupported_browse(true, true));
-        assert!(!warn_unsupported_browse(true, false));
+        assert!(!warn_unsupported_browse(true, true, true));
+        assert!(!warn_unsupported_browse(true, true, false));
+        assert!(!warn_unsupported_browse(true, false, true));
     }
 
     #[test]
@@ -330,6 +340,23 @@ mod tests {
     }
 
     #[test]
+    fn empty_registry_flag_falls_back_to_builtin_index() {
+        // Regression (issue #41): `--registry ""` takes the explicit-flag
+        // branch, whose fallback tier must be the public package index, not
+        // the push-side GHCR fallback (GHCR gates `_catalog`). Reverting the
+        // branch's fallback constant to `FALLBACK_REGISTRY` must fail here —
+        // no other test drives an all-empty `--registry`.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.registry = vec![String::new()];
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
+        assert!(registries[0].kind.is_index());
+    }
+
+    #[test]
     fn no_registry_anywhere_browses_builtin_fallback() {
         // No --registry, no env, no config default anywhere ⇒ the built-in
         // public package index is the sole browse target (never an error):
@@ -345,6 +372,44 @@ mod tests {
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
         assert!(registries[0].kind.is_index());
+    }
+
+    #[test]
+    fn no_scope_falls_back_to_builtin_index() {
+        // Regression (issue #41): outside any project — scope resolution
+        // fails — the browse fallback must be the public package index,
+        // never the push-side GHCR fallback (GHCR gates `_catalog`, so a
+        // bare registry fallback browses empty and mis-warns). A missing
+        // explicit config path forces `resolve_in` to Err deterministically
+        // (no reliance on the CWD walk-up).
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
+        assert!(registries[0].kind.is_index());
+    }
+
+    #[test]
+    fn no_scope_honors_global_registries() {
+        // Regression (issue #41, second defect): a `[[registries]]`-only
+        // GLOBAL config must be honored by a search run outside any project
+        // — parity with the TUI and fetch fallbacks, which already fold the
+        // global tiers via `registries_global_fallback`.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\nurl = \"global-search.example\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        let urls: Vec<&str> = registries.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["global-search.example"]);
     }
 
     #[test]

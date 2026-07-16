@@ -282,6 +282,38 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
 
 
 # ---------------------------------------------------------------------------
+# No project scope (issue #41)
+# ---------------------------------------------------------------------------
+
+
+def test_search_outside_project_browses_global_index_source(
+    grim_at, grim_home: Path, tmp_path: Path, http_index
+) -> None:
+    """``grim search`` run outside any project honors a GLOBAL config's
+    ``[[registries]]`` index source — regression for issue #41, where the
+    no-scope path browsed the push-side GHCR fallback (ignoring the global
+    config tiers entirely) and mis-warned about ``_catalog`` gating."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [_package("outside-skill", "skill", "ghcr.io/acme/skills/outside-skill", "From the index")],
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[[registries]]\nalias = "hub"\nindex = "{base}"\ndefault = true\n'
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    result = grim_at(outside).run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, result.stderr
+    repos = [r.get("repo", "") for r in json.loads(result.stdout)["items"]]
+    assert "ghcr.io/acme/skills/outside-skill" in repos, f"got {repos}"
+    assert "no catalog entries" not in result.stderr, (
+        f"the _catalog-gating warn must not fire for an index-only browse: {result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Mixed sources
 # ---------------------------------------------------------------------------
 

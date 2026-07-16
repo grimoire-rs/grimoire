@@ -236,8 +236,11 @@ them.
 | [Docker Hub][dockerhub] | no | yes |
 | [GitLab Container Registry (SaaS)][gitlab-registry] | no | yes |
 
-When an online browse comes back empty, grim prints a hint pointing to
-this section so you can confirm whether the registry supports `_catalog`.
+When an online browse that includes a registry (`oci`) source comes back
+empty, grim prints a hint pointing to this section so you can confirm
+whether the registry supports `_catalog`. An index-only browse set is
+exempt — an index never touches `_catalog`, and a failed index fetch
+gets its own per-source warning instead.
 
 ## `grimoire.lock` {#grimoire-lock}
 
@@ -403,7 +406,11 @@ flag → project `[[registries]]` → global `[[registries]]` → single default
 (`GRIM_DEFAULT_REGISTRY` → project `[options].default_registry` → global
 `[options].default_registry` → built-in `https://index.grimoire.rs`, the
 public [package index](./package-index.md)). The single-default tier
-applies only when no `[[registries]]` array is declared anywhere. Only the
+applies only when no `[[registries]]` array is declared anywhere. The same
+chain applies outside a project — with no `grimoire.toml` resolvable the
+project tiers are simply absent, so a bare `grim search` still browses the
+global `[[registries]]` and otherwise falls through to the built-in
+index. Only the
 `--registry` flag collapses browse — to exactly the registries it names
 (repeatable / comma-separated); `GRIM_DEFAULT_REGISTRY` does
 not restrict the browse set when `[[registries]]` is configured.

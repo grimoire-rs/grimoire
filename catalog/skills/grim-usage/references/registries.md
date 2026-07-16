@@ -97,6 +97,11 @@ browse):
    `https://index.grimoire.rs` (a bare registry fallback would browse
    empty — GHCR gates `_catalog`).
 
+The same precedence applies outside a project — with no `grimoire.toml`
+resolvable the project tiers are simply absent, so a search run from a
+bare directory still browses the global `[[registries]]` and otherwise
+falls through to the built-in public index.
+
 A config with no `[[registries]]` behaves exactly as before — the
 `[options].default_registry` / `GRIM_DEFAULT_REGISTRY` / `--registry` /
 built-in fallback chain still applies (see [Registry Resolution](#registry-resolution)).
