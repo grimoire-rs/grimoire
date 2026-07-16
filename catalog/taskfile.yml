@@ -74,4 +74,7 @@ tasks:
       # Both copies are gitignored (catalog/.gitignore).
       - cp "{{.ROOT_DIR}}/CHANGELOG.md" "{{.TASKFILE_DIR}}/CHANGELOG.md"
       - cp "{{.ROOT_DIR}}/assets/logo.svg" "{{.TASKFILE_DIR}}/logo.svg"
-      - '"{{.GRIM_BINARY}}" publish --manifest {{.TASKFILE_DIR}}/publish.toml {{.CLI_ARGS}}'
+      # --git stamps org.opencontainers.image.{revision,created} from HEAD
+      # (adr_git_provenance_annotations.md). Shallow-clone-safe; the two
+      # companion copies above are gitignored, so no -dirty suffix.
+      - '"{{.GRIM_BINARY}}" publish --git --manifest {{.TASKFILE_DIR}}/publish.toml {{.CLI_ARGS}}'
