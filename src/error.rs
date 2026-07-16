@@ -86,19 +86,30 @@ pub enum Error {
 /// Kebab-case via [`std::fmt::Display`] — the wire path (`main.rs`
 /// `error_document`) builds the JSON `reason` string through that
 /// rendering, not a `Serialize` derive. Additive and forward-compatible:
-/// consumers must tolerate both absence and unknown future values. Only
-/// the stale-lock refusal is annotated today.
+/// consumers must tolerate both absence and unknown future values.
+/// Annotated today: the stale-lock resolve refusal and the two
+/// force-recoverable install refusals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorReason {
     /// A resolve was refused because the lock's recorded hash no longer
     /// matches what the registry currently serves.
     StaleLock,
+    /// An install was refused because the installed artifact was modified
+    /// locally (slug `modified`, matching the `grim status` state string);
+    /// retry with `--force` to overwrite.
+    LocalModified,
+    /// An install was refused because the destination already exists on
+    /// disk with no install record; retry with `--force` to overwrite and
+    /// record it.
+    UntrackedDestination,
 }
 
 impl std::fmt::Display for ErrorReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::StaleLock => "stale-lock",
+            Self::LocalModified => "modified",
+            Self::UntrackedDestination => "untracked-destination",
         })
     }
 }
@@ -138,7 +149,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 Error::Lock(le) => Classification::new(classify_lock(le)),
                 Error::Access(ae) => Classification::new(classify_access(ae)),
                 Error::Resolve(re) => classify_resolve(re),
-                Error::Install(ie) => Classification::new(classify_install(ie)),
+                Error::Install(ie) => classify_install(ie),
                 Error::Anchor(ae) => Classification::new(classify_anchor(ae)),
                 Error::Skill(se) => Classification::new(classify_skill(se)),
                 Error::Release(re) => Classification::new(classify_release(re)),
@@ -247,19 +258,28 @@ fn classify_resolve(err: &ResolveError) -> Classification {
     }
 }
 
-/// Map an install-tier error to an exit code.
-fn classify_install(err: &InstallError) -> ExitCode {
+/// Map an install-tier error to a classification. The two force-recoverable
+/// refusals carry a reason subtype — assigned in the same match arms that
+/// decide their exit codes, so the two can never drift apart (mirrors
+/// [`classify_resolve`]'s `StaleLock` arm).
+fn classify_install(err: &InstallError) -> Classification {
     match &err.kind {
-        InstallErrorKind::BlobMissing => ExitCode::NotFound,
-        InstallErrorKind::IntegrityMismatch { .. }
-        | InstallErrorKind::UntrackedDestination { .. }
-        | InstallErrorKind::BlobDigestMismatch { .. }
+        InstallErrorKind::BlobMissing => Classification::new(ExitCode::NotFound),
+        InstallErrorKind::IntegrityMismatch { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::LocalModified),
+        },
+        InstallErrorKind::UntrackedDestination { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::UntrackedDestination),
+        },
+        InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::OversizeLayer { .. }
         | InstallErrorKind::MaterializeFailed(_)
         | InstallErrorKind::LocalSource(_)
-        | InstallErrorKind::LocalContentChanged { .. } => ExitCode::DataError,
-        InstallErrorKind::TargetIo { source, .. } => classify_io(source),
-        InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
+        | InstallErrorKind::LocalContentChanged { .. } => Classification::new(ExitCode::DataError),
+        InstallErrorKind::TargetIo { source, .. } => Classification::new(classify_io(source)),
+        InstallErrorKind::UnsupportedClient(_) => Classification::new(ExitCode::ConfigError),
     }
 }
 
@@ -496,18 +516,30 @@ mod tests {
     fn install_errors_classify_per_kind() {
         use crate::install::install_error::{InstallError, InstallErrorKind};
 
+        // The two force-recoverable refusals carry a reason subtype so a
+        // consumer can retry with `--force`; every other kind carries none.
         let cases = [
-            (InstallErrorKind::BlobMissing, ExitCode::NotFound),
+            (InstallErrorKind::BlobMissing, ExitCode::NotFound, None),
             (
                 InstallErrorKind::IntegrityMismatch {
                     recorded: Digest::Sha256("a".repeat(64)),
                     actual: Digest::Sha256("b".repeat(64)),
                 },
                 ExitCode::DataError,
+                Some(ErrorReason::LocalModified),
+            ),
+            (
+                InstallErrorKind::UntrackedDestination {
+                    client: "claude".to_string(),
+                    path: std::path::PathBuf::from("/w/.claude/skills/x"),
+                },
+                ExitCode::DataError,
+                Some(ErrorReason::UntrackedDestination),
             ),
             (
                 InstallErrorKind::MaterializeFailed("bad tar".to_string()),
                 ExitCode::DataError,
+                None,
             ),
             (
                 InstallErrorKind::OversizeLayer {
@@ -515,10 +547,12 @@ mod tests {
                     actual: 512 * 1024 * 1024 + 1,
                 },
                 ExitCode::DataError,
+                None,
             ),
             (
                 InstallErrorKind::UnsupportedClient("vscode".to_string()),
                 ExitCode::ConfigError,
+                None,
             ),
             (
                 InstallErrorKind::TargetIo {
@@ -526,12 +560,30 @@ mod tests {
                     source: std::io::Error::other("disk full"),
                 },
                 ExitCode::IoError,
+                None,
             ),
         ];
-        for (kind, expected) in cases {
+        for (kind, expected_exit, expected_reason) in cases {
             let err: anyhow::Error = Error::from(InstallError::without_reference(kind)).into();
-            assert_eq!(classify_error(&err), expected);
+            assert_eq!(
+                classify(&err),
+                Classification {
+                    exit: expected_exit,
+                    reason: expected_reason,
+                }
+            );
         }
+    }
+
+    #[test]
+    fn error_reason_slugs_are_locked() {
+        // The slugs are a 1.0-track wire contract (docs/src/json-interface.md
+        // #error-reason): the JSON `reason` field renders through `Display`,
+        // so a changed literal here is a breaking change for consumers.
+        // `modified` deliberately matches the `grim status` state string.
+        assert_eq!(ErrorReason::StaleLock.to_string(), "stale-lock");
+        assert_eq!(ErrorReason::LocalModified.to_string(), "modified");
+        assert_eq!(ErrorReason::UntrackedDestination.to_string(), "untracked-destination");
     }
 
     #[test]

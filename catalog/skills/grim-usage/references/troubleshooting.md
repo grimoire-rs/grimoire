@@ -31,9 +31,12 @@ no stderr parsing needed:
 
 Under `--format json`, a failure emits a `{"error": {code, exit,
 message}}` document on stdout; some failures add a machine-readable
-`reason` field (e.g. `stale-lock` with exit 65 when a partial
-`grim update <name>` is refused — retry with a full `grim update`). New
-reasons are additive — treat an unknown one as absent. Full list: the
+`reason` field: `stale-lock` (exit 65 — a partial `grim update <name>`
+was refused; retry with a full `grim update`), `modified` (exit 65 — an
+install refused a locally modified artifact; retry with `--force`), and
+`untracked-destination` (exit 65 — an install refused to clobber an
+unrecorded pre-existing destination; retry with `--force`). New reasons
+are additive — treat an unknown one as absent. Full list: the
 [JSON interface][json-interface] docs page.
 
 ## Exit 65: Data Errors
@@ -87,6 +90,10 @@ grim never silently overwrites or deletes work you did locally:
   config entry) — `--force` overwrites and records it. Identical
   content is adopted into the record instead of refused, so a lost
   state file with intact rendered files repairs itself on reinstall.
+- `grim add` installs-on-add through the same gates and takes the same
+  `--force`: re-running the *same* `grim add <ref> --force` overwrites a
+  modified artifact (re-adding the same reference is an idempotent
+  re-declare, so nothing else changes).
 - `grim update` prunes artifacts that dropped out of the lock, but a
   locally modified orphan is **kept** and reported as `kept-modified`;
   `--force` prunes it anyway.

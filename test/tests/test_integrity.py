@@ -47,6 +47,44 @@ def test_modified_install_is_refused_then_forced(
     assert installed.read_text().endswith("# canonical\n")
 
 
+def test_modified_add_is_refused_then_forced(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim add` installs-on-add through the same integrity gate as
+    `grim install`: re-adding the same reference over a locally modified
+    file refuses (65) until `--force` — the VS Code-extension retry shape."""
+    repo = f"{unique_repo}/rust-style"
+    make_artifact(
+        repo,
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# canonical\n"},
+        tag="v1",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    ref = f"{registry}/{repo}:v1"
+
+    added = runner.run("add", ref, check=False)
+    assert added.returncode == 0, added.stderr
+    installed = project_dir / ".claude/rules/rust-style.md"
+    installed.write_text("hand edited\n")
+
+    # Re-adding the same reference is an idempotent re-declare that reaches
+    # the shared install pipeline — the integrity gate refuses it.
+    refused = runner.run("add", ref, check=False)
+    assert refused.returncode == 65, (
+        f"modified artifact must refuse re-add with 65, got "
+        f"{refused.returncode}; {refused.stderr}"
+    )
+    assert installed.read_text() == "hand edited\n", (
+        "a refused add must not overwrite the user's edit"
+    )
+
+    forced = runner.run("add", "--force", ref, check=False)
+    assert forced.returncode == 0, forced.stderr
+    assert installed.read_text().endswith("# canonical\n")
+
+
 def test_status_reports_modified(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

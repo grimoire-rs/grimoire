@@ -70,6 +70,12 @@ pub struct AddArgs {
     #[arg(long, short = 'n')]
     pub name: Option<String>,
 
+    /// Overwrite a locally modified artifact instead of refusing it.
+    /// Same semantics as `grim install --force`; inert with `--no-install`
+    /// (nothing is materialized).
+    #[arg(long)]
+    pub force: bool,
+
     /// Whether to materialize the artifact after declaring it.
     #[command(flatten)]
     pub install: InstallOnAdd,
@@ -255,7 +261,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // acted-on entry (or, for a bundle, its members) is projected out and
     // installed, so the rest of a shared lock stays for `grim install`.
     if args.install.enabled() {
-        install_added(ctx, &scope, kind, &name, &new_lock, &access).await?;
+        install_added(ctx, &scope, kind, &name, &new_lock, &access, args.force).await?;
     }
 
     // A bundle has no single pinned member to report; surface the bundle
@@ -466,7 +472,7 @@ async fn add_path_source(
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
     if args.install.enabled() {
-        install_added(ctx, scope, kind, &name, &new_lock, &access).await?;
+        install_added(ctx, scope, kind, &name, &new_lock, &access, args.force).await?;
     }
 
     let pinned = new_lock
@@ -488,6 +494,11 @@ async fn add_path_source(
 /// refusal / hard error propagates as a non-zero exit via the shared
 /// [`install::finish`](super::install::finish).
 ///
+/// `force` carries `grim install --force` semantics unchanged: it overrides
+/// both the local-modification integrity gate and the untracked-destination
+/// clobber guard, so `grim add --force <same ref>` is the sanctioned
+/// recovery for a modified-state refusal.
+///
 /// # Errors
 ///
 /// Target parse (65), install-state I/O (74), integrity refusal / registry
@@ -499,6 +510,7 @@ async fn install_added(
     name: &str,
     new_lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
+    force: bool,
 ) -> anyhow::Result<()> {
     // Project the acted-on entry out of the (now complete) lock.
     let single = match kind {
@@ -531,8 +543,8 @@ async fn install_added(
 
     // Reuse the exact pipeline `grim install` runs (materialize + persist +
     // vendor config sync). `add` differs only in installing a single-entry
-    // projection instead of the whole lock, never forcing (honours the
-    // integrity gate), and staying silent (no progress bar).
+    // projection instead of the whole lock and staying silent (no progress
+    // bar); `--force` passes through with `grim install --force` semantics.
     let outcomes = super::grim(
         install_and_persist(
             &single,
@@ -544,7 +556,7 @@ async fn install_added(
             scope.scope,
             &scope.workspace,
             &scope.config_path,
-            false,
+            force,
             InstallIntent::Declared,
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
@@ -956,6 +968,16 @@ mod tests {
         // The two flags override each other last-wins.
         assert!(parse_install(&["grim", "--no-install", "--install", "ghcr.io/acme/x"]));
         assert!(!parse_install(&["grim", "--install", "--no-install", "ghcr.io/acme/x"]));
+    }
+
+    #[test]
+    fn force_parses_and_defaults_off() {
+        let parse_force = |argv: &[&str]| Harness::try_parse_from(argv).expect("parse").add.force;
+        assert!(!parse_force(&["grim", "ghcr.io/acme/x"]), "force defaults to false");
+        assert!(parse_force(&["grim", "--force", "ghcr.io/acme/x"]));
+        // `--force --no-install` parses (documented as inert — nothing is
+        // materialized, so the flag has nothing to override).
+        assert!(parse_force(&["grim", "--force", "--no-install", "ghcr.io/acme/x"]));
     }
 
     #[test]

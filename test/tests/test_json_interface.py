@@ -98,6 +98,39 @@ def test_error_reason_marks_stale_lock(grim_at, project_dir: Path) -> None:
     assert doc["error"]["reason"] == "stale-lock"
 
 
+def test_modified_refusal_carries_reason(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The error document carries the machine-readable ``reason``
+    ``modified`` for the local-modification integrity refusal — on both
+    `grim install` and `grim add` (install-on-add shares the pipeline), so
+    an extension retries the same command with `--force` without scraping
+    the non-frozen ``message``."""
+    repo = f"{unique_repo}/rust-style"
+    make_artifact(
+        repo,
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# canonical\n"},
+        tag="v1",
+    )
+    write_config(project_dir, rules={"rust-style": f"{registry}/{repo}:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    (project_dir / ".claude/rules/rust-style.md").write_text("hand edited\n")
+
+    for argv in (
+        ("--format", "json", "install"),
+        ("--format", "json", "add", f"{registry}/{repo}:v1"),
+    ):
+        result = runner.run(*argv, check=False)
+        assert result.returncode == 65, f"{argv}: {result.stderr}"
+        doc = json.loads(result.stdout)
+        assert doc["error"]["code"] == "data", argv
+        assert doc["error"]["exit"] == 65, argv
+        assert doc["error"]["reason"] == "modified", f"{argv}: {doc}"
+
+
 def test_plain_mode_failure_keeps_stdout_empty(
     grim_at, project_dir: Path
 ) -> None:

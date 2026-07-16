@@ -173,7 +173,7 @@ The `action` field in write confirmations takes one of: `set`, `unset`, `registr
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] [--no-install] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] [--no-install] [--force] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
 or bundle, pins it in the lock, and — by default — materializes it into your
 detected AI clients in one step. `<reference>` is the only required argument —
@@ -192,6 +192,17 @@ members) is materialized; the rest of the lock is left for
 [`grim install`](#install). Pass `--no-install` to declare and lock only —
 useful when adding several artifacts before one `grim install` pass, or when
 choosing clients explicitly with [`grim install --client`](#install).
+
+Install-on-add honours the same integrity gates as [`grim install`](#install):
+a previously installed artifact that was modified locally, or a pre-existing
+destination grim has no record of writing, refuses with exit 65 (under
+`--format json` the error document carries the [`reason`
+subtype](./json-interface.md#error-reason) `modified` or
+`untracked-destination`). `--force` overwrites deliberately — identical
+semantics to `grim install --force`, including the untracked-destination
+clobber guard — so re-running the *same* `grim add` with `--force` is the
+recovery path for a modified-state refusal. With `--no-install` nothing is
+materialized, so `--force` is inert.
 
 The declared name is a unique key per kind: re-running `add` with a
 `(kind, name)` pair that is already declared under a *different* reference

@@ -82,6 +82,12 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   add several artifacts before one `grim install`, or to pick clients with
   `grim install --client`. Only the added entry installs otherwise; the
   rest of the lock is left for `grim install`.
+- Install-on-add honours the same integrity gates as `grim install`: a
+  locally modified artifact, or a pre-existing destination grim has no
+  record of, refuses (exit 65; JSON `reason` `modified` /
+  `untracked-destination`). Re-run the same `grim add` with `--force` to
+  overwrite deliberately — identical semantics to `grim install --force`.
+  `--force` is inert with `--no-install` (nothing is materialized).
 
 If the reference is deprecated, `add` prints the publisher's deprecation
 notice on stderr and still completes the add — treat it as a prompt to

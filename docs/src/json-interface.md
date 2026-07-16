@@ -244,6 +244,8 @@ recognize. The reasons defined so far:
 | `reason` | Paired with | Meaning |
 |----------|-------------|---------|
 | `stale-lock` | `data` / 65 | A partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration. Retry with a full `grim update` (no names). |
+| `modified` | `data` / 65 | An install was refused because the installed artifact was modified locally (the same state `grim status` reports as `modified`). Retry the same `grim install` / `grim add` with `--force` to overwrite. |
+| `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. |
 
 New reasons may appear in any minor release under the [additive-field
 policy][stability-additive]; existing ones never change meaning.
