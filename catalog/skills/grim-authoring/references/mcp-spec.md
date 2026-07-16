@@ -32,6 +32,7 @@ Same location rule as bundles — top level, not nested:
 | `description` | **Required**, non-empty. Becomes the OCI description annotation. |
 | `summary` | Optional short catalog blurb. |
 | `keywords` | Optional, one comma-separated string. |
+| `license` | Optional SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation. |
 | `repository` | Optional, must be `https://` (65 otherwise). |
 | `deprecated` | Optional deprecation notice. |
 

@@ -95,6 +95,10 @@ pub struct McpDescriptor {
     /// Optional comma-separated keywords (`com.grimoire.keywords`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keywords: Option<String>,
+    /// Optional SPDX license expression
+    /// (`org.opencontainers.image.licenses`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
     /// Optional HTTPS source-repository URL
     /// (`org.opencontainers.image.source`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

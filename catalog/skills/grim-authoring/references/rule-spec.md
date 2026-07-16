@@ -30,6 +30,7 @@ round-trip.
 | `paths` | list of strings | Glob patterns the rule auto-loads on; absent = always active |
 | `summary` | string | **Top-level** — catalog blurb for `grim search` |
 | `keywords` | string | **Top-level** — comma-separated tags (a YAML list is tolerated and comma-joined, but write the string form: it is the only shape valid in every kind) |
+| `license` | string | **Top-level** — SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation |
 | `repository` | string | **Top-level** — `https://` source URL, hard-gated at release |
 | `deprecated` | string | **Top-level** — deprecation notice; non-empty marks the rule deprecated (flagged in search/TUI, warned on `add`) |
 | `replaced-by` | string | **Top-level** — successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |

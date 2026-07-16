@@ -193,6 +193,7 @@ from the first Markdown heading or first non-empty line.
 | `paths` | no | list of strings | Glob patterns the rule auto-loads on; empty/absent = always active |
 | `summary` | no | string | Short one-line blurb for the catalog |
 | `keywords` | no | string or list | Comma-separated tags (a YAML list is comma-joined) |
+| `license` | no | string | SPDX-style identifier (e.g. `Apache-2.0`); emitted as the OCI license annotation |
 | `metadata` | no | string→string map | Vendor extensions (e.g. `copilot.exclude-agent`) |
 | *(any other key)* | no | any YAML | Preserved verbatim (forward compatibility) |
 
@@ -265,7 +266,7 @@ agent frontmatter is **required**: every client needs at least a
 | `description` | yes | string | When a client should delegate to this agent |
 | `model` | no | string | Passed through verbatim, no alias translation; override per vendor via `<vendor>.model` |
 | `tools` | no | string | Comma-separated allowlist, projected per client (string vs. list) |
-| `metadata` | no | string→string map | Catalog keys (`summary`, `keywords`) + vendor extensions |
+| `metadata` | no | string→string map | Catalog keys (`summary`, `keywords`, `license`) + vendor extensions |
 | *(any other key)* | no | any YAML | Preserved verbatim (forward compatibility) |
 
 Like skills, agent `summary`/`keywords` live **inside** `metadata`. When a
@@ -333,6 +334,7 @@ here: any field outside the tables below is a hard parse error.
 | `description` | yes | string | Must be non-empty; becomes the OCI description annotation |
 | `summary` | no | string | Catalog blurb (`com.grimoire.summary`) |
 | `keywords` | no | string | Comma-separated tags (`com.grimoire.keywords`) |
+| `license` | no | string | SPDX-style identifier (`org.opencontainers.image.licenses`) |
 | `repository` | no | string | HTTPS source URL (`org.opencontainers.image.source`) |
 | `deprecated` | no | string | Deprecation notice (`com.grimoire.deprecated`) |
 | `server` | yes | table | Transport plus launch/connection fields, see below |
@@ -378,6 +380,7 @@ Top-level keys and member tables:
 | `summary` | no | string | Short one-line blurb for the catalog |
 | `keywords` | no | string | Comma-separated tags |
 | `description` | no | string | Longer description; defaults to a deterministic `grimoire bundle of N members` |
+| `license` | no | string | SPDX-style identifier (`org.opencontainers.image.licenses`) |
 | `[skills]` | no | name → ref table | Skill members |
 | `[rules]` | no | name → ref table | Rule members |
 | `[agents]` | no | name → ref table | Agent members |
@@ -486,7 +489,7 @@ Grimoire-specific ones, sourced per kind as follows:
 | `org.opencontainers.image.title` | artifact name | always |
 | `org.opencontainers.image.description` | `description` field, or derived from the rule body | always |
 | `org.opencontainers.image.version` | release version | always |
-| `org.opencontainers.image.licenses` | skill `license` field | when present |
+| `org.opencontainers.image.licenses` | skill top-level `license`; agent `metadata.license`; rule top-level `license`; bundle `license`; mcp top-level `license` | when present |
 | `org.opencontainers.image.source` | authored `repository` HTTPS URL (skill/agent `metadata.repository`; rule top-level `repository`; bundle `repository`; mcp top-level `repository`); falls back to the tagless release ref | always on release |
 | `com.grimoire.summary` | skill/agent `metadata.summary`; rule top-level `summary`; bundle `summary`; mcp top-level `summary` | when present |
 | `com.grimoire.keywords` | skill/agent `metadata.keywords`; rule top-level `keywords`; bundle `keywords`; mcp top-level `keywords` | when present |

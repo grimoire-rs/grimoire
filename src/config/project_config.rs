@@ -446,6 +446,8 @@ pub struct BundleMetadata {
     pub keywords: Option<String>,
     /// Overrides the default `grimoire bundle of N members` description.
     pub description: Option<String>,
+    /// SPDX license expression → `org.opencontainers.image.licenses`.
+    pub license: Option<String>,
     /// HTTPS URL to the source repository → `org.opencontainers.image.source`
     /// (validated `https://` at publish time).
     pub repository: Option<String>,
@@ -510,6 +512,8 @@ struct RawBundleSource {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
     repository: Option<String>,
     #[serde(default)]
     deprecated: Option<String>,
@@ -534,6 +538,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
             summary: raw.summary,
             keywords: raw.keywords,
             description: raw.description,
+            license: raw.license,
             repository: raw.repository,
             deprecated: raw.deprecated,
             replaced_by: raw.replaced_by,

@@ -315,6 +315,9 @@ pub fn annotations_for_rule(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Rule.to_string());
+    if let Some(license) = string_from_extra(fm, "license") {
+        a.insert("org.opencontainers.image.licenses".to_string(), license);
+    }
     if let Some(src) = source_annotation(SourceInputs {
         authored: string_from_extra(fm, "repository").as_deref(),
         git,
@@ -368,6 +371,9 @@ pub fn annotations_for_agent(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Agent.to_string());
+    if let Some(license) = fm.metadata.get("license") {
+        a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
+    }
     if let Some(src) = source_annotation(SourceInputs {
         authored: fm.metadata.get("repository").map(String::as_str),
         git,
@@ -421,6 +427,9 @@ pub fn annotations_for_bundle(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Bundle.to_string());
+    if let Some(license) = &metadata.license {
+        a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
+    }
     if let Some(src) = source_annotation(SourceInputs {
         authored: metadata.repository.as_deref(),
         git,
@@ -467,6 +476,9 @@ pub fn annotations_for_mcp(
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
     // Registry-agnostic kind fallback — see `annotations_for_skill`.
     a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Mcp.to_string());
+    if let Some(license) = &descriptor.license {
+        a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
+    }
     if let Some(src) = source_annotation(SourceInputs {
         authored: descriptor.repository.as_deref(),
         git,
@@ -774,6 +786,7 @@ mod tests {
             summary: Some("Python dev stack".to_string()),
             keywords: Some("python,lint".to_string()),
             description: Some("Skills and rules for Python work".to_string()),
+            license: None,
             repository: None,
             deprecated: None,
             replaced_by: None,
@@ -848,6 +861,62 @@ mod tests {
         // Default (no deprecation) omits the key.
         let plain = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
         assert!(!plain.contains_key(DEPRECATED_ANNOTATION));
+    }
+
+    // ── license (regression: license annotation was skill-only) ─────
+
+    #[test]
+    fn rule_license_from_extra_becomes_annotation() {
+        let doc = "---\npaths: [\"a\"]\nlicense: Apache-2.0\n---\n# R\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None, None);
+        assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
+        // Absent key ⇒ no annotation.
+        let plain = RuleFrontmatter::parse_doc("---\npaths: [\"a\"]\n---\n# R\nbody\n", Path::new("r.md")).unwrap();
+        let b = annotations_for_rule("r", &plain.frontmatter, &plain.body, "1.0.0", None, None);
+        assert!(!b.contains_key("org.opencontainers.image.licenses"));
+    }
+
+    #[test]
+    fn agent_license_metadata_becomes_annotation() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  license: MIT\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", None, None);
+        assert_eq!(a["org.opencontainers.image.licenses"], "MIT");
+        // Absent key ⇒ no annotation.
+        let plain =
+            AgentFrontmatter::parse_doc("---\nname: a\ndescription: d\n---\nbody\n", Path::new("a.md")).unwrap();
+        let b = annotations_for_agent(&plain.frontmatter, "1.0.0", None, None);
+        assert!(!b.contains_key("org.opencontainers.image.licenses"));
+    }
+
+    #[test]
+    fn bundle_license_metadata_becomes_annotation() {
+        let metadata = BundleMetadata {
+            license: Some("Apache-2.0".to_string()),
+            ..BundleMetadata::default()
+        };
+        let a = annotations_for_bundle("stack", "1.0.0", 2, None, &metadata, None);
+        assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
+        // Default (no license) omits the key.
+        let plain = annotations_for_bundle("stack", "1.0.0", 2, None, &BundleMetadata::default(), None);
+        assert!(!plain.contains_key("org.opencontainers.image.licenses"));
+    }
+
+    #[test]
+    fn mcp_license_becomes_annotation() {
+        let toml =
+            "description = \"d\"\nlicense = \"Apache-2.0\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\n";
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(toml).unwrap();
+        let a = annotations_for_mcp("grim", &d, "1.0.0", None, None);
+        assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
+        // Absent field ⇒ no annotation.
+        let plain = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\n",
+        )
+        .unwrap();
+        let b = annotations_for_mcp("grim", &plain, "1.0.0", None, None);
+        assert!(!b.contains_key("org.opencontainers.image.licenses"));
     }
 
     // ── replaced-by ──────────────────────────────────────────────────

@@ -53,6 +53,7 @@ This is grim's own descriptor, published as `mcp/grim` — see
 | `description` | yes | string | Must be non-empty after trimming; becomes the OCI description annotation |
 | `summary` | no | string | Short catalog blurb (`com.grimoire.summary`) |
 | `keywords` | no | string | Comma-separated tags (`com.grimoire.keywords`) |
+| `license` | no | string | SPDX-style identifier (`org.opencontainers.image.licenses`) |
 | `repository` | no | string | HTTPS source URL, same [validation](./publishing.md#metadata-repository) as every other kind (`org.opencontainers.image.source`) |
 | `deprecated` | no | string | [Deprecation notice](./publishing.md#metadata-deprecated) (`com.grimoire.deprecated`) |
 | `server` | yes | table | The launch/connection definition, see [below](#server-table) |

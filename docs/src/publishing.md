@@ -224,13 +224,14 @@ not as a guarantee the registry upholds.
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
 every match in a table. To make a result legible and findable, an artifact
-carries six pieces of catalog metadata, all optional:
+carries seven pieces of catalog metadata, all optional:
 
 | Field | Annotation | Purpose |
 |-------|-----------|---------|
 | `summary` | `com.grimoire.summary` | One-line blurb shown in the catalog (preferred over the description). |
 | `keywords` | `com.grimoire.keywords` | Comma-separated terms that search matches. |
 | `description` | `org.opencontainers.image.description` | The full description. |
+| `license` | `org.opencontainers.image.licenses` | SPDX-style license identifier (e.g. `Apache-2.0`). |
 | `repository` | `org.opencontainers.image.source` | HTTPS URL of the artifact's source repository ([details](#metadata-repository)). |
 | `deprecated` | `com.grimoire.deprecated` | A deprecation notice; marks the package deprecated and flags it everywhere ([details](#metadata-deprecated)). |
 | `replaced-by` | `com.grimoire.replaced-by` | A reference naming the successor artifact ([details](#metadata-replaced-by)). |

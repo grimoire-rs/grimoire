@@ -8,6 +8,7 @@
 description = "Grimoire catalog, install status, and artifact content over the Model Context Protocol."
 summary = "grim as an MCP server (search, status, fetch; render behind --allow-writes)"
 keywords = "grimoire,mcp,catalog,search,status,fetch,render"
+license = "Apache-2.0"
 repository = "https://github.com/grimoire-rs/grimoire"
 
 [server]

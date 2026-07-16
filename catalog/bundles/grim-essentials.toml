@@ -14,6 +14,7 @@
 summary = "Grimoire first-party starter pack"
 keywords = "grimoire,grim,skills,authoring,ai-config,oci,starter"
 description = "First-party skills: using the grim CLI, vendor-neutral AI-config authoring craft, and grim artifact authoring"
+license = "Apache-2.0"
 repository = "https://github.com/grimoire-rs/grimoire"
 
 [skills]

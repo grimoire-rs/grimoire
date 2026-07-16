@@ -26,6 +26,7 @@ tables — not in any nested map:
 | `summary` | One-line catalog blurb |
 | `keywords` | One comma-separated string — a TOML array is rejected |
 | `description` | Overrides the automatic `grimoire bundle of N members` |
+| `license` | SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation |
 | `repository` | `https://` source URL; anything else fails release (exit 65) |
 | `deprecated` | Deprecation notice; non-empty marks the bundle deprecated (flagged in search/TUI, warned on `add`) |
 | `replaced-by` | Successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
