@@ -360,6 +360,36 @@ mod tests {
         assert_eq!(global_skills_root(None, None), None);
     }
 
+    #[test]
+    fn docs_reference_matches_copilot_registry() {
+        // Doc/registry parity: `docs/src/vendor-metadata.md` must document
+        // exactly the `copilot.*` keys the registries know (rule ∪ agent —
+        // the skill registry is empty), so the reference page cannot silently
+        // drift from the renderer. Mirrors
+        // vendor_claude.rs::docs_reference_matches_claude_registry.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path).expect("docs/src/vendor-metadata.md exists (doc/registry parity)");
+        let mut documented = std::collections::BTreeSet::new();
+        // Backtick-delimited tokens: odd segments of a backtick split.
+        for token in doc.split('`').skip(1).step_by(2) {
+            if let Some(field) = token.strip_prefix("copilot.")
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            {
+                documented.insert(field.to_string());
+            }
+        }
+        let registry: std::collections::BTreeSet<String> = COPILOT_RULE_FIELDS
+            .iter()
+            .chain(COPILOT_AGENT_FIELDS.iter())
+            .map(|f| f.field.to_string())
+            .collect();
+        assert_eq!(
+            documented, registry,
+            "vendor-metadata.md must document exactly the copilot.* registry fields (rules ∪ agents)"
+        );
+    }
+
     fn parsed(doc: &str) -> ParsedRule {
         RuleFrontmatter::parse_doc(doc, Path::new("rust-style.md")).unwrap()
     }
