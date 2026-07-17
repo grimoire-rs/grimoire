@@ -28,7 +28,7 @@ use crate::oci::{ArtifactKind, Digest, Identifier};
 
 use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
-use super::install_state::{InstallRecord, InstallState, PersistError};
+use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
 use super::path_anchor::{AnchorError, AnchorRoots};
 use super::progress::{InstallProgress, SilentProgress};
@@ -698,6 +698,14 @@ async fn install_one<M: ArtifactMaterializer>(
         }
     }
 
+    // Layout-migration reaper (ADR render-layout-stability): file outputs
+    // the prior record holds at paths this layout no longer produces are
+    // orphans of a render-layout move — best-effort delete them before the
+    // record is replaced.
+    if let Some(rec) = &recorded {
+        reap_moved_outputs(rec, &outputs, roots);
+    }
+
     // `outputs` is the single source of truth — no denormalized top-level
     // mirror of the primary client.
     state.record(InstallRecord {
@@ -849,13 +857,93 @@ fn integrity_gate(
         .filter(|c| client_supports_kind(*c, rec.kind, target))
         .collect();
     let covers_targets = !expected.is_empty()
-        && expected
-            .iter()
-            .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
+        && expected.iter().all(|c| {
+            rec.outputs
+                .iter()
+                .any(|out| out.client == c.as_str() && output_at_current_layout(out, *c, rec, target, roots))
+        });
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
     Ok(None)
+}
+
+/// Whether a recorded file output still sits at the path the CURRENT
+/// layout produces for its client (structural anchor + relative equality).
+/// A mismatch means the render layout moved since the record was written
+/// (ADR render-layout-stability): the integrity gate must fall through so
+/// the install re-materializes at the new path and [`reap_moved_outputs`]
+/// collects the old one. Entry-typed outputs (MCP config registrations)
+/// are exempt — their location is the vendor config file, not a render
+/// layout. A layout that cannot be computed here (unparsable client
+/// string, anchor root absent) counts as current: on such a host the path
+/// does not move, so there is nothing to migrate.
+fn output_at_current_layout(
+    out: &ClientOutput,
+    client: crate::install::client_target::ClientTarget,
+    rec: &InstallRecord,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+) -> bool {
+    if out.entry.is_some() {
+        return true;
+    }
+    let dest = target.path_for(client, rec.kind, &rec.name);
+    match crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, rec.kind, roots) {
+        Ok(current) => current == out.target,
+        Err(_) => true,
+    }
+}
+
+/// Layout-migration reaper (ADR render-layout-stability): after a
+/// re-materialize, best-effort delete the prior record's file outputs the
+/// new output set no longer produces — the orphaned old paths of a
+/// render-layout move. Never fails the install (precedent:
+/// [`InstallState::reap_legacy_project_state`]).
+///
+/// Guards, in order:
+/// 1. entry-typed outputs (shared MCP config files) are never touched;
+/// 2. an output structurally equal (anchor + relative) to a new output is
+///    still produced — not an orphan;
+/// 3. an absent anchor root (or any resolve/containment failure) — skip,
+///    nothing can be safely resolved on this machine;
+/// 4. hash-match: the on-disk footprint must equal the recorded
+///    `content_hash` — a user-edited orphan is preserved (the
+///    untracked-clobber philosophy).
+fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots: &AnchorRoots) {
+    for out in &prior.outputs {
+        // Guard 1: never delete a shared config file.
+        if out.entry.is_some() {
+            continue;
+        }
+        // Guard 2: still produced by the current layout — not an orphan.
+        if new_outputs.iter().any(|new| new.target == out.target) {
+            continue;
+        }
+        // Guard 3: tolerant resolve — absent root / containment failure /
+        // already gone ⇒ nothing to reap here.
+        if !matches!(out.is_present(roots), Ok(true)) {
+            continue;
+        }
+        // Guard 4: preserve anything the user edited.
+        let intact = out.current_hash(roots).is_ok_and(|actual| actual == out.content_hash);
+        if !intact {
+            continue;
+        }
+        let Ok(target) = out.target.resolve(roots) else {
+            continue;
+        };
+        if let Err(e) = remove_path(&target) {
+            tracing::warn!("could not reap moved output '{}': {e}", target.display());
+        }
+        if let Some(support) = &out.support_dir
+            && let Ok(dir) = support.resolve(roots)
+            && dir.exists()
+            && let Err(e) = remove_path(&dir)
+        {
+            tracing::warn!("could not reap moved support dir '{}': {e}", dir.display());
+        }
+    }
 }
 
 /// Validate + pack a locked path source and verify the bytes hash to the
@@ -2059,6 +2147,118 @@ mod tests {
         // The record no longer carries a support dir.
         let rec = state.get(ArtifactKind::Rule, "my-rule").unwrap();
         assert!(rec.outputs.iter().all(|c| c.support_dir.is_none()));
+    }
+
+    // ── reap_moved_outputs (layout-migration reaper) ────────────────────────
+
+    fn reap_output(anchor: PathAnchor, relative: &str, hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: "copilot".to_string(),
+            target: AnchoredPath {
+                anchor,
+                relative: relative.to_string(),
+            },
+            content_hash: hash,
+            support_dir: None,
+            entry: None,
+        }
+    }
+
+    fn reap_record(outputs: Vec<ClientOutput>) -> InstallRecord {
+        InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "r".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(
+                PinnedIdentifier::try_from(
+                    Identifier::new_registry("r", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
+                )
+                .unwrap(),
+            ),
+            dev: false,
+            outputs,
+        }
+    }
+
+    #[test]
+    fn reap_moved_outputs_deletes_unmodified_orphan_at_old_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(".github/instructions/r.instructions.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"body\n").unwrap();
+        let hash = footprint_hash(&old, None).unwrap();
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::Workspace,
+            ".github/instructions/r.instructions.md",
+            hash,
+        )]);
+        let new_outputs = vec![reap_output(
+            PathAnchor::Workspace,
+            "instructions/r.instructions.md",
+            Digest::Sha256("b".repeat(64)),
+        )];
+        reap_moved_outputs(&prior, &new_outputs, &roots(dir.path()));
+        assert!(!old.exists(), "unmodified orphan at the old anchor must be reaped");
+    }
+
+    #[test]
+    fn reap_moved_outputs_preserves_modified_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(".github/instructions/r.instructions.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"user-edited\n").unwrap();
+        // Recorded hash deliberately differs from the on-disk bytes.
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::Workspace,
+            ".github/instructions/r.instructions.md",
+            Digest::Sha256("d".repeat(64)),
+        )]);
+        reap_moved_outputs(&prior, &[], &roots(dir.path()));
+        assert!(old.exists(), "a user-edited orphan must be preserved (guard 4)");
+    }
+
+    #[test]
+    fn reap_moved_outputs_ignores_still_produced_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/rules/r.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"body\n").unwrap();
+        let hash = footprint_hash(&path, None).unwrap();
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::Workspace,
+            ".claude/rules/r.md",
+            hash.clone(),
+        )]);
+        let new_outputs = vec![reap_output(PathAnchor::Workspace, ".claude/rules/r.md", hash)];
+        reap_moved_outputs(&prior, &new_outputs, &roots(dir.path()));
+        assert!(
+            path.exists(),
+            "a path the new layout still produces is not an orphan (guard 2)"
+        );
+    }
+
+    #[test]
+    fn reap_moved_outputs_never_touches_entry_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join(".mcp.json");
+        std::fs::write(&cfg, "{\"mcpServers\":{\"m\":{\"command\":\"grim\"}}}").unwrap();
+        let mut out = reap_output(PathAnchor::Workspace, ".mcp.json", Digest::Sha256("e".repeat(64)));
+        out.entry = Some("/mcpServers/m".to_string());
+        let prior = reap_record(vec![out]);
+        reap_moved_outputs(&prior, &[], &roots(dir.path()));
+        assert!(cfg.exists(), "a shared config file is never reaped (guard 1)");
+    }
+
+    #[test]
+    fn reap_moved_outputs_tolerates_absent_anchor_root() {
+        let dir = tempfile::tempdir().unwrap();
+        // CopilotRoot is None in `roots()` — resolve fails; must not panic
+        // and must not error the install (best-effort).
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::CopilotRoot,
+            "instructions/r.instructions.md",
+            Digest::Sha256("f".repeat(64)),
+        )]);
+        reap_moved_outputs(&prior, &[], &roots(dir.path()));
     }
 
     // ── Client-set desync regression tests (C1–C3) ──────────────────────────
