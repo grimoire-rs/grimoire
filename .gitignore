@@ -116,3 +116,8 @@ docs/book/
 # not committed so the published site can never drift from the parser.
 # =============================================================================
 docs/src/schemas/
+
+# =============================================================================
+# Agent Worktrees — ephemeral per-issue working copies (.agents/worktrees/*).
+# =============================================================================
+.agents/
