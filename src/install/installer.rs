@@ -916,7 +916,10 @@ fn output_at_current_layout(
 ///    nothing can be safely resolved on this machine;
 /// 4. hash-match: the on-disk footprint must equal the recorded
 ///    `content_hash` — a user-edited orphan is preserved (the
-///    untracked-clobber philosophy).
+///    untracked-clobber philosophy);
+/// 5. resolved-identity: the old path must not canonicalize onto a new
+///    output's real file — a symlink alias of a live output is never reaped
+///    (guard 2 compares stored pairs, not resolved identity).
 fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots: &AnchorRoots) {
     for out in &prior.outputs {
         // Guard 1: never delete a shared config file.
@@ -940,6 +943,23 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
         let Ok(target) = out.target.resolve(roots) else {
             continue;
         };
+        // Guard 5: a symlink at the old path canonicalizes onto a NEW
+        // output's real file (same inode ⇒ same content, so guard 4 passed);
+        // deleting through the alias would destroy the live output. Skip when
+        // the canonicalized old path equals any canonicalized new-output path.
+        // Canonicalize failure falls through to the delete below — the prior
+        // guards already gated this entry as a hash-matching orphan.
+        if let Ok(canon_old) = std::fs::canonicalize(&target)
+            && new_outputs.iter().any(|new| {
+                new.target
+                    .resolve(roots)
+                    .ok()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+                    .is_some_and(|canon_new| canon_new == canon_old)
+            })
+        {
+            continue;
+        }
         if let Err(e) = remove_path(&target) {
             tracing::warn!("could not reap moved output '{}': {e}", target.display());
         }
@@ -2313,6 +2333,113 @@ mod tests {
             Digest::Sha256("f".repeat(64)),
         )]);
         reap_moved_outputs(&prior, &[], &roots(dir.path()));
+    }
+
+    /// W6 (must fail on current code): the old recorded path is a symlink
+    /// aliasing the NEW output's real file (same inode ⇒ same content, so
+    /// guard 4's hash check trivially passes). Guard 2 only compares the
+    /// stored anchor+relative pair, not resolved identity, so it does not
+    /// catch the alias. The reaper resolves the old path — `resolve()`
+    /// canonicalizes through the symlink — and `remove_path` then deletes
+    /// the canonicalized target, i.e. the NEW output, through the OLD path.
+    /// The fix is a resolved-identity guard: skip reap when the canonicalized
+    /// old path equals any canonicalized new output path.
+    #[cfg(unix)]
+    #[test]
+    fn reap_moved_outputs_skips_symlink_alias_of_new_output() {
+        let dir = tempfile::tempdir().unwrap();
+        // The NEW output's real file (produced by the current layout).
+        let new_file = dir.path().join("instructions/r.instructions.md");
+        std::fs::create_dir_all(new_file.parent().unwrap()).unwrap();
+        std::fs::write(&new_file, b"body\n").unwrap();
+        let new_hash = footprint_hash(&new_file, None).unwrap();
+
+        // The OLD recorded path is a symlink pointing at the NEW file.
+        let old = dir.path().join(".github/instructions/r.instructions.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&new_file, &old).unwrap();
+
+        // Recorded hash matches the aliased NEW file, so guard 4 sees "intact".
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::Workspace,
+            ".github/instructions/r.instructions.md",
+            new_hash.clone(),
+        )]);
+        // The current layout still produces the NEW file, at a different
+        // anchor+relative than the old symlink path (guard 2 cannot match).
+        let new_outputs = vec![reap_output(
+            PathAnchor::Workspace,
+            "instructions/r.instructions.md",
+            new_hash,
+        )];
+        reap_moved_outputs(&prior, &new_outputs, &roots(dir.path()));
+        assert!(
+            new_file.exists(),
+            "reaper must not delete the NEW output through a symlink alias at the old path"
+        );
+    }
+
+    /// W1a: a moved output carrying a support dir present on disk with a
+    /// hash-matching footprint — both the index AND the support dir are
+    /// reaped from the old layout location.
+    #[test]
+    fn reap_moved_outputs_deletes_moved_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_index = dir.path().join(".github/instructions/r.instructions.md");
+        let old_support = dir.path().join(".github/instructions/r");
+        std::fs::create_dir_all(&old_support).unwrap();
+        std::fs::write(&old_index, b"body\n").unwrap();
+        std::fs::write(old_support.join("extra.md"), b"detail\n").unwrap();
+        let hash = footprint_hash(&old_index, Some(&old_support)).unwrap();
+
+        let mut out = reap_output(PathAnchor::Workspace, ".github/instructions/r.instructions.md", hash);
+        out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".github/instructions/r".to_string(),
+        });
+        let prior = reap_record(vec![out]);
+        // Current layout produces the index at a different anchor+relative.
+        let new_outputs = vec![reap_output(
+            PathAnchor::Workspace,
+            "instructions/r.instructions.md",
+            Digest::Sha256("b".repeat(64)),
+        )];
+        reap_moved_outputs(&prior, &new_outputs, &roots(dir.path()));
+        assert!(!old_index.exists(), "the moved index must be reaped");
+        assert!(!old_support.exists(), "the moved support dir must be reaped");
+    }
+
+    /// W1b: a user-edited support dir — the on-disk footprint no longer
+    /// hashes to the recorded `content_hash` — is preserved (guard 4), index
+    /// and support dir both left on disk (self-heal / untracked-clobber).
+    #[test]
+    fn reap_moved_outputs_preserves_edited_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_index = dir.path().join(".github/instructions/r.instructions.md");
+        let old_support = dir.path().join(".github/instructions/r");
+        std::fs::create_dir_all(&old_support).unwrap();
+        std::fs::write(&old_index, b"body\n").unwrap();
+        std::fs::write(old_support.join("extra.md"), b"user-edited\n").unwrap();
+        // Recorded hash deliberately differs from the on-disk footprint.
+        let mut out = reap_output(
+            PathAnchor::Workspace,
+            ".github/instructions/r.instructions.md",
+            Digest::Sha256("d".repeat(64)),
+        );
+        out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".github/instructions/r".to_string(),
+        });
+        let prior = reap_record(vec![out]);
+        reap_moved_outputs(&prior, &[], &roots(dir.path()));
+        assert!(
+            old_index.exists(),
+            "an edited footprint's index must be preserved (guard 4)"
+        );
+        assert!(
+            old_support.exists(),
+            "an edited footprint's support dir must be preserved (guard 4)"
+        );
     }
 
     // ── Client-set desync regression tests (C1–C3) ──────────────────────────
