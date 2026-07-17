@@ -31,17 +31,17 @@ All rows `verified 2026-07-17` unless noted.
 
 | Capability | Vendor | Current grim behavior | Upstream status | Action when shipped |
 |---|---|---|---|---|
-| Global MCP env substitution | Copilot | skip + warn on env refs in global MCP | not supported ([docs](https://docs.github.com/en/copilot/how-tos/context/model-context-protocol/extending-copilot-coding-agent-with-mcp)) | project env refs, drop warn |
+| Global MCP env substitution | Copilot | skip + warn on env refs in global MCP | not documented in the local-CLI doc (literal values only) ([copilot cli docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers)); `${VAR}` substitution shipped in v0.0.406, then regressed in v0.0.407 ([github/copilot-cli#1403](https://github.com/github/copilot-cli/issues/1403)) — re-verify against a fixed release before trusting either state | project env refs, drop warn |
 | Glob-scoped rules | Codex | `supports_kind` = false for Rule (AGENTS.md directory-granular only) | no path-glob scoping ([codex docs](https://github.com/openai/codex/blob/main/docs/config.md)) | enable Rule kind + scoped render |
 | Vendor-specific skill frontmatter | OpenCode, Copilot | empty skill field registries | no vendor skill keys documented ([opencode](https://opencode.ai/docs/skills/), [copilot](https://docs.github.com/en/copilot)) | populate registries + parity docs |
 | `openai.yaml` skill sidecar | Codex | not emitted | sidecar format not stabilized ([codex repo](https://github.com/openai/codex)) | emit sidecar from skill metadata |
 | Agent `permission` map | OpenCode | dropped (scalar-only metadata) | shipped upstream ([opencode agents](https://opencode.ai/docs/agents/)) | gated on `adr_structured_vendor_metadata.md` acceptance (FieldType::Json) |
 | MCP `oauth: false` opt-out | OpenCode | not representable — the descriptor `oauth` field is the structured object-only `McpOAuth` block | shipped upstream ([opencode mcp](https://opencode.ai/docs/mcp-servers/)) | needs schema verify — no dual-typed field; consider `oauth_disabled` bool |
-| `.agent.md` extension | Copilot | emits `.md` agents | dual extension support in flux ([copilot docs](https://docs.github.com/en/copilot)) | switch/dual-emit needs layout-move reaper |
+| `.agent.md` extension | Copilot | emits `.md` agents | settled upstream — spec requires `.agent.md` ([copilot cli docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli)); tracked in [grimoire#44](https://github.com/grimoire-rs/grimoire/issues/44) (renderer-version re-materialization mechanism, NOT implemented on this branch) | live-verify against a shipped, version-pinned CLI first (issue #44), then switch/dual-emit needs layout-move reaper |
 | `excludeAgent` third enum value | Copilot | two-literal enum | proposed ([gh discussion #195217](https://github.com/orgs/community/discussions/195217)) | append literal (additive) |
 | `nickname_candidates` | Codex | not representable | shipped upstream; needs array FieldType ([codex config](https://github.com/openai/codex/blob/main/docs/config.md)) | add array FieldType, then registry row |
 | `ws` MCP transport projection | OpenCode, Copilot, Codex | decline + warn (Claude projects) | not documented for these vendors | fold into remote arm per vendor |
-| MCP `oauth` block projection | OpenCode, Copilot, Codex | decline + warn (Claude projects) | no native oauth config surface documented | project per vendor schema |
+| MCP `oauth` block projection | OpenCode, Copilot, Codex | decline + warn (Claude projects) | OpenCode/Copilot: no native oauth config surface documented. Codex: has a native `auth` enum (`oauth` default \| `chatgpt`, triggers `codex mcp login`'s stored-credential flow) — not zero-surface, just not grim's structured `McpOAuth` block | project per vendor schema (Codex: map onto the `auth` enum, not the full block) |
 
 ## Fragility note
 
