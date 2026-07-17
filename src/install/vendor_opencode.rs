@@ -138,7 +138,7 @@ impl Vendor for OpenCodeVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
+        scope: ConfigScope,
         name: &str,
         descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
@@ -155,7 +155,7 @@ impl Vendor for OpenCodeVendor {
         // with a warning rather than registering a server that cannot
         // authenticate; plain descriptors are unaffected.
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for opencode ({_scope}): no verified oauth mapping");
+            tracing::warn!("mcp server '{name}' skipped for opencode ({scope}): no verified oauth mapping");
             return None;
         }
         let mut entry = serde_json::Map::new();
@@ -179,9 +179,7 @@ impl Vendor for OpenCodeVendor {
             // skip with a warning rather than writing a `remote` entry
             // OpenCode would try to speak HTTP to.
             McpTransport::Ws => {
-                tracing::warn!(
-                    "mcp server '{name}' skipped for opencode ({_scope}): no ws transport in the mcp schema"
-                );
+                tracing::warn!("mcp server '{name}' skipped for opencode ({scope}): no ws transport in the mcp schema");
                 return None;
             }
             McpTransport::Http | McpTransport::Sse => {
