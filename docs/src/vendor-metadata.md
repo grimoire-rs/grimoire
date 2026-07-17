@@ -245,7 +245,7 @@ Three vendor keys are projectable, mapped from `CODEX_AGENT_FIELDS` in
 | Key | Native TOML field | Type | Notes |
 |---|---|---|---|
 | `codex.model` | `model` | string | **Overrides** the common `model` field for Codex |
-| `codex.reasoning-effort` | `model_reasoning_effort` | enum | Accepted values: `ultra`, `max`, `high`, `medium`, `low`, `minimal`, `none` |
+| `codex.reasoning-effort` | `model_reasoning_effort` | enum | Accepted values: `ultra`, `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none` |
 | `codex.sandbox-mode` | `sandbox_mode` | enum | Accepted values: `read-only`, `workspace-write`, `danger-full-access` |
 
 A `codex.model` key overrides the projected common `model` field silently,

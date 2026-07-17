@@ -16,8 +16,9 @@
 //! optional `model` (developers.openai.com/codex/subagents).
 //!
 //! Codex has **no native rule target**: AGENTS.md is always-on and
-//! directory-granular with no path-glob / `applyTo` scoping anywhere, and
-//! hooks cannot synthesize it (`PreToolUse` rejects `additionalContext`).
+//! directory-granular with no path-glob / `applyTo` scoping anywhere
+//! (upstream hooks now accept `additionalContext` — openai/codex#20692 —
+//! but that still cannot express path-glob-scoped rules).
 //! So [`CodexVendor::supports_kind`] declines [`ArtifactKind::Rule`] and the
 //! installer warns + skips rather than writing an inert file.
 //!
@@ -60,7 +61,7 @@ pub const CODEX_AGENT_FIELDS: &[KnownField] = &[
     KnownField {
         field: "reasoning-effort",
         native: "model_reasoning_effort",
-        ty: FieldType::Enum(&["ultra", "max", "high", "medium", "low", "minimal", "none"]),
+        ty: FieldType::Enum(&["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"]),
     },
     KnownField {
         field: "sandbox-mode",
@@ -639,12 +640,13 @@ mod tests {
         );
     }
 
-    // ── C3.6: codex.reasoning-effort enum realigned to the upstream native
-    // set ultra|max|high|medium|low|minimal|none (drops `xhigh`) ──────────
+    // ── codex.reasoning-effort enum tracks the upstream native
+    // `ReasoningEffort` set, including `xhigh` (a native variant — the
+    // C3.6 drop was based on a refuted premise and was a regression) ──────
 
     #[test]
     fn agent_index_accepts_updated_reasoning_effort_literals() {
-        for accepted in ["ultra", "max", "high", "medium", "low", "minimal", "none"] {
+        for accepted in ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"] {
             let doc =
                 format!("---\nname: rev\ndescription: d\nmetadata:\n  codex.reasoning-effort: {accepted}\n---\nbody\n");
             let out = CodexVendor
@@ -660,13 +662,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_index_rejects_xhigh_after_c3_6_realignment() {
-        // `xhigh` is a Claude-ism dropped from the Codex-native enum by
-        // plan C3.6; pre-release, no compat burden.
+    fn agent_index_accepts_xhigh_reasoning_effort() {
+        // `xhigh` is a native upstream `ReasoningEffort` variant; the C3.6
+        // drop hard-failed a valid value (regression, now restored).
         let doc = "---\nname: rev\ndescription: d\nmetadata:\n  codex.reasoning-effort: xhigh\n---\nbody\n";
-        assert!(
-            CodexVendor.agent_index(&parsed_agent(doc), "p").is_err(),
-            "xhigh must be rejected once the enum is realigned to the upstream native set"
+        let out = CodexVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
+        let value: toml::Value = toml::from_str(&out.document).expect("valid TOML");
+        assert_eq!(
+            value.as_table().unwrap()["model_reasoning_effort"].as_str(),
+            Some("xhigh")
         );
     }
 
