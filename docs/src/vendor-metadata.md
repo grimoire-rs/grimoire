@@ -226,6 +226,7 @@ projectable vendor key, mapped from `COPILOT_AGENT_FIELDS` in
 | Key | Native field | Type | Notes |
 |---|---|---|---|
 | `copilot.tools` | `tools` | comma list | **Overrides** the common `tools` field for Copilot; comma-separated string → YAML list |
+| `copilot.model` | `model` | string | **Overrides** the common `model` field for Copilot — the escape hatch when the common value is not Copilot-shaped |
 
 `mcp-servers` (an object) is not in this registry, for the same reason as
 Claude's `mcpServers` above — see
