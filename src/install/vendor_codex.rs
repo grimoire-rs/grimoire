@@ -29,10 +29,14 @@
 //! `command`/`args`/`env` and HTTP/SSE → `url` under `mcp_servers.<name>`.
 //! A stdio `env` value is written **verbatim** — a literal `${VAR}` is the
 //! launched subprocess's OS environment assignment (the same passthrough
-//! Claude/OpenCode give it), not something grim or Codex substitutes. An
-//! HTTP/SSE descriptor that needs `headers` is instead skipped with a
-//! warning: Codex's upstream remote schema has no headers field at all, so
-//! grim never silently drops the (usually auth-carrying) headers.
+//! Claude/OpenCode give it), not something grim or Codex substitutes.
+//! HTTP/SSE `headers` map onto Codex's three upstream header surfaces:
+//! a plain value → `http_headers`, a whole-value `${VAR}` →
+//! `env_http_headers`, and `Authorization: Bearer ${VAR}` →
+//! `bearer_token_env_var`. A header embedding an env ref in surrounding
+//! text (or carrying several refs) has no faithful target, so that
+//! descriptor is skipped with a warning — grim never writes a broken
+//! literal and never inlines a secret.
 
 use std::path::{Path, PathBuf};
 
@@ -184,22 +188,48 @@ impl Vendor for CodexVendor {
             // `sse` has no dedicated Codex mapping upstream; treated like
             // `http` (both are `url`-shaped remote transports).
             McpTransport::Http | McpTransport::Sse => {
-                // DECIDED (plan C1, Copilot precedent): Codex's upstream MCP
-                // schema (learn.chatgpt.com/docs/extend/mcp) maps only `url`
-                // for a remote server — there is no headers field at all.
-                // Headers almost always carry the auth token (e.g.
-                // `Authorization: Bearer ${VAR}`); dropping them silently
-                // would register a connection Codex can never authenticate,
-                // so a descriptor that needs them is skipped with a warning
-                // rather than ever writing a broken entry.
-                if !s.headers.is_empty() {
-                    tracing::warn!(
-                        "mcp server '{name}' skipped for codex ({scope}): config.toml has no headers field \
-                         and grim never drops required headers silently"
-                    );
-                    return None;
+                // Codex's upstream `RawMcpServerConfig` carries three header
+                // surfaces: `http_headers` (static name → value),
+                // `env_http_headers` (name → env var whose value is sent),
+                // and `bearer_token_env_var` (Authorization: Bearer from an
+                // env var). Each canonical header maps onto exactly one of
+                // them; a header grim cannot represent faithfully (an env
+                // ref embedded in surrounding text, or multiple refs) skips
+                // the whole descriptor with a warning — never a broken
+                // literal, never an inlined secret (fail-closed residual).
+                let mut http_headers = serde_json::Map::new();
+                let mut env_http_headers = serde_json::Map::new();
+                let mut bearer_token_env_var: Option<String> = None;
+                for (header, value) in &s.headers {
+                    let refs: Vec<&str> = crate::oci::mcp::env_ref_names(value).collect();
+                    if refs.is_empty() {
+                        http_headers.insert(header.clone(), serde_json::json!(value));
+                    } else if refs.len() == 1 && *value == format!("${{{}}}", refs[0]) {
+                        env_http_headers.insert(header.clone(), serde_json::json!(refs[0]));
+                    } else if refs.len() == 1
+                        && header.eq_ignore_ascii_case("authorization")
+                        && *value == format!("Bearer ${{{}}}", refs[0])
+                    {
+                        bearer_token_env_var = Some(refs[0].to_string());
+                    } else {
+                        tracing::warn!(
+                            "mcp server '{name}' skipped for codex ({scope}): header '{header}' embeds an \
+                             env reference Codex cannot represent (http_headers is literal-only, \
+                             env_http_headers is whole-value) and grim never inlines secrets"
+                        );
+                        return None;
+                    }
                 }
                 entry.insert("url".into(), serde_json::json!(s.url));
+                if let Some(var) = bearer_token_env_var {
+                    entry.insert("bearer_token_env_var".into(), serde_json::json!(var));
+                }
+                if !http_headers.is_empty() {
+                    entry.insert("http_headers".into(), serde_json::Value::Object(http_headers));
+                }
+                if !env_http_headers.is_empty() {
+                    entry.insert("env_http_headers".into(), serde_json::Value::Object(env_http_headers));
+                }
             }
         }
         Some((format!("/mcp_servers/{name}"), serde_json::Value::Object(entry)))
@@ -615,29 +645,71 @@ mod tests {
         assert_eq!(value["url"], "https://api.example.com/mcp");
     }
 
-    // C1 DECIDED-note reconciliation: the plan's "skip env-ref descriptors,
-    // Copilot precedent" note conflicts with
-    // `mcp_entry_stdio_maps_command_args_env_under_mcp_servers_pointer`
-    // above, which is already pinned to accept a literal `${VAR}` value in
-    // `env` (a stdio `env` entry is an OS-environment passthrough, not
-    // substituted by grim or Codex — the same contract Claude/OpenCode
-    // already give it). The place Codex genuinely cannot represent a
-    // descriptor is HTTP/SSE headers — its upstream schema has no headers
-    // field at all — so that is where the skip-with-warning precedent
-    // applies; this is the "dedicated skip test" the plan calls for.
+    // HTTP/SSE headers map onto Codex's three upstream header surfaces
+    // (`http_headers` / `env_http_headers` / `bearer_token_env_var`); only
+    // an unrepresentable header (env ref embedded in text, multiple refs)
+    // still skips the descriptor — fail-closed, never a broken literal.
     #[test]
-    fn mcp_entry_http_with_headers_is_skipped_codex_has_no_headers_field() {
+    fn mcp_entry_http_static_header_maps_to_http_headers() {
+        let mut descriptor = http_descriptor("https://api.example.com/mcp");
+        descriptor
+            .server
+            .headers
+            .insert("X-Api-Version".to_string(), "2026-07".to_string());
+        let (_, value) = CodexVendor
+            .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+            .expect("static header is representable");
+        assert_eq!(value["http_headers"]["X-Api-Version"], "2026-07");
+        assert!(value.get("env_http_headers").is_none());
+        assert!(value.get("bearer_token_env_var").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_http_bearer_header_maps_to_bearer_token_env_var() {
         let mut descriptor = http_descriptor("https://api.example.com/mcp");
         descriptor
             .server
             .headers
             .insert("Authorization".to_string(), "Bearer ${API_TOKEN}".to_string());
-        assert!(
-            CodexVendor
-                .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
-                .is_none(),
-            "config.toml has no headers field; a descriptor that needs one must be skipped, not silently dropped"
-        );
+        let (_, value) = CodexVendor
+            .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+            .expect("Bearer ${VAR} maps to bearer_token_env_var");
+        assert_eq!(value["bearer_token_env_var"], "API_TOKEN");
+        assert!(value.get("http_headers").is_none());
+        assert!(value.get("env_http_headers").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_http_bare_ref_header_maps_to_env_http_headers() {
+        let mut descriptor = http_descriptor("https://api.example.com/mcp");
+        descriptor
+            .server
+            .headers
+            .insert("X-Api-Key".to_string(), "${API_KEY}".to_string());
+        let (_, value) = CodexVendor
+            .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+            .expect("whole-value ${VAR} maps to env_http_headers");
+        assert_eq!(value["env_http_headers"]["X-Api-Key"], "API_KEY");
+        assert!(value.get("http_headers").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_http_unrepresentable_header_is_skipped() {
+        // An env ref embedded in surrounding text has no faithful target:
+        // http_headers is literal-only, env_http_headers is whole-value.
+        for value in ["token ${API_TOKEN} extra", "${A}${B}"] {
+            let mut descriptor = http_descriptor("https://api.example.com/mcp");
+            descriptor
+                .server
+                .headers
+                .insert("X-Auth".to_string(), value.to_string());
+            assert!(
+                CodexVendor
+                    .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+                    .is_none(),
+                "unrepresentable header value '{value}' must skip the descriptor"
+            );
+        }
     }
 
     // ── codex.reasoning-effort enum tracks the upstream native

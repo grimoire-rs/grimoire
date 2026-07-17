@@ -136,7 +136,7 @@ client already reads — never a new file:
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` | `mcp` | same as project | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | project | `<workspace>/.vscode/mcp.json` | `servers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url`/`headers` | `${env:VAR}` |
 | [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
-| [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` only (no headers — see [Limitations](#limitations)) | `${VAR}` (literal passthrough, not substituted by grim) |
+| [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
 
 Codex is the one **TOML** target — every other client above writes
@@ -310,12 +310,15 @@ arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
 - **Copilot CLI's global config skips descriptors with `${VAR}`
   references** — see [Environment references](#env-references). Every
   other client and scope still installs normally.
-- **[Codex][codex-mcp-docs] has no headers field.** Its upstream MCP
-  schema maps only `url` for a remote server; a descriptor whose
-  `[server]` table carries `headers` (almost always an auth token, e.g.
-  `Authorization: Bearer ${VAR}`) is skipped for Codex with a warning
-  rather than registering a connection Codex can never authenticate.
-  Every other client and scope still installs normally.
+- **[Codex][codex-mcp-docs] headers must fit one of three upstream
+  surfaces.** A remote descriptor's `headers` map onto Codex's
+  `http_headers` (a plain literal value), `env_http_headers` (a value
+  that is exactly one `${VAR}`), or `bearer_token_env_var`
+  (`Authorization: Bearer ${VAR}`). A header that embeds an env
+  reference in surrounding text — or carries several references — has no
+  faithful Codex representation, so that descriptor is skipped for Codex
+  with a warning rather than writing a broken literal or inlining a
+  secret. Every other client and scope still installs normally.
 - **`grim_fetch` / `grim_describe` / `grim_render` need the network even
   with warm blobs.** grim's cache stores blobs but not manifests, so under
   `GRIM_OFFLINE=1` (or `--offline`) these fail cleanly at the manifest

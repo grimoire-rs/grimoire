@@ -284,6 +284,48 @@ def test_reformatting_codex_config_toml_is_not_modified_but_a_value_change_is(
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "missing"
 
 
+REMOTE_HEADERS_DESCRIPTOR = """\
+description = "Remote MCP with headers."
+
+[server]
+transport = "http"
+url = "https://api.example.com/mcp"
+
+[server.headers]
+X-Api-Version = "2026-07"
+Authorization = "Bearer ${API_TOKEN}"
+"""
+
+
+def test_install_mcp_codex_remote_headers_render_valid_toml(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A remote descriptor with a static and a Bearer header registers a
+    Codex entry mapping them onto ``http_headers`` /
+    ``bearer_token_env_var`` (Codex's upstream RawMcpServerConfig header
+    surfaces); the spliced file is valid TOML and uninstall round-trips."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=REMOTE_HEADERS_DESCRIPTOR)
+    (project_dir / ".codex").mkdir()  # detect Codex only
+    write_config(project_dir)
+    runner.json("add", ref)
+    runner.json("install")
+
+    cfg = project_dir / ".codex" / "config.toml"
+    doc = tomllib.loads(cfg.read_text())
+    entry = doc["mcp_servers"]["grim-mcp"]
+    assert entry["url"] == "https://api.example.com/mcp"
+    assert entry["http_headers"] == {"X-Api-Version": "2026-07"}
+    assert entry["bearer_token_env_var"] == "API_TOKEN", (
+        "Authorization: Bearer ${VAR} maps to bearer_token_env_var, never inlined"
+    )
+    assert "env_http_headers" not in entry
+
+    runner.json("uninstall", "mcp", "grim-mcp")
+    doc = tomllib.loads(cfg.read_text()) if cfg.exists() else {}
+    assert "grim-mcp" not in doc.get("mcp_servers", {}), "uninstall removes only the managed entry"
+
+
 def test_update_pin_change_resplices_codex_mcp_entry_in_place(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
