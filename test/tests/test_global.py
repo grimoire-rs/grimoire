@@ -252,6 +252,59 @@ def test_global_copilot_rule_installs_to_native_instructions_path(
     )
 
 
+def test_global_copilot_rule_native_root_emits_no_fallback_warning(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Pass arm of the Copilot global-rule warn conditional (installer.rs
+    ~594): when the native Copilot root resolves (HOME set), the rule
+    installs to the native instructions path and NO fallback warning is
+    emitted."""
+    repo = f"{unique_repo}/cp-warn-rule"
+    ru = make_artifact(repo, "rule", {"cp-warn-rule.md": "# guidance\n"}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-warn-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    result = runner.run(
+        "install", "--global", "--client", "copilot", format="json", log_level="warn"
+    )
+    assert (runner.home / ".copilot/instructions/cp-warn-rule.instructions.md").is_file()
+    assert "no resolvable Copilot root" not in result.stderr, (
+        "a resolvable native root must not emit the workspace-fallback warning\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+def test_global_copilot_rule_without_resolvable_root_warns_and_falls_back(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Decline arm of the Copilot global-rule warn conditional (installer.rs
+    ~594): with neither COPILOT_HOME nor HOME set no native Copilot root
+    resolves, so the rule falls back to the inert workspace layout and the
+    installer warns."""
+    repo = f"{unique_repo}/cp-nowarn-rule"
+    ru = make_artifact(repo, "rule", {"cp-nowarn-rule.md": "# guidance\n"}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-nowarn-rule = "{ru.fq}"\n')
+    # cwd in an isolated dir so the workspace-layout fallback write lands in
+    # the temp tree, not the pytest working directory.
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    runner = GrimRunner(grim_binary, grim_home, cwd=workdir)
+    # Drop the isolated HOME/USERPROFILE so home_dir() returns None and, with
+    # COPILOT_HOME also unset, global_native_root(None, None) is None.
+    runner.env.pop("HOME", None)
+    runner.env.pop("USERPROFILE", None)
+    runner.json("lock", "--global")
+
+    result = runner.run(
+        "install", "--global", "--client", "copilot", format="json", log_level="warn", check=False
+    )
+    assert "no resolvable Copilot root" in result.stderr, (
+        "an unresolvable native root must emit the workspace-fallback warning\n"
+        f"rc={result.returncode} stderr: {result.stderr.strip()}"
+    )
+
+
 def test_global_copilot_rule_layout_migration_reaps_old_output(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:

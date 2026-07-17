@@ -2442,6 +2442,95 @@ mod tests {
         );
     }
 
+    // ── output_at_current_layout (S5) ───────────────────────────────────────
+    //
+    // `output_at_current_layout` reads only `out.entry`, `out.target`,
+    // `rec.kind`, and `rec.name` (never `rec.outputs`), so `reap_record(vec![])`
+    // is a sufficient record stand-in for these unit tests.
+
+    /// A recorded output whose anchor+relative equals what the CURRENT layout
+    /// produces is at the current layout (integrity gate stays online).
+    #[test]
+    fn output_at_current_layout_true_when_layout_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
+        // The current Project/Copilot/Rule layout for record name "r".
+        let out = reap_output(
+            PathAnchor::Workspace,
+            ".github/instructions/r.instructions.md",
+            Digest::Sha256("a".repeat(64)),
+        );
+        let rec = reap_record(vec![]);
+        assert!(output_at_current_layout(
+            &out,
+            ClientTarget::Copilot,
+            &rec,
+            &target,
+            &roots(dir.path()),
+        ));
+    }
+
+    /// A recorded output at a stale relative (a render-layout move) no longer
+    /// matches the current-layout anchor+relative → not current, so the
+    /// integrity gate falls through and the reaper collects the old path.
+    #[test]
+    fn output_at_current_layout_false_on_anchor_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
+        // Recorded at an OLD relative; the current layout produces
+        // ".github/instructions/r.instructions.md".
+        let out = reap_output(
+            PathAnchor::Workspace,
+            "instructions/r.instructions.md",
+            Digest::Sha256("a".repeat(64)),
+        );
+        let rec = reap_record(vec![]);
+        assert!(!output_at_current_layout(
+            &out,
+            ClientTarget::Copilot,
+            &rec,
+            &target,
+            &roots(dir.path()),
+        ));
+    }
+
+    /// When the current-layout destination cannot be anchored on this host
+    /// (its anchor root is absent from `roots`), the path cannot move, so the
+    /// output counts as current — nothing to migrate. Global Claude rules
+    /// anchor to ClaudeRoot, which is `None` in `roots()`.
+    #[test]
+    fn output_at_current_layout_true_when_root_unresolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Global, vec![ClientTarget::Claude]);
+        let out = reap_output(PathAnchor::ClaudeRoot, "rules/r.md", Digest::Sha256("a".repeat(64)));
+        let rec = reap_record(vec![]);
+        assert!(output_at_current_layout(
+            &out,
+            ClientTarget::Claude,
+            &rec,
+            &target,
+            &roots(dir.path()),
+        ));
+    }
+
+    /// Entry-typed outputs (MCP config registrations) live in a vendor config
+    /// file, not a render layout — always current, never migrated.
+    #[test]
+    fn output_at_current_layout_true_for_entry_typed_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut out = reap_output(PathAnchor::Workspace, ".mcp.json", Digest::Sha256("a".repeat(64)));
+        out.entry = Some("/mcpServers/m".to_string());
+        let rec = reap_record(vec![]);
+        assert!(output_at_current_layout(
+            &out,
+            ClientTarget::Claude,
+            &rec,
+            &target,
+            &roots(dir.path()),
+        ));
+    }
+
     // ── Client-set desync regression tests (C1–C3) ──────────────────────────
 
     /// C1: a recorded client output whose anchor root is absent on this
