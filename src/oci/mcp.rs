@@ -357,6 +357,7 @@ impl McpDescriptor {
                     .as_deref()
                     .into_iter()
                     .chain(o.scopes.iter().map(String::as_str))
+                    .chain(o.auth_server_metadata_url.as_deref())
             }))
     }
 }
@@ -655,6 +656,19 @@ auth_server_metadata_url = "https://auth.example.com/.well-known/oauth-authoriza
         // client_id / scopes join env-ref validation (bad ref rejects).
         let err = McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nscopes = [\"${BAD:-x}\"]",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::InvalidEnvRef(_)), "{err}");
+    }
+
+    #[test]
+    fn auth_server_metadata_url_joins_env_ref_validation() {
+        // The metadata URL starts with https:// (passing the scheme check)
+        // but embeds a malformed default-syntax reference. string_values'
+        // "every string value that may carry ${VAR} references" contract
+        // must reject it just like client_id / scopes do.
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nauth_server_metadata_url = \"https://${AUTH_HOST:-fallback}/.well-known/oauth-authorization-server\"",
         )
         .unwrap_err();
         assert!(matches!(err, McpError::InvalidEnvRef(_)), "{err}");
