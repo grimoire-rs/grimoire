@@ -326,12 +326,15 @@ struct CodexHeaders {
 /// header surfaces (`http_headers`/`env_http_headers`/`bearer_token_env_var`).
 /// Returns `None` — descriptor unrepresentable, warning already emitted —
 /// when two header names collide case-insensitively (HTTP header names are
-/// case-insensitive, but `headers` is a `BTreeMap` keyed on the raw name, so
-/// e.g. `Authorization` and `authorization` are distinct keys that would
-/// both hit the bearer branch, contending for the single
-/// `bearer_token_env_var` slot) or when a header value embeds an env
-/// reference Codex cannot represent faithfully (in surrounding text, or
-/// multiple refs).
+/// case-insensitive, and so are Codex's three header slots, but `headers` is
+/// a `BTreeMap` keyed on the raw name — so ANY pair of names differing only
+/// in case is two distinct keys that Codex cannot tell apart, regardless of
+/// which slot they land in. The sharpest instance is the bearer slot:
+/// `Authorization` and `authorization` both hit the bearer branch and
+/// contend for the single `bearer_token_env_var`, but `X-Trace`/`x-trace`
+/// in `http_headers` is just as unrepresentable) or when a header value
+/// embeds an env reference Codex cannot represent faithfully (in surrounding
+/// text, or multiple refs).
 fn classify_codex_headers(
     headers: &std::collections::BTreeMap<String, String>,
     name: &str,
@@ -847,6 +850,31 @@ mod tests {
                 .is_none(),
             "two case-insensitively-colliding Authorization headers are unrepresentable \
              for Codex (single bearer_token_env_var slot) — must decline, not pick a winner"
+        );
+    }
+
+    // The case-insensitive collision guard fires on ANY duplicate header name,
+    // not just the bearer slot: Codex's `http_headers`/`env_http_headers` maps
+    // are themselves case-insensitive, so two names that differ only in case
+    // (`X-Trace`/`x-trace`) are also unrepresentable — decline, don't emit a
+    // BTreeMap-order winner.
+    #[test]
+    fn mcp_entry_http_case_insensitive_duplicate_nonauth_headers_are_declined() {
+        let mut descriptor = http_descriptor("https://api.example.com/mcp");
+        descriptor
+            .server
+            .headers
+            .insert("X-Trace".to_string(), "on".to_string());
+        descriptor
+            .server
+            .headers
+            .insert("x-trace".to_string(), "off".to_string());
+        assert!(
+            CodexVendor
+                .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+                .is_none(),
+            "two case-insensitively-colliding non-auth headers are unrepresentable for Codex \
+             (case-insensitive header slots) — must decline, not pick a winner"
         );
     }
 

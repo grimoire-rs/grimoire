@@ -1700,25 +1700,33 @@ mod tests {
         b.into_inner().unwrap()
     }
 
-    fn locked_rule(name: &str, blob: &[u8]) -> LockedArtifact {
+    /// Shared `LockMetadata` for the lock-builder helpers — every field is a
+    /// fixed test constant that never varies between `lock_of`/`lock_of_mcp`.
+    fn test_lock_metadata() -> LockMetadata {
+        LockMetadata {
+            lock_version: LockVersion::V1,
+            declaration_hash_version: 1,
+            declaration_hash: format!("sha256:{}", "d".repeat(64)),
+            generated_by: "grim 0.1.0".to_string(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Build a locked artifact of `kind` whose pin digest = sha256(`blob`); a
+    /// distinct blob therefore yields a distinct pin (drives `pin_changed`).
+    fn locked_of(name: &str, blob: &[u8], kind: ArtifactKind) -> LockedArtifact {
         let digest = Algorithm::Sha256.hash(blob);
         let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(digest);
-        LockedArtifact::direct(
-            name.to_string(),
-            ArtifactKind::Rule,
-            PinnedIdentifier::try_from(id).unwrap(),
-        )
+        LockedArtifact::direct(name.to_string(), kind, PinnedIdentifier::try_from(id).unwrap())
+    }
+
+    fn locked_rule(name: &str, blob: &[u8]) -> LockedArtifact {
+        locked_of(name, blob, ArtifactKind::Rule)
     }
 
     fn lock_of(rules: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
-            metadata: LockMetadata {
-                lock_version: LockVersion::V1,
-                declaration_hash_version: 1,
-                declaration_hash: format!("sha256:{}", "d".repeat(64)),
-                generated_by: "grim 0.1.0".to_string(),
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-            },
+            metadata: test_lock_metadata(),
             skills: vec![],
             rules,
             agents: vec![],
@@ -1727,27 +1735,13 @@ mod tests {
         }
     }
 
-    /// Build a locked MCP artifact whose pin digest = sha256(`blob`); a
-    /// distinct blob therefore yields a distinct pin (drives `pin_changed`).
     fn locked_mcp(name: &str, blob: &[u8]) -> LockedArtifact {
-        let digest = Algorithm::Sha256.hash(blob);
-        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(digest);
-        LockedArtifact::direct(
-            name.to_string(),
-            ArtifactKind::Mcp,
-            PinnedIdentifier::try_from(id).unwrap(),
-        )
+        locked_of(name, blob, ArtifactKind::Mcp)
     }
 
     fn lock_of_mcp(mcp: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
-            metadata: LockMetadata {
-                lock_version: LockVersion::V1,
-                declaration_hash_version: 1,
-                declaration_hash: format!("sha256:{}", "d".repeat(64)),
-                generated_by: "grim 0.1.0".to_string(),
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-            },
+            metadata: test_lock_metadata(),
             skills: vec![],
             rules: vec![],
             agents: vec![],
@@ -3461,11 +3455,18 @@ mod tests {
         )
         .await;
 
-        // The rebuilt record no longer tracks Codex (it declined the new pin).
+        // The rebuilt record no longer tracks Codex (it declined the new pin),
+        // but the surviving Claude output keeps the record non-empty — that
+        // non-empty premise is what makes the B1 orphan leak reachable, so
+        // pin it explicitly.
         let rec_b = state.get(crate::oci::ArtifactKind::Mcp, "srv").unwrap();
         assert!(
             rec_b.outputs.iter().all(|o| o.client != "codex"),
             "pin B record must drop the declining Codex output"
+        );
+        assert!(
+            rec_b.outputs.iter().any(|o| o.client == "claude"),
+            "pin B record must keep the surviving Claude output (non-empty record is the B1 premise)"
         );
 
         // ...and Codex's stale entry must be spliced out of its config, not
@@ -3474,6 +3475,15 @@ mod tests {
         assert!(
             crate::install::toml_splice::member_value(&raw_b, "mcp_servers", "srv").is_none(),
             "stale Codex MCP entry must be removed on a pin-change decline, not orphaned: {raw_b}"
+        );
+
+        // The surviving Claude entry must remain in its own config — the
+        // decline reaps only the declining client, never a representable sibling.
+        let claude_config = dir.path().join(".mcp.json");
+        let raw_claude = std::fs::read_to_string(&claude_config).unwrap();
+        assert!(
+            crate::install::json_splice::member_value(&raw_claude, "mcpServers", "srv").is_some(),
+            "surviving Claude MCP entry must remain after a Codex decline: {raw_claude}"
         );
     }
 
