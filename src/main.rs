@@ -62,7 +62,7 @@ use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
 use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
-use crate::error::classify;
+use crate::error::{ErrorReason, classify};
 
 #[derive(Parser)]
 #[command(
@@ -170,21 +170,20 @@ fn main() -> std::process::ExitCode {
             // the default filter also writes to stderr).
             eprintln!("{err:#}");
             let classification = classify(&err);
-            let reason = classification.reason.map(|r| r.to_string());
-            emit_error_document(format, classification.exit, &format!("{err:#}"), reason.as_deref());
+            emit_error_document(format, classification.exit, &format!("{err:#}"), classification.reason);
             classification.exit.into()
         }
     }
 }
 
 /// Under `--format json`, print the structured error document to stdout:
-/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>", "reason"?}}`.
+/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>", "reason"?, "retryable"?}}`.
 ///
 /// stdout — not stderr — because stderr carries tracing output and the two
 /// would interleave; a consumer parses stdout and treats a top-level
 /// `error` key as the error document (see `docs/src/json-interface.md`).
 /// Plain mode emits nothing here (the human chain is already on stderr).
-fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reason: Option<&str>) {
+fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reason: Option<ErrorReason>) {
     if format != OutputFormat::Json {
         return;
     }
@@ -194,12 +193,16 @@ fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reas
 }
 
 /// Build the error-document value. `reason` is the optional machine-readable
-/// subtype (`error::classify`'s `Classification::reason`, rendered via its
-/// `Display`); when `None` the key is omitted, matching the fetch `encoding`
-/// omit-empty precedent so a consumer distinguishes an old grim (no key)
-/// from an unclassified error (still no key — the same, by design: reasons
-/// are purely additive over the existing `code`/`exit`).
-fn error_document(code: ExitCode, message: &str, reason: Option<&str>) -> serde_json::Value {
+/// subtype (`error::classify`'s `Classification::reason`), rendered through
+/// its `Display`; when `None` the key is omitted, matching the fetch
+/// `encoding` omit-empty precedent so a consumer distinguishes an old grim
+/// (no key) from an unclassified error (still no key — the same, by
+/// design: reasons are purely additive over the existing `code`/`exit`).
+///
+/// `retryable` is likewise omit-when-absent: present and `true` only when
+/// `reason` is both present and [`ErrorReason::retryable`] — never a bare
+/// `false`, so a consumer's presence check alone answers the question.
+fn error_document(code: ExitCode, message: &str, reason: Option<ErrorReason>) -> serde_json::Value {
     let mut error = serde_json::json!({
         "code": code.slug(),
         "exit": code as u8,
@@ -207,6 +210,9 @@ fn error_document(code: ExitCode, message: &str, reason: Option<&str>) -> serde_
     });
     if let Some(reason) = reason {
         error["reason"] = serde_json::Value::String(reason.to_string());
+        if reason.retryable() {
+            error["retryable"] = serde_json::Value::Bool(true);
+        }
     }
     serde_json::json!({ "error": error })
 }
@@ -257,7 +263,34 @@ mod tests {
 
     #[test]
     fn error_document_carries_reason_when_present() {
-        let doc = error_document(ExitCode::DataError, "boom", Some("stale-lock"));
+        let doc = error_document(ExitCode::DataError, "boom", Some(crate::error::ErrorReason::StaleLock));
         assert_eq!(doc["error"]["reason"], "stale-lock");
+    }
+
+    #[test]
+    fn error_document_omits_retryable_when_reason_is_none() {
+        let doc = error_document(ExitCode::DataError, "boom", None);
+        assert!(
+            doc["error"].get("retryable").is_none(),
+            "no reason ⇒ no retryable key: {doc}"
+        );
+    }
+
+    #[test]
+    fn error_document_omits_retryable_for_non_retryable_reason() {
+        // stale-lock is a documented reason but not retryable — the field
+        // must stay absent, not `false`.
+        let doc = error_document(ExitCode::DataError, "boom", Some(crate::error::ErrorReason::StaleLock));
+        assert!(
+            doc["error"].get("retryable").is_none(),
+            "stale-lock is not retryable: {doc}"
+        );
+    }
+
+    #[test]
+    fn error_document_carries_retryable_true_for_locked() {
+        let doc = error_document(ExitCode::TempFail, "boom", Some(crate::error::ErrorReason::Locked));
+        assert_eq!(doc["error"]["reason"], "locked");
+        assert_eq!(doc["error"]["retryable"], true);
     }
 }

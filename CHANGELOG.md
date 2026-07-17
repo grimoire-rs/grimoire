@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The JSON error document gains two new `reason` subtypes: `no-config`
+  (a project-scope command found no `grimoire.toml` walking up from the
+  working directory — exit 79, distinct from an explicit `--config <path>`
+  that does not exist, which stays reason-less) and `locked` (a config-file
+  write lost the advisory-lock race — exit 75). `locked` also sets the new,
+  additive `retryable: true` field, so a consumer knows to retry the same
+  command unchanged without scraping `message` *(error)*
 - `grim config set --dry-run` validates and reports the write confirmation
   without acquiring the write lock or touching `grimoire.toml`; the report
   gains an always-present `dry_run` field (`false` for every other write

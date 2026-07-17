@@ -102,6 +102,15 @@ pub enum ErrorReason {
     /// disk with no install record; retry with `--force` to overwrite and
     /// record it.
     UntrackedDestination,
+    /// A project-scope command found no `grimoire.toml` by walking up from
+    /// the working directory (`ConfigErrorKind::NotDiscovered`). Distinct
+    /// from an explicit `--config <path>` that does not exist, which stays
+    /// reason-less (see `classify_config`).
+    NoConfig,
+    /// A config-file write was refused because another process holds the
+    /// `<file>.lock` advisory sidecar (`LockErrorKind::Locked`). Transient —
+    /// retry may succeed once the other writer releases the lock.
+    Locked,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -110,7 +119,21 @@ impl std::fmt::Display for ErrorReason {
             Self::StaleLock => "stale-lock",
             Self::LocalModified => "modified",
             Self::UntrackedDestination => "untracked-destination",
+            Self::NoConfig => "no-config",
+            Self::Locked => "locked",
         })
+    }
+}
+
+impl ErrorReason {
+    /// Whether a consumer should treat this reason as transient — worth
+    /// retrying the same command unchanged. Keyed on the reason (single
+    /// source of truth), never on the exit code: `AuthError::Helper::Timeout`
+    /// also exits `TempFail` (75) but carries no reason at all, so it can
+    /// never reach this method — a caller that keyed on exit code instead
+    /// would wrongly mark it retryable.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Locked)
     }
 }
 
@@ -145,8 +168,8 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 Error::Identifier(_) => Classification::new(ExitCode::DataError),
                 Error::Digest(_) => Classification::new(ExitCode::DataError),
                 Error::PinnedIdentifier(_) => Classification::new(ExitCode::DataError),
-                Error::Config(ce) => Classification::new(classify_config(ce)),
-                Error::Lock(le) => Classification::new(classify_lock(le)),
+                Error::Config(ce) => classify_config(ce),
+                Error::Lock(le) => classify_lock(le),
                 Error::Access(ae) => Classification::new(classify_access(ae)),
                 Error::Resolve(re) => classify_resolve(re),
                 Error::Install(ie) => classify_install(ie),
@@ -187,38 +210,56 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
     classify(err).exit
 }
 
-/// Map a config-tier error to an exit code.
-fn classify_config(err: &ConfigError) -> ExitCode {
+/// Map a config-tier error to a classification. `NotDiscovered` (no
+/// `grimoire.toml` found walking up from cwd) carries the `NoConfig` reason;
+/// every other arm — including the explicit-`--config`-path-missing `Io`
+/// case right below it — carries none. The two `NotFound` arms look
+/// similar but must never merge: `NotDiscovered` is "no project config
+/// exists anywhere", `Io(NotFound)` is "the path the user named does not
+/// exist" — only the former is a `NoConfig` refusal.
+fn classify_config(err: &ConfigError) -> Classification {
     match &err.kind {
         ConfigErrorKind::TomlParse(_)
         | ConfigErrorKind::FileTooLarge { .. }
         | ConfigErrorKind::RegistryInvalid { .. }
         | ConfigErrorKind::TreeSeparatorInvalid { .. }
-        | ConfigErrorKind::ClientsInvalid { .. } => ExitCode::ConfigError,
-        ConfigErrorKind::NotDiscovered => ExitCode::NotFound,
+        | ConfigErrorKind::ClientsInvalid { .. } => Classification::new(ExitCode::ConfigError),
+        ConfigErrorKind::NotDiscovered => Classification {
+            exit: ExitCode::NotFound,
+            reason: Some(ErrorReason::NoConfig),
+        },
         ConfigErrorKind::ArtifactValueMissingRegistry { .. }
         | ConfigErrorKind::ArtifactValueInvalid { .. }
         | ConfigErrorKind::ArtifactValuePathInvalid { .. }
-        | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => ExitCode::DataError,
-        ConfigErrorKind::ConfigAlreadyExists => ExitCode::UsageError,
+        | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => Classification::new(ExitCode::DataError),
+        ConfigErrorKind::ConfigAlreadyExists => Classification::new(ExitCode::UsageError),
         // A missing config file is a NotFound contract case (docs:
         // "Explicit --config <path> not found" ⇒ 79), not a generic I/O
         // failure: discovery guards existence and the global config
         // absorbs absence, so config-tier ENOENT means an explicit path.
-        ConfigErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound => ExitCode::NotFound,
-        ConfigErrorKind::Io(io) => classify_io(io),
+        // No reason: unlike `NotDiscovered` above, this is a wrong path the
+        // user typed, not "no config anywhere" — a consumer must not
+        // conflate the two.
+        ConfigErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound => Classification::new(ExitCode::NotFound),
+        ConfigErrorKind::Io(io) => Classification::new(classify_io(io)),
     }
 }
 
-/// Map a lock-tier error to an exit code.
-fn classify_lock(err: &LockError) -> ExitCode {
+/// Map a lock-tier error to a classification. `Locked` (another writer
+/// holds the config-file advisory sidecar) carries the `Locked` reason —
+/// the only reason [`ErrorReason::retryable`] reports `true` for; every
+/// other arm carries none.
+fn classify_lock(err: &LockError) -> Classification {
     match &err.kind {
-        LockErrorKind::Locked => ExitCode::TempFail,
+        LockErrorKind::Locked => Classification {
+            exit: ExitCode::TempFail,
+            reason: Some(ErrorReason::Locked),
+        },
         LockErrorKind::TomlParse(_)
         | LockErrorKind::TomlSerialize(_)
         | LockErrorKind::FileTooLarge { .. }
-        | LockErrorKind::UnsupportedVersion { .. } => ExitCode::ConfigError,
-        LockErrorKind::Io(io) => classify_io(io),
+        | LockErrorKind::UnsupportedVersion { .. } => Classification::new(ExitCode::ConfigError),
+        LockErrorKind::Io(io) => Classification::new(classify_io(io)),
     }
 }
 
@@ -584,6 +625,57 @@ mod tests {
         assert_eq!(ErrorReason::StaleLock.to_string(), "stale-lock");
         assert_eq!(ErrorReason::LocalModified.to_string(), "modified");
         assert_eq!(ErrorReason::UntrackedDestination.to_string(), "untracked-destination");
+        assert_eq!(ErrorReason::NoConfig.to_string(), "no-config");
+        assert_eq!(ErrorReason::Locked.to_string(), "locked");
+    }
+
+    #[test]
+    fn retryable_is_true_only_for_locked() {
+        // Single source of truth: retryable is keyed on the reason, never on
+        // the exit code — `AuthError::Helper::Timeout` also exits TempFail
+        // (75) but carries no `ErrorReason` at all, so it can never reach
+        // this method.
+        assert!(!ErrorReason::StaleLock.retryable());
+        assert!(!ErrorReason::LocalModified.retryable());
+        assert!(!ErrorReason::UntrackedDestination.retryable());
+        assert!(!ErrorReason::NoConfig.retryable());
+        assert!(ErrorReason::Locked.retryable());
+    }
+
+    #[test]
+    fn config_not_discovered_classifies_reason_as_no_config() {
+        let err: anyhow::Error = Error::from(ConfigError::new(
+            std::path::PathBuf::from("/w"),
+            ConfigErrorKind::NotDiscovered,
+        ))
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::NotFound,
+                reason: Some(ErrorReason::NoConfig),
+            }
+        );
+    }
+
+    #[test]
+    fn lock_locked_classifies_reason_as_locked() {
+        let err: anyhow::Error = Error::from(LockError::new(
+            std::path::PathBuf::from("/w/grimoire.toml.lock"),
+            LockErrorKind::Locked,
+        ))
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::TempFail,
+                reason: Some(ErrorReason::Locked),
+            }
+        );
+        assert!(
+            classify(&err).reason.is_some_and(ErrorReason::retryable),
+            "lock contention must be marked retryable"
+        );
     }
 
     #[test]
@@ -790,6 +882,14 @@ mod tests {
         ))
         .into();
         assert_eq!(classify_error(&err), ExitCode::NotFound);
+        // CRITICAL negative: an explicit `--config <path>` that does not
+        // exist is a wrong path, not "no config anywhere" — it must NEVER
+        // carry the `NoConfig` reason `ConfigErrorKind::NotDiscovered` gets.
+        assert_eq!(
+            classify(&err).reason,
+            None,
+            "explicit --config path missing must stay reason-less, unlike NotDiscovered"
+        );
 
         // Any other config-tier I/O failure keeps the generic mapping.
         let io = std::io::Error::other("disk gone");

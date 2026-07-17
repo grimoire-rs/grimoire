@@ -252,9 +252,35 @@ recognize. The reasons defined so far:
 | `stale-lock` | `data` / 65 | A partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration. Retry with a full `grim update` (no names). |
 | `modified` | `data` / 65 | An install was refused because the installed artifact was modified locally (the same state `grim status` reports as `modified`). Retry the same `grim install` / `grim add` with `--force` to overwrite. |
 | `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. |
+| `no-config` | `not-found` / 79 | A project-scope command found no `grimoire.toml` by walking up from the working directory. Distinct from an explicit `--config <path>` that does not exist, which also exits 79 but carries no `reason` — that is a wrong path, not "no config anywhere". |
+| `locked` | `temp-fail` / 75 | A config-file write was refused because another `grim` process holds the `<file>.lock` advisory sidecar. Transient — retry the same command. |
 
 New reasons may appear in any minor release under the [additive-field
 policy][stability-additive]; existing ones never change meaning.
+
+### The optional `retryable` field
+
+Alongside `reason`, the error object may carry `"retryable": true` — a
+hint that the same command is worth retrying unchanged, no `--force` or
+input fix required:
+
+```json
+{
+  "error": {
+    "code": "temp-fail",
+    "exit": 75,
+    "reason": "locked",
+    "retryable": true,
+    "message": "…: another process holds the advisory lock; try again"
+  }
+}
+```
+
+`retryable` is **additive and omit-when-absent**, same rule as `reason`
+itself: present only when `reason` is present *and* that specific reason
+is retryable, otherwise the key is absent entirely — never a bare
+`false`. Today only `locked` sets it; every other documented `reason`
+(including a bare `reason`-less failure) omits the key.
 
 ## Null and additive policy {#null-policy}
 

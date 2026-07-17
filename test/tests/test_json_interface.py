@@ -41,6 +41,9 @@ def test_error_document_on_missing_config(
     assert "reason" not in doc["error"], (
         f"an unclassified error omits the optional reason subtype: {doc}"
     )
+    assert "retryable" not in doc["error"], (
+        f"no reason ⇒ no retryable key either: {doc}"
+    )
     assert result.stderr.strip(), "human-readable chain still on stderr"
 
 
@@ -129,6 +132,68 @@ def test_modified_refusal_carries_reason(
         assert doc["error"]["code"] == "data", argv
         assert doc["error"]["exit"] == 65, argv
         assert doc["error"]["reason"] == "modified", f"{argv}: {doc}"
+
+
+def test_error_reason_marks_no_config(grim_at, project_dir: Path) -> None:
+    """A project-scope command run in a directory with no discoverable
+    ``grimoire.toml`` (walk-up finds nothing, ceiling'd at the isolated
+    ``$HOME``) carries reason ``no-config`` — distinct from an explicit
+    ``--config <path>`` that does not exist, which carries no reason at
+    all (`test_error_document_on_missing_config`)."""
+    runner = grim_at(project_dir)  # empty dir; no grimoire.toml anywhere up
+
+    result = runner.run("--format", "json", "status", check=False)
+    assert result.returncode == 79, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["error"]["code"] == "not-found"
+    assert doc["error"]["exit"] == 79
+    assert doc["error"]["reason"] == "no-config"
+    assert "retryable" not in doc["error"], (
+        f"no-config is not a retryable reason: {doc}"
+    )
+
+
+def test_error_reason_marks_locked_and_retryable(
+    grim_at, project_dir: Path
+) -> None:
+    """A ``grim config set`` that loses the advisory-flock race on the
+    ``grimoire.toml.lock`` sidecar exits 75 (TempFail) with reason
+    ``locked`` and ``retryable: true`` — the one reason
+    ``ErrorReason::retryable`` reports ``true`` for.
+
+    Holds the sidecar's exclusive flock directly from the test process
+    (POSIX ``fcntl.flock``, non-blocking) so the contention is deterministic
+    rather than racing two subprocesses."""
+    import fcntl
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        import pytest
+
+        pytest.skip("POSIX fcntl.flock sidecar contention")
+
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    sidecar = project_dir / "grimoire.toml.lock"
+
+    fd = os.open(sidecar, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = runner.run(
+            "--format", "json", "config", "set", "options.clients", "claude",
+            check=False,
+        )
+        assert result.returncode == 75, result.stderr
+        doc = json.loads(result.stdout)
+        assert doc["error"]["code"] == "temp-fail"
+        assert doc["error"]["exit"] == 75
+        assert doc["error"]["reason"] == "locked"
+        assert doc["error"]["retryable"] is True
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def test_plain_mode_failure_keeps_stdout_empty(
