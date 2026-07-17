@@ -99,15 +99,9 @@ under `test/`. Rust edition 2024.
 these skills** — duty + procedure: [catalog/README.md](./catalog/README.md).
 Hooks remind on matching edits; `task catalog:verify` gates CI.
 
-## Deep Context
-
-- `.claude/rules/product-context.md` — product vision and positioning
-- `.claude/rules/arch-principles.md` — design principles (auto-loads on
-  Rust files)
-
 ## Core Principles
 
-Eight principles distill every rule, skill, and standard in the framework.
+Nine principles distill every rule, skill, and standard in the framework.
 Follow them and everything else follows.
 
 ### 1. Understand First
@@ -150,6 +144,12 @@ decisions in ADRs. Name things so the next person understands.
 
 When you get user feedback or corrections, evaluate whether the insight
 should persist as an AI config update (rules, skills, agents).
+
+### 9. Preserve Compatibility
+
+The era of breaking existing configurations is over — treat every schema, layout, and renderer change with high caution.
+Schema evolution is additive-only (new fields optional + default; enum literals added, never removed).
+Layout moves ship automatic state migration, an old-path reaper, and an upgrade fixture; renderer changes prove self-heal (re-materialize leaves `status` not-modified). Contract: `docs/src/stability.md`, `adr_render_layout_stability.md`.
 
 ## Tech Stack
 
