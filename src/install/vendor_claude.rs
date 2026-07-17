@@ -256,7 +256,7 @@ impl Vendor for ClaudeVendor {
                     entry.insert("env".into(), serde_json::json!(s.env));
                 }
             }
-            McpTransport::Http | McpTransport::Sse => {
+            McpTransport::Http | McpTransport::Sse | McpTransport::Ws => {
                 entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
                 entry.insert("url".into(), serde_json::json!(s.url));
                 if !s.headers.is_empty() {
@@ -428,6 +428,21 @@ mod tests {
         let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &remote).unwrap();
         assert_eq!(value["headersHelper"], "fresh-token");
         assert!(value.get("timeout").is_none(), "unset refinement must not emit");
+    }
+
+    #[test]
+    fn mcp_entry_ws_transport_projects_natively() {
+        // Claude reads `type: "ws"` with the same url/headers surface as
+        // http (code.claude.com/docs/en/mcp, "Add a remote WebSocket
+        // server").
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://mcp.example.com/socket\"\nheaders = { Authorization = \"Bearer ${T}\" }",
+        )
+        .unwrap();
+        let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(value["type"], "ws");
+        assert_eq!(value["url"], "wss://mcp.example.com/socket");
+        assert_eq!(value["headers"]["Authorization"], "Bearer ${T}");
     }
 
     fn parsed_agent(doc: &str) -> ParsedAgent {

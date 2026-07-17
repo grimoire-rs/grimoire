@@ -44,6 +44,10 @@ pub enum McpTransport {
     /// A remote server over server-sent events (deprecated upstream but
     /// still accepted by every client).
     Sse,
+    /// A remote server over a persistent WebSocket (`url` + `headers`,
+    /// `ws://`/`wss://` scheme). Claude-native (`type: "ws"`); other
+    /// vendors decline it.
+    Ws,
 }
 
 impl std::fmt::Display for McpTransport {
@@ -52,6 +56,7 @@ impl std::fmt::Display for McpTransport {
             Self::Stdio => "stdio",
             Self::Http => "http",
             Self::Sse => "sse",
+            Self::Ws => "ws",
         })
     }
 }
@@ -147,8 +152,9 @@ pub enum McpError {
         /// The declared transport.
         transport: McpTransport,
     },
-    /// A `url` that is not an absolute http(s) URL.
-    #[error("invalid server url '{0}': expected an http:// or https:// URL")]
+    /// A `url` whose scheme does not fit the transport: http(s) for
+    /// `http`/`sse`, ws(s) for `ws`.
+    #[error("invalid server url '{0}': expected http:// or https:// (ws:// or wss:// for the ws transport)")]
     InvalidUrl(String),
     /// A refinement field authored on a transport that cannot use it.
     #[error("field '{field}' is not valid for {transport} transport")]
@@ -246,14 +252,20 @@ impl McpDescriptor {
                     });
                 }
             }
-            McpTransport::Http | McpTransport::Sse => {
+            McpTransport::Http | McpTransport::Sse | McpTransport::Ws => {
                 let Some(url) = s.url.as_deref() else {
                     return Err(McpError::RemoteShape { transport: s.transport });
                 };
                 if s.command.is_some() || !s.args.is_empty() || !s.env.is_empty() {
                     return Err(McpError::RemoteShape { transport: s.transport });
                 }
-                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                // Scheme is transport-fitted: wss:// is canonical for ws
+                // (code.claude.com/docs/en/mcp, "type": "ws" example).
+                let scheme_ok = match s.transport {
+                    McpTransport::Ws => url.starts_with("wss://") || url.starts_with("ws://"),
+                    _ => url.starts_with("https://") || url.starts_with("http://"),
+                };
+                if !scheme_ok {
                     return Err(McpError::InvalidUrl(url.to_string()));
                 }
                 if s.cwd.is_some() {
@@ -448,6 +460,31 @@ headers = { Authorization = "Bearer ${TOKEN}" }
         // A plain `$VAR` (no braces) is a literal, not a reference — allowed.
         let toml = "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\nenv = { A = \"$HOME\" }";
         McpDescriptor::from_toml_str(toml).unwrap();
+    }
+
+    #[test]
+    fn ws_transport_parses_and_validates() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://mcp.example.com/socket\"\nheaders = { Authorization = \"Bearer ${TOKEN}\" }",
+        )
+        .unwrap();
+        assert_eq!(d.server.transport, McpTransport::Ws);
+        let bytes = d.to_layer_bytes().unwrap();
+        assert_eq!(d, McpDescriptor::from_layer_bytes(&bytes).unwrap());
+
+        // Remote shape enforced (url required, stdio fields forbidden).
+        let err = McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"").unwrap_err();
+        assert!(matches!(err, McpError::RemoteShape { .. }));
+
+        // Scheme is transport-fitted both ways.
+        let err =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"https://x\"")
+                .unwrap_err();
+        assert!(matches!(err, McpError::InvalidUrl(_)));
+        let err =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"wss://x\"")
+                .unwrap_err();
+        assert!(matches!(err, McpError::InvalidUrl(_)));
     }
 
     #[test]

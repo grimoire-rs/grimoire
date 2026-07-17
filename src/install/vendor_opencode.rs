@@ -166,6 +166,15 @@ impl Vendor for OpenCodeVendor {
                     entry.insert("cwd".into(), serde_json::json!(cwd));
                 }
             }
+            // WebSocket transport has no OpenCode `mcp` schema mapping —
+            // skip with a warning rather than writing a `remote` entry
+            // OpenCode would try to speak HTTP to.
+            McpTransport::Ws => {
+                tracing::warn!(
+                    "mcp server '{name}' skipped for opencode ({_scope}): no ws transport in the mcp schema"
+                );
+                return None;
+            }
             McpTransport::Http | McpTransport::Sse => {
                 entry.insert("type".into(), serde_json::json!("remote"));
                 entry.insert("url".into(), serde_json::json!(s.url));
@@ -373,6 +382,18 @@ mod tests {
             let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
             assert!(OpenCodeVendor.agent_index(&parsed, "p").is_err(), "{doc}");
         }
+    }
+
+    #[test]
+    fn mcp_entry_ws_transport_is_declined() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"",
+        )
+        .unwrap();
+        assert!(
+            OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none(),
+            "no ws transport in OpenCode's mcp schema — decline, never a broken remote entry"
+        );
     }
 
     #[test]

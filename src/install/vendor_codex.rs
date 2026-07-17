@@ -188,6 +188,13 @@ impl Vendor for CodexVendor {
                     entry.insert("env".into(), serde_json::json!(s.env));
                 }
             }
+            // WebSocket transport has no Codex mapping at all — skip with
+            // a warning (established decline precedent; the installer
+            // records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for codex ({scope}): config.toml has no ws transport");
+                return None;
+            }
             // `sse` has no dedicated Codex mapping upstream; treated like
             // `http` (both are `url`-shaped remote transports).
             McpTransport::Http | McpTransport::Sse => {
@@ -702,6 +709,18 @@ mod tests {
             .expect("whole-value ${VAR} maps to env_http_headers");
         assert_eq!(value["env_http_headers"]["X-Api-Key"], "API_KEY");
         assert!(value.get("http_headers").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_ws_transport_is_declined() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"",
+        )
+        .unwrap();
+        assert!(
+            CodexVendor.mcp_entry(ConfigScope::Global, "m", &d).is_none(),
+            "config.toml has no ws transport — decline"
+        );
     }
 
     #[test]

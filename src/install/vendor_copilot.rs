@@ -163,6 +163,14 @@ impl Vendor for CopilotVendor {
                             entry.insert("env".into(), serde_json::json!(s.env));
                         }
                     }
+                    // WebSocket transport has no VS Code `servers` schema
+                    // mapping — skip with a warning.
+                    McpTransport::Ws => {
+                        tracing::warn!(
+                            "mcp server '{name}' skipped for copilot (project): no ws transport in the servers schema"
+                        );
+                        return None;
+                    }
                     McpTransport::Http | McpTransport::Sse => {
                         entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
                         entry.insert("url".into(), serde_json::json!(s.url));
@@ -198,6 +206,14 @@ impl Vendor for CopilotVendor {
                         if !s.env.is_empty() {
                             entry.insert("env".into(), serde_json::json!(s.env));
                         }
+                    }
+                    // WebSocket transport has no Copilot CLI mapping —
+                    // skip with a warning.
+                    McpTransport::Ws => {
+                        tracing::warn!(
+                            "mcp server '{name}' skipped for copilot (global): no ws transport in mcp-config.json"
+                        );
+                        return None;
                     }
                     McpTransport::Http | McpTransport::Sse => {
                         entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
@@ -483,6 +499,16 @@ mod tests {
             "expected override is silent: {:?}",
             out.warnings
         );
+    }
+
+    #[test]
+    fn mcp_entry_ws_transport_is_declined_both_scopes() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"",
+        )
+        .unwrap();
+        assert!(CopilotVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none());
+        assert!(CopilotVendor.mcp_entry(ConfigScope::Global, "m", &d).is_none());
     }
 
     #[test]
