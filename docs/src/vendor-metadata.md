@@ -179,7 +179,7 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 | `claude.model` | `model` | string | **Overrides** the common `model` field for Claude |
 | `claude.tools` | `tools` | string | **Overrides** the common `tools` field for Claude (comma-separated string, Claude's native shape) |
 | `claude.disallowed-tools` | `disallowedTools` | string | |
-| `claude.permission-mode` | `permissionMode` | enum | Accepted values: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan` |
+| `claude.permission-mode` | `permissionMode` | enum | Accepted values: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan`, `manual` |
 | `claude.max-turns` | `maxTurns` | integer | |
 | `claude.skills` | `skills` | comma list | Comma-separated string → YAML list |
 | `claude.memory` | `memory` | enum | Accepted values: `user`, `project`, `local` |
