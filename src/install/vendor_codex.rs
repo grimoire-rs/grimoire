@@ -213,47 +213,11 @@ impl Vendor for CodexVendor {
                 // ref embedded in surrounding text, or multiple refs) skips
                 // the whole descriptor with a warning — never a broken
                 // literal, never an inlined secret (fail-closed residual).
-                // HTTP header names are case-insensitive, but `s.headers` is a
-                // BTreeMap keyed on the raw name — two names differing only in
-                // case are distinct keys that would both be processed (e.g. both
-                // matching the `authorization` bearer branch, overwriting the
-                // single `bearer_token_env_var` slot in BTreeMap order). Codex
-                // cannot represent that collision faithfully, so fail closed.
-                let mut seen: std::collections::HashMap<String, &String> = std::collections::HashMap::new();
-                for header in s.headers.keys() {
-                    if let Some(prev) = seen.insert(header.to_ascii_lowercase(), header) {
-                        tracing::warn!(
-                            "mcp server '{name}' skipped for codex ({scope}): header names '{prev}' \
-                             and '{header}' collide case-insensitively — Codex's header slots \
-                             (http_headers/env_http_headers/bearer_token_env_var) are \
-                             case-insensitive and cannot represent the duplicate"
-                        );
-                        return None;
-                    }
-                }
-                let mut http_headers = serde_json::Map::new();
-                let mut env_http_headers = serde_json::Map::new();
-                let mut bearer_token_env_var: Option<String> = None;
-                for (header, value) in &s.headers {
-                    let refs: Vec<&str> = crate::oci::mcp::env_ref_names(value).collect();
-                    if refs.is_empty() {
-                        http_headers.insert(header.clone(), serde_json::json!(value));
-                    } else if refs.len() == 1 && *value == format!("${{{}}}", refs[0]) {
-                        env_http_headers.insert(header.clone(), serde_json::json!(refs[0]));
-                    } else if refs.len() == 1
-                        && header.eq_ignore_ascii_case("authorization")
-                        && *value == format!("Bearer ${{{}}}", refs[0])
-                    {
-                        bearer_token_env_var = Some(refs[0].to_string());
-                    } else {
-                        tracing::warn!(
-                            "mcp server '{name}' skipped for codex ({scope}): header '{header}' embeds an \
-                             env reference Codex cannot represent (http_headers is literal-only, \
-                             env_http_headers is whole-value) and grim never inlines secrets"
-                        );
-                        return None;
-                    }
-                }
+                let CodexHeaders {
+                    http_headers,
+                    env_http_headers,
+                    bearer_token_env_var,
+                } = classify_codex_headers(&s.headers, name, scope)?;
                 entry.insert("url".into(), serde_json::json!(s.url));
                 if let Some(var) = bearer_token_env_var {
                     entry.insert("bearer_token_env_var".into(), serde_json::json!(var));
@@ -348,6 +312,71 @@ impl Vendor for CodexVendor {
         document.push_str(&table);
         Ok(Some(RenderedDoc { document, warnings }))
     }
+}
+
+/// Codex's three upstream HTTP/SSE header surfaces, classified from a
+/// canonical header map by [`classify_codex_headers`].
+struct CodexHeaders {
+    http_headers: serde_json::Map<String, serde_json::Value>,
+    env_http_headers: serde_json::Map<String, serde_json::Value>,
+    bearer_token_env_var: Option<String>,
+}
+
+/// Classifies a canonical HTTP/SSE header map onto Codex's three upstream
+/// header surfaces (`http_headers`/`env_http_headers`/`bearer_token_env_var`).
+/// Returns `None` — descriptor unrepresentable, warning already emitted —
+/// when two header names collide case-insensitively (HTTP header names are
+/// case-insensitive, but `headers` is a `BTreeMap` keyed on the raw name, so
+/// e.g. `Authorization` and `authorization` are distinct keys that would
+/// both hit the bearer branch, contending for the single
+/// `bearer_token_env_var` slot) or when a header value embeds an env
+/// reference Codex cannot represent faithfully (in surrounding text, or
+/// multiple refs).
+fn classify_codex_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+    name: &str,
+    scope: ConfigScope,
+) -> Option<CodexHeaders> {
+    let mut seen: std::collections::HashMap<String, &String> = std::collections::HashMap::new();
+    for header in headers.keys() {
+        if let Some(prev) = seen.insert(header.to_ascii_lowercase(), header) {
+            tracing::warn!(
+                "mcp server '{name}' skipped for codex ({scope}): header names '{prev}' \
+                 and '{header}' collide case-insensitively — Codex's header slots \
+                 (http_headers/env_http_headers/bearer_token_env_var) are \
+                 case-insensitive and cannot represent the duplicate"
+            );
+            return None;
+        }
+    }
+    let mut http_headers = serde_json::Map::new();
+    let mut env_http_headers = serde_json::Map::new();
+    let mut bearer_token_env_var: Option<String> = None;
+    for (header, value) in headers {
+        let refs: Vec<&str> = crate::oci::mcp::env_ref_names(value).collect();
+        if refs.is_empty() {
+            http_headers.insert(header.clone(), serde_json::json!(value));
+        } else if refs.len() == 1 && *value == format!("${{{}}}", refs[0]) {
+            env_http_headers.insert(header.clone(), serde_json::json!(refs[0]));
+        } else if refs.len() == 1
+            && header.eq_ignore_ascii_case("authorization")
+            && *value == format!("Bearer ${{{}}}", refs[0])
+        {
+            bearer_token_env_var = Some(refs[0].to_string());
+        } else {
+            tracing::warn!(
+                "mcp server '{name}' skipped for codex ({scope}): header '{header}' embeds an \
+                 env reference Codex cannot represent (http_headers is literal-only, \
+                 env_http_headers is whole-value) and grim never inlines secrets"
+            );
+            return None;
+        }
+    }
+    Some(CodexHeaders {
+        http_headers,
+        env_http_headers,
+        bearer_token_env_var,
+    })
 }
 
 /// Codex's user-level config root. `$CODEX_HOME` replaces `~/.codex` when
