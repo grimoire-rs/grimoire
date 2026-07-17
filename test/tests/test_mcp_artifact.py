@@ -284,6 +284,44 @@ def test_reformatting_codex_config_toml_is_not_modified_but_a_value_change_is(
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "missing"
 
 
+REFINED_DESCRIPTOR = """\
+description = "Refined stdio server."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+timeout = 30000
+always_load = true
+cwd = "./srv"
+"""
+
+
+def test_install_mcp_refinement_fields_project_claude_and_opencode(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``timeout``/``always_load``/``cwd`` project onto each client's
+    native keys: Claude gets ``timeout`` + ``alwaysLoad``, OpenCode gets
+    ``timeout`` + ``cwd``; fields with no native target are dropped."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=REFINED_DESCRIPTOR)
+    (project_dir / ".claude").mkdir()
+    (project_dir / ".opencode").mkdir()
+    write_config(project_dir)
+    runner.json("add", ref)
+    runner.json("install")
+
+    claude_entry = json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]["grim-mcp"]
+    assert claude_entry["timeout"] == 30000
+    assert claude_entry["alwaysLoad"] is True
+    assert "cwd" not in claude_entry, "cwd has no Claude target"
+
+    oc_entry = json.loads((project_dir / "opencode.json").read_text())["mcp"]["grim-mcp"]
+    assert oc_entry["timeout"] == 30000
+    assert oc_entry["cwd"] == "./srv"
+    assert "alwaysLoad" not in oc_entry and "always_load" not in oc_entry
+
+
 REMOTE_HEADERS_DESCRIPTOR = """\
 description = "Remote MCP with headers."
 

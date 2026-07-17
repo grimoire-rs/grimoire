@@ -168,6 +168,9 @@ impl Vendor for CodexVendor {
     ) -> Option<(String, serde_json::Value)> {
         use crate::oci::mcp::McpTransport;
 
+        // Refinement fields (`timeout`/`always_load`/`headers_helper`/
+        // `cwd`) have no documented Codex target — dropped (pure
+        // refinements, nothing auth-critical is lost).
         let s = &descriptor.server;
         let mut entry = serde_json::Map::new();
         match s.transport {
@@ -699,6 +702,18 @@ mod tests {
             .expect("whole-value ${VAR} maps to env_http_headers");
         assert_eq!(value["env_http_headers"]["X-Api-Key"], "API_KEY");
         assert!(value.get("http_headers").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_drops_refinement_fields() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = CodexVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headers_helper"] {
+            assert!(value.get(key).is_none(), "no Codex target for '{key}': {value}");
+        }
     }
 
     #[test]

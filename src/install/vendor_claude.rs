@@ -264,6 +264,17 @@ impl Vendor for ClaudeVendor {
                 }
             }
         }
+        // Refinement fields — Claude reads all three natively. Descriptor
+        // validation guarantees `headers_helper` only appears on remote.
+        if let Some(timeout) = s.timeout {
+            entry.insert("timeout".into(), serde_json::json!(timeout));
+        }
+        if let Some(always_load) = s.always_load {
+            entry.insert("alwaysLoad".into(), serde_json::json!(always_load));
+        }
+        if let Some(helper) = &s.headers_helper {
+            entry.insert("headersHelper".into(), serde_json::json!(helper));
+        }
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
@@ -398,6 +409,25 @@ mod tests {
             out.document
         );
         assert!(!out.document.contains("- Bash"), "no comma-split: {}", out.document);
+    }
+
+    #[test]
+    fn mcp_entry_projects_timeout_and_vendor_refinements() {
+        let stdio = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 30000\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &stdio).unwrap();
+        assert_eq!(value["timeout"], 30000);
+        assert_eq!(value["alwaysLoad"], true);
+
+        let remote = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\nheaders_helper = \"fresh-token\"\n",
+        )
+        .unwrap();
+        let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &remote).unwrap();
+        assert_eq!(value["headersHelper"], "fresh-token");
+        assert!(value.get("timeout").is_none(), "unset refinement must not emit");
     }
 
     fn parsed_agent(doc: &str) -> ParsedAgent {

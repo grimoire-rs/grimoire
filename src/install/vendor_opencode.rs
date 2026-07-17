@@ -160,6 +160,11 @@ impl Vendor for OpenCodeVendor {
                 if !s.env.is_empty() {
                     entry.insert("environment".into(), serde_json::json!(s.env));
                 }
+                // Native local-only key (opencode.ai/docs/mcp-servers):
+                // relative paths resolve from the workspace.
+                if let Some(cwd) = &s.cwd {
+                    entry.insert("cwd".into(), serde_json::json!(cwd));
+                }
             }
             McpTransport::Http | McpTransport::Sse => {
                 entry.insert("type".into(), serde_json::json!("remote"));
@@ -168,6 +173,12 @@ impl Vendor for OpenCodeVendor {
                     entry.insert("headers".into(), serde_json::json!(s.headers));
                 }
             }
+        }
+        // `timeout` is native for both types; `always_load` and
+        // `headers_helper` have no OpenCode equivalent — dropped (pure
+        // refinements, nothing auth-critical is lost).
+        if let Some(timeout) = s.timeout {
+            entry.insert("timeout".into(), serde_json::json!(timeout));
         }
         entry.insert("enabled".into(), serde_json::json!(true));
         let mut value = serde_json::Value::Object(entry);
@@ -362,6 +373,21 @@ mod tests {
             let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
             assert!(OpenCodeVendor.agent_index(&parsed, "p").is_err(), "{doc}");
         }
+    }
+
+    #[test]
+    fn mcp_entry_projects_timeout_and_cwd_drops_foreign_refinements() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(value["timeout"], 7000, "timeout is native for both types");
+        assert_eq!(value["cwd"], "./srv", "cwd is native for local servers");
+        assert!(
+            value.get("always_load").is_none() && value.get("alwaysLoad").is_none(),
+            "always_load has no OpenCode equivalent: {value}"
+        );
     }
 
     #[test]

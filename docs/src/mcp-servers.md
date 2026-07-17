@@ -79,6 +79,10 @@ validation error, not a silent merge:
 | `env` | `stdio`, optional | String→string map; values may reference the host environment as `${VAR}` |
 | `url` | `http`/`sse` | Must start with `http://` or `https://` |
 | `headers` | `http`/`sse`, optional | String→string map, same `${VAR}` referencing as `env` |
+| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`) and [OpenCode][opencode-mcp-docs] (`timeout`); dropped for clients without a native key |
+| `always_load` | any transport, optional | Load the server eagerly at client startup — projected for [Claude Code][claude-code-mcp-docs] (`alwaysLoad`) only |
+| `headers_helper` | `http`/`sse`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
+| `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`) only |
 
 ### Example — a remote server {#server-example-remote}
 
@@ -111,6 +115,7 @@ before it ever reaches a registry. Every violation below exits with code
 | `url` not starting with `http://` or `https://` | rejected |
 | an `env` key outside `[A-Za-z_][A-Za-z0-9_]*` | rejected |
 | a malformed `${…}` reference — unclosed, an invalid variable name, or a `${VAR:-default}` fallback | rejected |
+| `headers_helper` on `stdio`, or `cwd` on `http`/`sse` | rejected |
 | a non-`https://` `repository` | rejected (same gate as [every other kind](./publishing.md#metadata-repository)) |
 | any field not in the [common](#common-fields) or [server](#server-table) tables | rejected |
 
@@ -130,9 +135,9 @@ client already reads — never a new file:
 
 | Client | Scope | File | Container key | Entry shape | Env-ref syntax |
 |---|---|---|---|---|---|
-| [Claude Code][claude-code-mcp-docs] | project | `<workspace>/.mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); remote: `type: http\|sse` + `url` + `headers` | `${VAR}` (native, no translation) |
+| [Claude Code][claude-code-mcp-docs] | project | `<workspace>/.mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); remote: `type: http\|sse` + `url` + `headers`; refinements: `timeout`/`alwaysLoad`/`headersHelper` | `${VAR}` (native, no translation) |
 | [Claude Code][claude-code-mcp-docs] | global | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | `mcpServers` | same as project | `${VAR}` |
-| [OpenCode][opencode-mcp-docs] | project | `<workspace>/opencode.json` (or `.jsonc` when present) | `mcp` | local: `type: "local"`, `command` as **one** array (`[cmd, ...args]`), `environment`, `enabled: true`; remote: `type: "remote"`, `url`, `headers`, `enabled` | `{env:VAR}` |
+| [OpenCode][opencode-mcp-docs] | project | `<workspace>/opencode.json` (or `.jsonc` when present) | `mcp` | local: `type: "local"`, `command` as **one** array (`[cmd, ...args]`), `environment`, `enabled: true`; remote: `type: "remote"`, `url`, `headers`, `enabled`; refinements: `timeout`/`cwd` | `{env:VAR}` |
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` | `mcp` | same as project | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | project | `<workspace>/.vscode/mcp.json` | `servers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url`/`headers` | `${env:VAR}` |
 | [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
