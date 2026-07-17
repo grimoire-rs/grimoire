@@ -213,6 +213,24 @@ impl Vendor for CodexVendor {
                 // ref embedded in surrounding text, or multiple refs) skips
                 // the whole descriptor with a warning — never a broken
                 // literal, never an inlined secret (fail-closed residual).
+                // HTTP header names are case-insensitive, but `s.headers` is a
+                // BTreeMap keyed on the raw name — two names differing only in
+                // case are distinct keys that would both be processed (e.g. both
+                // matching the `authorization` bearer branch, overwriting the
+                // single `bearer_token_env_var` slot in BTreeMap order). Codex
+                // cannot represent that collision faithfully, so fail closed.
+                let mut seen: std::collections::HashMap<String, &String> = std::collections::HashMap::new();
+                for header in s.headers.keys() {
+                    if let Some(prev) = seen.insert(header.to_ascii_lowercase(), header) {
+                        tracing::warn!(
+                            "mcp server '{name}' skipped for codex ({scope}): header names '{prev}' \
+                             and '{header}' collide case-insensitively — Codex's header slots \
+                             (http_headers/env_http_headers/bearer_token_env_var) are \
+                             case-insensitive and cannot represent the duplicate"
+                        );
+                        return None;
+                    }
+                }
                 let mut http_headers = serde_json::Map::new();
                 let mut env_http_headers = serde_json::Map::new();
                 let mut bearer_token_env_var: Option<String> = None;
@@ -774,6 +792,52 @@ mod tests {
                 "unrepresentable header value '{value}' must skip the descriptor"
             );
         }
+    }
+
+    // W7: HTTP header names are case-insensitive, but `s.headers` is a
+    // `BTreeMap<String, String>` keyed on the raw (case-sensitive) name — so
+    // `Authorization` and `authorization` are two distinct keys that BOTH
+    // match the `eq_ignore_ascii_case("authorization")` bearer branch. Codex's
+    // `config.toml` has a single `bearer_token_env_var` slot, so two colliding
+    // Authorization headers are unrepresentable: the descriptor must fail
+    // closed (decline) rather than silently emit one BTreeMap-order winner.
+    #[test]
+    fn mcp_entry_http_case_insensitive_duplicate_authorization_headers_are_declined() {
+        let mut descriptor = http_descriptor("https://api.example.com/mcp");
+        descriptor
+            .server
+            .headers
+            .insert("Authorization".to_string(), "Bearer ${TOKEN_A}".to_string());
+        descriptor
+            .server
+            .headers
+            .insert("authorization".to_string(), "Bearer ${TOKEN_B}".to_string());
+        assert!(
+            CodexVendor
+                .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+                .is_none(),
+            "two case-insensitively-colliding Authorization headers are unrepresentable \
+             for Codex (single bearer_token_env_var slot) — must decline, not pick a winner"
+        );
+    }
+
+    // S1: the bearer branch keys on `eq_ignore_ascii_case("authorization")`,
+    // so a lowercase `authorization` header alone maps to `bearer_token_env_var`
+    // exactly like the canonical `Authorization` — this guards against a
+    // regression to a case-sensitive `==` comparison.
+    #[test]
+    fn mcp_entry_http_lowercase_authorization_maps_to_bearer_token_env_var() {
+        let mut descriptor = http_descriptor("https://api.example.com/mcp");
+        descriptor
+            .server
+            .headers
+            .insert("authorization".to_string(), "Bearer ${API_TOKEN}".to_string());
+        let (_, value) = CodexVendor
+            .mcp_entry(ConfigScope::Global, "grim-mcp", &descriptor)
+            .expect("lowercase authorization Bearer ${VAR} maps to bearer_token_env_var");
+        assert_eq!(value["bearer_token_env_var"], "API_TOKEN");
+        assert!(value.get("http_headers").is_none());
+        assert!(value.get("env_http_headers").is_none());
     }
 
     // ── codex.reasoning-effort enum tracks the upstream native
