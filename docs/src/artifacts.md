@@ -466,7 +466,7 @@ in [Vendor-Specific Metadata](./vendor-metadata.md):
 
 | Vendor | Skills | Rules | Agents |
 |--------|--------|-------|--------|
-| `claude.*` | `disable-model-invocation`, `user-invocable`, `model`, `effort`, `context`, `agent`, `argument-hint`, `when-to-use`, `arguments`, `disallowed-tools`, `shell`, `paths` ([registry](./vendor-metadata.md#claude-registry)) | *(none today — unknown keys warn + drop)* | `model`, `tools`, `disallowed-tools`, `permission-mode`, `max-turns`, `skills`, `memory`, `background`, `effort`, `isolation`, `color`, `initial-prompt` ([registry](./vendor-metadata.md#claude-agent-registry)) |
+| `claude.*` | `disable-model-invocation`, `user-invocable`, `model`, `effort`, `context`, `agent`, `argument-hint`, `when-to-use`, `arguments`, `allowed-tools`, `disallowed-tools`, `shell`, `paths` ([registry](./vendor-metadata.md#claude-registry)) | *(none today — unknown keys warn + drop)* | `model`, `tools`, `disallowed-tools`, `permission-mode`, `max-turns`, `skills`, `memory`, `background`, `effort`, `isolation`, `color`, `initial-prompt` ([registry](./vendor-metadata.md#claude-agent-registry)) |
 | `opencode.*` | *(none — universal fields only)* | *(none)* | `model`, `mode`, `temperature`, `top-p`, `steps`, `prompt`, `disable`, `hidden`, `color` ([registry](./vendor-metadata.md#opencode-agent-registry)) |
 | `copilot.*` | *(none — universal fields only)* | `exclude-agent` ([registry](./vendor-metadata.md#rule-keys)) | `tools`, `model` ([registry](./vendor-metadata.md#copilot-agent-registry)) |
 | `codex.*` | *(none — universal fields only)* | **unsupported** — warns + skips | `model`, `reasoning-effort`, `sandbox-mode` ([registry](./vendor-metadata.md#codex-agent-registry)) |

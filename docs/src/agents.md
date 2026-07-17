@@ -91,7 +91,7 @@ On install, grim projects the canonical file per client:
 |---|---|---|---|---|
 | `name` | kept | **dropped** (filename is the identity) | kept | kept (`name` key in TOML) |
 | `description` | kept | kept | kept | kept (`description` key in TOML) |
-| `model` | kept | kept (see [precedence](#override-precedence)) | **dropped** (no documented field) | kept (optional `model` key in TOML) |
+| `model` | kept | kept (see [precedence](#override-precedence)) | kept | kept (optional `model` key in TOML) |
 | `tools` | kept (comma string) | **dropped** (deprecated upstream) | emitted as a YAML **list** | **dropped with warning** (no Codex equivalent) |
 | plain `metadata` / unknown keys | kept | dropped | dropped | dropped |
 | body | verbatim | verbatim | verbatim | `developer_instructions` key in TOML |

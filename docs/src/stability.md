@@ -108,6 +108,18 @@ bundle](./concepts.md#bundles)) is unreadable by a `grim` build that
 predates the feature. It exits 78 (`EX_CONFIG`), the same code any other
 config or lock parse failure uses.
 
+This hard-reject is a deliberate departure from the ecosystem norm:
+[Cargo][cargo-manifest] warns rather than errors on an unrecognized
+`Cargo.toml` key and reserves `package.metadata` as a designated
+pass-through table, [npm][npm-package-json] generally tolerates unknown
+`package.json` fields, and [Helm][helm-chart] silently drops an
+unrecognized `Chart.yaml` key, gating compatibility on `apiVersion`
+instead — none of the three hard-reject a manifest for a field they don't
+recognize. Grimoire trades that forward-tolerance for an explicit signal:
+a lock or state file is read back by every subsequent command, and a
+silently-dropped field there would let a newer file downgrade into a
+report that looks complete but is not.
+
 This only triggers when the feature is actually in use: a registry-only
 lock or state file stays byte-identical across the version boundary, so a
 project that never declares a path source is unaffected either way.
@@ -188,4 +200,7 @@ unaffected — they read straight from disk and never touch a manifest.
 
 <!-- external -->
 [gnu-make]: https://www.gnu.org/software/make/manual/make.html
+[cargo-manifest]: https://doc.rust-lang.org/cargo/reference/manifest.html
+[npm-package-json]: https://docs.npmjs.com/cli/v10/configuring-npm/package-json
+[helm-chart]: https://helm.sh/docs/topics/charts/#the-chartyaml-file
 [npm-install]: https://docs.npmjs.com/cli/commands/npm-install
