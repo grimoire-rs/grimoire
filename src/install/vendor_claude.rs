@@ -76,6 +76,11 @@ pub const CLAUDE_SKILL_FIELDS: &[KnownField] = &[
         ty: FieldType::String,
     },
     KnownField {
+        field: "allowed-tools",
+        native: "allowed-tools",
+        ty: FieldType::String,
+    },
+    KnownField {
         field: "disallowed-tools",
         native: "disallowed-tools",
         ty: FieldType::String,
@@ -379,6 +384,20 @@ mod tests {
             documented, registry,
             "vendor-metadata.md must document exactly the claude.* registry fields (skills ∪ agents)"
         );
+    }
+
+    #[test]
+    fn skill_render_lifts_allowed_tools() {
+        // String passthrough — Claude's native `allowed-tools` is a
+        // comma-separated string, never comma-split into a YAML list.
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  claude.allowed-tools: \"Bash(git:*), Read\"\n---\nbody\n";
+        let out = ClaudeVendor.skill_index(doc).unwrap().unwrap();
+        assert!(
+            out.document.contains("allowed-tools: Bash(git:*), Read"),
+            "{}",
+            out.document
+        );
+        assert!(!out.document.contains("- Bash"), "no comma-split: {}", out.document);
     }
 
     fn parsed_agent(doc: &str) -> ParsedAgent {

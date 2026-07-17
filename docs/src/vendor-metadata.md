@@ -143,6 +143,7 @@ the `CLAUDE_SKILL_FIELDS` constant in `src/install/vendor_claude.rs`.
 | `claude.argument-hint` | `argument-hint` | string | |
 | `claude.when-to-use` | `when_to_use` | string | Note: the native key uses an underscore, not a hyphen |
 | `claude.arguments` | `arguments` | string | |
+| `claude.allowed-tools` | `allowed-tools` | string | Comma-separated tool allowlist, passed through verbatim |
 | `claude.disallowed-tools` | `disallowed-tools` | string | |
 | `claude.shell` | `shell` | enum | Accepted values: `bash`, `powershell` |
 | `claude.paths` | `paths` | string | Comma-separated glob patterns |
