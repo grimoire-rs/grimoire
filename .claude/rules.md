@@ -68,6 +68,7 @@ Catalog = single source of truth — `CLAUDE.md` may summarize or reference by p
 | CLI shell | [subsystem-cli.md](./rules/subsystem-cli.md) | `src/**` |
 | CLI API / output formats | [subsystem-cli-api.md](./rules/subsystem-cli-api.md) | `src/**` |
 | CLI command index | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) | `src/**` |
+| Config key title/description style | [subsystem-config-keys.md](./rules/subsystem-config-keys.md) | `src/command/config_keys.rs`, `src/config/declaration.rs` |
 | Acceptance tests | [subsystem-tests.md](./rules/subsystem-tests.md) | `test/**` |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
@@ -85,6 +86,7 @@ provisional; the coupling is intended (declared below).
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
+| `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
 | `docs/**` | [docs-style.md](./rules/docs-style.md) |
