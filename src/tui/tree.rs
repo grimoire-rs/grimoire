@@ -21,7 +21,7 @@ pub struct TreeBuildOptions {
     /// The effective default registry: its host is elided as the tree root
     /// so names stay short when browsing the primary registry.
     pub default_registry: Option<String>,
-    /// When true, insert a type-level group (skill / rule / agent / bundle)
+    /// Whether a type-level group (skill / rule / agent / bundle) sits
     /// between the registry root and the path segments.
     pub group_by_type: bool,
     /// Characters (each a single `String`) that split the repository path

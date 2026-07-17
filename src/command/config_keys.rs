@@ -14,11 +14,13 @@
 //! runtime fallback can never drift apart — no separate tripwire test
 //! needed.
 //!
-//! Descriptions are the first sentence of the doc comment on the matching
-//! field in `config::declaration` (whitespace-normalized), authored here
-//! as literals rather than parsed at runtime — `config::declaration.rs`
-//! is off-limits (its doc comments feed a committed JSON schema that must
-//! stay byte-identical).
+//! Descriptions are a whitespace-normalized PREFIX of the doc comment on
+//! the matching field in `config::declaration`, authored here as literals
+//! rather than parsed at runtime. The two are independent copies, not a
+//! single source — editing one for wording/style requires re-checking the
+//! other so the prefix relationship holds; `config_key_metadata_matches_published_schema`
+//! is the automated tripwire. See `.claude/rules/subsystem-config-keys.md`
+//! for the description-authoring style rules.
 
 use crate::api::ValueType;
 use crate::config::declaration::DefaultView;
@@ -70,9 +72,12 @@ impl ConfigKey {
             key: "options.default_registry",
             value_type: ValueType::String { default: None },
             title: "Default registry",
-            description: "Default registry for short identifiers (lower priority than \
-                           `GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in \
-                           `command::resolve_default_registry`).",
+            description: "Registry used when an artifact reference names no registry. Ignored when a \
+                           `[[registries]]` entry is declared — the array's default entry expands short \
+                           identifiers instead. Overridden by the `--registry` flag or \
+                           `GRIM_DEFAULT_REGISTRY` environment variable when set. Falls back to \
+                           `ghcr.io/grimoire-rs` when this key, `--registry`, and \
+                           `GRIM_DEFAULT_REGISTRY` are all unset.",
         };
         const CLIENTS: KeySpec = KeySpec {
             key: "options.clients",
@@ -81,7 +86,9 @@ impl ConfigKey {
                 default: None,
             },
             title: "Clients",
-            description: "AI client targets install/update materialize into when `--client` is absent.",
+            description: "Determines which clients receive installs and updates when `--client` is \
+                           absent. Auto-detects clients when left empty, falling back to all clients \
+                           when none are detected.",
         };
         const SHOW_DEPRECATED: KeySpec = KeySpec {
             key: "options.show_deprecated",
@@ -89,8 +96,8 @@ impl ConfigKey {
                 default: defaults::SHOW_DEPRECATED,
             },
             title: "Show deprecated",
-            description: "When false (default), deprecated artifacts are hidden from `grim search` and \
-                           the TUI catalog unless installed; true shows them everywhere.",
+            description: "Controls whether deprecated artifacts appear in `grim search` and the TUI \
+                           catalog. Hidden by default unless already installed.",
         };
         const TUI_DEFAULT_VIEW: KeySpec = KeySpec {
             key: "options.tui.default_view",
@@ -99,7 +106,8 @@ impl ConfigKey {
                 default: defaults::DEFAULT_VIEW.as_str(),
             },
             title: "Default view",
-            description: "The view mode to open with.",
+            description: "Sets the view the browser opens in. Defaults to `tree`, grouping items by \
+                           path segments; `flat` lists them ungrouped.",
         };
         const TUI_GROUP_BY_TYPE: KeySpec = KeySpec {
             key: "options.tui.group_by_type",
@@ -107,8 +115,8 @@ impl ConfigKey {
                 default: defaults::GROUP_BY_TYPE,
             },
             title: "Group by type",
-            description: "When true, insert a type-level group (skill / rule / agent / bundle) between \
-                           the registry root and the path segments in tree view.",
+            description: "Controls whether a type-level group (skill, rule, agent, or bundle) appears \
+                           between the registry root and path segments in tree view. Disabled by default.",
         };
         const TUI_TREE_SEPARATORS: KeySpec = KeySpec {
             key: "options.tui.tree_separators",
@@ -116,7 +124,8 @@ impl ConfigKey {
                 default: Some(defaults::TREE_SEPARATORS),
             },
             title: "Tree separators",
-            description: "Characters on which the repository path is split into nested groups in tree view.",
+            description: "Sets the characters that split the repository path into nested groups in \
+                           tree view. Defaults to `/`; each entry must be a single character.",
         };
         const TUI_EXPAND_LEVELS: KeySpec = KeySpec {
             key: "options.tui.expand_levels",
@@ -124,7 +133,8 @@ impl ConfigKey {
                 default: defaults::EXPAND_LEVELS,
             },
             title: "Expand levels",
-            description: "How many levels of the grouped tree are expanded when the browser opens.",
+            description: "Sets how many levels of the grouped tree are expanded when the browser opens. \
+                           Defaults to `1` (registry roots only); `0` expands the tree fully.",
         };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
@@ -165,15 +175,16 @@ impl RegistryField {
             key: "registry.<alias>.oci",
             value_type: ValueType::String { default: None },
             title: "OCI registry ref",
-            description: "A plain OCI registry ref — host (and optional namespace), e.g. `ghcr.io` or `ghcr.io/acme`.",
+            description: "Sets the OCI registry host, for example `ghcr.io` or `ghcr.io/acme` with a \
+                           namespace. Mutually exclusive with `index` on the same registry entry.",
         };
         const INDEX: KeySpec = KeySpec {
             key: "registry.<alias>.index",
             value_type: ValueType::String { default: None },
             title: "Package-index locator",
-            description: "A package-index locator replacing the `_catalog` listing: an `http(s)://` base \
-                           serving compiled static files (`all.json`), or a git repository (`git+…`, \
-                           `ssh://`, `git@…`, or a URL ending in `.git`) holding `index/**/metadata.json`.",
+            description: "Sets a package-index locator that replaces the `_catalog` registry listing. \
+                           Accepts an `http(s)://` base or a git repository URL. Mutually exclusive with \
+                           `oci` on the same registry entry.",
         };
         // Not an `[options]`/`[options.tui]` key, so there is no matching
         // `config::defaults` const — this literal instead mirrors
@@ -182,7 +193,8 @@ impl RegistryField {
             key: "registry.<alias>.default",
             value_type: ValueType::Bool { default: false },
             title: "Default registry flag",
-            description: "Marks this registry as the primary one short identifiers expand against.",
+            description: "Controls whether this registry is the primary one short identifiers expand \
+                           against. Only one entry may set this; the first entry wins when none do.",
         };
         match self {
             Self::Oci => &OCI,

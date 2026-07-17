@@ -250,7 +250,7 @@ pub struct TuiState {
     pub view_mode: ViewMode,
     /// The set of tree-group keys that are collapsed (descendants hidden).
     pub collapsed: BTreeSet<String>,
-    /// When true, insert a type-level group between the registry root and
+    /// Whether a type-level group appears between the registry root and
     /// the path segments.
     pub group_by_type: bool,
     /// Characters (each a `String`) on which the repository path is split

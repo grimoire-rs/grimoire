@@ -117,28 +117,29 @@ impl DefaultView {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TuiOptions {
-    /// The view mode to open with. `"tree"` starts the browser in grouped
-    /// tree view; `"flat"` (or absent) starts in flat list mode.
-    /// An invalid value is rejected as an unknown enum variant at deserialization.
+    /// Sets the view the browser opens in. Defaults to `tree`, grouping
+    /// items by path segments; `flat` lists them ungrouped. An invalid
+    /// value is rejected as an unknown enum variant at deserialization.
     /// The runtime `t` key still toggles ephemerally — config is never
     /// rewritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_view: Option<DefaultView>,
-    /// When true, insert a type-level group (skill / rule / agent / bundle)
-    /// between the registry root and the path segments in tree view.
+    /// Controls whether a type-level group (skill, rule, agent, or bundle)
+    /// appears between the registry root and path segments in tree view.
+    /// Disabled by default.
     #[serde(default)]
     pub group_by_type: bool,
-    /// Characters on which the repository path is split into nested groups
-    /// in tree view. When absent or empty, `/` is used at runtime. Each
-    /// entry must be exactly one single-column printable character; empty,
+    /// Sets the characters that split the repository path into nested
+    /// groups in tree view. Defaults to `/`; each entry must be a single
+    /// character. Entries must be single-column and printable — empty,
     /// multi-character, control, whitespace, or zero-width entries are a
     /// parse error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tree_separators: Vec<String>,
-    /// How many levels of the grouped tree are expanded when the browser
-    /// opens. `1` (the built-in default when absent) shows only the registry
-    /// roots; `2` also expands their direct children, and so on. `0` opens the
-    /// tree fully expanded. Has no effect in flat mode.
+    /// Sets how many levels of the grouped tree are expanded when the
+    /// browser opens. Defaults to `1` (registry roots only); `0` expands
+    /// the tree fully. `2` also expands the roots' direct children, and so
+    /// on. Has no effect in flat mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand_levels: Option<u32>,
 }
@@ -162,9 +163,12 @@ impl TuiOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigOptions {
-    /// Default registry for short identifiers (lower priority than
-    /// `GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in
-    /// `command::resolve_default_registry`).
+    /// Registry used when an artifact reference names no registry. Ignored
+    /// when a `[[registries]]` entry is declared — the array's default
+    /// entry expands short identifiers instead. Overridden by the
+    /// `--registry` flag or `GRIM_DEFAULT_REGISTRY` environment variable
+    /// when set. Falls back to `ghcr.io/grimoire-rs` when this key,
+    /// `--registry`, and `GRIM_DEFAULT_REGISTRY` are all unset.
     ///
     /// **Deprecated for new writes** — `grim init` now emits a
     /// `[[registries]]` entry with `default = true` instead. This field is
@@ -174,17 +178,19 @@ pub struct ConfigOptions {
     /// is added — the field is a serde key, not a callable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
-    /// AI client targets install/update materialize into when `--client` is
-    /// absent. A list so one declaration can generate for several clients
-    /// at once (e.g. `["claude", "opencode"]`); empty triggers detection of
-    /// the clients whose vendor dir is present, falling back to `claude`.
+    /// Determines which clients receive installs and updates when
+    /// `--client` is absent. Auto-detects clients when left empty, falling
+    /// back to all clients when none are detected. A list, so one
+    /// declaration can target several clients at once — for example
+    /// `["claude", "opencode"]`. Auto-detection selects every client whose
+    /// vendor directory is present.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clients: Vec<String>,
     /// TUI display options (grouped tree view, separators, default mode).
     #[serde(default, skip_serializing_if = "TuiOptions::is_empty")]
     pub tui: TuiOptions,
-    /// When false (default), deprecated artifacts are hidden from `grim search`
-    /// and the TUI catalog unless installed; true shows them everywhere. The
+    /// Controls whether deprecated artifacts appear in `grim search` and
+    /// the TUI catalog. Hidden by default unless already installed. The
     /// TUI `h` key toggles this ephemerally — config is never rewritten.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_deprecated: bool,
@@ -211,24 +217,23 @@ pub struct RegistryConfig {
     /// unique across the array.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
-    /// A plain OCI registry ref — host (and optional namespace), e.g.
-    /// `ghcr.io` or `ghcr.io/acme`. Same shape as
-    /// `[options].default_registry`. Mutually exclusive with
-    /// [`Self::index`]. Accepts the pre-0.7.0 key `url` as a
-    /// deserialization alias.
+    /// Sets the OCI registry host, for example `ghcr.io` or
+    /// `ghcr.io/acme` with a namespace. Mutually exclusive with `index` on
+    /// the same registry entry. Same shape as `[options].default_registry`.
+    /// Accepts the pre-0.7.0 key `url` as a deserialization alias.
     #[serde(default, alias = "url", skip_serializing_if = "Option::is_none")]
     pub oci: Option<String>,
-    /// A package-index locator replacing the `_catalog` listing: an
-    /// `http(s)://` base serving compiled static files (`all.json`), or a
-    /// git repository (`git+…`, `ssh://`, `git@…`, or a URL ending in
-    /// `.git`) holding `index/**/metadata.json`. Mutually exclusive with
-    /// [`Self::oci`].
+    /// Sets a package-index locator that replaces the `_catalog` registry
+    /// listing. Accepts an `http(s)://` base or a git repository URL.
+    /// Mutually exclusive with `oci` on the same registry entry. An
+    /// HTTP(S) base serves compiled static files (`all.json`); a git
+    /// repository (`git+…`, `ssh://`, `git@…`, or a URL ending in `.git`)
+    /// holds `index/**/metadata.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
-    /// Marks this registry as the primary one short identifiers expand
-    /// against. Exactly one entry MAY set it; setting it on two or more
-    /// entries is a parse error. When none set it, the first entry is
-    /// primary at resolution time.
+    /// Controls whether this registry is the primary one short identifiers
+    /// expand against. Only one entry may set this; the first entry wins
+    /// when none do. Setting it on two or more entries is a parse error.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
 }

@@ -334,7 +334,8 @@ pub struct ConfigEntry {
     pub value_type: ValueType,
     /// Short human title, e.g. `"Default view"`.
     pub title: &'static str,
-    /// One-sentence description of the key.
+    /// One to three sentences describing the key's effect — style and
+    /// content governed by `subsystem-config-keys.md`.
     pub description: &'static str,
     /// The runtime default in CLI string form, `None` when there is no
     /// fixed default.
@@ -630,7 +631,8 @@ mod tests {
                     default: None,
                 },
                 "Clients",
-                "AI client targets install/update materialize into when `--client` is absent.",
+                "Determines which clients receive installs and updates when `--client` is absent. \
+                 Auto-detects clients when left empty, falling back to all clients when none are detected.",
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -657,7 +659,8 @@ mod tests {
                     default: None,
                 },
                 "Clients",
-                "AI client targets install/update materialize into when `--client` is absent.",
+                "Determines which clients receive installs and updates when `--client` is absent. \
+                 Auto-detects clients when left empty, falling back to all clients when none are detected.",
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -680,7 +683,8 @@ mod tests {
                 default: "tree",
             },
             "Default view",
-            "The view mode to open with.",
+            "Sets the view the browser opens in. Defaults to `tree`, grouping items by path segments; \
+             `flat` lists them ungrouped.",
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&enum_entry).unwrap()).unwrap();
         let obj = v.as_object().expect("entry must serialize as an object");
@@ -707,7 +711,8 @@ mod tests {
             Some("true".to_string()),
             ValueType::Bool { default: false },
             "Show deprecated",
-            "When false (default), deprecated artifacts are hidden from `grim search` and the TUI catalog unless installed; true shows them everywhere.",
+            "Controls whether deprecated artifacts appear in `grim search` and the TUI catalog. \
+             Hidden by default unless already installed.",
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&bool_entry).unwrap()).unwrap();
         assert_eq!(v["type"], "boolean");
@@ -739,7 +744,9 @@ mod tests {
                 None,
                 ValueType::String { default: None },
                 "Default registry",
-                "Default registry for short identifiers.",
+                "Registry used when an artifact reference names no registry. Ignored when a \
+                 `[[registries]]` entry is declared — the array's default entry expands short \
+                 identifiers instead.",
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
