@@ -34,7 +34,7 @@ pub const MCP_LAYER_SIZE_LIMIT: u64 = 64 * 1024;
 /// An MCP server transport.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransport {
     /// A local process speaking JSON-RPC over stdio (`command` + `args`).
@@ -68,7 +68,7 @@ impl std::fmt::Display for McpTransport {
 /// `client_secret` is deliberately absent: a secret has no safe home in a
 /// published artifact (the same principle behind `${VAR}` env references —
 /// grim never ships literal credentials).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpOAuth {
     /// Pre-registered OAuth client id. May reference the host environment
@@ -88,7 +88,7 @@ pub struct McpOAuth {
 }
 
 /// The `[server]` table: how clients launch or reach the server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpServer {
     /// Transport kind; drives which of the other fields are required.
@@ -133,7 +133,7 @@ pub struct McpServer {
 
 /// The MCP descriptor document: authored as TOML, shipped as the
 /// canonical JSON layer blob.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpDescriptor {
     /// Human-readable description (required — becomes the OCI
