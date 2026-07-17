@@ -134,7 +134,7 @@ client's **native** user-level discovery directory rather than under
 |--------|-------------|------------|-------------|
 | **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` | `~/.claude/agents/<name>.md` |
 | **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) | `$XDG_CONFIG_HOME/opencode/agents/<name>.md` |
-| **Copilot** | `~/.copilot/skills/<name>/` | `$GRIM_HOME/.github/instructions/<name>.instructions.md` (inert — no documented user-level instructions path; grim warns) | `~/.copilot/agents/<name>.md` |
+| **Copilot** | `~/.copilot/skills/<name>/` | `~/.copilot/instructions/<name>.instructions.md` (native; workspace-layout fallback + warn only when no root resolves) | `~/.copilot/agents/<name>.md` |
 | **Codex** | `$HOME/.agents/skills/<name>/` (cross-vendor standard; independent of `$CODEX_HOME`) | **unsupported** — Codex has no path-scoped rule mechanism; grim warns + skips, writes no file | `$CODEX_HOME`\|`~/.codex/agents/<name>.toml` (TOML) |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
@@ -253,7 +253,7 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 | global · opencode · skill | `OpenCodeSkills` | `<name>` (root already ends `/skills`) |
 | global · opencode · agent | `OpenCodeRoot` | `agents/<name>.md` |
 | global · opencode · rule | `GrimHome` | `.opencode/rules/<name>.md` |
-| global · copilot · rule | `GrimHome` | `.github/instructions/<name>…` (inert) |
+| global · copilot · rule | `CopilotRoot` | `instructions/<name>.instructions.md` (GrimHome fallback classifies pre-move records for the layout-migration reaper) |
 | global · codex · skill | `AgentsSkills` | `<name>` (root already ends `/skills`) |
 | global · codex · agent | `CodexRoot` | `agents/<name>.toml` |
 | · codex · rule | — | **not classified** — declined at the `supports_kind` gate before anchoring; no output recorded |

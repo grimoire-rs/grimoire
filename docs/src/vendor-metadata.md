@@ -219,8 +219,8 @@ not in this registry.
 
 ## The copilot.* agent registry {#copilot-agent-registry}
 
-[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize one
-projectable vendor key, mapped from `COPILOT_AGENT_FIELDS` in
+[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize two
+projectable vendor keys, mapped from `COPILOT_AGENT_FIELDS` in
 `src/install/vendor_copilot.rs`.
 
 | Key | Native field | Type | Notes |

@@ -101,14 +101,24 @@ impl Vendor for CopilotVendor {
     }
 
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        // Copilot documents no user-level instructions directory; global
-        // rules stay under the workspace layout (inert for Copilot — the
-        // installer warns).
-        let _ = scope;
-        workspace
-            .join(".github")
-            .join("instructions")
-            .join(format!("{name}.instructions.md"))
+        match scope {
+            ConfigScope::Project => workspace
+                .join(".github")
+                .join("instructions")
+                .join(format!("{name}.instructions.md")),
+            // Global: Copilot CLI's native user-level instructions dir
+            // under `$COPILOT_HOME|~/.copilot`. Falls back to the (inert)
+            // workspace layout only when no root resolves — on such a host
+            // the path does not move, so no orphan is created.
+            ConfigScope::Global => global_native_root(env_dir("COPILOT_HOME"), home_dir())
+                .map(|root| root.join("instructions").join(format!("{name}.instructions.md")))
+                .unwrap_or_else(|| {
+                    workspace
+                        .join(".github")
+                        .join("instructions")
+                        .join(format!("{name}.instructions.md"))
+                }),
+        }
     }
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
@@ -377,6 +387,28 @@ mod tests {
                 .starts_with("---\napplyTo: \"a\"\nexcludeAgent: \"code-review\"\n---\n")
         );
         assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn rule_path_global_routes_to_copilot_root() {
+        let w = Path::new("/w");
+        assert_eq!(
+            CopilotVendor.rule_path(w, ConfigScope::Project, "style"),
+            PathBuf::from("/w/.github/instructions/style.instructions.md")
+        );
+        // No COPILOT_HOME manipulation here (env is process-global); the
+        // override order is covered by `global_skills_root_resolution_order`.
+        if let Some(home) = home_dir()
+            && env_dir("COPILOT_HOME").is_none()
+        {
+            assert_eq!(
+                CopilotVendor.rule_path(w, ConfigScope::Global, "style"),
+                home.join(".copilot/instructions/style.instructions.md")
+            );
+        }
+        // Unresolvable root ⇒ the caller falls back to the workspace layout
+        // (the path does not move on such hosts — no orphan).
+        assert_eq!(global_native_root(None, None), None);
     }
 
     #[test]

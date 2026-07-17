@@ -584,15 +584,21 @@ async fn install_one<M: ArtifactMaterializer>(
     let mut client_records: Vec<ClientOutput> = Vec::with_capacity(materialize_set.len());
     for client in &materialize_set {
         let dest = target.path_for(*client, kind, &artifact.name);
-        // Copilot documents no user-level instructions location: a
-        // global-scope rule lands in the workspace layout, which Copilot
-        // never scans. Install proceeds (consistent footprint) but warn.
+        // A global Copilot rule normally routes to the native
+        // `$COPILOT_HOME|~/.copilot/instructions/` dir. Only when no root
+        // resolves does it fall back to the (inert) workspace layout,
+        // which Copilot never scans — warn in that narrow sub-case.
         if kind == ArtifactKind::Rule
             && *client == crate::install::client_target::ClientTarget::Copilot
             && target.scope() == crate::config::scope::ConfigScope::Global
+            && crate::install::vendor_copilot::global_native_root(
+                crate::install::vendor::env_dir("COPILOT_HOME"),
+                crate::install::vendor::home_dir(),
+            )
+            .is_none()
         {
             tracing::warn!(
-                "Copilot has no user-level instructions path; global rule '{}' will not be discovered by Copilot",
+                "no resolvable Copilot root (COPILOT_HOME/HOME unset); global rule '{}' falls back to the workspace layout and will not be discovered by Copilot",
                 artifact.name
             );
         }

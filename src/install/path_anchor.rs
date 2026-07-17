@@ -37,7 +37,7 @@ pub enum PathAnchor {
     Workspace,
     /// Global Claude skills + rules: `$CLAUDE_CONFIG_DIR` else `~/.claude`.
     ClaudeRoot,
-    /// Global Copilot skills: `$COPILOT_HOME` else `~/.copilot`.
+    /// Global Copilot skills and rules: `$COPILOT_HOME` else `~/.copilot`.
     CopilotRoot,
     /// Global OpenCode skills: `$OPENCODE_CONFIG_DIR/skills` else
     /// `$XDG_CONFIG_HOME`|`~/.config`/opencode/skills.
@@ -47,8 +47,9 @@ pub enum PathAnchor {
     /// `<opencode-root>/agents/<name>.md`. Derived as the parent of the
     /// resolved skills root — no separate `AnchorRoots` field.
     OpenCodeRoot,
-    /// `$GRIM_HOME`: the global OpenCode rules dir and the inert global
-    /// Copilot rules path.
+    /// `$GRIM_HOME`: the global OpenCode rules dir; also the pre-move
+    /// fallback anchor for global Copilot rules (the layout-migration
+    /// reaper collects old workspace-layout outputs there).
     GrimHome,
     /// The directory holding Claude Code's user config file `.claude.json`
     /// (global-scope MCP registrations): `$CLAUDE_CONFIG_DIR` else `$HOME`.
@@ -363,9 +364,12 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                     PathAnchor::CopilotRoot
                 }
 
-                // Copilot: rules (inert) live under $GRIM_HOME — no native user-level
-                // instructions path for Copilot at global scope.
-                (ClientTarget::Copilot, ArtifactKind::Rule) => PathAnchor::GrimHome,
+                // Copilot: rules live under the native $COPILOT_HOME root
+                // (`instructions/`). GrimHome stays the appended fallback so
+                // pre-move records (workspace layout under $GRIM_HOME) still
+                // classify — the layout-migration reaper collects them on the
+                // next re-install.
+                (ClientTarget::Copilot, ArtifactKind::Rule) => PathAnchor::CopilotRoot,
 
                 // OpenCode: skills live under the OpenCode skills root.
                 (ClientTarget::OpenCode, ArtifactKind::Skill) => PathAnchor::OpenCodeSkills,
@@ -1131,12 +1135,34 @@ mod tests {
         assert_eq!(ap.relative, "my-skill");
     }
 
-    /// Global Copilot rule (inert) → `(GrimHome, ".github/instructions/…")`.
-    /// The §1.1 row the path_anchor tester flagged as untested: Copilot has
-    /// no native user-level instructions path, so global rules live under
-    /// the `$GRIM_HOME` workspace layout, anchored to `GrimHome`.
+    /// Global Copilot rule → `(CopilotRoot, "instructions/…")` — the native
+    /// `$COPILOT_HOME|~/.copilot/instructions/` layout (the render-layout
+    /// move away from the inert `$GRIM_HOME` workspace layout).
     #[test]
-    fn t4_global_copilot_rule_classifies_to_grim_home() {
+    fn t4_global_copilot_rule_classifies_to_copilot_root() {
+        let roots = all_roots();
+        let abs = roots
+            .copilot_root
+            .clone()
+            .unwrap()
+            .join("instructions/my-rule.instructions.md");
+        let ap = AnchoredPath::from_target(
+            &abs,
+            ConfigScope::Global,
+            ClientTarget::Copilot,
+            ArtifactKind::Rule,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(ap.anchor, PathAnchor::CopilotRoot);
+        assert_eq!(ap.relative, "instructions/my-rule.instructions.md");
+    }
+
+    /// A pre-move record's path (workspace layout under `$GRIM_HOME`) still
+    /// classifies via the appended `GrimHome` fallback — required so the
+    /// layout-migration reaper can resolve and collect the old outputs.
+    #[test]
+    fn t4_global_copilot_rule_grim_home_fallback_still_classifies() {
         let roots = all_roots();
         let abs = PathBuf::from("/grim/.github/instructions/my-rule.instructions.md");
         let ap = AnchoredPath::from_target(

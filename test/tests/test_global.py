@@ -12,7 +12,7 @@ Global installs land in vendor-native user-level discovery paths:
              rules  → ``$GRIM_HOME/.opencode/rules/<name>.md`` (loaded via absolute glob in
                        ``$XDG_CONFIG_HOME/opencode/opencode.json``)
 - Copilot:   skills → ``$HOME/.copilot/skills/<name>/``
-             rules  → ``$GRIM_HOME/.github/instructions/<name>.instructions.md`` (inert for Copilot)
+             rules  → ``$HOME/.copilot/instructions/<name>.instructions.md``
 
 Vendor env-var overrides (tested at the bottom of this file):
 - ``CLAUDE_CONFIG_DIR`` replaces the entire ``~/.claude`` tree (skills + rules)
@@ -229,6 +229,82 @@ def test_global_install_copilot_skill_lands_in_home_dot_copilot(
         f"got nothing at {skill_dir}"
     )
     assert (skill_dir / "SKILL.md").is_file()
+
+
+def test_global_copilot_rule_installs_to_native_instructions_path(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A globally-installed Copilot rule lands in the native
+    ``~/.copilot/instructions/`` dir (Copilot CLI discovery), not the
+    inert ``$GRIM_HOME`` workspace layout."""
+    repo = f"{unique_repo}/cp-rule"
+    ru = make_artifact(repo, "rule", {"cp-rule.md": "# guidance\n"}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "copilot")["items"]
+    assert rows[0]["status"] == "installed"
+    native = runner.home / ".copilot/instructions/cp-rule.instructions.md"
+    assert native.is_file(), f"global Copilot rule must land at {native}"
+    assert not (grim_home / ".github/instructions/cp-rule.instructions.md").exists(), (
+        "the inert $GRIM_HOME workspace layout must no longer be written"
+    )
+
+
+def test_global_copilot_rule_layout_migration_reaps_old_output(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """ADR render-layout-stability upgrade fixture: a pre-move install
+    (record anchored to ``grim-home``, file at the old
+    ``$GRIM_HOME/.github/instructions/`` layout, bytes unchanged) migrates
+    on ``grim update`` — the rule re-materializes at the native path, the
+    orphaned old output is reaped, the record re-anchors, and
+    ``status``/``uninstall`` round-trip cleanly."""
+    repo = f"{unique_repo}/mig-rule"
+    ru = make_artifact(repo, "rule", {"mig-rule.md": "# guidance\n"}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nmig-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "copilot")
+
+    native = runner.home / ".copilot/instructions/mig-rule.instructions.md"
+    assert native.is_file()
+
+    # Simulate the pre-move on-disk state: move the file to the old
+    # workspace layout under $GRIM_HOME and re-anchor the state record
+    # (bytes unchanged, so the recorded content hash still round-trips).
+    old = grim_home / ".github/instructions/mig-rule.instructions.md"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(native.read_bytes())
+    native.unlink()
+    state_path = grim_home / "state/global.json"
+    state = json.loads(state_path.read_text())
+    [record] = [r for r in state["records"] if r["name"] == "mig-rule"]
+    [output] = record["outputs"]
+    output["target"] = {
+        "anchor": "grim-home",
+        "relative": ".github/instructions/mig-rule.instructions.md",
+    }
+    state_path.write_text(json.dumps(state))
+
+    # Make Copilot (and only Copilot) detected for the update pass.
+    (runner.home / ".copilot/skills").mkdir(parents=True)
+
+    runner.json("update", "--global")
+
+    assert native.is_file(), "update must re-materialize at the new native path"
+    assert not old.exists(), "the unmodified old-layout output must be reaped"
+    state = json.loads(state_path.read_text())
+    [record] = [r for r in state["records"] if r["name"] == "mig-rule"]
+    anchors = [o["target"]["anchor"] for o in record["outputs"]]
+    assert anchors == ["copilot-root"], f"record must re-anchor, got {anchors}"
+
+    status = runner.json("status", "--global")["items"]
+    assert status[0]["state"] == "installed", status
+
+    runner.json("uninstall", "rule", "mig-rule", "--global")
+    assert not native.exists(), "uninstall must remove the migrated output"
 
 
 # ---------------------------------------------------------------------------

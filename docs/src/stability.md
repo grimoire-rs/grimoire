@@ -80,6 +80,12 @@ grim upholds this: artifacts remain discoverable by the target client;
 status, update, and uninstall keep working across upgrades; exact vendor
 paths may change in a minor release with automatic migration.
 
+That migration is mechanical: the first install or update after an
+upgrade that moved a layout re-materializes the artifact at its new
+path, re-anchors the install record, and reaps the unmodified old
+output. A locally modified old file is never deleted — the same
+preservation rule the [untracked-destination guard](#unstable) applies.
+
 The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout
 stability (`.claude/artifacts/adr_render_layout_stability.md`).

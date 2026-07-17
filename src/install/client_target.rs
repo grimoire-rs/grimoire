@@ -529,16 +529,21 @@ mod tests {
                 cfg.join("opencode/skills/x")
             );
         }
-        // Rules stay in the workspace layout: OpenCode loads them via the
-        // absolute instructions glob; Copilot has no global path (warned).
+        // OpenCode rules stay in the workspace layout (loaded via the
+        // absolute instructions glob); Copilot rules route to the native
+        // `$COPILOT_HOME|~/.copilot/instructions/` dir.
         assert_eq!(
             ClientTarget::OpenCode.path_for(w, g, ArtifactKind::Rule, "r"),
             PathBuf::from("/grim-home/.opencode/rules/r.md")
         );
-        assert_eq!(
-            ClientTarget::Copilot.path_for(w, g, ArtifactKind::Rule, "r"),
-            PathBuf::from("/grim-home/.github/instructions/r.instructions.md")
-        );
+        if let Some(home) = crate::install::vendor::home_dir()
+            && crate::install::vendor::env_dir("COPILOT_HOME").is_none()
+        {
+            assert_eq!(
+                ClientTarget::Copilot.path_for(w, g, ArtifactKind::Rule, "r"),
+                home.join(".copilot/instructions/r.instructions.md")
+            );
+        }
     }
 
     #[test]
