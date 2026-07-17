@@ -208,10 +208,18 @@ impl Vendor for OpenCodeVendor {
         // identity (the canonical `name` is dropped) and only the fields
         // OpenCode reads are emitted — `description` plus the pass-through
         // `model` (caveat documented: OpenCode expects `provider/model-id`;
-        // `opencode.model` overrides). `tools` is dropped (deprecated
-        // upstream in favor of the object-valued `permission`).
+        // `opencode.model` overrides). `tools` is dropped with a warning
+        // (deprecated upstream in favor of the object-valued `permission`
+        // — see the vendor capability watchlist).
         let projection = render::project_agent(&parsed.frontmatter, self)?;
         let mut warnings = projection.warnings;
+
+        if projection.cleaned.tools.is_some() {
+            warnings.push(format!(
+                "agent field 'tools' has no OpenCode equivalent (deprecated upstream in favor of 'permission'); dropped for agent '{}'",
+                projection.cleaned.name
+            ));
+        }
 
         let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![(
             "description",
@@ -247,7 +255,7 @@ impl Vendor for OpenCodeVendor {
 /// to respect the explicit override; else the default
 /// `$XDG_CONFIG_HOME|~/.config/opencode/skills`. `$OPENCODE_CONFIG` (a
 /// config **file** path) deliberately plays no role — it does not affect
-/// OpenCode's skill discovery (sst/opencode#3432).
+/// OpenCode's skill discovery (anomalyco/opencode#3432).
 pub(crate) fn global_skills_root(config_dir_override: Option<PathBuf>, xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     config_dir_override
         .map(|d| d.join("skills"))
@@ -324,7 +332,9 @@ mod tests {
         );
         assert!(!out.document.contains("name:"), "filename carries the identity");
         assert!(!out.document.contains("tools"), "tools is deprecated upstream");
-        assert!(out.warnings.is_empty());
+        // The drop is no longer silent — one warning naming the field.
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("tools"), "{:?}", out.warnings);
     }
 
     #[test]
