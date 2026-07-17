@@ -79,6 +79,7 @@ Four verbs operate on dotted keys:
 ```sh
 grim config get   options.clients
 grim config set   options.clients claude,opencode
+grim config set   options.clients claude,opencode --dry-run
 grim config unset options.tui.default_view
 grim config list
 grim config list --all
@@ -86,7 +87,9 @@ grim config list --all
 
 `get` prints the bare value on a single line with no key name or table header, so `$(grim config get options.clients)` works directly in shell. A valid-but-unset key exits `1` with no stdout — the same contract as [`git config`][git-config]: `grim config get options.clients || echo default`. An unknown key (typo or unsupported leaf) exits `64` without reading the config.
 
-`set` and `unset` print a one-row confirmation table with `Action`, `Key`, `Value`, and `Scope` columns.
+`set` and `unset` print a one-row confirmation table with `Action`, `Key`, `Value`, `Scope`, and `Dry Run` columns.
+
+`set` accepts `--dry-run`: it parses the key, resolves scope, and validates the value exactly as a real `set` would, then reports the confirmation table without acquiring the write lock or touching `grimoire.toml`. Error behavior is identical to a real `set` — an unknown key still exits `64`, an invalid value still exits `65`, running outside a project still exits `79`. `--global set --dry-run` against a `$GRIM_HOME` with no existing config succeeds and creates no file (a real `--global set` does create one, seeded from empty defaults). `unset` has no `--dry-run` flag.
 
 `list` shows every explicitly-set key and value for the active scope — keys at their default or absent values are omitted. Each invocation reads from exactly one scope, so origin is implicit in the scope flag used. Scopes are never merged: `grim config --global list` shows only global values, project `list` shows only project values.
 
@@ -146,7 +149,7 @@ shapes are:
 |-----------|------------|
 | `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
-| `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
+| `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…","dry_run":bool}` — `dry_run` is `true` only for `set --dry-run`; every other write verb always reports `false` |
 | `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null}` |
 | `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"default":bool}` |
 | `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"default":bool}` |

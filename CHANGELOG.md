@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim config set --dry-run` validates and reports the write confirmation
+  without acquiring the write lock or touching `grimoire.toml`; the report
+  gains an always-present `dry_run` field (`false` for every other write
+  verb, which has no dry-run flag) *(config)*
 - OpenAI Codex CLI is now a supported install target: `--client codex` on the
   CLI and `clients = ["codex"]` in `[options]`, alongside Claude, Copilot, and
   OpenCode *(install)*

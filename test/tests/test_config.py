@@ -397,10 +397,10 @@ def test_set_json_write_confirmation_carries_action_key_value_scope(
     project_dir: Path,
 ) -> None:
     """``set`` with ``--format json`` returns a write-confirmation object
-    with ``action``, ``key``, ``value``, and ``scope`` fields.
+    with ``action``, ``key``, ``value``, ``scope``, and ``dry_run`` fields.
 
     Traces to ADR: ConfigWriteReport JSON shape
-    ``{"action":"…","key":"…","value":"…","scope":"…"}``.
+    ``{"action":"…","key":"…","value":"…","scope":"…","dry_run":bool}``.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
@@ -421,6 +421,9 @@ def test_set_json_write_confirmation_carries_action_key_value_scope(
     assert result.get("scope") == "project", (
         f"'scope' field must be 'project' for project-scope set; "
         f"got: {result.get('scope')!r}"
+    )
+    assert result.get("dry_run") is False, (
+        f"a real (non-dry-run) set must report dry_run:false; got: {result.get('dry_run')!r}"
     )
 
 
@@ -1307,3 +1310,163 @@ def test_schema_directive_survives_config_rewrites(
     body = (project_dir / "grimoire.toml").read_text()
     assert body.startswith(directive), f"unset must keep the directive first: {body}"
     tomllib.loads(body)  # still valid TOML
+
+
+# ---------------------------------------------------------------------------
+# `config set --dry-run`
+# ---------------------------------------------------------------------------
+
+
+def test_set_dry_run_valid_value_exits_0_and_leaves_file_unchanged(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set --dry-run`` with a valid value exits 0, reports ``dry_run:
+    true`` in the write confirmation, and does not touch ``grimoire.toml``
+    on disk (byte-for-byte).
+
+    A subsequent ``get`` must still report the key unset — nothing was
+    written.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    before = (project_dir / "grimoire.toml").read_bytes()
+
+    result = runner.json("config", "set", "options.clients", "claude", "--dry-run")
+
+    assert result.get("action") == "set"
+    assert result.get("key") == "options.clients"
+    assert "claude" in str(result.get("value", "")), (
+        f"dry-run value must still report the parsed stored value; got: {result!r}"
+    )
+    assert result.get("dry_run") is True, (
+        f"dry-run write confirmation must carry dry_run:true; got: {result!r}"
+    )
+
+    after = (project_dir / "grimoire.toml").read_bytes()
+    assert after == before, (
+        f"grimoire.toml must be byte-for-byte unchanged after a dry run; "
+        f"before={before!r} after={after!r}"
+    )
+
+    # Nothing was actually written — get still reports unset (exit 1).
+    get_result = runner.run("config", "get", "options.clients", check=False)
+    assert get_result.returncode == 1, (
+        f"dry-run set must not persist the value; get must still exit 1; "
+        f"got {get_result.returncode}"
+    )
+
+
+def test_set_dry_run_invalid_value_exits_65_matching_real_set_envelope(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set --dry-run`` of an invalid enum value exits 65 with the same
+    structured error envelope a real (non-dry-run) ``set`` produces.
+
+    Error parity is by construction: both paths run the exact same
+    ``apply_set`` validator before any write is attempted.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    real = runner.run(
+        "--format", "json", "config", "set", "options.tui.default_view", "bogus",
+        check=False,
+    )
+    dry = runner.run(
+        "--format", "json", "config", "set", "options.tui.default_view", "bogus",
+        "--dry-run", check=False,
+    )
+
+    assert real.returncode == 65, f"real invalid set must exit 65; got {real.returncode}"
+    assert dry.returncode == 65, f"dry-run invalid set must exit 65; got {dry.returncode}"
+
+    real_doc = json.loads(real.stdout)
+    dry_doc = json.loads(dry.stdout)
+    assert real_doc == dry_doc, (
+        f"dry-run error envelope must match the real set's envelope exactly; "
+        f"real={real_doc!r} dry={dry_doc!r}"
+    )
+
+
+def test_set_dry_run_unknown_key_exits_64(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``set --dry-run`` of an unknown key exits 64 before any resolution
+    or validation — same as a real ``set``."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "optins.clients", "claude", "--dry-run", check=False
+    )
+
+    assert result.returncode == 64, (
+        f"unknown key must exit 64 (UsageError) even under --dry-run; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+
+
+def test_set_dry_run_outside_project_exits_79(
+    grim_at: object,
+    tmp_path: Path,
+) -> None:
+    """``set --dry-run`` outside a project (no ``grimoire.toml`` found by
+    walking up) exits 79 — scope resolution runs before the dry-run
+    short-circuit."""
+    outside = tmp_path / "empty"
+    outside.mkdir()
+    runner: GrimRunner = grim_at(outside)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "options.clients", "claude", "--dry-run", check=False
+    )
+
+    assert result.returncode == 79, (
+        f"set --dry-run outside a project must exit 79; got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+def test_set_dry_run_global_scope_with_no_existing_config_creates_no_file(
+    grim_binary: Path,
+    grim_home: Path,
+) -> None:
+    """``--global set --dry-run`` with no existing ``$GRIM_HOME/grimoire.toml``
+    exits 0 and creates no file.
+
+    Contrast with a real ``--global set``, which creates the file (global
+    scope resolves to empty defaults when absent, and a real write always
+    persists them) — the dry-run path must skip the write entirely.
+    """
+    runner = GrimRunner(grim_binary, grim_home)
+    assert not (grim_home / "grimoire.toml").exists(), "test precondition: no global config yet"
+
+    result = runner.run(
+        "config", "--global", "set", "options.clients", "claude", "--dry-run"
+    )
+
+    assert result.returncode == 0, (
+        f"dry-run --global set must succeed even with no existing global config; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert not (grim_home / "grimoire.toml").exists(), (
+        "--dry-run must never create the global config file"
+    )
+
+
+def test_set_dry_run_plain_table_shows_dry_run_true(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Plain ``set --dry-run`` output includes a ``Dry Run`` column showing
+    ``true``."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.plain("config", "set", "options.clients", "claude", "--dry-run")
+
+    assert "Dry Run" in result.stdout, f"plain output must have a Dry Run column; got: {result.stdout!r}"
+    assert "true" in result.stdout, f"dry-run row must show true; got: {result.stdout!r}"

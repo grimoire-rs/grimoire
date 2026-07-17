@@ -5,8 +5,11 @@
 //!
 //! Plain format varies by variant:
 //! - `Get`: bare value on a single line (no key, no table — script contract).
-//! - `Write`: one-row table (`Action | Key | Value | Scope`) — the shared
-//!   confirmation for `set`, `unset`, and `registry add`/`rm`/`use`.
+//! - `Write`: one-row table (`Action | Key | Value | Scope | Dry Run`) — the
+//!   shared confirmation for `set`, `unset`, and `registry add`/`rm`/`use`.
+//!   `dry_run` is `true` only for `grim config set --dry-run`; every other
+//!   write verb (including `unset`, which has no `--dry-run` flag) reports
+//!   `false`.
 //! - `List`: one table per invocation (`Key | Value`); unset rows (shown
 //!   only with `--all`) render an empty `Value` cell.
 //! - `RegistryList`: one table (`Alias | Type | Source | Default`).
@@ -14,7 +17,8 @@
 //!
 //! JSON format:
 //! - `Get`: `{"key":"…","value":"…"|null,"set":bool,"scope":"…"}`.
-//! - `Write`: single object matching struct fields.
+//! - `Write`: single object matching struct fields, incl. always-present
+//!   `dry_run`.
 //! - `List`: `{"items": [...]}` of [`ConfigEntry`] objects — every item
 //!   always carries the full metadata shape `{"key","value","set","type",
 //!   "title","description","default","values"}` (always-present-null
@@ -149,9 +153,10 @@ impl fmt::Display for WriteAction {
 /// Confirmation for any config write: `set`, `unset`, and the registry
 /// lifecycle verbs (`add`, `rm`, `use`).
 ///
-/// Plain format: one-row table — `Action | Key | Value | Scope`.
+/// Plain format: one-row table — `Action | Key | Value | Scope | Dry Run`.
 ///
-/// JSON format: `{"action": "…", "key": "…", "value": "…"|null, "scope": "…"}`.
+/// JSON format: `{"action": "…", "key": "…", "value": "…"|null, "scope": "…",
+/// "dry_run": bool}`.
 #[derive(Debug, Serialize)]
 pub struct ConfigWriteReport {
     /// What kind of write this confirms.
@@ -163,6 +168,10 @@ pub struct ConfigWriteReport {
     pub value: Option<String>,
     /// Which scope was written.
     pub scope: Origin,
+    /// `true` for `grim config set --dry-run` (validated, nothing written);
+    /// always `false` for every other write verb, which has no dry-run
+    /// surface.
+    pub dry_run: bool,
 }
 
 impl Printable for ConfigWriteReport {
@@ -171,12 +180,13 @@ impl Printable for ConfigWriteReport {
         let value_str = self.value.as_deref().unwrap_or("");
         print_table(
             w,
-            &["Action", "Key", "Value", "Scope"],
+            &["Action", "Key", "Value", "Scope", "Dry Run"],
             &[vec![
                 self.action.to_string(),
                 self.key.clone(),
                 value_str.to_string(),
                 self.scope.to_string(),
+                self.dry_run.to_string(),
             ]],
         )
     }
@@ -579,12 +589,13 @@ mod tests {
 
     #[test]
     fn config_write_report_json_carries_action_key_value_scope() {
-        // ADR: ConfigWriteReport JSON shape {"action":"…","key":"…","value":"…","scope":"…"}.
+        // ADR: ConfigWriteReport JSON shape {"action":"…","key":"…","value":"…","scope":"…","dry_run":bool}.
         let r = ConfigWriteReport {
             action: WriteAction::Set,
             key: "options.clients".to_string(),
             value: Some("claude".to_string()),
             scope: Origin::Project,
+            dry_run: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -594,29 +605,74 @@ mod tests {
         assert_eq!(v["scope"], "project", "scope must be 'project'");
         let val = v["value"].as_str().unwrap_or("");
         assert!(val.contains("claude"), "value field must contain 'claude'");
+        assert_eq!(v["dry_run"], false, "dry_run must be false for a real write");
     }
 
     #[test]
-    fn config_write_report_plain_emits_table_with_action_columns() {
-        // subsystem-cli-api.md: single-table rule — exactly one print_table call.
-        // The table must contain action, key, value, and scope data.
+    fn config_write_report_json_pins_frozen_shape() {
+        // Frozen shape: exactly these 5 keys, always present (additive-only
+        // JSON contract — a future field must widen this set, never replace it).
         let r = ConfigWriteReport {
             action: WriteAction::Set,
             key: "options.clients".to_string(),
             value: Some("claude".to_string()),
             scope: Origin::Project,
+            dry_run: true,
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        let obj = v.as_object().expect("write report must serialize as an object");
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["action", "key", "value", "scope", "dry_run"].into_iter().collect();
+        assert_eq!(
+            keys, expected,
+            "ConfigWriteReport JSON must pin exactly the frozen shape"
+        );
+        assert_eq!(v["dry_run"], true);
+    }
+
+    #[test]
+    fn config_write_report_plain_emits_table_with_action_columns() {
+        // subsystem-cli-api.md: single-table rule — exactly one print_table call.
+        // The table must contain action, key, value, scope, and dry-run data.
+        let r = ConfigWriteReport {
+            action: WriteAction::Set,
+            key: "options.clients".to_string(),
+            value: Some("claude".to_string()),
+            scope: Origin::Project,
+            dry_run: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         r.print_plain(&mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(!text.is_empty(), "plain write-confirmation must not be empty");
-        // All four column values must appear in the output.
+        // All five column values must appear in the output.
         assert!(
             text.contains("options.clients"),
             "key must appear in table; got: {text:?}"
         );
         assert!(text.contains("claude"), "value must appear in table; got: {text:?}");
         assert!(text.contains("project"), "scope must appear in table; got: {text:?}");
+        assert!(text.contains("Dry Run"), "Dry Run header must appear; got: {text:?}");
+        assert!(text.contains("false"), "dry_run value must appear; got: {text:?}");
+    }
+
+    #[test]
+    fn config_write_report_plain_dry_run_true_renders_true() {
+        let r = ConfigWriteReport {
+            action: WriteAction::Set,
+            key: "options.clients".to_string(),
+            value: Some("claude".to_string()),
+            scope: Origin::Project,
+            dry_run: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("true"),
+            "dry_run true must render as 'true'; got: {text:?}"
+        );
     }
 
     #[test]

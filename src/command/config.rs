@@ -55,6 +55,9 @@ pub enum ConfigCommand {
         key: String,
         /// New value (parsed to the field's type).
         value: String,
+        /// Validate and report without writing the config file.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a dotted key (or a whole registry entry when the key names
     /// a `registry.<alias>` without a trailing field).
@@ -136,7 +139,7 @@ pub enum RegistryCommand {
 pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigReport, ExitCode)> {
     match &args.command {
         ConfigCommand::Get { key } => run_get(ctx, key),
-        ConfigCommand::Set { key, value } => run_set(ctx, key, value),
+        ConfigCommand::Set { key, value, dry_run } => run_set(ctx, key, value, *dry_run),
         ConfigCommand::Unset { key } => run_unset(ctx, key),
         ConfigCommand::List { all } => run_list(ctx, *all),
         ConfigCommand::Registry(r) => match &r.command {
@@ -725,17 +728,27 @@ fn run_get(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)>
     ))
 }
 
-fn run_set(ctx: &Context, key: &str, value: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+/// `--dry-run` validates and reports exactly what a real `set` would do —
+/// same `parse_key` / scope resolution / `apply_set` / registry validation —
+/// but skips the advisory lock and the write, so error parity with the real
+/// path is by construction (same validators, same 64/65/79 envelopes).
+fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let parsed = parse_key(key)?;
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
-    let _guard = acquire_config_lock(&scope)?;
+    let _guard = if dry_run { None } else { acquire_config_lock(&scope)? };
 
     let mut options = scope.options.clone();
     let mut registries = scope.registries.clone();
     let stored = apply_set(&parsed, value, &mut options, &mut registries)?;
-    commit_config(&scope, &options, &registries)?;
+
+    if dry_run {
+        // The validate half of `commit_config`, without the write.
+        super::grim(validate_registries(&registries, &scope.config_path))?;
+    } else {
+        commit_config(&scope, &options, &registries)?;
+    }
 
     Ok((
         ConfigReport::Write(ConfigWriteReport {
@@ -743,6 +756,7 @@ fn run_set(ctx: &Context, key: &str, value: &str) -> anyhow::Result<(ConfigRepor
             key: key.to_string(),
             value: Some(stored),
             scope: origin,
+            dry_run,
         }),
         ExitCode::Success,
     ))
@@ -766,6 +780,7 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
             key: key.to_string(),
             value: None,
             scope: origin,
+            dry_run: false,
         }),
         ExitCode::Success,
     ))
@@ -839,6 +854,7 @@ fn run_registry_add(
             key: format!("registry.{alias}"),
             value: Some(locator.to_string()),
             scope: origin,
+            dry_run: false,
         }),
         ExitCode::Success,
     ))
@@ -866,6 +882,7 @@ fn run_registry_rm(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, 
             key: format!("registry.{alias}"),
             value: None,
             scope: origin,
+            dry_run: false,
         }),
         ExitCode::Success,
     ))
@@ -894,6 +911,7 @@ fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport,
             key: format!("registry.{alias}"),
             value: None,
             scope: origin,
+            dry_run: false,
         }),
         ExitCode::Success,
     ))
@@ -968,9 +986,24 @@ mod tests {
         let a = parse(&["set", "options.clients", "claude,opencode"]).expect("set parses");
         assert!(matches!(
             a.command,
-            ConfigCommand::Set { key, value }
-            if key == "options.clients" && value == "claude,opencode"
+            ConfigCommand::Set { key, value, dry_run }
+            if key == "options.clients" && value == "claude,opencode" && !dry_run
         ));
+    }
+
+    #[test]
+    fn set_dry_run_flag_parses() {
+        let a = parse(&["set", "options.clients", "claude", "--dry-run"]).expect("set --dry-run parses");
+        assert!(matches!(
+            a.command,
+            ConfigCommand::Set { dry_run, .. } if dry_run
+        ));
+    }
+
+    #[test]
+    fn unset_rejects_dry_run_flag() {
+        // `--dry-run` is `set`-only; `unset` has no such surface.
+        assert!(parse(&["unset", "options.clients", "--dry-run"]).is_err());
     }
 
     #[test]
