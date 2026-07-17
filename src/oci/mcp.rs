@@ -79,6 +79,21 @@ pub struct McpServer {
     /// environment variables as `${VAR}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// Server startup timeout in milliseconds (Claude `timeout`,
+    /// OpenCode `timeout`). Valid for every transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Load the server eagerly at client startup (Claude `alwaysLoad`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
+    /// Executable that produces fresh auth headers (Claude
+    /// `headersHelper`). Remote transports only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers_helper: Option<String>,
+    /// Working directory for the launched process (OpenCode `cwd`).
+    /// Stdio only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// The MCP descriptor document: authored as TOML, shipped as the
@@ -135,6 +150,14 @@ pub enum McpError {
     /// A `url` that is not an absolute http(s) URL.
     #[error("invalid server url '{0}': expected an http:// or https:// URL")]
     InvalidUrl(String),
+    /// A refinement field authored on a transport that cannot use it.
+    #[error("field '{field}' is not valid for {transport} transport")]
+    RefinementShape {
+        /// The offending field (descriptor spelling).
+        field: &'static str,
+        /// The declared transport.
+        transport: McpTransport,
+    },
     /// An `env` key outside `[A-Za-z_][A-Za-z0-9_]*`.
     #[error("invalid env key '{0}': expected [A-Za-z_][A-Za-z0-9_]*")]
     InvalidEnvKey(String),
@@ -216,6 +239,12 @@ impl McpDescriptor {
                 {
                     return Err(McpError::StdioShape);
                 }
+                if s.headers_helper.is_some() {
+                    return Err(McpError::RefinementShape {
+                        field: "headers_helper",
+                        transport: s.transport,
+                    });
+                }
             }
             McpTransport::Http | McpTransport::Sse => {
                 let Some(url) = s.url.as_deref() else {
@@ -226,6 +255,12 @@ impl McpDescriptor {
                 }
                 if !(url.starts_with("https://") || url.starts_with("http://")) {
                     return Err(McpError::InvalidUrl(url.to_string()));
+                }
+                if s.cwd.is_some() {
+                    return Err(McpError::RefinementShape {
+                        field: "cwd",
+                        transport: s.transport,
+                    });
                 }
             }
         }
@@ -413,6 +448,83 @@ headers = { Authorization = "Bearer ${TOKEN}" }
         // A plain `$VAR` (no braces) is a literal, not a reference — allowed.
         let toml = "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\nenv = { A = \"$HOME\" }";
         McpDescriptor::from_toml_str(toml).unwrap();
+    }
+
+    #[test]
+    fn descriptor_round_trips_refinement_fields() {
+        let toml = r#"
+description = "d"
+
+[server]
+transport = "stdio"
+command = "grim"
+timeout = 30000
+always_load = true
+cwd = "./srv"
+"#;
+        let d = McpDescriptor::from_toml_str(toml).unwrap();
+        assert_eq!(d.server.timeout, Some(30000));
+        assert_eq!(d.server.always_load, Some(true));
+        assert_eq!(d.server.cwd.as_deref(), Some("./srv"));
+        let bytes = d.to_layer_bytes().unwrap();
+        assert_eq!(d, McpDescriptor::from_layer_bytes(&bytes).unwrap());
+
+        let remote = r#"
+description = "d"
+
+[server]
+transport = "http"
+url = "https://api.example.com/mcp"
+timeout = 5000
+headers_helper = "/usr/local/bin/fresh-token"
+"#;
+        let d = McpDescriptor::from_toml_str(remote).unwrap();
+        assert_eq!(d.server.headers_helper.as_deref(), Some("/usr/local/bin/fresh-token"));
+        let bytes = d.to_layer_bytes().unwrap();
+        assert_eq!(d, McpDescriptor::from_layer_bytes(&bytes).unwrap());
+    }
+
+    #[test]
+    fn refinement_field_on_wrong_transport_is_rejected() {
+        // headers_helper is remote-only.
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\nheaders_helper = \"h\"",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                McpError::RefinementShape {
+                    field: "headers_helper",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // cwd is stdio-only.
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\ncwd = \".\"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::RefinementShape { field: "cwd", .. }), "{err}");
+    }
+
+    #[test]
+    fn old_descriptor_without_refinement_fields_parses() {
+        // Backward-compat lock: a layer blob published by an older grim
+        // (no refinement fields) parses unchanged, and a descriptor not
+        // using the new fields serializes byte-identically to the old
+        // canonical layer shape (no new keys appear).
+        let d = McpDescriptor::from_toml_str(STDIO).unwrap();
+        let bytes = d.to_layer_bytes().unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        for absent in ["timeout", "always_load", "headers_helper", "cwd"] {
+            assert!(
+                !json.contains(absent),
+                "unused refinement field '{absent}' must not serialize"
+            );
+        }
+        assert_eq!(d, McpDescriptor::from_layer_bytes(&bytes).unwrap());
     }
 
     #[test]

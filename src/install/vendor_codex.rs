@@ -572,6 +572,10 @@ mod tests {
                 env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 url: None,
                 headers: Default::default(),
+                timeout: None,
+                always_load: None,
+                headers_helper: None,
+                cwd: None,
             },
         }
     }
@@ -591,6 +595,10 @@ mod tests {
                 env: Default::default(),
                 url: Some(url.to_string()),
                 headers: Default::default(),
+                timeout: None,
+                always_load: None,
+                headers_helper: None,
+                cwd: None,
             },
         }
     }
