@@ -275,6 +275,22 @@ impl Vendor for ClaudeVendor {
         if let Some(helper) = &s.headers_helper {
             entry.insert("headersHelper".into(), serde_json::json!(helper));
         }
+        if let Some(oauth) = &s.oauth {
+            let mut o = serde_json::Map::new();
+            if let Some(client_id) = &oauth.client_id {
+                o.insert("clientId".into(), serde_json::json!(client_id));
+            }
+            if let Some(port) = oauth.callback_port {
+                o.insert("callbackPort".into(), serde_json::json!(port));
+            }
+            if let Some(url) = &oauth.auth_server_metadata_url {
+                o.insert("authServerMetadataUrl".into(), serde_json::json!(url));
+            }
+            if !oauth.scopes.is_empty() {
+                o.insert("scopes".into(), serde_json::json!(oauth.scopes));
+            }
+            entry.insert("oauth".into(), serde_json::Value::Object(o));
+        }
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
@@ -428,6 +444,22 @@ mod tests {
         let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &remote).unwrap();
         assert_eq!(value["headersHelper"], "fresh-token");
         assert!(value.get("timeout").is_none(), "unset refinement must not emit");
+    }
+
+    #[test]
+    fn mcp_entry_projects_oauth_block() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"cid\"\nscopes = [\"read\", \"write\"]\ncallback_port = 43110\nauth_server_metadata_url = \"https://auth/.well-known/oauth-authorization-server\"",
+        )
+        .unwrap();
+        let (_, value) = ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(value["oauth"]["clientId"], "cid");
+        assert_eq!(value["oauth"]["scopes"][1], "write");
+        assert_eq!(value["oauth"]["callbackPort"], 43110);
+        assert_eq!(
+            value["oauth"]["authServerMetadataUrl"],
+            "https://auth/.well-known/oauth-authorization-server"
+        );
     }
 
     #[test]

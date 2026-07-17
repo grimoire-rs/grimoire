@@ -61,6 +61,32 @@ impl std::fmt::Display for McpTransport {
     }
 }
 
+/// The `[server.oauth]` block: OAuth client configuration for a remote
+/// server (Claude-native projection; other vendors decline descriptors
+/// that carry it).
+///
+/// `client_secret` is deliberately absent: a secret has no safe home in a
+/// published artifact (the same principle behind `${VAR}` env references —
+/// grim never ships literal credentials).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpOAuth {
+    /// Pre-registered OAuth client id. May reference the host environment
+    /// as `${VAR}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Requested scopes. Values may reference the host environment as
+    /// `${VAR}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Fixed localhost callback port for the authorization redirect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Authorization-server metadata URL (RFC 8414); https-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
+}
+
 /// The `[server]` table: how clients launch or reach the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +125,10 @@ pub struct McpServer {
     /// Stdio only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// OAuth client configuration. `http`/`sse` only (Claude documents no
+    /// OAuth for `ws`, and stdio has no authorization flow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuth>,
 }
 
 /// The MCP descriptor document: authored as TOML, shipped as the
@@ -156,6 +186,9 @@ pub enum McpError {
     /// `http`/`sse`, ws(s) for `ws`.
     #[error("invalid server url '{0}': expected http:// or https:// (ws:// or wss:// for the ws transport)")]
     InvalidUrl(String),
+    /// An `oauth.auth_server_metadata_url` that is not an https URL.
+    #[error("invalid oauth auth_server_metadata_url '{0}': expected an https:// URL")]
+    OAuthMetadataUrl(String),
     /// A refinement field authored on a transport that cannot use it.
     #[error("field '{field}' is not valid for {transport} transport")]
     RefinementShape {
@@ -276,6 +309,21 @@ impl McpDescriptor {
                 }
             }
         }
+        if let Some(oauth) = &s.oauth {
+            // Claude documents no OAuth for `ws`, and stdio has no
+            // authorization flow — http/sse only.
+            if !matches!(s.transport, McpTransport::Http | McpTransport::Sse) {
+                return Err(McpError::RefinementShape {
+                    field: "oauth",
+                    transport: s.transport,
+                });
+            }
+            if let Some(url) = &oauth.auth_server_metadata_url
+                && !url.starts_with("https://")
+            {
+                return Err(McpError::OAuthMetadataUrl(url.clone()));
+            }
+        }
         for key in s.env.keys() {
             if !is_env_name(key) {
                 return Err(McpError::InvalidEnvKey(key.clone()));
@@ -304,6 +352,12 @@ impl McpDescriptor {
             .chain(s.env.values().map(String::as_str))
             .chain(s.url.as_deref())
             .chain(s.headers.values().map(String::as_str))
+            .chain(s.oauth.iter().flat_map(|o| {
+                o.client_id
+                    .as_deref()
+                    .into_iter()
+                    .chain(o.scopes.iter().map(String::as_str))
+            }))
     }
 }
 
@@ -544,6 +598,66 @@ headers_helper = "/usr/local/bin/fresh-token"
         )
         .unwrap_err();
         assert!(matches!(err, McpError::RefinementShape { field: "cwd", .. }), "{err}");
+    }
+
+    #[test]
+    fn oauth_block_parses_validates_and_round_trips() {
+        let toml = r#"
+description = "d"
+
+[server]
+transport = "http"
+url = "https://api.example.com/mcp"
+
+[server.oauth]
+client_id = "${OAUTH_CLIENT_ID}"
+scopes = ["read", "write"]
+callback_port = 43110
+auth_server_metadata_url = "https://auth.example.com/.well-known/oauth-authorization-server"
+"#;
+        let d = McpDescriptor::from_toml_str(toml).unwrap();
+        let oauth = d.server.oauth.as_ref().unwrap();
+        assert_eq!(oauth.client_id.as_deref(), Some("${OAUTH_CLIENT_ID}"));
+        assert_eq!(oauth.scopes, ["read", "write"]);
+        assert_eq!(oauth.callback_port, Some(43110));
+        // Layer round-trip + byte stability.
+        let bytes = d.to_layer_bytes().unwrap();
+        let parsed = McpDescriptor::from_layer_bytes(&bytes).unwrap();
+        assert_eq!(d, parsed);
+        assert_eq!(bytes, parsed.to_layer_bytes().unwrap());
+        // A descriptor without oauth never serializes the key.
+        let plain = McpDescriptor::from_toml_str(STDIO).unwrap();
+        assert!(
+            !String::from_utf8(plain.to_layer_bytes().unwrap())
+                .unwrap()
+                .contains("oauth")
+        );
+
+        // Stdio (and ws) reject oauth.
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::RefinementShape { field: "oauth", .. }), "{err}");
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::RefinementShape { field: "oauth", .. }), "{err}");
+
+        // Metadata URL is https-only.
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nauth_server_metadata_url = \"http://auth\"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::OAuthMetadataUrl(_)), "{err}");
+
+        // client_id / scopes join env-ref validation (bad ref rejects).
+        let err = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nscopes = [\"${BAD:-x}\"]",
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::InvalidEnvRef(_)), "{err}");
     }
 
     #[test]

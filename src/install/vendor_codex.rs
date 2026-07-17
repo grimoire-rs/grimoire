@@ -170,8 +170,14 @@ impl Vendor for CodexVendor {
 
         // Refinement fields (`timeout`/`always_load`/`headers_helper`/
         // `cwd`) have no documented Codex target — dropped (pure
-        // refinements, nothing auth-critical is lost).
+        // refinements, nothing auth-critical is lost). A structured oauth
+        // block, by contrast, IS auth-critical: no Codex target exists,
+        // so the whole descriptor is skipped with a warning.
         let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for codex ({scope}): config.toml has no oauth surface");
+            return None;
+        }
         let mut entry = serde_json::Map::new();
         match s.transport {
             // A stdio `env` entry is a literal OS environment assignment for
@@ -586,6 +592,7 @@ mod tests {
                 always_load: None,
                 headers_helper: None,
                 cwd: None,
+                oauth: None,
             },
         }
     }
@@ -609,6 +616,7 @@ mod tests {
                 always_load: None,
                 headers_helper: None,
                 cwd: None,
+                oauth: None,
             },
         }
     }
@@ -709,6 +717,20 @@ mod tests {
             .expect("whole-value ${VAR} maps to env_http_headers");
         assert_eq!(value["env_http_headers"]["X-Api-Key"], "API_KEY");
         assert!(value.get("http_headers").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_oauth_descriptor_is_declined_plain_is_not() {
+        let with_oauth = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(CodexVendor.mcp_entry(ConfigScope::Global, "m", &with_oauth).is_none());
+        let plain = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"",
+        )
+        .unwrap();
+        assert!(CodexVendor.mcp_entry(ConfigScope::Global, "m", &plain).is_some());
     }
 
     #[test]

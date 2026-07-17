@@ -149,6 +149,15 @@ impl Vendor for OpenCodeVendor {
         // under `environment`; `type: remote` with `url`/`headers`. Env
         // references use `{env:VAR}`.
         let s = &descriptor.server;
+        // A structured oauth block has no verified OpenCode mapping
+        // (upstream `oauth` is object|false with an unverified schema —
+        // see the vendor capability watchlist). Skip the whole descriptor
+        // with a warning rather than registering a server that cannot
+        // authenticate; plain descriptors are unaffected.
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for opencode ({_scope}): no verified oauth mapping");
+            return None;
+        }
         let mut entry = serde_json::Map::new();
         match s.transport {
             McpTransport::Stdio => {
@@ -382,6 +391,24 @@ mod tests {
             let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
             assert!(OpenCodeVendor.agent_index(&parsed, "p").is_err(), "{doc}");
         }
+    }
+
+    #[test]
+    fn mcp_entry_oauth_descriptor_is_declined_plain_is_not() {
+        let with_oauth = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            OpenCodeVendor
+                .mcp_entry(ConfigScope::Project, "m", &with_oauth)
+                .is_none()
+        );
+        let plain = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"",
+        )
+        .unwrap();
+        assert!(OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &plain).is_some());
     }
 
     #[test]
