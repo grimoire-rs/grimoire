@@ -133,7 +133,7 @@ reference is the Grimoire docs site. When a field table here feels
 incomplete, the docs page is the source of truth:
 [Artifact Reference][artifacts] · [Vendor-Specific Metadata][vendor] ·
 [Publishing][publishing] · [Agent Artifacts][agents]. For the TOML
-surfaces, `grim schema --kind <config|publish|lock>` prints the JSON
+surfaces, `grim schema --kind <config|publish|lock|mcp>` prints the JSON
 Schema generated from grim's own parsers — bind it in your editor to
 catch manifest typos before any command runs.
 

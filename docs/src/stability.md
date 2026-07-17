@@ -112,6 +112,13 @@ This only triggers when the feature is actually in use: a registry-only
 lock or state file stays byte-identical across the version boundary, so a
 project that never declares a path source is unaffected either way.
 
+The [MCP descriptor](./mcp-servers.md) layer holds the same line: a
+descriptor published with fields an older grim predates (the refinement
+fields, the `ws` transport, the `oauth` block) fails to parse there —
+a data error (65) at install or fetch, never a silent drop. A descriptor
+that does not author the new fields serializes byte-identically across
+the boundary.
+
 ### Local path sources are trusted like a build script {#limitations-path-source-trust}
 
 A [local path source][path-sources] — a `grimoire.toml` skill, rule,

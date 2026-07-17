@@ -66,8 +66,10 @@ is a string key in `metadata` — registries are linked from
 
 The canonical format *is* Claude Code's native subagent format: a plain
 agent (no vendor keys) installs for Claude byte-identical. OpenCode
-drops `name` (filename is its identity) and `tools`; Copilot drops
-`model` and emits `tools` as a YAML list; both add a provenance comment.
+drops `name` (filename is its identity) and drops `tools` with a warning
+(deprecated upstream in favor of `permission`); Copilot emits `name`,
+`description`, `model`, and `tools` as a YAML list; both add a
+provenance comment.
 
 Codex emits a **TOML** file at `.codex/agents/<name>.toml`. The body
 becomes `developer_instructions`; `name` and `description` map directly;
@@ -75,8 +77,8 @@ becomes `developer_instructions`; `name` and `description` map directly;
 Codex does not project tool allowlists from grim's universal schema.
 Optional Codex-specific knobs live in `metadata` as `codex.*` keys:
 `codex.model` (Codex-native model name), `codex.reasoning-effort`
-(`ultra` | `max` | `high` | `medium` | `low` | `minimal` | `none`), and
-`codex.sandbox-mode` (`read-only` | `workspace-write` |
+(`ultra` | `max` | `xhigh` | `high` | `medium` | `low` | `minimal` |
+`none`), and `codex.sandbox-mode` (`read-only` | `workspace-write` |
 `danger-full-access`). Universal skill keys have no `codex.*` equivalents
 — codex skills use the standard grim skill shape unchanged.
 

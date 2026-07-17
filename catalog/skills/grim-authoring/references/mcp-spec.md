@@ -44,8 +44,9 @@ Same location rule as bundles — top level, not nested:
 
 | Transport | Required | Allowed | Forbidden |
 |---|---|---|---|
-| `stdio` | `command` | `args`, `env` | `url`, `headers` |
-| `http` / `sse` | `url` (http(s) scheme) | `headers` | `command`, `args`, `env` |
+| `stdio` | `command` | `args`, `env`, `timeout`, `always_load`, `cwd` | `url`, `headers`, `headers_helper`, `oauth` |
+| `http` / `sse` | `url` (http(s) scheme) | `headers`, `timeout`, `always_load`, `headers_helper`, `[server.oauth]` | `command`, `args`, `env`, `cwd` |
+| `ws` | `url` (ws(s) scheme) | `headers`, `timeout`, `always_load`, `headers_helper` | `command`, `args`, `env`, `cwd`, `oauth` |
 
 `env` keys must match `[A-Za-z_][A-Za-z0-9_]*`.
 
@@ -64,10 +65,12 @@ the VS Code config; Claude reads `${VAR}` natively).
 - Codex's `config.toml` receives a stdio `env` value **verbatim** — the
   literal `${VAR}` string is written as the launched subprocess's OS
   environment assignment (the same passthrough Claude/OpenCode give it),
-  not substituted by grim or Codex. Codex's remote schema has **no headers
-  field**, so an `http`/`sse` descriptor that needs `headers` (almost always
-  an auth token) skips Codex with a warning rather than silently dropping
-  required auth.
+  not substituted by grim or Codex. Remote `headers` map onto Codex's
+  three surfaces: a literal value → `http_headers`, a whole-value
+  `${VAR}` → `env_http_headers`, `Authorization: Bearer ${VAR}` →
+  `bearer_token_env_var`; a header embedding a ref in surrounding text
+  (or several refs) has no faithful target and skips Codex with a
+  warning.
 - A bare `$VAR` (no braces) is a literal, not a reference.
 
 ## What Each Client Receives
@@ -78,7 +81,9 @@ gets `command` as ONE array (`["grim", "mcp"]`) under `type: "local"`
 with env under `environment`; the VS Code config uses `type: "stdio"`;
 Copilot CLI's global entry gains `tools: ["*"]`; Codex gets a
 `[mcp_servers.<name>]` TOML table with `command`/`args`/`env` (stdio) or
-`url` (http/sse, headers unsupported). Only the managed entry
+`url` + the three header surfaces (http/sse). The `ws` transport and the
+`[server.oauth]` block project for **Claude only** — every other client
+skips such a descriptor with a warning. Only the managed entry
 is ever touched — user keys, formatting, and comments in the config file
 survive, and grim's drift check is semantic (reordering the file is not
 a modification; editing the entry's values is).
@@ -103,6 +108,8 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - Forgetting `--kind mcp`: the file hits the bundle parser (grim hints).
 - `description` missing or whitespace-only → 65.
 - `url` on a stdio server, or `command`/`args`/`env` on a remote one → 65.
+- `oauth` on `stdio`/`ws`, `cwd` on a remote, `headers_helper` on stdio,
+  or a non-https `auth_server_metadata_url` → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
 - Not a bundle member: bundles carry only `[skills]`/`[rules]`/`[agents]`
   tables — MCP descriptors cannot be listed in one; declare them directly.

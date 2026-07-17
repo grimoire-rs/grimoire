@@ -73,15 +73,16 @@ validation error, not a silent merge:
 
 | Field | Required for | Notes |
 |---|---|---|
-| `transport` | always | `stdio`, `http`, or `sse` |
+| `transport` | always | `stdio`, `http`, `sse`, or `ws` |
 | `command` | `stdio` | The executable to launch |
 | `args` | `stdio`, optional | Arguments appended to `command` |
 | `env` | `stdio`, optional | String→string map; values may reference the host environment as `${VAR}` |
-| `url` | `http`/`sse` | Must start with `http://` or `https://` |
-| `headers` | `http`/`sse`, optional | String→string map, same `${VAR}` referencing as `env` |
+| `url` | `http`/`sse`/`ws` | `http://` or `https://` for `http`/`sse`; `ws://` or `wss://` for `ws` |
+| `headers` | `http`/`sse`/`ws`, optional | String→string map, same `${VAR}` referencing as `env` |
+| `oauth` | `http`/`sse`, optional | OAuth client block, see [below](#server-oauth) — not valid for `ws` ([Claude documents no OAuth over WebSocket][claude-code-mcp-docs]) or `stdio` |
 | `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`) and [OpenCode][opencode-mcp-docs] (`timeout`); dropped for clients without a native key |
 | `always_load` | any transport, optional | Load the server eagerly at client startup — projected for [Claude Code][claude-code-mcp-docs] (`alwaysLoad`) only |
-| `headers_helper` | `http`/`sse`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
+| `headers_helper` | `http`/`sse`/`ws`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
 | `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`) only |
 
 ### Example — a remote server {#server-example-remote}
@@ -101,6 +102,41 @@ transport is deprecated upstream in the MCP spec but still accepted by
 every client Grimoire supports, so grim keeps it as a first-class
 transport value.
 
+`ws` describes a persistent WebSocket server (`wss://` canonical). Only
+[Claude Code][claude-code-mcp-docs] reads a `type: "ws"` entry — every
+other client [declines the descriptor](#emit-matrix) with a warning.
+
+### The `[server.oauth]` block {#server-oauth}
+
+A remote `http`/`sse` server that authenticates via OAuth can carry a
+structured client configuration. All fields are optional:
+
+```toml
+[server]
+transport = "http"
+url = "https://mcp.acme.internal/search"
+
+[server.oauth]
+client_id = "${ACME_OAUTH_CLIENT_ID}"
+scopes = ["search:read"]
+callback_port = 43110
+auth_server_metadata_url = "https://auth.acme.internal/.well-known/oauth-authorization-server"
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `client_id` | string | Pre-registered OAuth client id; may reference the host environment as `${VAR}` |
+| `scopes` | string list | Requested scopes; `${VAR}` references allowed |
+| `callback_port` | integer | Fixed localhost callback port for the authorization redirect |
+| `auth_server_metadata_url` | string | Authorization-server metadata URL (RFC 8414); **https-only** |
+
+There is deliberately **no `client_secret` field**: a secret has no safe
+home in a published artifact — the same principle behind [`${VAR}`
+environment references](#env-references). Only
+[Claude Code][claude-code-mcp-docs] projects the block; every other
+client [declines a descriptor that carries one](#limitations) rather than
+registering a server it cannot authenticate.
+
 ## Validation {#validation}
 
 `grim build`, `grim release`, and `grim publish` validate a descriptor
@@ -111,11 +147,12 @@ before it ever reaches a registry. Every violation below exits with code
 |---|---|
 | `description` empty or missing | rejected |
 | `stdio` with no `command`, or `stdio` with `url`/`headers` set | rejected |
-| `http`/`sse` with no `url`, or with `command`/`args`/`env` set | rejected |
-| `url` not starting with `http://` or `https://` | rejected |
+| `http`/`sse`/`ws` with no `url`, or with `command`/`args`/`env` set | rejected |
+| a `url` scheme not fitting the transport — `http(s)://` for `http`/`sse`, `ws(s)://` for `ws` | rejected |
 | an `env` key outside `[A-Za-z_][A-Za-z0-9_]*` | rejected |
 | a malformed `${…}` reference — unclosed, an invalid variable name, or a `${VAR:-default}` fallback | rejected |
-| `headers_helper` on `stdio`, or `cwd` on `http`/`sse` | rejected |
+| `headers_helper` on `stdio`, or `cwd` on a remote transport | rejected |
+| `oauth` on `stdio` or `ws`, or a non-`https://` `auth_server_metadata_url` | rejected |
 | a non-`https://` `repository` | rejected (same gate as [every other kind](./publishing.md#metadata-repository)) |
 | any field not in the [common](#common-fields) or [server](#server-table) tables | rejected |
 
@@ -135,7 +172,7 @@ client already reads — never a new file:
 
 | Client | Scope | File | Container key | Entry shape | Env-ref syntax |
 |---|---|---|---|---|---|
-| [Claude Code][claude-code-mcp-docs] | project | `<workspace>/.mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); remote: `type: http\|sse` + `url` + `headers`; refinements: `timeout`/`alwaysLoad`/`headersHelper` | `${VAR}` (native, no translation) |
+| [Claude Code][claude-code-mcp-docs] | project | `<workspace>/.mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); remote: `type: http\|sse\|ws` + `url` + `headers`; refinements: `timeout`/`alwaysLoad`/`headersHelper`; oauth: `{clientId, callbackPort, authServerMetadataUrl, scopes}` | `${VAR}` (native, no translation) |
 | [Claude Code][claude-code-mcp-docs] | global | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | `mcpServers` | same as project | `${VAR}` |
 | [OpenCode][opencode-mcp-docs] | project | `<workspace>/opencode.json` (or `.jsonc` when present) | `mcp` | local: `type: "local"`, `command` as **one** array (`[cmd, ...args]`), `environment`, `enabled: true`; remote: `type: "remote"`, `url`, `headers`, `enabled`; refinements: `timeout`/`cwd` | `{env:VAR}` |
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` | `mcp` | same as project | `{env:VAR}` |
@@ -315,6 +352,27 @@ arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
 - **Copilot CLI's global config skips descriptors with `${VAR}`
   references** — see [Environment references](#env-references). Every
   other client and scope still installs normally.
+- **`ws` transport is Claude-only.** [OpenCode][opencode-mcp-docs],
+  [Copilot][copilot-mcp-docs] (both scopes), and [Codex][codex-mcp-docs]
+  document no WebSocket MCP transport; a `transport = "ws"` descriptor is
+  skipped for them with a warning rather than registering a remote entry
+  they would try to speak HTTP to.
+- **The `[server.oauth]` block is Claude-only.** A descriptor carrying
+  one is skipped with a warning for [OpenCode][opencode-mcp-docs],
+  [Copilot][copilot-mcp-docs], and [Codex][codex-mcp-docs] — OAuth is
+  auth-critical, so grim never registers a connection those clients could
+  not authenticate. Descriptors without the block are unaffected.
+  (OpenCode documents an `oauth` key of its own; projecting it is on the
+  vendor capability watchlist pending schema verification.)
+- **New descriptor fields do not parse on an older grim.** The descriptor
+  layer is `deny_unknown_fields`: an artifact published with `timeout`,
+  `always_load`, `headers_helper`, `cwd`, `oauth`, or `transport = "ws"`
+  is **rejected by a grim build that predates those fields** (a data
+  error, exit 65, at install/fetch time — same stance as
+  [stability.md's forward-compatibility limitation][stability-forward]).
+  Publishers who need to serve old clients should simply not author the
+  new fields; a descriptor without them stays byte-identical across the
+  version boundary.
 - **[Codex][codex-mcp-docs] headers must fit one of three upstream
   surfaces.** A remote descriptor's `headers` map onto Codex's
   `http_headers` (a plain literal value), `env_http_headers` (a value
@@ -338,6 +396,9 @@ arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
   record against, so that client is skipped for this install with a
   warning rather than recorded in a way that would silently break on a
   different host.
+
+<!-- internal -->
+[stability-forward]: ./stability.md#limitations-forward-compat
 
 <!-- external -->
 [mcp-spec]: https://spec.modelcontextprotocol.io/
