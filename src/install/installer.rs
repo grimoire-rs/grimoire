@@ -15,7 +15,7 @@
 //! skills-then-rules iteration order so the caller can build a stable
 //! report.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::scope::ConfigScope;
@@ -917,8 +917,9 @@ fn output_at_current_layout(
 /// 4. hash-match: the on-disk footprint must equal the recorded
 ///    `content_hash` — a user-edited orphan is preserved (the
 ///    untracked-clobber philosophy);
-/// 5. resolved-identity: the old path must not canonicalize onto a new
-///    output's real file — a symlink alias of a live output is never reaped
+/// 5. resolved-identity: no old footprint component (index target OR
+///    support dir) may canonicalize onto any new output's footprint
+///    component — a symlink alias of a live output is never reaped
 ///    (guard 2 compares stored pairs, not resolved identity).
 fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots: &AnchorRoots) {
     for out in &prior.outputs {
@@ -943,30 +944,41 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
         let Ok(target) = out.target.resolve(roots) else {
             continue;
         };
-        // Guard 5: a symlink at the old path canonicalizes onto a NEW
-        // output's real file (same inode ⇒ same content, so guard 4 passed);
-        // deleting through the alias would destroy the live output. Skip when
-        // the canonicalized old path equals any canonicalized new-output path.
-        // Canonicalize failure falls through to the delete below — the prior
-        // guards already gated this entry as a hash-matching orphan.
-        if let Ok(canon_old) = std::fs::canonicalize(&target)
-            && new_outputs.iter().any(|new| {
-                new.target
-                    .resolve(roots)
-                    .ok()
-                    .and_then(|p| std::fs::canonicalize(p).ok())
-                    .is_some_and(|canon_new| canon_new == canon_old)
+        let old_support = out.resolved_support_dir(roots).ok().flatten();
+        // Guard 5: resolved-identity across the FULL footprint. A symlink at
+        // any old footprint component — the index target OR the support dir —
+        // can canonicalize onto a live NEW output's real file or directory
+        // (same inode ⇒ same content, so guard 4 passed); deleting through the
+        // alias would destroy the live output. Skip the whole reap when any old
+        // component canonicalizes onto any new output's footprint component. A
+        // component that fails to canonicalize (absent / dangling) is not an
+        // alias of a live output and falls through to the delete below — the
+        // prior guards already gated this entry as a hash-matching orphan.
+        let new_footprint: Vec<PathBuf> = new_outputs
+            .iter()
+            .flat_map(|new| {
+                [
+                    new.resolved_target(roots).ok(),
+                    new.resolved_support_dir(roots).ok().flatten(),
+                ]
             })
-        {
+            .flatten()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect();
+        let aliases_live_output = [Some(&target), old_support.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .any(|canon_old| new_footprint.contains(&canon_old));
+        if aliases_live_output {
             continue;
         }
         if let Err(e) = remove_path(&target) {
             tracing::warn!("could not reap moved output '{}': {e}", target.display());
         }
-        if let Some(support) = &out.support_dir
-            && let Ok(dir) = support.resolve(roots)
+        if let Some(dir) = &old_support
             && dir.exists()
-            && let Err(e) = remove_path(&dir)
+            && let Err(e) = remove_path(dir)
         {
             tracing::warn!("could not reap moved support dir '{}': {e}", dir.display());
         }
@@ -1175,13 +1187,35 @@ async fn install_mcp(
                 && let Some(stale) = rec.outputs.iter().find(|o| o.client == client.as_str())
                 && let Some(stale_pointer) = &stale.entry
             {
-                crate::install::uninstall::remove_entry(&config_path, stale_pointer, format)
-                    .map_err(|e| target_io(&config_path, e))?;
-                tracing::warn!(
-                    "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
-                    artifact.name,
-                    config_path.display()
-                );
+                // Splice the stale member out of the file grim ACTUALLY wrote —
+                // the recorded output's anchored target resolved through the
+                // containment guard — never the `config_path` recomputed from
+                // the current environment. A repointed vendor variable (e.g.
+                // $OPENCODE_CONFIG now naming an unrelated external file) must
+                // not make grim edit a file it never owned, and the recorded
+                // resolve runs the same anchoring guard the write path uses. An
+                // unresolvable recorded target, or an on-disk value that drifted
+                // from the recorded hash (a user edit) or is already gone,
+                // leaves the entry in place — the safe direction (untracked
+                // clobber), reachable again by a reinstall on the original env.
+                match stale.resolved_target(roots) {
+                    Ok(recorded_path) => {
+                        let intact = stale.current_hash(roots).is_ok_and(|h| h == stale.content_hash);
+                        if intact {
+                            crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale.mcp_format())
+                                .map_err(|e| target_io(&recorded_path, e))?;
+                            tracing::warn!(
+                                "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
+                                artifact.name,
+                                recorded_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        "mcp server '{}' is no longer representable for {client} at the new pin; its stale entry could not be located to remove (recorded target unresolvable: {e}) and is left in place",
+                        artifact.name
+                    ),
+                }
             }
             continue;
         };
@@ -2373,6 +2407,58 @@ mod tests {
         );
     }
 
+    /// C1 (must fail on pre-fix code): the old recorded SUPPORT DIR — not the
+    /// index — is a symlink aliasing a NEW output's live support dir. Guard 4
+    /// passes (current_hash resolves through the alias to the same content),
+    /// and pre-fix guard 5 compared only index targets, so the reaper resolved
+    /// the support symlink and `remove_dir_all` recursively destroyed the live
+    /// NEW support tree. The fix widens guard 5 to the full footprint: any old
+    /// component canonicalizing onto any new component skips the reap.
+    #[cfg(unix)]
+    #[test]
+    fn reap_moved_outputs_skips_support_dir_symlink_alias_of_new_support() {
+        let dir = tempfile::tempdir().unwrap();
+        // The NEW output: a real index and a real support dir with content.
+        let new_index = dir.path().join("instructions/r.instructions.md");
+        let new_support = dir.path().join("instructions/r");
+        std::fs::create_dir_all(&new_support).unwrap();
+        std::fs::write(&new_index, b"body\n").unwrap();
+        std::fs::write(new_support.join("extra.md"), b"detail\n").unwrap();
+
+        // The OLD footprint: a real orphan index at the moved location, and a
+        // support dir that is a SYMLINK aliasing the NEW support dir (only the
+        // support dir is aliased, not the index).
+        let old_index = dir.path().join(".github/instructions/r.instructions.md");
+        let old_support = dir.path().join(".github/instructions/r");
+        std::fs::create_dir_all(old_index.parent().unwrap()).unwrap();
+        std::fs::write(&old_index, b"body\n").unwrap();
+        std::os::unix::fs::symlink(&new_support, &old_support).unwrap();
+
+        // Recorded hash matches what current_hash computes over the resolved
+        // footprint (old index + aliased support content), so guard 4 passes.
+        let hash = footprint_hash(&old_index, Some(&new_support)).unwrap();
+        let mut out = reap_output(PathAnchor::Workspace, ".github/instructions/r.instructions.md", hash);
+        out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".github/instructions/r".to_string(),
+        });
+        let prior = reap_record(vec![out]);
+
+        // The current layout still produces the NEW index + support dir.
+        let new_hash = footprint_hash(&new_index, Some(&new_support)).unwrap();
+        let mut new_out = reap_output(PathAnchor::Workspace, "instructions/r.instructions.md", new_hash);
+        new_out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: "instructions/r".to_string(),
+        });
+        reap_moved_outputs(&prior, &[new_out], &roots(dir.path()));
+
+        assert!(
+            new_support.exists() && new_support.join("extra.md").exists(),
+            "the reaper must not delete the NEW support tree through an aliasing old support dir"
+        );
+    }
+
     /// W1a: a moved output carrying a support dir present on disk with a
     /// hash-matching footprint — both the index AND the support dir are
     /// reaped from the old layout location.
@@ -3484,6 +3570,95 @@ mod tests {
         assert!(
             crate::install::json_splice::member_value(&raw_claude, "mcpServers", "srv").is_some(),
             "surviving Claude MCP entry must remain after a Codex decline: {raw_claude}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_change_decline_edits_recorded_path_not_recomputed_config() {
+        // C2 regression: the decline splice must remove the stale entry from
+        // the file grim RECORDED, never the config path recomputed from the
+        // current environment. A repointed vendor config (the recorded target
+        // and the recomputed path differ) must not make grim edit a file it
+        // never wrote — so a differing recomputed path is left untouched.
+        use crate::install::client_target::ClientTarget;
+        use crate::oci::mcp::McpDescriptor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            crate::config::scope::ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Codex],
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        // Pin A: plain HTTP descriptor — Claude and Codex both represent it.
+        let plain =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"")
+                .unwrap();
+        let blob_a = plain.to_layer_bytes().unwrap();
+        let lock_a = lock_of_mcp(vec![locked_mcp("srv", &blob_a)]);
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        // Relocate the recorded Codex output to a DIFFERENT file than the one
+        // the current environment recomputes (`.codex/config.toml`), and seed
+        // that recorded file with the same entry. This is the repointed-config
+        // shape: grim must edit the RECORDED file, never the recomputed one.
+        let codex_config = dir.path().join(".codex/config.toml");
+        let recorded_config = dir.path().join(".codex/recorded.toml");
+        std::fs::copy(&codex_config, &recorded_config).unwrap();
+        let mut rec = state.get(crate::oci::ArtifactKind::Mcp, "srv").unwrap().clone();
+        for out in &mut rec.outputs {
+            if out.client == "codex" {
+                out.target = AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".codex/recorded.toml".to_string(),
+                };
+            }
+        }
+        state.record(rec);
+
+        // Pin B: the same server gains an oauth block — Codex declines.
+        let with_oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        let blob_b = with_oauth.to_layer_bytes().unwrap();
+        let lock_b = lock_of_mcp(vec![locked_mcp("srv", &blob_b)]);
+        install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        // The RECORDED file had its stale entry spliced out.
+        let raw_recorded = std::fs::read_to_string(&recorded_config).unwrap();
+        assert!(
+            crate::install::toml_splice::member_value(&raw_recorded, "mcp_servers", "srv").is_none(),
+            "stale entry must be removed from the RECORDED path on a decline: {raw_recorded}"
+        );
+        // The recomputed path grim never recorded stays untouched.
+        let raw_config = std::fs::read_to_string(&codex_config).unwrap();
+        assert!(
+            crate::install::toml_splice::member_value(&raw_config, "mcp_servers", "srv").is_some(),
+            "the recomputed config path grim never recorded must stay untouched: {raw_config}"
         );
     }
 
