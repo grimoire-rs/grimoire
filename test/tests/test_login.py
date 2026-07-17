@@ -7,17 +7,28 @@ tempdir — the user's real ``~/.docker`` is never touched. Helper-backed
 tests drop a ``docker-credential-test`` Python script onto a tempdir,
 prepend it to ``PATH``, and point ``credsStore`` at ``test``.
 
+``grim login`` verifies the credential against the registry by default;
+tests exercising only the store mechanics pass ``--no-verify`` so they
+stay network-free. Verification tests use the anonymous session registry
+and a module-local htpasswd-gated ``registry:2`` container.
+
 Exit codes follow ``quality-rust-exit_codes.md`` (sysexits-aligned):
-usage 64, config 78, success 0.
+usage 64, unavailable 69, config 78, auth 80, offline-blocked 81,
+success 0.
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -106,6 +117,76 @@ def credential_helper(tmp_path: Path, docker_config: Path) -> dict[str, str]:
     }
 
 
+_HTPASSWD_USER = "testuser"
+_HTPASSWD_PASSWORD = "testpass"
+# bcrypt htpasswd line for testuser:testpass, committed as a constant so
+# the suite needs no bcrypt dependency (generated once with
+# ``htpasswd -Bbn testuser testpass``).
+_HTPASSWD_LINE = "testuser:$2y$05$yR3/Pme3IBgbwaObz/q0g.3fpoX1FSKU3UeUDxvBQF.tijc89N85y"
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _wait_registry_up(host: str, timeout_s: float = 30.0) -> bool:
+    """True once ``/v2/`` answers anything HTTP — a 401 from the auth gate
+    counts as up."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://{host}/v2/", timeout=2):
+                return True
+        except urllib.error.HTTPError:
+            return True
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.5)
+    return False
+
+
+@pytest.fixture(scope="module")
+def auth_registry() -> Iterator[str]:
+    """An htpasswd-gated ``registry:2`` container on a free port.
+
+    Yields the ``host:port`` string. Skips when docker is unavailable or
+    the container cannot start — the same posture as the session registry
+    fixture in ``test/conftest.py``. The htpasswd file is written inside
+    the container (no volume mount) from the committed bcrypt line.
+    """
+    port = _free_port()
+    host = f"127.0.0.1:{port}"
+    name = f"grim-login-verify-{port}"
+    try:
+        run = subprocess.run(
+            [
+                "docker", "run", "-d", "--rm",
+                "--name", name,
+                "-p", f"{port}:5000",
+                "-e", "REGISTRY_AUTH=htpasswd",
+                "-e", "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm",
+                "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
+                "--entrypoint", "sh",
+                "registry:2",
+                "-c",
+                f"mkdir -p /auth && printf '%s\\n' '{_HTPASSWD_LINE}' > /auth/htpasswd"
+                " && exec registry serve /etc/docker/registry/config.yml",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("docker not available")
+    if run.returncode != 0:
+        pytest.skip(f"cannot start htpasswd registry container: {run.stderr.strip()}")
+    if not _wait_registry_up(host):
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        pytest.skip("htpasswd registry container did not become ready")
+    yield host
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -171,7 +252,7 @@ def _read_config(docker_config: Path) -> dict:
 def test_login_plaintext_writes_base64_entry(grim: GrimRunner, docker_config: Path) -> None:
     res = _login(
         grim,
-        "-u", "alice", "--password-stdin", "--allow-insecure-store", "ghcr.io",
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="hunter2\n",
     )
@@ -185,7 +266,7 @@ def test_login_plaintext_writes_base64_entry(grim: GrimRunner, docker_config: Pa
 def test_login_plaintext_config_is_owner_only(grim: GrimRunner, docker_config: Path) -> None:
     _login(
         grim,
-        "-u", "u", "--password-stdin", "--allow-insecure-store", "ghcr.io",
+        "-u", "u", "--password-stdin", "--allow-insecure-store", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="p\n",
     )
@@ -196,7 +277,7 @@ def test_login_plaintext_config_is_owner_only(grim: GrimRunner, docker_config: P
 def test_login_refused_without_helper_or_optin(grim: GrimRunner, docker_config: Path) -> None:
     res = _login(
         grim,
-        "-u", "u", "--password-stdin", "ghcr.io",
+        "-u", "u", "--password-stdin", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="p\n",
     )
@@ -207,7 +288,7 @@ def test_login_refused_without_helper_or_optin(grim: GrimRunner, docker_config: 
 def test_login_canonicalizes_registry_key(grim: GrimRunner, docker_config: Path) -> None:
     res = _login(
         grim,
-        "-u", "u", "--password-stdin", "--allow-insecure-store", "https://ghcr.io/v1/",
+        "-u", "u", "--password-stdin", "--allow-insecure-store", "--no-verify", "https://ghcr.io/v1/",
         docker_config=docker_config,
         stdin="p\n",
     )
@@ -252,14 +333,14 @@ def test_login_empty_password_stdin_is_usage_error(grim: GrimRunner, docker_conf
 def test_login_json_output(grim: GrimRunner, docker_config: Path) -> None:
     res = _login(
         grim,
-        "-u", "alice", "--password-stdin", "--allow-insecure-store", "ghcr.io",
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="p\n",
         fmt="json",
     )
     assert res.returncode == 0, res.stderr
     payload = json.loads(res.stdout)
-    assert payload == {"registry": "ghcr.io", "username": "alice"}
+    assert payload == {"registry": "ghcr.io", "username": "alice", "verification": "skipped"}
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +351,7 @@ def test_login_json_output(grim: GrimRunner, docker_config: Path) -> None:
 def test_logout_removes_plaintext_entry(grim: GrimRunner, docker_config: Path) -> None:
     _login(
         grim,
-        "-u", "u", "--password-stdin", "--allow-insecure-store", "ghcr.io",
+        "-u", "u", "--password-stdin", "--allow-insecure-store", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="p\n",
     )
@@ -293,7 +374,7 @@ def test_logout_noop_when_nothing_stored(grim: GrimRunner, docker_config: Path) 
 def test_login_via_helper_stores_credential(grim: GrimRunner, docker_config: Path, credential_helper: dict) -> None:
     res = _login(
         grim,
-        "-u", "alice", "--password-stdin", "ghcr.io",
+        "-u", "alice", "--password-stdin", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="s3cret\n",
         extra_env=credential_helper,
@@ -309,7 +390,7 @@ def test_login_via_helper_stores_credential(grim: GrimRunner, docker_config: Pat
 def test_logout_via_helper_erases_credential(grim: GrimRunner, docker_config: Path, credential_helper: dict) -> None:
     _login(
         grim,
-        "-u", "alice", "--password-stdin", "ghcr.io",
+        "-u", "alice", "--password-stdin", "--no-verify", "ghcr.io",
         docker_config=docker_config,
         stdin="s3cret\n",
         extra_env=credential_helper,
@@ -340,7 +421,7 @@ def test_login_resolves_configured_default_registry(
 
     res = _login(
         runner,
-        "-u", "alice", "--password-stdin", "--allow-insecure-store",
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify",
         docker_config=docker_config,
         stdin="hunter2\n",
         fmt="json",
@@ -366,7 +447,7 @@ def test_login_resolves_registries_alias(
 
     res = _login(
         runner,
-        "-u", "alice", "--password-stdin", "--allow-insecure-store", "corp",
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify", "corp",
         docker_config=docker_config,
         stdin="hunter2\n",
         fmt="json",
@@ -391,7 +472,7 @@ def test_logout_resolves_registries_alias(
 
     _login(
         runner,
-        "-u", "alice", "--password-stdin", "--allow-insecure-store",
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify",
         docker_config=docker_config,
         stdin="hunter2\n",
     )
@@ -420,3 +501,121 @@ def test_login_no_registry_anywhere_is_config_error(
     )
     assert res.returncode == 78, res.stderr
     assert "no registry" in res.stderr.lower(), res.stderr
+
+
+# ---------------------------------------------------------------------------
+# Credential verification (issue #37) — default-on registry ping before store
+# ---------------------------------------------------------------------------
+
+
+def test_login_verify_anonymous_registry_reports_no_auth_required(
+    grim: GrimRunner, docker_config: Path, registry: str
+) -> None:
+    """Default verification against an anonymous ``registry:2``: ``/v2/``
+    answers 2xx without a challenge, so there is nothing to verify — the
+    credential stores with ``verification: no-auth-required``."""
+    res = _login(
+        grim,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", registry,
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        fmt="json",
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["verification"] == "no-auth-required", payload
+    assert registry in _read_config(docker_config)["auths"]
+
+
+def test_login_verify_unreachable_registry_exits_69_and_stores_nothing(
+    grim: GrimRunner, docker_config: Path
+) -> None:
+    res = _login(
+        grim,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "127.0.0.1:1",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        extra_env={"GRIM_INSECURE_REGISTRIES": "127.0.0.1:1"},
+    )
+    assert res.returncode == 69, res.stderr
+    assert "127.0.0.1:1" not in _read_config(docker_config).get("auths", {})
+
+
+def test_login_verify_bad_credentials_exits_80_and_stores_nothing(
+    grim: GrimRunner, docker_config: Path, auth_registry: str
+) -> None:
+    """The htpasswd registry answers ``/v2/`` with a Basic challenge; a
+    wrong password is rejected at login time, nothing persisted."""
+    res = _login(
+        grim,
+        "-u", _HTPASSWD_USER, "--password-stdin", "--allow-insecure-store", auth_registry,
+        docker_config=docker_config,
+        stdin="wrong-password\n",
+        extra_env={"GRIM_INSECURE_REGISTRIES": auth_registry},
+    )
+    assert res.returncode == 80, res.stderr
+    assert auth_registry not in _read_config(docker_config).get("auths", {})
+
+
+def test_login_verify_good_credentials_verifies_and_stores(
+    grim: GrimRunner, docker_config: Path, auth_registry: str
+) -> None:
+    res = _login(
+        grim,
+        "-u", _HTPASSWD_USER, "--password-stdin", "--allow-insecure-store", auth_registry,
+        docker_config=docker_config,
+        stdin=f"{_HTPASSWD_PASSWORD}\n",
+        fmt="json",
+        extra_env={"GRIM_INSECURE_REGISTRIES": auth_registry},
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["verification"] == "verified", payload
+    assert auth_registry in _read_config(docker_config)["auths"]
+
+
+def test_login_verify_offline_is_blocked_exit_81(grim: GrimRunner, docker_config: Path) -> None:
+    """Explicit ``--verify`` under ``GRIM_OFFLINE`` is a policy conflict —
+    exit 81, nothing stored."""
+    res = _login(
+        grim,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--verify", "ghcr.io",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        extra_env={"GRIM_OFFLINE": "1"},
+    )
+    assert res.returncode == 81, res.stderr
+    assert "ghcr.io" not in _read_config(docker_config).get("auths", {})
+
+
+def test_login_offline_default_skips_verification(grim: GrimRunner, docker_config: Path) -> None:
+    """Without an explicit ``--verify``, offline mode downgrades to a
+    silent skip (warning on stderr) — the credential still stores."""
+    res = _login(
+        grim,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "ghcr.io",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        fmt="json",
+        extra_env={"GRIM_OFFLINE": "1"},
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["verification"] == "skipped", payload
+    assert "ghcr.io" in _read_config(docker_config)["auths"]
+
+
+def test_login_no_verify_stores_without_network(grim: GrimRunner, docker_config: Path) -> None:
+    """``--no-verify`` preserves the store-only path: no network contact,
+    so even an unreachable registry stores fine."""
+    res = _login(
+        grim,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify", "127.0.0.1:1",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+        fmt="json",
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["verification"] == "skipped", payload
+    assert "127.0.0.1:1" in _read_config(docker_config)["auths"]

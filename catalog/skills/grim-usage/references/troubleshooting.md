@@ -124,9 +124,12 @@ never resolved online cannot be resolved from the cache.
 
 Exit 80 is the registry rejecting your credential. Things to know:
 
-- `grim login` stores the credential **without** contacting the
-  registry, so a wrong password surfaces on the next pull or push, not
-  at login time. Re-login with a fresh token.
+- `grim login` verifies the credential against the registry **before**
+  storing it by default — a wrong password fails right at login with
+  exit 80 and nothing stored (unreachable registry: 69; explicit verify
+  request while offline: 81). A skipped verification (store-only mode,
+  offline) surfaces a wrong password on the next pull or push instead.
+  Re-login with a fresh token; confirm flags with `grim login --help`.
 - Credentials are read from `$DOCKER_CONFIG/config.json` — a plain
   `docker login` works too; the store is shared.
 - A configured credential helper that is not on `PATH` is exit 78, not

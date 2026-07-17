@@ -60,32 +60,12 @@ pub struct RegistryClient {
 impl RegistryClient {
     /// Construct a client for production use.
     ///
-    /// The conventional loopback forms (`localhost` / `127.0.0.1`, bare and
-    /// on `:5000`) are contacted over plain HTTP so a local test registry
-    /// "just works"; any host listed in `GRIM_INSECURE_REGISTRIES`
-    /// (comma-separated) is likewise plain HTTP; everything else uses HTTPS.
-    /// `oci-client`'s `HttpsExcept` matches by *exact* `host:port`, so a
-    /// loopback registry on another port (e.g. the manual rig on `:5050`)
-    /// opts in through that env var.
+    /// The hosts named by [`plain_http_hosts`] are contacted over plain
+    /// HTTP so a local test registry "just works"; everything else uses
+    /// HTTPS.
     pub fn new() -> Self {
-        // `HttpsExcept` is exact-match per `host:port`, so enumerate the
-        // zero-config loopback forms (bare host + the conventional :5000)
-        // and add every `GRIM_INSECURE_REGISTRIES` entry — that env is how
-        // a loopback registry on a non-default port (e.g. the manual rig
-        // on :5050) opts into plain HTTP.
-        let mut exceptions = vec![
-            "localhost".to_string(),
-            "localhost:5000".to_string(),
-            "127.0.0.1".to_string(),
-            "127.0.0.1:5000".to_string(),
-        ];
-        for r in insecure_registries() {
-            if !exceptions.contains(&r) {
-                exceptions.push(r);
-            }
-        }
         Self {
-            client: Client::new(registry_config(exceptions)),
+            client: Client::new(registry_config(plain_http_hosts())),
         }
     }
 
@@ -127,6 +107,30 @@ impl RegistryClient {
             }
         }
     }
+}
+
+/// The exact `host[:port]` forms grim contacts over plain HTTP: the
+/// conventional loopback forms (`localhost` / `127.0.0.1`, bare and on
+/// `:5000`) plus every `GRIM_INSECURE_REGISTRIES` entry (comma-separated).
+///
+/// `oci-client`'s `HttpsExcept` matches by *exact* `host:port`, so a
+/// loopback registry on a non-default port (e.g. the manual rig on
+/// `:5050`) opts in through the env var. Single source of the scheme
+/// decision, shared by [`RegistryClient::new`] and the `grim login`
+/// verification ping ([`crate::auth::verify`]).
+pub fn plain_http_hosts() -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "localhost:5000".to_string(),
+        "127.0.0.1".to_string(),
+        "127.0.0.1:5000".to_string(),
+    ];
+    for r in insecure_registries() {
+        if !hosts.contains(&r) {
+            hosts.push(r);
+        }
+    }
+    hosts
 }
 
 /// Hosts the user has opted into plain HTTP for, from
@@ -624,8 +628,9 @@ impl OciAccess for RegistryClient {
 /// The bare registry host (first path segment) of a possibly-namespaced
 /// registry string: `ghcr.io/acme` → `ghcr.io`; `localhost:5000` →
 /// `localhost:5000`. The OCI distribution API (`/v2/_catalog`, auth scope)
-/// is served by the host, not a host+namespace prefix.
-fn registry_host(registry: &str) -> &str {
+/// is served by the host, not a host+namespace prefix. Also consumed by
+/// the `grim login` verification ping ([`crate::auth::verify`]).
+pub fn registry_host(registry: &str) -> &str {
     registry.split_once('/').map_or(registry, |(host, _)| host)
 }
 

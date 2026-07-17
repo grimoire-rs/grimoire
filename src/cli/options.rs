@@ -91,6 +91,35 @@ pub struct GlobalOptions {
     pub registry: Vec<String>,
 }
 
+/// A `--verify` / `--no-verify` flag pair resolving to an effective
+/// boolean that defaults to **on**. Flatten into a command's args with
+/// `#[command(flatten)]`; when both flags are given, the later one wins
+/// (`overrides_with` in both directions).
+#[derive(Debug, Clone, Copy, Args)]
+pub struct VerifyOpts {
+    /// Verify the credential against the registry before storing it
+    /// (the default). Explicit `--verify` under offline mode is an error
+    /// rather than the silent default skip.
+    #[arg(long, overrides_with = "no_verify")]
+    pub verify: bool,
+
+    /// Store the credential without contacting the registry.
+    #[arg(long, overrides_with = "verify")]
+    pub no_verify: bool,
+}
+
+impl VerifyOpts {
+    /// The effective decision: verification is on unless `--no-verify`.
+    pub fn enabled(self) -> bool {
+        !self.no_verify
+    }
+
+    /// Whether `--verify` was passed explicitly (vs the silent default).
+    pub fn explicit(self) -> bool {
+        self.verify
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

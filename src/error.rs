@@ -329,6 +329,15 @@ fn classify_auth(err: &AuthError) -> ExitCode {
         AuthError::MalformedConfig { .. } => ExitCode::DataError,
         AuthError::NoCredentialStore | AuthError::NoConfigLocation => ExitCode::ConfigError,
         AuthError::HelperFailed { .. } => ExitCode::AuthError,
+        // Login verification: a refused credential is an auth failure; an
+        // unanswerable registry / token endpoint is a remote-resource
+        // fault; an explicit --verify under offline is deliberate policy.
+        AuthError::VerifyRejected { .. } => ExitCode::AuthError,
+        AuthError::VerifyUnavailable { .. } => ExitCode::Unavailable,
+        // A downgrade-refusing insecure realm means verification could not
+        // complete safely — treat it like an unreachable endpoint.
+        AuthError::VerifyInsecureRealm { .. } => ExitCode::Unavailable,
+        AuthError::VerifyOffline => ExitCode::OfflineBlocked,
         AuthError::Helper(inner) => match inner {
             Helper::NotOnPath { .. } | Helper::UnsafePath { .. } => ExitCode::ConfigError,
             Helper::Timeout { .. } => ExitCode::TempFail,
@@ -400,6 +409,26 @@ mod tests {
                     helper: "test".to_string(),
                 },
                 ExitCode::AuthError,
+            ),
+            (
+                AuthError::VerifyRejected {
+                    registry: "ghcr.io".to_string(),
+                },
+                ExitCode::AuthError,
+            ),
+            (
+                AuthError::VerifyUnavailable {
+                    registry: "ghcr.io".to_string(),
+                    source: None,
+                },
+                ExitCode::Unavailable,
+            ),
+            (AuthError::VerifyOffline, ExitCode::OfflineBlocked),
+            (
+                AuthError::VerifyInsecureRealm {
+                    registry: "ghcr.io".to_string(),
+                },
+                ExitCode::Unavailable,
             ),
         ];
         for (inner, expected) in cases {

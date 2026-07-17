@@ -64,9 +64,37 @@ Grimoire **refuses** to write a plaintext credential unless you opt in with
 `--allow-insecure-store`, which stores a base64 entry (not encryption) in
 `config.json`. The file is created with owner-only (`0600`) permissions.
 
-Grimoire stores the credential without first contacting the registry, which
-matches `docker login` with a credential helper. A wrong password therefore
-surfaces on the next pull or push, not at login time.
+### Verification {#login-verify}
+
+A stored-but-wrong credential is a delayed failure: it surfaces on the next
+pull or push, far from the login that caused it. To catch that at login
+time, `grim login` verifies the credential against the registry **before**
+storing it, matching `oras login`: it pings the registry's `/v2/` endpoint
+and answers the returned `WWW-Authenticate` challenge with the credential —
+directly for a `Basic` challenge, via a scope-less token request against
+the challenge's realm for a `Bearer` one. A rejected credential stores
+nothing.
+
+Verification proves the registry's authentication endpoint accepts the
+credential. It does **not** prove push or pull access to any particular
+repository — authorization is still decided per repository on the next pull
+or push.
+
+| Outcome | Exit code | Stored? | Report `verification` |
+|---------|-----------|---------|-----------------------|
+| Credential accepted | 0 | yes | `verified` |
+| Registry requires no authentication | 0 | yes | `no-auth-required` |
+| Credential rejected | 80 | no | — |
+| Registry unreachable / server error | 69 | no | — |
+| Insecure (non-`https`) token endpoint named by an HTTPS registry | 69 | no | — |
+| Skipped (`--no-verify`, or offline) | 0 | yes | `skipped` |
+
+`--no-verify` skips the ping and stores optimistically — the pre-verify
+behavior, matching `docker login` with a credential helper. Offline mode
+(`--offline` / `GRIM_OFFLINE`) skips verification silently with a warning,
+since a stored-but-unverified credential is the useful outcome on an
+air-gapped machine; passing `--verify` explicitly while offline is a policy
+conflict and fails with exit 81.
 
 ## grim logout {#logout}
 

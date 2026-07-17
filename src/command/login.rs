@@ -9,6 +9,12 @@
 //! is intentionally **no** `--password VALUE` flag — an argv-visible
 //! secret leaks through `ps` and shell history, so it is refused by
 //! construction (clap has no such argument to parse).
+//!
+//! By default the credential is verified against the registry *before*
+//! it is stored ([`crate::auth::verify`], oras-style): a rejected
+//! credential exits 80 with nothing persisted. `--no-verify` skips the
+//! ping; offline mode skips it silently with a warning unless `--verify`
+//! was explicit (then exit 81 — a policy conflict).
 
 use std::io::Read as _;
 
@@ -16,12 +22,14 @@ use clap::Args;
 use secrecy::SecretString;
 use secrecy::zeroize::Zeroizing;
 
-use crate::api::login_report::LoginReport;
+use crate::api::login_report::{LoginReport, VerificationStatus};
 use crate::auth::credential::Credential;
 use crate::auth::login as auth_login;
 use crate::auth::prompt;
 use crate::auth::store::{DockerCredentialStore, StoreOptions};
+use crate::auth::verify::VerifyOutcome;
 use crate::cli::exit_code::ExitCode;
+use crate::cli::options::VerifyOpts;
 use crate::context::Context;
 
 /// `grim login` arguments.
@@ -41,6 +49,11 @@ pub struct LoginArgs {
     /// Refused by default.
     #[arg(long)]
     pub allow_insecure_store: bool,
+
+    /// `--verify` / `--no-verify`: check the credential against the
+    /// registry before storing it. On by default.
+    #[command(flatten)]
+    pub verify: VerifyOpts,
 
     /// Registry hostname (e.g. `ghcr.io`), or a configured `[[registries]]`
     /// alias (substituted to that entry's url). Falls back to the
@@ -62,7 +75,9 @@ pub struct LoginArgs {
 /// # Errors
 ///
 /// A missing/empty credential input (usage error 64), a missing registry
-/// (config error 78), or a credential-store failure (auth/I/O tiers).
+/// (config error 78), a verification failure (rejected 80, unreachable
+/// 69, explicit `--verify` while offline 81 — nothing stored in any of
+/// these), or a credential-store failure (auth/I/O tiers).
 pub async fn run(ctx: &Context, args: &LoginArgs) -> anyhow::Result<(LoginReport, ExitCode)> {
     let registry = super::resolve_login_registry(ctx, args.host.as_deref())?;
 
@@ -87,12 +102,33 @@ pub async fn run(ctx: &Context, args: &LoginArgs) -> anyhow::Result<(LoginReport
     let password = input_task(move || read_password(password_stdin)).await?;
     let cred = Credential::basic(username.clone(), password);
 
+    // Verify BEFORE store (oras semantics): a rejected or unverifiable
+    // credential propagates here and nothing is persisted.
+    let verification = if !args.verify.enabled() {
+        VerificationStatus::Skipped
+    } else if ctx.offline() {
+        if args.verify.explicit() {
+            // An explicit --verify under --offline/GRIM_OFFLINE is a
+            // policy conflict (exit 81), not a silent downgrade.
+            return Err(anyhow::Error::from(crate::error::Error::from(
+                crate::auth::auth_error::AuthError::VerifyOffline,
+            )));
+        }
+        tracing::warn!("offline mode: skipping credential verification for {registry}");
+        VerificationStatus::Skipped
+    } else {
+        match super::grim(crate::auth::verify::verify_credential(&registry, &cred).await)? {
+            VerifyOutcome::Verified => VerificationStatus::Verified,
+            VerifyOutcome::NoAuthRequired => VerificationStatus::NoAuthRequired,
+        }
+    };
+
     let store = super::grim(DockerCredentialStore::new(StoreOptions {
         allow_plaintext_put: args.allow_insecure_store,
     }))?;
     super::grim(auth_login::login(&registry, &cred, &store).await)?;
 
-    Ok((LoginReport::new(registry, username), ExitCode::Success))
+    Ok((LoginReport::new(registry, username, verification), ExitCode::Success))
 }
 
 /// Run a blocking credential-input closure on the blocking pool. A panic in
@@ -177,7 +213,38 @@ mod tests {
     #[test]
     fn accepts_minimal_and_full_invocations() {
         parse(&["ghcr.io"]).expect("bare positional parses");
-        parse(&["-u", "user", "--password-stdin", "--allow-insecure-store", "ghcr.io"]).expect("full flag set parses");
+        parse(&[
+            "-u",
+            "user",
+            "--password-stdin",
+            "--allow-insecure-store",
+            "--verify",
+            "ghcr.io",
+        ])
+        .expect("full flag set parses");
+    }
+
+    #[test]
+    fn verify_defaults_on_and_no_verify_disables() {
+        let default = parse(&["ghcr.io"]).expect("parses");
+        assert!(default.verify.enabled(), "verification must default on");
+        assert!(!default.verify.explicit(), "the default is not an explicit --verify");
+
+        let explicit = parse(&["--verify", "ghcr.io"]).expect("parses");
+        assert!(explicit.verify.enabled());
+        assert!(explicit.verify.explicit());
+
+        let skipped = parse(&["--no-verify", "ghcr.io"]).expect("parses");
+        assert!(!skipped.verify.enabled());
+    }
+
+    #[test]
+    fn verify_flag_pair_last_one_wins() {
+        let off = parse(&["--verify", "--no-verify", "ghcr.io"]).expect("parses");
+        assert!(!off.verify.enabled());
+
+        let on = parse(&["--no-verify", "--verify", "ghcr.io"]).expect("parses");
+        assert!(on.verify.enabled());
     }
 
     #[test]

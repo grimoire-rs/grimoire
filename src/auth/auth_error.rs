@@ -52,6 +52,35 @@ pub enum AuthError {
     /// `$DOCKER_CONFIG`).
     #[error("cannot locate docker config; set $DOCKER_CONFIG or $HOME")]
     NoConfigLocation,
+
+    /// The registry refused the credential during the `grim login`
+    /// verification ping. Nothing was stored.
+    #[error("registry {registry} rejected the credential")]
+    VerifyRejected { registry: String },
+
+    /// The registry (or its token endpoint) could not answer the `grim
+    /// login` verification ping: transport failure, 5xx, or 429. The
+    /// source is absent only for a status `reqwest` does not classify as
+    /// an error (practically unreachable — redirects are followed).
+    #[error("could not reach registry {registry} to verify the credential")]
+    VerifyUnavailable {
+        registry: String,
+        #[source]
+        source: Option<Box<reqwest::Error>>,
+    },
+
+    /// An explicit `--verify` while offline mode disables all network
+    /// access — a policy conflict, not a transport fault.
+    #[error("cannot verify a credential in offline mode")]
+    VerifyOffline,
+
+    /// The registry answered an HTTPS verification ping with a `Bearer`
+    /// realm that is not itself HTTPS — following it would send the
+    /// credential in cleartext. grim refuses the downgrade; nothing stored.
+    #[error(
+        "registry {registry} named an insecure (non-https) token endpoint; refusing to send the credential in cleartext"
+    )]
+    VerifyInsecureRealm { registry: String },
 }
 
 #[cfg(test)]
@@ -63,6 +92,20 @@ mod tests {
         for msg in [
             AuthError::NoCredentialStore.to_string(),
             AuthError::NoConfigLocation.to_string(),
+            AuthError::VerifyRejected {
+                registry: "ghcr.io".to_string(),
+            }
+            .to_string(),
+            AuthError::VerifyUnavailable {
+                registry: "ghcr.io".to_string(),
+                source: None,
+            }
+            .to_string(),
+            AuthError::VerifyOffline.to_string(),
+            AuthError::VerifyInsecureRealm {
+                registry: "ghcr.io".to_string(),
+            }
+            .to_string(),
         ] {
             let first = msg.chars().next().unwrap();
             assert!(first.is_lowercase(), "message must start lowercase: {msg:?}");

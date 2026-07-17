@@ -365,7 +365,12 @@ Credentials land in `$DOCKER_CONFIG/config.json` (default
 `~/.docker/config.json`): a configured credential helper if present,
 else grim *refuses* a plaintext write unless you opt in with
 `--allow-insecure-store` (base64, not encryption; file mode `0600`).
-A wrong password surfaces on the next pull or push, not at login time.
+By default the credential is verified against the registry before it is
+stored — a wrong password fails at login time with exit 80 and nothing
+persisted, an unreachable registry with exit 69. Verification proves the
+registry accepts the credential, not that it grants push access to any
+given repository. It can be skipped to store optimistically, and offline
+mode skips it with a warning; confirm the flags with `grim login --help`.
 
 The CI recipe — headless runner, no keychain, per-job isolation:
 

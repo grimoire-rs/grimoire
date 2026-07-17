@@ -19,6 +19,7 @@ pub mod login;
 pub mod prompt;
 pub mod registry_url;
 pub mod store;
+pub mod verify;
 
 // The only re-export with a cross-module consumer: the credential read path
 // (`oci::access::registry_client`) and the store share one registry-key

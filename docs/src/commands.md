@@ -932,7 +932,12 @@ in the Docker-compatible credential store, so later pulls and pushes reuse it.
 Pass the username with `-u`/`--username` (prompted on a terminal when omitted)
 and the password via `--password-stdin` or a hidden terminal prompt — there is
 no `--password <value>` flag, by design. `--allow-insecure-store` permits a
-base64 plaintext entry when no credential helper is configured. With no
+base64 plaintext entry when no credential helper is configured. By default
+the credential is verified against the registry before it is stored: a
+rejected credential exits 80 and stores nothing, an unreachable registry
+exits 69; `--no-verify` skips the ping and stores optimistically — see
+[Verification](./authentication.md#login-verify) for the full outcome
+table and the offline interplay. With no
 positional `registry`, it resolves `--registry`, then `GRIM_DEFAULT_REGISTRY`,
 then the configured `[[registries]]` (aliases resolve; the default entry
 wins) — but never the built-in fallback registry: with nothing configured

@@ -9,10 +9,10 @@
 //! canonicalized by [`CredentialStore`] implementations themselves, so
 //! these wrappers pass it straight through.
 //!
-//! v1 does not verify the credential against the registry before storing
-//! it (matching `docker login` with a credential helper, which also stores
-//! optimistically). The function shape leaves room for a future
-//! `--verify` pre-flight without changing call sites.
+//! Credential verification is the command layer's pre-flight
+//! ([`crate::auth::verify`], run by `grim login` before calling
+//! [`login`]) — these wrappers stay store-only so the store seam keeps
+//! its three minimal protocol verbs.
 
 use crate::auth::auth_error::AuthError;
 use crate::auth::credential::Credential;

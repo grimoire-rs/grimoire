@@ -94,7 +94,7 @@ today, so it is the one non-`enum` row whose `values` is a list
 | `uninstall` | `{kind, name, status}` | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` | `status`: `built` |
 | `release` | `{ref, manifest_digest, tags, pushed}` | `pushed`: bool (`false` = dry run) |
-| `login` | `{registry, username}` | — |
+| `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
 | `config set` / `unset` / `registry add` / `rm` / `use` | `{action, key, value, scope}` | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default` |
