@@ -140,11 +140,16 @@ pub fn prune_orphans(
     force: bool,
 ) -> Result<Vec<PrunedArtifact>, PruneError> {
     // Keys the lock still declares; everything recorded but not here is an
-    // orphan.
+    // orphan. Every locked kind must be chained here — an omitted kind
+    // (agents/mcp were missing until this fix) makes every one of its
+    // still-declared records look orphaned and prunes them on every
+    // `grim update`.
     let declared: HashSet<(ArtifactKind, String)> = lock
         .skills
         .iter()
         .chain(lock.rules.iter())
+        .chain(lock.agents.iter())
+        .chain(lock.mcp.iter())
         .map(|a| (a.kind, a.name.clone()))
         .collect();
 
@@ -338,6 +343,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -394,6 +401,44 @@ mod tests {
 
     fn locked_rule(name: &str) -> LockedArtifact {
         LockedArtifact::direct(name.to_string(), ArtifactKind::Rule, pinned(name))
+    }
+
+    fn locked_of_kind(kind: ArtifactKind, name: &str) -> LockedArtifact {
+        LockedArtifact::direct(name.to_string(), kind, pinned(name))
+    }
+
+    /// Materialize a minimal record of an arbitrary `kind`, recorded like
+    /// [`install_rule`] but not tied to the rule shape — used to prove
+    /// `prune_orphans`'s "declared" set recognizes every locked kind
+    /// (regression: agents/mcp were omitted, see
+    /// `still_declared_mcp_and_agent_records_are_not_pruned`).
+    fn install_of_kind(
+        state: &mut InstallState,
+        root: &std::path::Path,
+        kind: ArtifactKind,
+        name: &str,
+    ) -> std::path::PathBuf {
+        let file = root.join(format!(".claude/rules/{name}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("# {name}\n")).unwrap();
+        let hash = content_hash(&file).unwrap();
+        state.record(InstallRecord {
+            kind,
+            name: name.to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name)),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: format!(".claude/rules/{name}.md"),
+                },
+                content_hash: hash,
+                support_dir: None,
+                entry: None,
+            }],
+        });
+        file
     }
 
     fn lock_of(rules: Vec<LockedArtifact>) -> GrimoireLock {
@@ -486,6 +531,36 @@ mod tests {
         let roots = roots(ws);
         let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
         assert!(acted.is_empty());
+    }
+
+    #[test]
+    fn still_declared_mcp_and_agent_records_are_not_pruned() {
+        // Regression: `declared` must chain every locked kind, not just
+        // skills/rules. Before this fix `lock.agents`/`lock.mcp` were
+        // omitted from the set, so ANY installed agent or mcp record —
+        // even one still declared — looked orphaned and was pruned on
+        // every `grim update` (found via the Codex MCP pin-change
+        // acceptance test).
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mcp_file = install_of_kind(&mut state, ws, ArtifactKind::Mcp, "grim-mcp");
+        let agent_file = install_of_kind(&mut state, ws, ArtifactKind::Agent, "reviewer");
+
+        let mut lock = lock_of(vec![]);
+        lock.agents = vec![locked_of_kind(ArtifactKind::Agent, "reviewer")];
+        lock.mcp = vec![locked_of_kind(ArtifactKind::Mcp, "grim-mcp")];
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+
+        assert!(
+            acted.is_empty(),
+            "still-declared agent/mcp records must not be pruned: {acted:?}"
+        );
+        assert!(mcp_file.exists());
+        assert!(agent_file.exists());
+        assert!(state.get(ArtifactKind::Mcp, "grim-mcp").is_some());
+        assert!(state.get(ArtifactKind::Agent, "reviewer").is_some());
     }
 
     #[test]

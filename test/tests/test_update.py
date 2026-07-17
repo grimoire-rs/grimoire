@@ -73,6 +73,35 @@ def test_update_named_only_touches_that_artifact(
     assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
 
 
+def test_prune_of_a_zero_output_declined_record_is_clean(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C3.9 leftover: a zero-output record (a rule installed with
+    `--client codex` only — Codex declines rules) must prune cleanly when
+    dropped from the declaration; no crash, no orphaned state."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "codex")["items"]
+    assert rows[0]["status"] == "skipped", rows
+
+    # Drop the declaration and re-lock — the prune pass must reap the
+    # zero-output record cleanly.
+    (project_dir / "grimoire.toml").write_text("")
+    runner.run("lock", check=False)
+    update_rows = runner.json("update")["items"]
+    assert any(r["action"] == "removed" for r in update_rows), update_rows
+
+    status = runner.json("status")["items"]
+    assert not any(r["name"] == "rust-style" for r in status), status
+
+
 def test_update_installs_newly_declared_rule(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

@@ -106,7 +106,8 @@ impl ClientOutput {
     pub fn current_hash(&self, roots: &AnchorRoots) -> Result<Digest, AnchorError> {
         let target = self.resolved_target(roots)?;
         if let Some(pointer) = &self.entry {
-            return current_entry_hash(&target, pointer).map_err(|source| AnchorError::Io { path: target, source });
+            return current_entry_hash(&target, pointer, self.mcp_format())
+                .map_err(|source| AnchorError::Io { path: target, source });
         }
         let support = self.resolved_support_dir(roots)?;
         footprint_hash(&target, support.as_deref()).map_err(|source| AnchorError::Io { path: target, source })
@@ -130,8 +131,21 @@ impl ClientOutput {
         }
         match &self.entry {
             None => Ok(true),
-            Some(pointer) => Ok(read_entry_value(&target, pointer).is_ok_and(|v| v.is_some())),
+            Some(pointer) => Ok(read_entry_value(&target, pointer, self.mcp_format()).is_ok_and(|v| v.is_some())),
         }
+    }
+
+    /// The splice format [`Self::client`]'s vendor writes its MCP config
+    /// in — used to read back an `entry` output's semantic value with the
+    /// matching parser (Codex writes TOML, every other vendor JSON/JSONC).
+    /// An unparsable/legacy client string falls back to the JSON default.
+    /// Shared with the uninstall seam so the read-back, integrity, and
+    /// removal sides all dispatch on one source of truth.
+    pub fn mcp_format(&self) -> crate::install::vendor::McpConfigFormat {
+        self.client
+            .parse::<ClientTarget>()
+            .map(|c| c.vendor().mcp_config_format())
+            .unwrap_or_default()
     }
 
     /// Resolve + validate this output's anchored target into an absolute
@@ -167,20 +181,40 @@ pub fn entry_value_hash(value: &serde_json::Value) -> Result<Digest, io::Error> 
 }
 
 /// Read the managed member `pointer` points at inside the config file at
-/// `target` (JSONC-tolerant). `Ok(None)` when the member (or the
-/// `instructions`-style container) is absent; `Err` on I/O or an
-/// unparseable file.
-fn read_entry_value(target: &Path, pointer: &str) -> io::Result<Option<serde_json::Value>> {
+/// `target`, using the splice engine `format` names (JSON/JSONC-tolerant,
+/// or TOML). `Ok(None)` when the member (or the `instructions`-style
+/// container) is absent; `Err` on I/O or an unparseable file.
+fn read_entry_value(
+    target: &Path,
+    pointer: &str,
+    format: crate::install::vendor::McpConfigFormat,
+) -> io::Result<Option<serde_json::Value>> {
+    use crate::install::vendor::McpConfigFormat;
+
     let raw = std::fs::read_to_string(target)?;
-    let (doc, _) = crate::install::json_config::parse_object(&raw, target)?;
-    Ok(serde_json::Value::Object(doc).pointer(pointer).cloned())
+    match format {
+        McpConfigFormat::Json => {
+            let (doc, _) = crate::install::json_config::parse_object(&raw, target)?;
+            Ok(serde_json::Value::Object(doc).pointer(pointer).cloned())
+        }
+        McpConfigFormat::Toml => {
+            let Some((container, member)) = crate::install::json_splice::split_pointer(pointer) else {
+                return Ok(None);
+            };
+            Ok(crate::install::toml_splice::member_value(&raw, container, member))
+        }
+    }
 }
 
 /// The current semantic hash of the entry at `pointer` in `target`. An
 /// absent file/member surfaces as `NotFound` so the caller's
 /// missing-vs-modified precedence holds.
-fn current_entry_hash(target: &Path, pointer: &str) -> io::Result<Digest> {
-    let value = read_entry_value(target, pointer)?.ok_or_else(|| {
+fn current_entry_hash(
+    target: &Path,
+    pointer: &str,
+    format: crate::install::vendor::McpConfigFormat,
+) -> io::Result<Digest> {
+    let value = read_entry_value(target, pointer, format)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("managed entry '{pointer}' not present in '{}'", target.display()),
@@ -682,6 +716,8 @@ impl InstallState {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let convert = (ConfigScope::Project, &roots);
 
@@ -1872,6 +1908,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
 
         let st = InstallState::load_global(&global_path, &roots).unwrap();
@@ -1891,6 +1929,60 @@ mod tests {
         );
         // The target was under claude_root → anchored to ClaudeRoot.
         assert_eq!(rec.outputs[0].target.anchor, PathAnchor::ClaudeRoot);
+    }
+
+    // ── C3.2: V1 global state carrying a Codex RULE record ───────────────────
+
+    /// A V1-era (or hand-edited) `global.json` can carry a `(codex, rule)`
+    /// record even though a fresh install can never produce one today (the
+    /// installer's `supports_kind` gate declines Codex rules before
+    /// anchoring). `candidate_anchors` handles this declined pair with an
+    /// empty candidate set rather than `unreachable!()`, so the conversion
+    /// must degrade gracefully: warn, drop the unanchorable record, mark the
+    /// migration lossy — never panic.
+    ///
+    /// Requirement: C3.2 (V1-migration panic guard for the (Codex, Rule) pair).
+    #[test]
+    fn c3_2_v1_global_codex_rule_record_is_dropped_lossy_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let grim_home = dir.path().join("grim");
+        let state_dir = grim_home.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let global_path = InstallState::global_path(&state_dir);
+        let hash = "c".repeat(64);
+        // A global Codex RULE record — declined at fresh-install time, but
+        // still representable in a legacy/hand-edited V1 file.
+        let v1_json = format!(
+            r#"{{"version":1,"records":[{{"kind":"rule","name":"legacy-rule","pinned":"localhost:5000/legacy-rule@sha256:{sha}","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","clients":[{{"client":"codex","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","support_dir":null}}]}}]}}"#,
+            sha = "d".repeat(64),
+            hash = hash,
+        );
+        std::fs::write(&global_path, v1_json).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: PathBuf::from("/unused"),
+            grim_home: grim_home.clone(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: Some(PathBuf::from("/home/u/.codex")),
+        };
+
+        // Must not panic (the historical bug: `unreachable!()` in
+        // `candidate_anchors` for the (Codex, Rule) global pair).
+        let st = InstallState::load_global(&global_path, &roots).expect("load_global must not error, let alone panic");
+
+        assert!(
+            st.get(ArtifactKind::Rule, "legacy-rule").is_none(),
+            "the unanchorable (codex, rule) record must be dropped, not kept with a bogus anchor"
+        );
+        assert!(
+            st.legacy_migration_lossy(),
+            "dropping a record must flag the migration lossy so the legacy file is not reaped"
+        );
     }
 
     // ── F02: bare load() of a V1 file returns Err(InvalidData) ──────────────
@@ -2390,8 +2482,16 @@ mod tests {
     // ── Entry-typed outputs (MCP config registrations) ───────────────────
 
     /// A `ClientOutput` pointing at a managed entry inside `cfg`, hashed
-    /// over `value`'s canonical serialization.
-    fn entry_output(tmp: &std::path::Path, pointer: &str, value: &serde_json::Value) -> (ClientOutput, AnchorRoots) {
+    /// over `value`'s canonical serialization, for an arbitrary `client`
+    /// name / config filename (so a TOML-spliced client can share this
+    /// helper with the JSON-spliced ones below).
+    fn entry_output_for(
+        tmp: &std::path::Path,
+        client: &str,
+        filename: &str,
+        pointer: &str,
+        value: &serde_json::Value,
+    ) -> (ClientOutput, AnchorRoots) {
         let roots = AnchorRoots {
             workspace: tmp.to_path_buf(),
             grim_home: tmp.join("grim-home"),
@@ -2399,18 +2499,26 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let out = ClientOutput {
-            client: "claude".to_string(),
+            client: client.to_string(),
             target: AnchoredPath {
                 anchor: PathAnchor::Workspace,
-                relative: ".mcp.json".to_string(),
+                relative: filename.to_string(),
             },
             content_hash: entry_value_hash(value).unwrap(),
             support_dir: None,
             entry: Some(pointer.to_string()),
         };
         (out, roots)
+    }
+
+    /// A Claude (JSON-spliced) `ClientOutput` pointing at a managed entry
+    /// inside `.mcp.json`, hashed over `value`'s canonical serialization.
+    fn entry_output(tmp: &std::path::Path, pointer: &str, value: &serde_json::Value) -> (ClientOutput, AnchorRoots) {
+        entry_output_for(tmp, "claude", ".mcp.json", pointer, value)
     }
 
     #[test]
@@ -2491,5 +2599,76 @@ mod tests {
         assert!(!json.contains("entry"), "absent entry must not serialize: {json}");
         let round: ClientOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(round, out);
+    }
+
+    // ── C3.9 leftover: TOML dispatch on the read side (Codex) ────────────
+
+    #[test]
+    fn read_entry_value_and_current_entry_hash_direct_toml() {
+        use crate::install::vendor::McpConfigFormat;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.toml");
+        std::fs::write(&cfg, "[mcp_servers.grim]\ncommand = \"grim\"\n").unwrap();
+
+        let value = read_entry_value(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml)
+            .unwrap()
+            .expect("member present");
+        assert_eq!(value["command"], "grim");
+
+        let hash = current_entry_hash(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml).unwrap();
+        assert_eq!(hash, entry_value_hash(&value).unwrap());
+
+        // Absent member surfaces as NotFound (missing-vs-modified precedence).
+        let err = current_entry_hash(&cfg, "/mcp_servers/absent", McpConfigFormat::Toml).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn client_output_dispatches_to_toml_for_codex_entries() {
+        // End-to-end proof (through the public `is_present`/`current_hash`
+        // seam) that a Codex `ClientOutput` reads its managed member back
+        // via the TOML splice engine, not the JSON one.
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim", "args": ["mcp"]});
+        let (out, roots) = entry_output_for(tmp.path(), "codex", ".codex/config.toml", "/mcp_servers/grim", &value);
+
+        std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+        std::fs::write(
+            tmp.path().join(".codex/config.toml"),
+            "model = \"gpt-5-codex\"\n\n[mcp_servers.grim]\nargs = [\"mcp\"]\ncommand = \"grim\"\n",
+        )
+        .unwrap();
+        assert!(out.is_present(&roots).unwrap());
+        assert_eq!(
+            out.current_hash(&roots).unwrap(),
+            out.content_hash,
+            "reordered TOML keys/foreign content must still match semantically"
+        );
+
+        std::fs::write(
+            tmp.path().join(".codex/config.toml"),
+            "[mcp_servers.grim]\ncommand = \"evil\"\n",
+        )
+        .unwrap();
+        assert_ne!(out.current_hash(&roots).unwrap(), out.content_hash);
+    }
+
+    #[test]
+    fn mcp_format_falls_back_to_json_for_unparsable_client_string() {
+        // A client string that does not name a supported `ClientTarget`
+        // (a legacy or corrupt recorded value) must not fail the read: the
+        // `mcp_format()` `unwrap_or_default()` fallback treats it as JSON,
+        // matching the pre-Codex wire contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        let (out, roots) = entry_output_for(tmp.path(), "not-a-real-client", ".mcp.json", "/mcpServers/grim", &value);
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            "{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}",
+        )
+        .unwrap();
+        assert!(out.is_present(&roots).unwrap(), "JSON fallback must parse the file");
+        assert_eq!(out.current_hash(&roots).unwrap(), out.content_hash);
     }
 }

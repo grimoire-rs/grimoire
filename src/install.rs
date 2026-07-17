@@ -26,9 +26,11 @@ pub mod prune;
 pub mod render;
 pub mod status_badge;
 pub mod target;
+pub mod toml_splice;
 pub mod uninstall;
 pub mod vendor;
 pub mod vendor_claude;
+pub mod vendor_codex;
 pub mod vendor_copilot;
 pub mod vendor_opencode;
 

@@ -75,6 +75,12 @@ otherwise real artifact, so their `kind` is always one of those five
 values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
 
+`install`'s `target` is `null` when every selected client declines the
+artifact's kind — e.g. a rule installed with only [Codex][codex-subagents-docs]
+selected (Codex has no path-scoped rule mechanism), or an mcp descriptor
+no selected client can register. Nothing was written to disk in that
+case, so there is no path to report; `status` is `skipped`.
+
 `config list`'s `type` field is one of `string`, `boolean`, `integer`,
 `enum`, `string-list`, `string-set`. `string-list` is an ordered, open
 list — any value is accepted (e.g. `options.tui.tree_separators`), and its
@@ -82,7 +88,7 @@ list — any value is accepted (e.g. `options.tui.tree_separators`), and its
 values, each drawn from the closed `values` list — the same non-null
 shape `enum` rows carry. `options.clients` is the one `string-set` key
 today, so it is the one non-`enum` row whose `values` is a list
-(`["claude","opencode","copilot"]`) rather than `null`.
+(`["claude","opencode","copilot","codex"]`) rather than `null`.
 
 ### Single-object reports {#shapes-single}
 
@@ -334,3 +340,4 @@ can ship in a minor release.
 <!-- external -->
 [clap]: https://docs.rs/clap/latest/clap/
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
+[codex-subagents-docs]: https://developers.openai.com/codex/subagents

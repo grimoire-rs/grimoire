@@ -112,7 +112,13 @@ pub fn uninstall(
         // the file. Tolerant like the OpenCode glob removal: an absent or
         // unparseable config has nothing grim-managed left to remove.
         if let Some(pointer) = &out.entry {
-            remove_entry(&target, pointer)?;
+            // The splice engine is client-specific (Codex writes TOML, every
+            // other vendor JSON/JSONC), dispatched on the recorded client's
+            // `mcp_format` — the single source of truth shared with the install
+            // and read-back sides. An unparsable/legacy client string falls
+            // back to the JSON default rather than failing the
+            // otherwise-idempotent uninstall.
+            remove_entry(&target, pointer, out.mcp_format())?;
             continue;
         }
         // The index/target first, then a multi-file rule's sibling support
@@ -134,11 +140,18 @@ pub fn uninstall(
 }
 
 /// Splice the managed member `pointer` points at out of the config file at
-/// `path`. Converges tolerantly (the OpenCode glob-removal contract): an
-/// absent file, an unparseable file, or a malformed recorded pointer has
-/// nothing grim-managed left to remove. The file itself always survives.
-fn remove_entry(path: &std::path::Path, pointer: &str) -> std::io::Result<()> {
-    use crate::install::json_splice::{Splice, remove_member, split_pointer};
+/// `path`, using the splice engine `format` names. Converges tolerantly
+/// (the OpenCode glob-removal contract): an absent file, an unparseable
+/// file, or a malformed recorded pointer has nothing grim-managed left to
+/// remove. The file itself always survives.
+fn remove_entry(
+    path: &std::path::Path,
+    pointer: &str,
+    format: crate::install::vendor::McpConfigFormat,
+) -> std::io::Result<()> {
+    use crate::install::json_splice::{self, Splice, split_pointer};
+    use crate::install::toml_splice;
+    use crate::install::vendor::McpConfigFormat;
 
     let Some((container, member)) = split_pointer(pointer) else {
         tracing::warn!(
@@ -152,7 +165,11 @@ fn remove_entry(path: &std::path::Path, pointer: &str) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    match remove_member(&text, container, member) {
+    let spliced = match format {
+        McpConfigFormat::Json => json_splice::remove_member(&text, container, member),
+        McpConfigFormat::Toml => toml_splice::remove_member(&text, container, member),
+    };
+    match spliced {
         Ok(Splice::Changed(new_text)) => crate::store::atomic_write::atomic_write(path, new_text.as_bytes()),
         Ok(Splice::Unchanged) => Ok(()),
         // Removal is tolerant: a config grim cannot parse has nothing
@@ -206,6 +223,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -421,6 +440,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots)
             .expect("an unresolvable client anchor must be tolerated, not error");
@@ -497,5 +518,63 @@ mod tests {
         state.record(record);
         uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "not json {{{");
+    }
+
+    // Regression guard (plan C1): `remove_entry` dispatches on the
+    // recorded client's `Vendor::mcp_config_format`, so a Codex TOML entry
+    // routes through `toml_splice::remove_member` instead of hitting the
+    // JSON scanner's `InvalidData` → tolerant no-op, which would otherwise
+    // orphan the managed entry in the config file instead of removing it.
+    #[test]
+    fn uninstall_entry_output_removes_toml_member_never_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join("config.toml");
+        std::fs::write(
+            &cfg,
+            "# user comment\nmodel = \"gpt-5-codex\"\n\n[mcp_servers.grim]\ncommand = \"grim\"\n\n[mcp_servers.other-server]\ncommand = \"npx\"\n",
+        )
+        .unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = ClientOutput {
+            client: "codex".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: "config.toml".to_string(),
+            },
+            content_hash: Digest::Sha256("b".repeat(64)),
+            support_dir: None,
+            entry: None,
+        };
+        out.entry = Some("/mcp_servers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert!(cfg.is_file(), "the shared config.toml must survive");
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let doc: toml::Value = toml::from_str(&text).expect("config.toml must stay valid TOML after uninstall");
+        assert!(
+            doc.get("mcp_servers").and_then(|t| t.get("grim")).is_none(),
+            "managed Codex TOML entry must be removed, not orphaned: {text:?}"
+        );
+        assert_eq!(
+            doc.get("mcp_servers")
+                .and_then(|t| t.get("other-server"))
+                .and_then(|s| s.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("npx"),
+            "foreign mcp_servers entry preserved"
+        );
+        assert!(text.contains("# user comment"), "unrelated comment preserved");
+        assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
     }
 }

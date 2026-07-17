@@ -3813,6 +3813,8 @@ mod tests {
                 copilot_root: None,
                 opencode_skills: None,
                 claude_user_dir: None,
+                agents_skills: None,
+                codex_root: None,
             },
             clients_default: Vec::new(),
             clients_selected: Vec::new(),
@@ -4030,6 +4032,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -5135,6 +5139,8 @@ mod tests {
                 copilot_root: None,
                 opencode_skills: None,
                 claude_user_dir: None,
+                agents_skills: None,
+                codex_root: None,
             },
             clients_default: vec![],
             clients_selected: Vec::new(),
@@ -5548,6 +5554,8 @@ mod p2_app_member_node_tests {
                 copilot_root: None,
                 opencode_skills: None,
                 claude_user_dir: None,
+                agents_skills: None,
+                codex_root: None,
             },
             clients_default: vec!["claude".to_string()],
             clients_selected: Vec::new(),

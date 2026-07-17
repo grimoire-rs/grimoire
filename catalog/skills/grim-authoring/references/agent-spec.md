@@ -68,6 +68,18 @@ The canonical format *is* Claude Code's native subagent format: a plain
 agent (no vendor keys) installs for Claude byte-identical. OpenCode
 drops `name` (filename is its identity) and `tools`; Copilot drops
 `model` and emits `tools` as a YAML list; both add a provenance comment.
+
+Codex emits a **TOML** file at `.codex/agents/<name>.toml`. The body
+becomes `developer_instructions`; `name` and `description` map directly;
+`model` is optional. The `tools` field is **dropped with a warning** —
+Codex does not project tool allowlists from grim's universal schema.
+Optional Codex-specific knobs live in `metadata` as `codex.*` keys:
+`codex.model` (Codex-native model name), `codex.reasoning-effort`
+(`ultra` | `max` | `high` | `medium` | `low` | `minimal` | `none`), and
+`codex.sandbox-mode` (`read-only` | `workspace-write` |
+`danger-full-access`). Universal skill keys have no `codex.*` equivalents
+— codex skills use the standard grim skill shape unchanged.
+
 Full matrix: [emit matrix][emit-matrix].
 
 ## Limitations
@@ -75,9 +87,10 @@ Full matrix: [emit matrix][emit-matrix].
 - **No object-valued vendor fields** — `metadata` is string-valued, so
   Claude's `mcpServers`/`hooks`, OpenCode's `permission`, and Copilot's
   `mcp-servers` cannot be authored; add them post-install.
-- **No support directory** — an agent installs as exactly one
-  `<name>.md`. A sibling directory sharing the stem is read **only** for
-  the well-known companions `README.md`, `logo.png`, and `logo.svg`:
+- **No support directory** — an agent installs as exactly one file
+  (`<name>.md`, or `<name>.toml` for Codex). A sibling directory sharing
+  the stem is read **only** for the well-known companions `README.md`,
+  `logo.png`, and `logo.svg`:
   those three ride the published layer (under `<name>/…`, for
   `grim fetch --path` and catalog UIs) but are never installed to a
   client; every other file in that directory is ignored

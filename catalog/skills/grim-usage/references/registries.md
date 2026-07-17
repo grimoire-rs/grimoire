@@ -237,8 +237,9 @@ no extra configuration. The TUI flips scope at runtime with `g`.
 ## Client Targets
 
 An installed artifact lands in a **client target**: `claude`,
-`opencode`, or `copilot`, each receiving the artifact in its native
-layout. `grim install` and `grim update` choose targets by precedence:
+`opencode`, `copilot`, or `codex`, each receiving the artifact in its
+native layout. `grim install` and `grim update` choose targets by
+precedence:
 
 1. `--client <list>` flag (comma-separated: `--client claude,copilot`)
 2. config `[options].clients` (TOML array of client names)

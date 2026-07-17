@@ -11,10 +11,11 @@ vendor MCP writers land.
 from __future__ import annotations
 
 import json
+import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
 from src.helpers import write_config
-from src.registry import fetch_blob, fetch_manifest
+from src.registry import fetch_blob, fetch_manifest, retag
 
 MCP_LAYER_MEDIA_TYPE = "application/vnd.grimoire.mcp.v1+json"
 
@@ -241,6 +242,139 @@ def test_reformatting_the_config_is_not_modified_but_a_value_change_is(
     assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "missing"
 
 
+def test_reformatting_codex_config_toml_is_not_modified_but_a_value_change_is(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The drift check for Codex's TOML-spliced entry is semantic too:
+    reformatting `config.toml` leaves the artifact `installed`; changing
+    the managed value flips it to `modified` (mirrors
+    `test_reformatting_the_config_is_not_modified_but_a_value_change_is`,
+    Claude's JSON-spliced counterpart, for the TOML target)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    (project_dir / ".codex").mkdir()  # detect Codex only
+    write_config(project_dir)
+    runner.json("add", ref)
+    runner.json("install")
+    cfg = project_dir / ".codex" / "config.toml"
+    doc = tomllib.loads(cfg.read_text())
+    assert doc["mcp_servers"]["grim-mcp"]["command"] == "grim"
+
+    # Reformat (whitespace / spacing) without changing values: still installed.
+    cfg.write_text('[mcp_servers.grim-mcp]\ncommand   =    "grim"\nargs = [ "mcp" ]\n')
+    status = runner.json("status")["items"]
+    assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "installed"
+
+    # A real value change: modified + refused without --force.
+    cfg.write_text('[mcp_servers.grim-mcp]\ncommand = "evil"\nargs = ["mcp"]\n')
+    status = runner.json("status")["items"]
+    assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "modified"
+    refused = runner.run("install", check=False)
+    assert refused.returncode == 65, refused.stderr
+    assert tomllib.loads(cfg.read_text())["mcp_servers"]["grim-mcp"]["command"] == "evil", (
+        "a refused install must not overwrite the user's edit"
+    )
+    forced = runner.run("install", "--force", check=False)
+    assert forced.returncode == 0, forced.stderr
+    assert tomllib.loads(cfg.read_text())["mcp_servers"]["grim-mcp"]["command"] == "grim"
+
+    # Deleting the managed entry (file survives) reads as missing.
+    cfg.write_text('[mcp_servers.other]\ncommand = "x"\n')
+    status = runner.json("status")["items"]
+    assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "missing"
+
+
+def test_update_pin_change_resplices_codex_mcp_entry_in_place(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A version bump on a declared MCP artifact re-splices the Codex
+    `[mcp_servers.<name>]` entry in place (plan C1/C2): `grim update`
+    rewrites just the managed table when the pin changes, and `status`
+    reflects the new value."""
+    runner = grim_at(project_dir)
+    # The manifest title (and thus the artifact's canonical name) is the
+    # descriptor's source file stem — a *fixed* filename across releases is
+    # required so a version bump stays the same binding identity, exactly
+    # like `_release()`'s convention below.
+    descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    repo_path = f"{unique_repo}/mcp/grim-mcp"
+    repo = f"{registry}/{repo_path}"
+
+    descriptor.write_text(DESCRIPTOR)
+    first = runner.json("release", str(descriptor), f"{repo}:1.0.0", "--kind", "mcp")
+    runner.json("release", str(descriptor), f"{repo}:stable", "--kind", "mcp")  # floating tag, initially v1
+
+    (project_dir / ".codex").mkdir()  # detect Codex only
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{repo}:stable"\n')
+    runner.run("lock", check=False)
+    rows = runner.json("install")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".codex" / "config.toml"
+    doc = tomllib.loads(cfg.read_text())
+    assert doc["mcp_servers"]["grim-mcp"]["command"] == "grim"
+
+    # Publish v2 content (same filename, changed body) and move the floating
+    # tag onto it (rolling release).
+    descriptor.write_text(DESCRIPTOR.replace('command = "grim"', 'command = "grim2"'))
+    second = runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
+    assert first["manifest_digest"] != second["manifest_digest"]
+    retag(repo_path, "stable", second["manifest_digest"])
+
+    update_rows = runner.json("update")["items"]
+    # Regression guard: a still-declared mcp record must produce exactly one
+    # `updated` row, never a spurious extra `removed` row from the prune
+    # pass treating it as orphaned (`declared` omitting `lock.mcp`).
+    assert len(update_rows) == 1, update_rows
+    assert update_rows[0]["action"] == "updated", update_rows
+
+    doc = tomllib.loads(cfg.read_text())
+    assert doc["mcp_servers"]["grim-mcp"]["command"] == "grim2", (
+        "the entry must re-splice in place at the new pin"
+    )
+    assert doc["mcp_servers"]["grim-mcp"]["args"] == ["mcp"], "unrelated field carried through the resplice"
+
+    status = runner.json("status")["items"]
+    assert next(r for r in status if r["name"] == "grim-mcp")["state"] == "installed"
+
+
+def test_prune_removes_codex_mcp_entry_when_declaration_dropped(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Dropping an MCP declaration and re-locking prunes the orphaned
+    record through the shared uninstall seam — for Codex this must remove
+    only the managed `[mcp_servers.<name>]` entry from `config.toml`,
+    never the file, on the update/prune path (mirrors the explicit
+    `grim uninstall` coverage in
+    `test_uninstall_codex_mcp_entry_removed_file_and_foreign_keys_remain`)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    (project_dir / ".codex").mkdir()
+    (project_dir / ".codex" / "config.toml").write_text('[mcp_servers.other-server]\ncommand = "npx"\n')
+    write_config(project_dir)
+    runner.json("add", ref)
+    runner.json("install")
+
+    cfg = project_dir / ".codex" / "config.toml"
+    assert "grim-mcp" in tomllib.loads(cfg.read_text())["mcp_servers"]
+
+    # Drop the declaration and re-lock — the prune pass must reap the
+    # orphaned Codex MCP record.
+    (project_dir / "grimoire.toml").write_text("")
+    runner.run("lock", check=False)
+    update_rows = runner.json("update")["items"]
+    assert any(r["action"] == "removed" for r in update_rows), update_rows
+
+    assert cfg.is_file(), "config.toml must survive the prune"
+    doc = tomllib.loads(cfg.read_text())
+    assert "grim-mcp" not in doc.get("mcp_servers", {}), "pruned entry must be removed"
+    assert doc["mcp_servers"]["other-server"]["command"] == "npx", "foreign entry preserved"
+
+    status = runner.json("status")["items"]
+    assert not any(r["name"] == "grim-mcp" for r in status), status
+
+
 def test_uninstall_removes_entries_but_never_the_config_files(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -343,6 +477,145 @@ def test_global_copilot_skips_env_ref_descriptors(
     assert claude["mcpServers"]["grim-mcp"]["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}"
     opencode = json.loads((runner.home / ".config" / "opencode" / "opencode.json").read_text())
     assert opencode["mcp"]["grim-mcp"]["environment"]["GRIM_TOKEN"] == "{env:GITHUB_TOKEN}"
+
+
+def test_project_repeat_install_is_byte_stable_for_every_json_client(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C2 idempotency, proven for the three existing JSON-spliced clients:
+    a second `grim install` with an unchanged pin writes exactly one entry
+    per client config, byte-identical to the first install's output."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    _detect_all_clients(project_dir)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    first = runner.json("install")["items"]
+    assert first[0]["status"] == "installed", first
+
+    claude_cfg = project_dir / ".mcp.json"
+    opencode_cfg = project_dir / "opencode.json"
+    vscode_cfg = project_dir / ".vscode" / "mcp.json"
+    claude_before = claude_cfg.read_text()
+    opencode_before = opencode_cfg.read_text()
+    vscode_before = vscode_cfg.read_text()
+
+    second = runner.json("install")["items"]
+    assert second[0]["status"] == "unchanged", second
+
+    assert claude_cfg.read_text() == claude_before, "claude config must be byte-stable on repeat install"
+    assert opencode_cfg.read_text() == opencode_before, "opencode config must be byte-stable on repeat install"
+    assert vscode_cfg.read_text() == vscode_before, "vscode config must be byte-stable on repeat install"
+
+    for cfg, container in (
+        (claude_cfg, "mcpServers"),
+        (opencode_cfg, "mcp"),
+        (vscode_cfg, "servers"),
+    ):
+        doc = json.loads(cfg.read_text())
+        assert list(doc[container].keys()).count("grim-mcp") == 1, (
+            f"{cfg}: exactly one grim-mcp entry expected, got {doc[container]!r}"
+        )
+
+
+def test_global_codex_registers_entry_in_config_toml_idempotent(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """A global Codex MCP install writes the `[mcp_servers.<name>]` entry
+    into `$CODEX_HOME/config.toml` (plan C1); a repeat install is
+    byte-stable with exactly one entry (idempotency, plan C2)."""
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor_dir = tmp_path / "src"
+    descriptor = descriptor_dir / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    codex_home = grim_home.parent / "codex_home"
+    runner.env["CODEX_HOME"] = str(codex_home)
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "codex")["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert rows[0]["target"] is not None, "target must be non-null once Codex MCP registration lands"
+
+    config = codex_home / "config.toml"
+    assert config.is_file(), "Codex global MCP registration must land at $CODEX_HOME/config.toml"
+    doc = tomllib.loads(config.read_text())
+    assert doc["mcp_servers"]["grim-mcp"]["command"] == "grim"
+    first_text = config.read_text()
+
+    # Repeat install is byte-stable with exactly one entry.
+    rows2 = runner.json("install", "--global", "--client", "codex")["items"]
+    assert rows2[0]["status"] == "unchanged", rows2
+    second_text = config.read_text()
+    assert second_text == first_text, "repeat Codex install must be byte-stable"
+    assert second_text.count("[mcp_servers.grim-mcp]") == 1
+
+
+def test_project_codex_config_toml_preserves_comments_and_foreign_keys(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A pre-existing `.codex/config.toml` with user comments and unrelated
+    keys/tables must survive an MCP install untouched outside the managed
+    `[mcp_servers.grim-mcp]` entry (span-preserving splice, plan C1)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    (project_dir / ".codex").mkdir()  # detect Codex only
+    user_toml = (
+        "# managed by the user, not grim\n"
+        "model = \"gpt-5-codex\"\n"
+        "\n"
+        "[sandbox]\n"
+        "mode = \"workspace-write\"\n"
+        "\n"
+        "[mcp_servers.other-server]\n"
+        "command = \"npx\"\n"
+    )
+    (project_dir / ".codex" / "config.toml").write_text(user_toml)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    rows = runner.json("install")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    text = (project_dir / ".codex" / "config.toml").read_text()
+    assert "# managed by the user, not grim" in text, "user comment must survive"
+    assert "model = \"gpt-5-codex\"" in text, "unrelated key must survive"
+    doc = tomllib.loads(text)
+    assert doc["sandbox"]["mode"] == "workspace-write"
+    assert doc["mcp_servers"]["other-server"]["command"] == "npx", "foreign mcp server entry must survive"
+    assert doc["mcp_servers"]["grim-mcp"]["command"] == "grim"
+
+
+def test_uninstall_codex_mcp_entry_removed_file_and_foreign_keys_remain(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Arch-verify gap (plan C1): `uninstall` must remove only the managed
+    Codex TOML entry — never the file, never a foreign `mcp_servers`
+    entry."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    (project_dir / ".codex").mkdir()
+    (project_dir / ".codex" / "config.toml").write_text(
+        "[mcp_servers.other-server]\ncommand = \"npx\"\n"
+    )
+    write_config(project_dir)
+    runner.json("add", ref)
+
+    out = runner.json("uninstall", "mcp", "grim-mcp")
+    assert out["status"] in ("uninstalled", "removed"), out
+
+    cfg = project_dir / ".codex" / "config.toml"
+    assert cfg.is_file(), "config.toml must survive uninstall"
+    doc = tomllib.loads(cfg.read_text())
+    assert "grim-mcp" not in doc.get("mcp_servers", {}), "managed entry removed"
+    assert doc["mcp_servers"]["other-server"]["command"] == "npx", "foreign entry preserved"
 
 
 def test_global_copilot_registers_env_free_descriptors(

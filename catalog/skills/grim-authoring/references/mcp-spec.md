@@ -16,8 +16,10 @@ the standard name rules, with catalog metadata at the top level and a
 single `[server]` table. It never materializes a file at install time —
 grim registers a vendor-native entry in each client's own MCP config
 (Claude's `.mcp.json` / `~/.claude.json`, OpenCode's `opencode.json`,
-the VS Code / Copilot surfaces) and removes exactly that entry on
-uninstall.
+the VS Code / Copilot surfaces, and Codex's `config.toml` under
+`[mcp_servers.<name>]`) and removes exactly that entry on uninstall.
+Codex's config is TOML, not JSON — grim splices it span-preserving the
+same way, so surrounding user keys and comments survive.
 
 **`--kind mcp` is mandatory.** A `.toml` is bundle-shaped by default;
 grim errors with a `--kind mcp` hint when it sees a `[server]` table on
@@ -59,6 +61,13 @@ the VS Code config; Claude reads `${VAR}` natively).
 - Copilot CLI's global `mcp-config.json` supports no substitution at
   all: a descriptor that uses `${VAR}` skips that client with a warning
   rather than ever writing a secret (or a broken literal) to disk.
+- Codex's `config.toml` receives a stdio `env` value **verbatim** — the
+  literal `${VAR}` string is written as the launched subprocess's OS
+  environment assignment (the same passthrough Claude/OpenCode give it),
+  not substituted by grim or Codex. Codex's remote schema has **no headers
+  field**, so an `http`/`sse` descriptor that needs `headers` (almost always
+  an auth token) skips Codex with a warning rather than silently dropping
+  required auth.
 - A bare `$VAR` (no braces) is a literal, not a reference.
 
 ## What Each Client Receives
@@ -67,7 +76,9 @@ Grim renders the vendor's own schema — confirm the authoritative matrix
 on the docs site ([MCP Server Artifacts][mcp-docs]). Highlights: OpenCode
 gets `command` as ONE array (`["grim", "mcp"]`) under `type: "local"`
 with env under `environment`; the VS Code config uses `type: "stdio"`;
-Copilot CLI's global entry gains `tools: ["*"]`. Only the managed entry
+Copilot CLI's global entry gains `tools: ["*"]`; Codex gets a
+`[mcp_servers.<name>]` TOML table with `command`/`args`/`env` (stdio) or
+`url` (http/sse, headers unsupported). Only the managed entry
 is ever touched — user keys, formatting, and comments in the config file
 survive, and grim's drift check is semantic (reordering the file is not
 a modification; editing the entry's values is).

@@ -6,14 +6,17 @@ thing: a running [Model Context Protocol][mcp-spec] server — how to
 launch it, or how to reach it — so every client can connect to the same
 tool without anyone hand-writing its config three times.
 
-Adding one MCP server today means editing three different files by hand:
-[Claude Code][claude-code-mcp-docs]'s `.mcp.json` (`mcpServers`, a
-`command`/`args` pair), [OpenCode][opencode-mcp-docs]'s `opencode.json`
-(`mcp`, a single `command` array), and [VS Code][vscode-mcp-docs]'s
-`.vscode/mcp.json` (`servers`, yet another shape) — each with its own
+Adding one MCP server today means editing a different config file by hand
+for every client: [Claude Code][claude-code-mcp-docs]'s `.mcp.json`
+(`mcpServers`, a `command`/`args` pair), [OpenCode][opencode-mcp-docs]'s
+`opencode.json` (`mcp`, a single `command` array),
+[VS Code][vscode-mcp-docs]'s `.vscode/mcp.json` (`servers`, yet another
+shape), [GitHub Copilot][copilot-mcp-docs] CLI's global `mcp-config.json`,
+and [Codex][codex-mcp-docs]'s `config.toml` (`[mcp_servers.<name>]`, the
+only TOML one) — each with its own shape and, where supported, its own
 environment-variable reference syntax (`${VAR}`, `{env:VAR}`,
-`${env:VAR}`). The three copies drift the moment someone rotates a token
-or renames a server, exactly the copy-paste problem
+`${env:VAR}`). The copies drift the moment someone rotates a token or
+renames a server, exactly the copy-paste problem
 [skills][vendor-metadata] already solve for capabilities.
 
 Grimoire treats an MCP server like any other artifact: author **one
@@ -133,16 +136,28 @@ client already reads — never a new file:
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` | `mcp` | same as project | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | project | `<workspace>/.vscode/mcp.json` | `servers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url`/`headers` | `${env:VAR}` |
 | [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
+| [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` only (no headers — see [Limitations](#limitations)) | `${VAR}` (literal passthrough, not substituted by grim) |
+| [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
+
+Codex is the one **TOML** target — every other client above writes
+JSON/JSONC — so its splice runs through a separate span-preserving
+engine built on [`toml_edit`][toml-edit-crate] instead of grim's own
+JSON/JSONC scanner; the entry still lands under a `[mcp_servers.<name>]`
+table the same way a JSON entry lands under `mcpServers.<name>`. Codex
+also only honors a *project*-scope `.codex/config.toml` for a project the
+user has marked **trusted** — grim writes the file regardless of trust
+state, since that decision is Codex's, not grim's, to make; an untrusted
+project simply will not have the registration read until it is trusted.
 
 Every write here is a **splice**, not a rewrite: grim locates the
 existing `<container>.<member>` span in the file — parsing the
-surrounding JSON/JSONC only enough to find that one member — and
-replaces just that span, so key order, unrelated entries, formatting,
-and JSONC comments elsewhere in the file all survive byte-for-byte. The
-idiom is the same one [Ansible's `blockinfile` module][ansible-blockinfile]
+surrounding JSON/JSONC (or, for Codex, TOML) only enough to find that one
+member — and replaces just that span, so key order, unrelated entries,
+formatting, and comments elsewhere in the file all survive byte-for-byte.
+The idiom is the same one [Ansible's `blockinfile` module][ansible-blockinfile]
 uses for editing a marked region of a config file it does not own — grim
-never owns `~/.claude.json` or `opencode.json`, so it never reserializes
-them.
+never owns `~/.claude.json`, `opencode.json`, or `config.toml`, so it
+never reserializes them.
 
 That matters most for `~/.claude.json`: it is Claude Code's live,
 monolithic user-state file, not a config file grim can treat as its own.
@@ -166,6 +181,7 @@ query parameter, say) still translates correctly:
 | [OpenCode][opencode-mcp-docs] | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | `${env:VAR}` |
 | [Copilot CLI][copilot-mcp-docs] (global) | not supported |
+| [Codex][codex-mcp-docs] | `${VAR}` (literal passthrough — an `env` value is an OS environment assignment for the launched subprocess, not substituted by grim or Codex) |
 
 [Copilot CLI][copilot-mcp-docs]'s global `mcp-config.json` has no
 variable-substitution mechanism at all — there is no syntax to translate
@@ -294,6 +310,12 @@ arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
 - **Copilot CLI's global config skips descriptors with `${VAR}`
   references** — see [Environment references](#env-references). Every
   other client and scope still installs normally.
+- **[Codex][codex-mcp-docs] has no headers field.** Its upstream MCP
+  schema maps only `url` for a remote server; a descriptor whose
+  `[server]` table carries `headers` (almost always an auth token, e.g.
+  `Authorization: Bearer ${VAR}`) is skipped for Codex with a warning
+  rather than registering a connection Codex can never authenticate.
+  Every other client and scope still installs normally.
 - **`grim_fetch` / `grim_describe` / `grim_render` need the network even
   with warm blobs.** grim's cache stores blobs but not manifests, so under
   `GRIM_OFFLINE=1` (or `--offline`) these fail cleanly at the manifest
@@ -315,8 +337,10 @@ arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [opencode-mcp-docs]: https://opencode.ai/docs/mcp-servers/
 [vscode-mcp-docs]: https://code.visualstudio.com/docs/copilot/chat/mcp-servers
 [copilot-mcp-docs]: https://docs.github.com/en/copilot/concepts/about-model-context-protocol-mcp
+[codex-mcp-docs]: https://developers.openai.com/codex/mcp
 [ansible-blockinfile]: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
 [catalog-mcp-grim]: https://github.com/grimoire-rs/grimoire/blob/main/catalog/mcp/grim.toml
+[toml-edit-crate]: https://docs.rs/toml_edit/latest/toml_edit/
 
 <!-- internal -->
 [vendor-metadata]: ./vendor-metadata.md

@@ -34,6 +34,11 @@ thiserror = "2"
 sha2 = "0.11"
 hex = "0.4"
 toml = "1.1"
+# Span-preserving TOML edits for Codex's `config.toml` MCP registration —
+# the `toml` crate above only round-trips through a full parse/reserialize,
+# which would reorder keys and drop comments (see src/install/toml_splice.rs,
+# the TOML analogue of src/install/json_splice.rs).
+toml_edit = "0.25"
 tempfile = "3"
 fs4 = "1.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

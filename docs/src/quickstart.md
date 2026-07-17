@@ -48,8 +48,10 @@ grim search authoring
 `grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets every AI client it detects in
 the workspace ([Claude Code][claude], [opencode][opencode], [GitHub
-Copilot][copilot]); pass `--client` to pick explicitly, with a comma-separated
-list to install into several at once:
+Copilot][copilot], [OpenAI Codex][codex]); pass `--client` to pick explicitly,
+with a comma-separated list to install into several at once. Note that
+[Codex][codex] supports skills and agents only — rules are not supported and
+are skipped with a warning:
 
 ```sh
 grim install
@@ -100,6 +102,7 @@ before declaring anything, launch the interactive browser with
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
 [opencode]: https://opencode.ai
 [copilot]: https://github.com/features/copilot
+[codex]: https://openai.com/index/openai-codex/
 
 <!-- internal -->
 [index]: ./package-index.md

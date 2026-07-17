@@ -23,7 +23,7 @@ use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::vendor::{env_dir, home_dir, xdg_config_dir};
-use crate::install::{vendor_claude, vendor_copilot, vendor_opencode};
+use crate::install::{vendor_claude, vendor_codex, vendor_copilot, vendor_opencode};
 use crate::oci::ArtifactKind;
 
 /// A logical root an install target is stored relative to.
@@ -56,6 +56,13 @@ pub enum PathAnchor {
     /// file lives *inside* that dir, without it the file is a *sibling* of
     /// `~/.claude`.
     ClaudeUserDir,
+    /// Global Codex skills: the cross-vendor open standard `$HOME/.agents/skills`
+    /// (keyed on `$HOME`, **not** relocated by `$CODEX_HOME`).
+    AgentsSkills,
+    /// Global Codex config root: `$CODEX_HOME` else `~/.codex`. Hosts the
+    /// `agents/` dir, so a global Codex agent lands at
+    /// `<codex-root>/agents/<name>.toml`.
+    CodexRoot,
 }
 
 impl std::fmt::Display for PathAnchor {
@@ -68,6 +75,8 @@ impl std::fmt::Display for PathAnchor {
             Self::OpenCodeRoot => "opencode-root",
             Self::GrimHome => "grim-home",
             Self::ClaudeUserDir => "claude-user-dir",
+            Self::AgentsSkills => "agents-skills",
+            Self::CodexRoot => "codex-root",
         })
     }
 }
@@ -103,6 +112,11 @@ pub struct AnchorRoots {
     /// when resolvable: `$CLAUDE_CONFIG_DIR` else `$HOME`. Not derivable
     /// from [`Self::claude_root`] (see [`PathAnchor::ClaudeUserDir`]).
     pub claude_user_dir: Option<PathBuf>,
+    /// The global Codex skills root (`$HOME/.agents/skills`), when resolvable.
+    pub agents_skills: Option<PathBuf>,
+    /// The global Codex config root (`$CODEX_HOME` else `~/.codex`), when
+    /// resolvable. Hosts the sibling `agents/` dir.
+    pub codex_root: Option<PathBuf>,
 }
 
 impl AnchorRoots {
@@ -117,6 +131,8 @@ impl AnchorRoots {
             copilot_root: vendor_copilot::global_native_root(env_dir("COPILOT_HOME"), home_dir()),
             opencode_skills: vendor_opencode::global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()),
             claude_user_dir: vendor_claude::user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
+            agents_skills: vendor_codex::global_skills_root(home_dir()),
+            codex_root: vendor_codex::codex_root(env_dir("CODEX_HOME"), home_dir()),
         }
     }
 }
@@ -140,6 +156,8 @@ impl PathAnchor {
                 .and_then(|s| s.parent())
                 .map(std::path::Path::to_path_buf),
             Self::ClaudeUserDir => roots.claude_user_dir.clone(),
+            Self::AgentsSkills => roots.agents_skills.clone(),
+            Self::CodexRoot => roots.codex_root.clone(),
         }
     }
 }
@@ -317,9 +335,22 @@ impl AnchoredPath {
 /// anchoring to `GrimHome`. `Bundle` arms are `unreachable!()` because
 /// bundles are always expanded into members and never materialized. The
 /// caller tries them longest-root-first so the more specific root wins.
+///
+/// Global-scope `(Codex, Rule)` is the one declined pair still reachable
+/// with persisted data: a fresh install never reaches `from_target` with
+/// it (the installer's `supports_kind` gate skips it first), but a V1-era
+/// state record predating that gate — or a hand-edited state file — can
+/// still reach [`convert_v1_records`](super::install_state) directly. That
+/// pair returns an empty candidate set rather than panicking, so the
+/// "no root matched" fallthrough below yields the existing
+/// [`AnchorError::UnknownAnchor`] (already handled by every caller) instead
+/// of an `unreachable!()` reachable from persisted state. Project scope is
+/// untouched by this guard — it is unconditionally `[Workspace]` for every
+/// `(client, kind)` pair, so it was never at panic risk here.
 fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
     match scope {
         ConfigScope::Project => vec![PathAnchor::Workspace],
+        ConfigScope::Global if (client, kind) == (ClientTarget::Codex, ArtifactKind::Rule) => Vec::new(),
         ConfigScope::Global => {
             let primary = match (client, kind) {
                 // Claude: all three materializable kinds live under the Claude root.
@@ -347,20 +378,37 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // in opencode.json — no native rules directory).
                 (ClientTarget::OpenCode, ArtifactKind::Rule) => PathAnchor::GrimHome,
 
+                // Codex: skills live under the cross-vendor $HOME/.agents/skills.
+                (ClientTarget::Codex, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+
+                // Codex: agents live in the sibling `agents/` dir under the Codex
+                // config root ($CODEX_HOME|~/.codex).
+                (ClientTarget::Codex, ArtifactKind::Agent) => PathAnchor::CodexRoot,
+
+                // Codex: rules have no native target — handled by the
+                // dedicated match guard above (empty candidate set), never
+                // reached here.
+                (ClientTarget::Codex, ArtifactKind::Rule) => {
+                    unreachable!("Codex declined rules are handled by the match guard above")
+                }
+
                 // Bundles are never materialized; they expand into members.
                 (ClientTarget::Claude, ArtifactKind::Bundle)
                 | (ClientTarget::Copilot, ArtifactKind::Bundle)
-                | (ClientTarget::OpenCode, ArtifactKind::Bundle) => {
+                | (ClientTarget::OpenCode, ArtifactKind::Bundle)
+                | (ClientTarget::Codex, ArtifactKind::Bundle) => {
                     unreachable!("bundles are never materialized; they expand into members")
                 }
 
                 // MCP config-entry anchors: Claude's user config file dir
                 // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
                 // config dir (`opencode.json`), Copilot's native root
-                // (`mcp-config.json`).
+                // (`mcp-config.json`), Codex's config root (`config.toml`,
+                // alongside the `agents/` dir — same root as the agent anchor).
                 (ClientTarget::Claude, ArtifactKind::Mcp) => PathAnchor::ClaudeUserDir,
                 (ClientTarget::OpenCode, ArtifactKind::Mcp) => PathAnchor::OpenCodeRoot,
                 (ClientTarget::Copilot, ArtifactKind::Mcp) => PathAnchor::CopilotRoot,
+                (ClientTarget::Codex, ArtifactKind::Mcp) => PathAnchor::CodexRoot,
             };
             // `GrimHome` is the universal fallback; deduplicate when the
             // primary already is `GrimHome`.
@@ -533,7 +581,7 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    /// Build an `AnchorRoots` with all five fields set to known paths.
+    /// Build an `AnchorRoots` with every field set to known paths.
     /// No environment is consulted — this is the "pure table lookup" setup.
     fn all_roots() -> AnchorRoots {
         AnchorRoots {
@@ -543,6 +591,8 @@ mod tests {
             copilot_root: Some(PathBuf::from("/copilot")),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
+            agents_skills: Some(PathBuf::from("/agents/skills")),
+            codex_root: Some(PathBuf::from("/codex")),
         }
     }
 
@@ -598,6 +648,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         assert!(PathAnchor::ClaudeRoot.root(&roots).is_none());
         assert!(PathAnchor::CopilotRoot.root(&roots).is_none());
@@ -616,6 +668,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         assert!(
             PathAnchor::OpenCodeRoot.root(&roots).is_none(),
@@ -727,6 +781,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::ClaudeRoot,
@@ -890,6 +946,52 @@ mod tests {
         assert_eq!(ap.relative, "agents/my-agent.md");
     }
 
+    /// AgentsSkills / CodexRoot anchors return their stored fields verbatim.
+    #[test]
+    fn t2_codex_anchors_return_their_fields() {
+        let roots = all_roots();
+        assert_eq!(
+            PathAnchor::AgentsSkills.root(&roots),
+            Some(PathBuf::from("/agents/skills"))
+        );
+        assert_eq!(PathAnchor::CodexRoot.root(&roots), Some(PathBuf::from("/codex")));
+    }
+
+    /// Global Codex skill → `(AgentsSkills, "<name>")` — the root already
+    /// ends in `/skills`, so the remainder is just the skill name.
+    #[test]
+    fn t4_global_codex_skill_classifies_to_agents_skills() {
+        let roots = all_roots();
+        let abs = PathBuf::from("/agents/skills/my-skill");
+        let ap = AnchoredPath::from_target(
+            &abs,
+            ConfigScope::Global,
+            ClientTarget::Codex,
+            ArtifactKind::Skill,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(ap.anchor, PathAnchor::AgentsSkills);
+        assert_eq!(ap.relative, "my-skill");
+    }
+
+    /// Global Codex agent → `(CodexRoot, "agents/<name>.toml")`.
+    #[test]
+    fn t4_global_codex_agent_classifies_to_codex_root() {
+        let roots = all_roots();
+        let abs = PathBuf::from("/codex/agents/my-agent.toml");
+        let ap = AnchoredPath::from_target(
+            &abs,
+            ConfigScope::Global,
+            ClientTarget::Codex,
+            ArtifactKind::Agent,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(ap.anchor, PathAnchor::CodexRoot);
+        assert_eq!(ap.relative, "agents/my-agent.toml");
+    }
+
     /// A project target NOT under the workspace produces UnknownAnchor.
     #[test]
     fn t4_project_target_outside_workspace_returns_unknown_anchor() {
@@ -1012,6 +1114,8 @@ mod tests {
             copilot_root: Some(PathBuf::from("/a/copilot")),
             opencode_skills: Some(PathBuf::from("/a/skills")),
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let abs = PathBuf::from("/a/skills/my-skill");
         let ap = AnchoredPath::from_target(
@@ -1062,6 +1166,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         // When there is no opencode_skills root, the vendor falls back to
         // the workspace layout under grim_home.
@@ -1109,6 +1215,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1148,6 +1256,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1179,6 +1289,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let abs = PathBuf::from("/definitely/not/on/disk/ws/.claude/rules/gone.md");
         let ap = AnchoredPath::from_target(
@@ -1207,6 +1319,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         // abs uses a different case for the "Users"/"Alice"/"ws" segments —
         // on macOS (case-insensitive FS) this is the same path.
@@ -1240,6 +1354,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         // Build /ws/<non-utf8> by appending a non-UTF-8 component.
         let mut abs = PathBuf::from("/ws");
@@ -1270,6 +1386,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         };
         // abs equals the workspace root exactly.
         let abs = PathBuf::from("/ws");
@@ -1405,6 +1523,26 @@ mod tests {
                 (PathAnchor::GrimHome, format!(".opencode/rules/{name}.md"))
             }
 
+            // Codex project: skills in `.agents/skills`, agents as `.codex` TOML.
+            (ConfigScope::Project, ClientTarget::Codex, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Codex, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".codex/agents/{name}.toml"))
+            }
+            // Codex global: skill → AgentsSkills (root ends in /skills);
+            // agent → CodexRoot + `agents/<name>.toml`.
+            (ConfigScope::Global, ClientTarget::Codex, ArtifactKind::Skill) => {
+                (PathAnchor::AgentsSkills, name.to_string())
+            }
+            (ConfigScope::Global, ClientTarget::Codex, ArtifactKind::Agent) => {
+                (PathAnchor::CodexRoot, format!("agents/{name}.toml"))
+            }
+            // Codex rules are unsupported — excluded from the loop below.
+            (_, ClientTarget::Codex, ArtifactKind::Rule) => {
+                unreachable!("Codex rules are skipped, not classified")
+            }
+
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
             // MCP descriptors register into client configs, not files —
@@ -1442,11 +1580,14 @@ mod tests {
             copilot_root: Some(PathBuf::from("/copilot")),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
+            // /agents/skills is the Codex skills root; /codex its config root.
+            agents_skills: Some(PathBuf::from("/agents/skills")),
+            codex_root: Some(PathBuf::from("/codex")),
         };
 
         let name = "test-artifact";
         let scopes = [ConfigScope::Project, ConfigScope::Global];
-        let clients = ClientTarget::ALL; // [Claude, OpenCode, Copilot]
+        let clients = ClientTarget::ALL; // [Claude, OpenCode, Copilot, Codex]
         let kinds = [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent];
         // ArtifactKind::Bundle is excluded — bundles are never materialised.
 
@@ -1455,6 +1596,12 @@ mod tests {
         for scope in scopes {
             for client in clients {
                 for kind in kinds {
+                    // A vendor that declines a kind never reaches `from_target`
+                    // (the installer skips it at the `supports_kind` gate), so
+                    // it has no anchor-remainder entry — Codex rules here.
+                    if !client.vendor().supports_kind(kind) {
+                        continue;
+                    }
                     combo_count += 1;
 
                     // Step 1: expected anchor + relative from the §1.1 table.
@@ -1508,12 +1655,13 @@ mod tests {
             }
         }
 
-        // Exhaustiveness guard: 2 scopes × 3 clients × 3 kinds = 18 combos.
+        // Exhaustiveness guard: 2 scopes × 4 clients × 3 kinds = 24, minus the
+        // 2 Codex-rule combos the `supports_kind` gate skips = 22 combos.
         // If a new ClientTarget or ArtifactKind variant is added, this fails,
         // forcing the table to be extended.
         assert_eq!(
-            combo_count, 18,
-            "expected 18 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 22,
+            "expected 22 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }

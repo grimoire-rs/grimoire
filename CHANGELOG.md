@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- OpenAI Codex CLI is now a supported install target: `--client codex` on the
+  CLI and `clients = ["codex"]` in `[options]`, alongside Claude, Copilot, and
+  OpenCode *(install)*
+- Codex skills install to the cross-vendor open standard
+  `.agents/skills/<name>/` — project-scope under `<workspace>/.agents/skills`,
+  global-scope under `$HOME/.agents/skills` (independent of `$CODEX_HOME`)
+  *(install)*
+- Codex agents render to TOML at `.codex/agents/<name>.toml`, supporting
+  `name`, `description`, `developer_instructions`, and optional `model`; Codex-
+  specific knobs (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
+  are also honored; `tools` entries are dropped with a warning *(install)*.
+  `codex.reasoning-effort` accepts the upstream-native set `ultra`, `max`,
+  `high`, `medium`, `low`, `minimal`, `none` — the Claude-only `xhigh` value is
+  not accepted (authoring note for anyone porting a Claude agent)
+- Codex rules are unsupported (Codex has no path-scoped instruction mechanism);
+  grim warns on stderr and skips (install still succeeds) *(install)*
+- Codex MCP servers register into `config.toml` under `[mcp_servers.<name>]`
+  (project `<workspace>/.codex/config.toml`, global `$CODEX_HOME`/`~/.codex`)
+  via a span-preserving TOML splice, mirroring the JSON splice every other
+  client already gets *(install)*
+- New `CODEX_HOME` env var relocates the Codex agent directory **and** the MCP
+  `config.toml` (skills are unaffected — they follow the cross-vendor
+  `$HOME/.agents/skills` standard) *(install)*
+
+### Fixed
+
+- `grim update` no longer prunes still-declared **agent** and **mcp** install
+  records: the orphan-detection set omitted those two kinds, so every declared
+  agent/mcp record looked orphaned and was reaped (its files deleted) on every
+  update *(install)*
+- Harden the generated-file provenance header against comment-breakout
+  injection: a registry ref / digest carrying a literal `-->` or `<…>` can no
+  longer close the `<!-- ... -->` comment early and inject live content into a
+  rendered OpenCode/Copilot rule or agent file (CWE-116) — `<`/`>` are escaped
+  and control characters collapse to a space *(install)*
+
 ## [0.9.1] - 2026-07-12
 
 ### Fixed

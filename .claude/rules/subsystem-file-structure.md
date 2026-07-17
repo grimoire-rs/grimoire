@@ -45,6 +45,11 @@ relative links resolve. The two on-disk roots (index file + sibling dir)
 are one footprint: the integrity hash folds both, and uninstall removes
 both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
 
+**Codex declines rules entirely** (`Vendor::supports_kind(Rule) == false`):
+it has no path-scoped instruction mechanism. The installer warns + skips,
+writes no file, and records no output for Codex — see `arch-principles.md`
+ADR index → `adr_codex_vendor.md`.
+
 Per-client rule transforms:
 
 - **Claude**: `paths:` is native Claude rule frontmatter. A plain rule
@@ -67,30 +72,42 @@ Per-client rule transforms:
   → `excludeAgent` (enum: `code-review` or `cloud-agent`). A rule with
   neither produces no frontmatter block at all. Marked `generated: true`.
 
-Support directory files are copied verbatim for all three clients. Only
-the index is ever transformed.
+Support directory files are copied verbatim for all three rule-supporting
+clients (Claude, OpenCode, Copilot — Codex declines rules). Only the index
+is ever transformed.
 
 ### MCP servers {#install-layout-mcp}
 
 An **mcp** artifact never materializes a file. Install registers a
 vendor-native entry in each client's own MCP config file via a
-span-preserving JSON splice (every byte outside the managed member —
-key order, formatting, JSONC comments — survives); uninstall removes
-only that entry, never the file. Integrity is judged **semantically**
-on the entry value (canonical sorted-key JSON hash), so reformatting
-the config is not a modification. Per-client config files:
+span-preserving splice (every byte outside the managed member — key
+order, formatting, comments — survives): JSON/JSONC for every client but
+Codex (`src/install/json_splice.rs`), TOML for Codex
+(`src/install/toml_splice.rs`, built on `toml_edit`). Uninstall removes
+only that entry, never the file, through the same format-specific
+splice engine (dispatched on `Vendor::mcp_config_format`). Integrity is
+judged **semantically** on the entry value (canonical sorted-key JSON
+hash — even for the TOML target, whose entry is converted to JSON before
+hashing), so reformatting the config is not a modification. Per-client
+config files:
 
 | Client | Project | Global |
 |--------|---------|--------|
 | **Claude** | `<workspace>/.mcp.json` (`mcpServers`) | `~/.claude.json` — `$CLAUDE_CONFIG_DIR/.claude.json` when set (`mcpServers`) |
 | **OpenCode** | `<workspace>/opencode.json`/`.jsonc` (`mcp`) | `$OPENCODE_CONFIG` else XDG `opencode.json` (`mcp`) |
 | **Copilot** | `<workspace>/.vscode/mcp.json` (`servers`) | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); env-ref descriptors are skipped (no substitution support) |
+| **Codex** | `<workspace>/.codex/config.toml` (`mcp_servers`); only honored by Codex for **trusted** projects — grim writes it regardless, an untrusted project simply won't have it read | `$CODEX_HOME`\|`~/.codex`/`config.toml` (`mcp_servers`); a descriptor needing HTTP/SSE headers is skipped (no headers field) |
 
 ### Agents {#install-layout-agents}
 
-An **agent** materializes as a single Markdown file in the client's agents
-directory. No support directory, no transform — the file is written
-verbatim.
+An **agent** materializes as a single file in the client's agents
+directory (no support directory). For Claude/OpenCode/Copilot it is a
+Markdown file (Claude installs a plain agent verbatim; OpenCode and Copilot
+project the frontmatter). For **Codex** it is a **TOML** file
+(`<name>.toml`) — Codex is the only TOML-emitting vendor: the canonical
+`name`/`description` plus the agent body (as `developer_instructions`) and
+an optional `model` are serialized to TOML; the `tools` field has no Codex
+equivalent and is dropped with a warning.
 
 Per-client agent paths:
 
@@ -99,12 +116,13 @@ Per-client agent paths:
 | **Claude** | `<claude_root>/agents/<name>.md` |
 | **Copilot** | `<copilot_root>/agents/<name>.md` |
 | **OpenCode** | `<opencode_root>/agents/<name>.md` |
+| **Codex** | `<codex_root>/agents/<name>.toml` |
 
 `opencode_root` is the parent of the OpenCode skills directory (i.e. the
 directory one level above the `skills/` subdir resolved from
 `$OPENCODE_CONFIG_DIR` or the XDG default). `claude_root` and
 `copilot_root` are the vendor roots described in the global-scope table
-below.
+below. `codex_root` is `$CODEX_HOME` else `~/.codex`.
 
 ### Global-scope paths {#global-scope-paths}
 
@@ -117,10 +135,11 @@ client's **native** user-level discovery directory rather than under
 | **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` | `~/.claude/agents/<name>.md` |
 | **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) | `$XDG_CONFIG_HOME/opencode/agents/<name>.md` |
 | **Copilot** | `~/.copilot/skills/<name>/` | `$GRIM_HOME/.github/instructions/<name>.instructions.md` (inert — no documented user-level instructions path; grim warns) | `~/.copilot/agents/<name>.md` |
+| **Codex** | `$HOME/.agents/skills/<name>/` (cross-vendor standard; independent of `$CODEX_HOME`) | **unsupported** — Codex has no path-scoped rule mechanism; grim warns + skips, writes no file | `$CODEX_HOME`\|`~/.codex/agents/<name>.toml` (TOML) |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
 
-**Vendor env overrides** (each client's own variable; the three directory
+**Vendor env overrides** (each client's own variable; the four directory
 variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 **and** rewrites; empty value = unset):
 
@@ -130,6 +149,7 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 | `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/` |
 | `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills and agents when set |
 | `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
+| `CODEX_HOME` | Replaces `~/.codex` — Codex **agents** root **and** the MCP `config.toml` there. Does **not** relocate Codex skills (those follow the `$HOME/.agents/skills` cross-vendor standard) |
 
 **Fallback**: env override → native default (`$HOME`-derived) → workspace
 layout under `$GRIM_HOME` for the affected client.
@@ -211,6 +231,8 @@ devcontainer portability). Every stored path carries an `anchor` tag and a
 | `OpenCodeRoot` | Parent of the `OpenCodeSkills` root (the directory one level above `skills/`) |
 | `GrimHome` | `$GRIM_HOME` |
 | `ClaudeUserDir` | `$CLAUDE_CONFIG_DIR` else `$HOME` — the dir holding Claude's user config file `.claude.json` (not derivable from `ClaudeRoot`: with the override set the file lives *inside* it, without it the file is a *sibling* of `~/.claude`) |
+| `AgentsSkills` | `$HOME/.agents/skills` (Codex skills; cross-vendor standard, **not** under `$CODEX_HOME`) |
+| `CodexRoot` | `$CODEX_HOME` else `~/.codex` (hosts Codex `agents/` **and** the MCP `config.toml`) |
 
 All roots are resolved once at scope-resolution time and passed as an
 `AnchorRoots` struct so every downstream operation is a pure table-lookup
@@ -222,7 +244,7 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 
 | Scope · client · kind | Anchor | Stored `relative` |
 |---|---|---|
-| project · any · any | `Workspace` | `.claude/…`, `.opencode/…`, `.github/…` (full sub-path from workspace) |
+| project · any · any | `Workspace` | `.claude/…`, `.opencode/…`, `.github/…`, `.agents/…`, `.codex/…` (full sub-path from workspace) |
 | global · claude · skill | `ClaudeRoot` | `skills/<name>` |
 | global · claude · rule | `ClaudeRoot` | `rules/<name>.md` |
 | global · claude · agent | `ClaudeRoot` | `agents/<name>.md` |
@@ -232,10 +254,14 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 | global · opencode · agent | `OpenCodeRoot` | `agents/<name>.md` |
 | global · opencode · rule | `GrimHome` | `.opencode/rules/<name>.md` |
 | global · copilot · rule | `GrimHome` | `.github/instructions/<name>…` (inert) |
+| global · codex · skill | `AgentsSkills` | `<name>` (root already ends `/skills`) |
+| global · codex · agent | `CodexRoot` | `agents/<name>.toml` |
+| · codex · rule | — | **not classified** — declined at the `supports_kind` gate before anchoring; no output recorded |
 | project · any · mcp | `Workspace` | `.mcp.json` / `opencode.json` / `.vscode/mcp.json` (entry-typed output: `entry` carries the managed member's JSON pointer) |
 | global · claude · mcp | `ClaudeUserDir` | `.claude.json` |
 | global · opencode · mcp | `OpenCodeRoot` | `opencode.json` |
 | global · copilot · mcp | `CopilotRoot` | `mcp-config.json` |
+| global · codex · mcp | `CodexRoot` | `config.toml` (same root as the agent anchor — TOML splice, see [install-layout-mcp](#install-layout-mcp)) |
 
 ### Path containment guard {#path-containment-guard}
 
@@ -271,6 +297,7 @@ for the active scope:
 | **Claude** | `<workspace>/.claude` | native root (`$CLAUDE_CONFIG_DIR` or `~/.claude`) exists |
 | **OpenCode** | `<workspace>/.opencode` | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
 | **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` | native skills root (`$COPILOT_HOME/skills` or `~/.copilot/skills`) exists — the `skills/` subdir, not the bare `~/.copilot` parent |
+| **Codex** | `<workspace>/.codex` — **not** the shared `.agents/skills` dir (a weak cross-vendor marker, like Copilot's bare `.github` caveat) | native config root (`$CODEX_HOME` or `~/.codex`) exists |
 
 Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
 scope)`), driven by `install::target::detect_clients`, which iterates

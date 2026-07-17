@@ -78,11 +78,10 @@ pub enum InstallOutcome {
     Updated,
     /// Already installed at the locked pin with intact content — no-op.
     AlreadyInstalled,
-    /// Skipped for a benign reason (carried for forward use).
-    #[allow(
-        dead_code,
-        reason = "no producer yet; consumers already wired in tui/app.rs and command/install.rs"
-    )]
+    /// Skipped for a benign reason: every selected client declines the kind,
+    /// so nothing was written (the artifact is still recorded with zero
+    /// outputs). Produced by `install_one` when the effective
+    /// supporting-client set is empty.
     Skipped(String),
     /// Refused: locally modified and `force` was not set. Carries the
     /// recorded vs. on-disk content hash so the caller can build a precise
@@ -106,8 +105,10 @@ pub enum InstallOutcome {
 pub struct ArtifactInstall {
     /// The artifact this result is about.
     pub reference: ArtifactRef,
-    /// The on-disk path the artifact installs to.
-    pub target: std::path::PathBuf,
+    /// The on-disk path the artifact installs to, or `None` when every
+    /// selected client declines the kind (nothing is written — e.g. a
+    /// Codex-only rule).
+    pub target: Option<std::path::PathBuf>,
     /// The outcome (or the error if the install failed).
     pub result: Result<InstallOutcome, crate::error::Error>,
 }
@@ -184,13 +185,37 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             name: artifact.name.clone(),
             source: artifact.source.to_declared(),
         };
-        // The primary client's path is the report target (back-compat).
-        let primary = target
-            .clients()
-            .first()
-            .copied()
-            .unwrap_or(crate::install::client_target::ClientTarget::Claude);
-        let report_target = target.path_for(primary, kind, &artifact.name);
+        // The report target and the decline warning must reflect what
+        // `install_one` will actually do, which is driven by the SAME
+        // `effective_supporting_clients` set it uses — the current `--client`
+        // selection PLUS every still-resolvable client a prior record
+        // materialized — not the raw `--client` set. A narrowed selection
+        // naming only kind-declining clients (e.g. `--client codex` for a rule)
+        // still re-materializes and re-records the prior clients at a new pin,
+        // so it must report their target and must NOT warn "recording no
+        // output". Computing this from `target.clients()` alone would lie.
+        let recorded_before = state.get(kind, &artifact.name).cloned();
+        let effective = effective_supporting_clients(target, kind, recorded_before.as_ref(), roots);
+        if effective.is_empty() {
+            // No selected client — and no still-resolvable recorded client —
+            // can host this kind: the artifact installs nowhere (this is
+            // exactly when `install_one` records zero outputs and returns
+            // `Skipped`). Name the selected clients so the user knows why; this
+            // is the single user-facing warning for the decline path (the
+            // per-client skip in `install_one` stays at debug to keep the
+            // common case quiet).
+            let declined = target
+                .clients()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                "{declined} cannot host {kind} '{}': no native target for {kind}; recording no output",
+                artifact.name
+            );
+        }
+        let report_target = effective.first().map(|c| target.path_for(*c, kind, &artifact.name));
         let result = install_one(
             artifact,
             kind,
@@ -368,8 +393,33 @@ async fn install_one<M: ArtifactMaterializer>(
     let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.source.provenance();
 
+    // Integrity gate (shared helper): refuses on drift, and short-circuits to
+    // AlreadyInstalled only when every output is intact, the pin is unchanged,
+    // AND the record covers every targeted client. A declined-kind record has
+    // zero outputs, so `covers_targets` is false for any client that could
+    // support the kind — it never masks a later supported install (F-1).
     if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force)? {
         return Ok(outcome);
+    }
+
+    // Fetch-before-gate (plan C3.3): an artifact whose kind NO candidate
+    // client (current selection or a still-resolvable recorded one) can
+    // host never touches the network or the materializer. The prior-record
+    // half of `effective_supporting_clients` is what keeps this from
+    // stranding a still-active recorded client at the old pin when a
+    // narrowed `--client` selection happens to name only kind-declining
+    // clients — see that function's doc comment.
+    if effective_supporting_clients(target, kind, recorded.as_ref(), roots).is_empty() {
+        state.record(InstallRecord {
+            kind,
+            name: artifact.name.clone(),
+            source: artifact.source.clone(),
+            dev: intent.is_dev(),
+            outputs: Vec::new(),
+        });
+        return Ok(InstallOutcome::Skipped(format!(
+            "no selected client has a native target for {kind}"
+        )));
     }
 
     let blob = match &artifact.source {
@@ -443,6 +493,24 @@ async fn install_one<M: ArtifactMaterializer>(
             }
         }
     }
+
+    // A vendor may decline a kind it has no native target for (Codex declines
+    // rules). Drop declined clients from the effective set: no dest, no
+    // materialize, no record for them. A declined client never has a recorded
+    // output, so the pin-change re-add above only carries supporting clients —
+    // the target set is the sole source of declined ones. This per-client skip
+    // is expected (the client simply cannot host the kind) and logged at debug
+    // only; the user-facing warning for "no client could host this artifact"
+    // is raised once by the caller when the whole supporting set is empty, so a
+    // rule installed into a default set that merely *includes* Codex stays
+    // quiet on stderr.
+    materialize_set.retain(|client| {
+        let supported = client.vendor().supports_kind(kind);
+        if !supported {
+            tracing::debug!("{client} has no native target for {kind} '{}'; skipping", artifact.name);
+        }
+        supported
+    });
 
     // Untracked-clobber gate: a destination that exists on disk with no
     // recorded output for its client was not written by grim, so
@@ -607,6 +675,12 @@ async fn install_one<M: ArtifactMaterializer>(
     // re-materialized — and must not be carried forward under the new pin; that
     // would re-introduce the very desync this fix removes. Dropping the record
     // entry leaves the on-disk files untouched (D3).
+    //
+    // Capture "nothing materialized this run" from the fresh outputs BEFORE
+    // they merge with carried-forward prior outputs: an all-declined install
+    // (e.g. Codex-only rule) wrote no new file even when the record still
+    // carries a prior client's output, and must report `Skipped`.
+    let nothing_installed = client_records.is_empty();
     let mut outputs = client_records;
     if !pin_changed && let Some(rec) = &recorded {
         for out in &rec.outputs {
@@ -634,7 +708,11 @@ async fn install_one<M: ArtifactMaterializer>(
         outputs,
     });
 
-    Ok(if recorded.is_some() {
+    Ok(if nothing_installed {
+        // Every selected client declined the kind: the artifact is declared
+        // and recorded (zero outputs) but nothing was written to disk.
+        InstallOutcome::Skipped(format!("no selected client has a native target for {kind}"))
+    } else if recorded.is_some() {
         InstallOutcome::Updated
     } else if adopted > 0 && adopted == materialize_set.len() {
         // Every output was adopted at an identical footprint — nothing
@@ -643,6 +721,65 @@ async fn install_one<M: ArtifactMaterializer>(
     } else {
         InstallOutcome::Installed
     })
+}
+
+/// Kind-aware "can `client` host `kind` at all" predicate (plan C3.4). MCP
+/// is judged by [`crate::install::vendor::Vendor::mcp_config_path`] (a
+/// vendor may materialize other kinds but carry no MCP config surface at
+/// this scope — `supports_kind` alone can't see that); every other kind
+/// stays judged by
+/// [`supports_kind`](crate::install::vendor::Vendor::supports_kind).
+fn client_supports_kind(
+    client: crate::install::client_target::ClientTarget,
+    kind: ArtifactKind,
+    target: &InstallTarget,
+) -> bool {
+    match kind {
+        ArtifactKind::Mcp => client
+            .vendor()
+            .mcp_config_path(target.workspace(), target.scope())
+            .is_some(),
+        kind => client.vendor().supports_kind(kind),
+    }
+}
+
+/// The set of clients able to host `kind` at all (plan C3.3): the current
+/// `--client` selection filtered by [`client_supports_kind`], PLUS —
+/// regardless of whether the pin changed — every still-resolvable client a
+/// prior record materialized for this artifact.
+///
+/// Computed BEFORE any fetch/unpack so an artifact whose kind every
+/// candidate client declines never touches the network or the materializer.
+/// The prior-record half closes the pin-change reattachment gap: a narrowed
+/// `--client` selection that happens to name only kind-declining clients at
+/// a NEW pin must not short-circuit here and strand the other,
+/// still-active recorded clients at the old pin — the downstream
+/// `pin_changed` re-materialization logic (already in [`install_one`])
+/// needs the gate to stay open for them.
+fn effective_supporting_clients(
+    target: &InstallTarget,
+    kind: ArtifactKind,
+    recorded: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> Vec<crate::install::client_target::ClientTarget> {
+    let mut set: Vec<crate::install::client_target::ClientTarget> = target
+        .clients()
+        .iter()
+        .copied()
+        .filter(|c| client_supports_kind(*c, kind, target))
+        .collect();
+    if let Some(rec) = recorded {
+        for out in &rec.outputs {
+            if let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>()
+                && client_supports_kind(client, kind, target)
+                && out.target.anchor.root(roots).is_some()
+                && !set.contains(&client)
+            {
+                set.push(client);
+            }
+        }
+    }
+    set
 }
 
 /// Integrity gate shared by every install path: for every client output a
@@ -696,14 +833,25 @@ fn integrity_gate(
         }
     }
     // Only short-circuit when the record already materialized every client
-    // this install targets. A target client absent from the record (an
-    // additive `--client` install, or a client re-enabled since the last
-    // install) must fall through to materialize instead of being silently
-    // skipped.
-    let covers_targets = target
+    // this install *would* produce output for. A target client absent from the
+    // record (an additive `--client` install, or a client re-enabled since the
+    // last install) must fall through to materialize instead of being silently
+    // skipped. A client that produces no output for this kind — Codex declines
+    // rules; a vendor with no MCP surface skips MCP — is legitimately absent
+    // from the record and must NOT count against coverage. When EVERY target
+    // declines (the expected-output set is empty), the record is not "already
+    // installed"; falling through lets the install report `Skipped` and keeps a
+    // later supported install from being masked.
+    let expected: Vec<crate::install::client_target::ClientTarget> = target
         .clients()
         .iter()
-        .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
+        .copied()
+        .filter(|c| client_supports_kind(*c, rec.kind, target))
+        .collect();
+    let covers_targets = !expected.is_empty()
+        && expected
+            .iter()
+            .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
@@ -849,7 +997,9 @@ async fn install_mcp(
     intent: InstallIntent,
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::{ClientOutput, entry_value_hash};
-    use crate::install::json_splice::{Splice, split_pointer, upsert_member};
+    use crate::install::json_splice::{self, Splice, split_pointer};
+    use crate::install::toml_splice;
+    use crate::install::vendor::McpConfigFormat;
 
     let kind = ArtifactKind::Mcp;
     let recorded = state.get(kind, &artifact.name).cloned();
@@ -887,6 +1037,7 @@ async fn install_mcp(
     let mut adopted = 0usize;
     for client in &register_set {
         let vendor = client.vendor();
+        let format = vendor.mcp_config_format();
         let Some(config_path) = vendor.mcp_config_path(target.workspace(), target.scope()) else {
             tracing::warn!(
                 "mcp server '{}' skipped for {client}: no writable MCP config surface at {} scope",
@@ -942,9 +1093,13 @@ async fn install_mcp(
         let tracked = recorded
             .as_ref()
             .is_some_and(|rec| rec.outputs.iter().any(|out| out.client == client.as_str()));
+        let existing_value = match format {
+            McpConfigFormat::Json => json_splice::member_value(&raw, container, member),
+            McpConfigFormat::Toml => toml_splice::member_value(&raw, container, member),
+        };
         if !force
             && !tracked
-            && let Some(existing) = crate::install::json_splice::member_value(&raw, container, member)
+            && let Some(existing) = existing_value
         {
             if existing != value {
                 return Ok(InstallOutcome::RefusedUntracked {
@@ -954,7 +1109,11 @@ async fn install_mcp(
             }
             adopted += 1;
         }
-        match upsert_member(&raw, container, member, &value) {
+        let spliced = match format {
+            McpConfigFormat::Json => json_splice::upsert_member(&raw, container, member, &value),
+            McpConfigFormat::Toml => toml_splice::upsert_member(&raw, container, member, &value),
+        };
+        match spliced {
             Ok(Splice::Changed(text)) => {
                 if let Some(parent) = config_path.parent()
                     && !parent.as_os_str().is_empty()
@@ -1153,6 +1312,8 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
             claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -2525,6 +2686,233 @@ mod tests {
             vec!["start:2", "advance:1:rule a", "advance:2:rule b", "finish"],
             "sink must be driven start → advance(1..=n) → finish in lock order"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_only_rule_warns_and_records_no_output() {
+        // Codex declines rules: a rule install whose only selected client is
+        // Codex writes no file but still records the artifact (zero outputs),
+        // so the lock/state declaration stays consistent.
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(
+            dir.path(),
+            crate::config::scope::ConfigScope::Project,
+            vec![crate::install::client_target::ClientTarget::Codex],
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        let r = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        // Nothing was written for any selected client → Skipped, no target.
+        assert!(matches!(*r[0].result.as_ref().unwrap(), InstallOutcome::Skipped(_)));
+        assert!(r[0].target.is_none(), "a declined-only install reports no target");
+        // No Codex rule file is written anywhere.
+        assert!(!dir.path().join(".codex/rules/rust-style.md").exists());
+        // The record exists but carries zero client outputs.
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        assert!(rec.outputs.is_empty(), "a Codex-declined rule records no output");
+
+        // A second pass stays Skipped — the zero-output record must NOT
+        // short-circuit to AlreadyInstalled (that would mask a later install).
+        let r2 = install_all(
+            &lock,
+            &access,
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        assert!(matches!(*r2[0].result.as_ref().unwrap(), InstallOutcome::Skipped(_)));
+    }
+
+    /// BLOCK-2 (round-2): a narrowed `--client codex` install for a rule at a
+    /// NEW pin, with a prior claude record, re-materializes and re-records the
+    /// claude output (pin-change reattachment via `effective_supporting_clients`).
+    /// The install REPORT must reflect that reality: `target` names the claude
+    /// path, NOT `None`. Deriving the report from `target.clients()` alone —
+    /// which is only Codex, and Codex declines rules — would falsely report no
+    /// target and log "recording no output" while a claude file was written.
+    #[tokio::test]
+    async fn narrowed_declining_selection_at_new_pin_reports_reattached_client_target() {
+        use crate::install::client_target::ClientTarget;
+        let dir = tempfile::tempdir().unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install claude at version A.
+        let blob_a = rule_tar("rust-style", b"vA\n");
+        let lock_a = lock_of(vec![locked_rule("rust-style", &blob_a)]);
+        let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        // 2. Install codex-only at version B. Codex declines rules, but the
+        //    prior claude output re-materializes to B (pin change). The report
+        //    target must name the claude output, not None.
+        let blob_b = rule_tar("rust-style", b"vB\n");
+        let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
+        let t_codex = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Codex]);
+        let r = install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &t_codex,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Updated,
+            "the reattached claude output re-materializes to the new pin"
+        );
+        let claude_path = dir.path().join(".claude/rules/rust-style.md");
+        assert_eq!(
+            std::fs::read(&claude_path).unwrap(),
+            b"vB\n",
+            "claude file updated to B"
+        );
+        assert_eq!(
+            r[0].target,
+            Some(claude_path),
+            "BLOCK-2: the report target must name the re-materialized claude output, not None"
+        );
+    }
+
+    /// Codex-gate robustness: a persisted record carrying a `client:"codex"`
+    /// output for a RULE (Codex declines rules — `supports_kind` returns
+    /// false) must never be reattached into the effective set. `ClientOutput
+    /// .client` is a free string, so a forged/legacy/shared-`GRIM_HOME` state
+    /// file can carry this combination even though grim itself never writes
+    /// it. Without the `client_supports_kind` filter in the reattachment
+    /// loop, this would return a non-empty set, letting `install_one` fetch
+    /// and report a phantom Codex target before the later `supports_kind`
+    /// retain dropped it again.
+    #[test]
+    fn effective_supporting_clients_excludes_forged_codex_rule_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Codex]);
+        let prior_pin = PinnedIdentifier::try_from(
+            Identifier::new_registry("rust-style", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        let recorded = InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(prior_pin),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "codex".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".codex/rules/rust-style.md".to_string(),
+                },
+                content_hash: Digest::Sha256("b".repeat(64)),
+                support_dir: None,
+                entry: None,
+            }],
+        };
+
+        let effective = effective_supporting_clients(&target, ArtifactKind::Rule, Some(&recorded), &roots);
+        assert!(
+            effective.is_empty(),
+            "a forged codex output for a rule (a kind Codex declines) must never be reattached: {effective:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_only_record_does_not_mask_later_supported_install() {
+        // F-1 regression: a Codex-only rule records zero outputs. Adding a
+        // rule-supporting client (Claude) to the selection and reinstalling the
+        // same pin must actually install for Claude — the empty record must not
+        // short-circuit to AlreadyInstalled.
+        use crate::install::client_target::ClientTarget;
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        // First: Codex only → nothing written, zero-output record.
+        let codex_only = InstallTarget::new(
+            dir.path(),
+            crate::config::scope::ConfigScope::Project,
+            vec![ClientTarget::Codex],
+        );
+        let r1 = install_all(
+            &lock,
+            &access,
+            &m,
+            &codex_only,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        assert!(matches!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Skipped(_)));
+        assert!(!dir.path().join(".claude/rules/rust-style.md").exists());
+
+        // Then: Claude + Codex, same pin → Claude's rule is now written.
+        let claude_codex = InstallTarget::new(
+            dir.path(),
+            crate::config::scope::ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Codex],
+        );
+        let r2 = install_all(
+            &lock,
+            &access,
+            &m,
+            &claude_codex,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        assert!(matches!(
+            *r2[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed | InstallOutcome::Updated
+        ));
+        assert!(
+            dir.path().join(".claude/rules/rust-style.md").is_file(),
+            "adding a supporting client must install, not no-op"
+        );
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        assert!(rec.outputs.iter().any(|o| o.client == "claude"));
     }
 
     #[test]

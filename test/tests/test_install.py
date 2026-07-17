@@ -3,6 +3,7 @@
 """`grim install` acceptance tests."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.assertions import assert_dir_exists, assert_path_exists
@@ -148,3 +149,35 @@ def test_offline_warm_blob_cache_succeeds(
         f"offline warm-cache install must succeed, got "
         f"{result.returncode}; {result.stderr}"
     )
+
+
+def test_codex_only_rule_install_skips_before_fetch_when_offline_cold(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Fetch-before-gate (plan C3.3): a Codex-only rule install must compute
+    the supporting-client set BEFORE fetching the artifact. Codex declines
+    rules, so the install must report `skipped` with zero outputs and never
+    touch the network/blob cache — even against a cold offline cache, which
+    would otherwise refuse with exit 81 if a fetch were attempted."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# rust\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)  # online: pins resolved
+
+    # Fresh GRIM_HOME ⇒ blob cache is cold; a real fetch attempt against it
+    # while --offline would refuse with exit 81 (see
+    # test_offline_cold_cache_blocks_install_exit_81 above).
+    runner.env["GRIM_HOME"] = str(project_dir / "cold-home")
+    result = runner.run("--offline", "install", "--client", "codex", format="json", check=False)
+    assert result.returncode == 0, (
+        "a Codex-only rule install must never attempt to fetch the artifact "
+        f"(fetch-before-gate, plan C3.3); got rc={result.returncode}; stderr: {result.stderr}"
+    )
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert rows[0]["target"] is None, rows

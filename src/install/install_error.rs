@@ -106,7 +106,7 @@ pub enum InstallErrorKind {
     UntrackedDestination { client: String, path: PathBuf },
 
     /// The configured client target is not supported by this build.
-    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
+    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot', 'codex'")]
     UnsupportedClient(String),
 
     /// A local path source failed to pack at install time: it is missing,
