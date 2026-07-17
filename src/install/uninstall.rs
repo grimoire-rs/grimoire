@@ -144,7 +144,15 @@ pub fn uninstall(
 /// (the OpenCode glob-removal contract): an absent file, an unparseable
 /// file, or a malformed recorded pointer has nothing grim-managed left to
 /// remove. The file itself always survives.
-fn remove_entry(
+///
+/// Shared with the installer's pin-change decline path
+/// ([`super::installer::install_mcp`]), which reuses this to reap a stale
+/// entry when a prior-tracked client's new pin is no longer representable.
+///
+/// # Errors
+///
+/// An I/O error from reading or atomically rewriting `path`.
+pub fn remove_entry(
     path: &std::path::Path,
     pointer: &str,
     format: crate::install::vendor::McpConfigFormat,

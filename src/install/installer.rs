@@ -881,9 +881,10 @@ fn integrity_gate(
 /// the install re-materializes at the new path and [`reap_moved_outputs`]
 /// collects the old one. Entry-typed outputs (MCP config registrations)
 /// are exempt — their location is the vendor config file, not a render
-/// layout. A layout that cannot be computed here (unparsable client
-/// string, anchor root absent) counts as current: on such a host the path
-/// does not move, so there is nothing to migrate.
+/// layout. A layout that cannot be computed here (the current-layout
+/// destination fails to anchor — anchor root absent or unanchorable path)
+/// counts as current: on such a host the path does not move, so there is
+/// nothing to migrate.
 fn output_at_current_layout(
     out: &ClientOutput,
     client: crate::install::client_target::ClientTarget,
@@ -1142,8 +1143,26 @@ async fn install_mcp(
         };
         // A vendor that cannot represent this descriptor at this scope
         // warns with its own specific reason (e.g. Copilot global + env
-        // references) and is skipped.
+        // references) and is skipped. On a pin change this can strand a
+        // prior-tracked client whose OLD pin was representable but whose NEW
+        // one is not (http→ws, oauth added): its recorded entry would drop
+        // from the rebuilt record while its stale member lingered in the
+        // config file, unreachable by a later uninstall. Splice that stale
+        // member out here so the decline leaves no orphan.
         let Some((pointer, value)) = vendor.mcp_entry(target.scope(), &artifact.name, &descriptor) else {
+            if pin_changed
+                && let Some(rec) = &recorded
+                && let Some(stale) = rec.outputs.iter().find(|o| o.client == client.as_str())
+                && let Some(stale_pointer) = &stale.entry
+            {
+                crate::install::uninstall::remove_entry(&config_path, stale_pointer, format)
+                    .map_err(|e| target_io(&config_path, e))?;
+                tracing::warn!(
+                    "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
+                    artifact.name,
+                    config_path.display()
+                );
+            }
             continue;
         };
         // Anchor BEFORE writing: an unanchorable config path (e.g. an
@@ -1684,6 +1703,35 @@ mod tests {
             rules,
             agents: vec![],
             mcp: vec![],
+            bundles: vec![],
+        }
+    }
+
+    /// Build a locked MCP artifact whose pin digest = sha256(`blob`); a
+    /// distinct blob therefore yields a distinct pin (drives `pin_changed`).
+    fn locked_mcp(name: &str, blob: &[u8]) -> LockedArtifact {
+        let digest = Algorithm::Sha256.hash(blob);
+        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(digest);
+        LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Mcp,
+            PinnedIdentifier::try_from(id).unwrap(),
+        )
+    }
+
+    fn lock_of_mcp(mcp: Vec<LockedArtifact>) -> GrimoireLock {
+        GrimoireLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: 1,
+                declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                generated_by: "grim 0.1.0".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp,
             bundles: vec![],
         }
     }
@@ -3119,6 +3167,98 @@ mod tests {
         );
         let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
         assert!(rec.outputs.iter().any(|o| o.client == "claude"));
+    }
+
+    #[tokio::test]
+    async fn pin_change_decline_removes_orphaned_mcp_entry_and_record_output() {
+        // B1 regression: on a pin change that makes a still-tracked client's
+        // NEW descriptor unrepresentable (Codex declines a descriptor that
+        // gains an oauth block), that client drops out of the rebuilt record —
+        // and its stale entry in the vendor's own config file must be spliced
+        // out too, never left orphaned (active-but-unmanaged; a later
+        // `uninstall` can no longer reach it). A surviving client (Claude,
+        // which projects oauth natively) keeps the record non-empty so it IS
+        // rebuilt and Codex silently drops from it — the exact leak in B1.
+        use crate::install::client_target::ClientTarget;
+        use crate::oci::mcp::McpDescriptor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            crate::config::scope::ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Codex],
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        // Pin A: plain HTTP descriptor — both Claude and Codex represent it.
+        let plain =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"")
+                .unwrap();
+        let blob_a = plain.to_layer_bytes().unwrap();
+        let lock_a = lock_of_mcp(vec![locked_mcp("srv", &blob_a)]);
+        let r1 = install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+
+        // Codex's config.toml carries the entry after pin A, and the record
+        // tracks the Codex output.
+        let codex_config = dir.path().join(".codex/config.toml");
+        let raw_a = std::fs::read_to_string(&codex_config).unwrap();
+        assert!(
+            crate::install::toml_splice::member_value(&raw_a, "mcp_servers", "srv").is_some(),
+            "pin A must register the Codex MCP entry: {raw_a}"
+        );
+        let rec_a = state.get(crate::oci::ArtifactKind::Mcp, "srv").unwrap();
+        assert!(
+            rec_a.outputs.iter().any(|o| o.client == "codex"),
+            "pin A record must track the Codex output"
+        );
+
+        // Pin B: the same server gains an oauth block — Claude still projects
+        // it, Codex declines (`mcp_entry` → None).
+        let with_oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        let blob_b = with_oauth.to_layer_bytes().unwrap();
+        let lock_b = lock_of_mcp(vec![locked_mcp("srv", &blob_b)]);
+        install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        // The rebuilt record no longer tracks Codex (it declined the new pin).
+        let rec_b = state.get(crate::oci::ArtifactKind::Mcp, "srv").unwrap();
+        assert!(
+            rec_b.outputs.iter().all(|o| o.client != "codex"),
+            "pin B record must drop the declining Codex output"
+        );
+
+        // ...and Codex's stale entry must be spliced out of its config, not
+        // left orphaned.
+        let raw_b = std::fs::read_to_string(&codex_config).unwrap();
+        assert!(
+            crate::install::toml_splice::member_value(&raw_b, "mcp_servers", "srv").is_none(),
+            "stale Codex MCP entry must be removed on a pin-change decline, not orphaned: {raw_b}"
+        );
     }
 
     #[test]
