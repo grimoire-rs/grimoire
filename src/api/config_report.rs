@@ -23,9 +23,12 @@
 //!   `dry_run`.
 //! - `List`: `{"items": [...]}` of [`ConfigEntry`] objects — every item
 //!   always carries the full metadata shape `{"key","value","set","type",
-//!   "title","description","default","values"}` (always-present-null
-//!   policy), whether or not `--all` was passed; the flag only widens the
-//!   row set (adding supported-but-unset keys), never the row shape.
+//!   "title","description","default","values","constraints"}`
+//!   (always-present-null policy), whether or not `--all` was passed; the
+//!   flag only widens the row set (adding supported-but-unset keys), never
+//!   the row shape. `constraints` is non-null only for keys whose list
+//!   items carry a shape rule beyond closed-set membership (today:
+//!   `options.tui.tree_separators`) — see [`ValueConstraints`].
 //! - `RegistryList`: `{"items": [...]}` of `{"alias","oci","index","default"}`
 //!   objects.
 //! - `RegistryShow`: single object matching struct fields.
@@ -334,9 +337,31 @@ impl Serialize for ValueType {
     }
 }
 
+/// Machine-readable pre-check constraints on the individual items of a
+/// list-valued config key (e.g. `options.tui.tree_separators`).
+///
+/// Advisory only: `item_pattern` is **necessary, NOT sufficient** — some
+/// item-shape rules (e.g. Unicode display width) cannot be expressed as a
+/// regex. `grim`'s own validation (the predicate behind the key's setter)
+/// is authoritative; a value that matches `item_pattern` can still be
+/// rejected at `grim config set` time. Present only on keys whose items
+/// carry a shape rule beyond membership in a closed set — contrast
+/// `options.clients`, whose closed set is already machine-readable via
+/// [`ConfigEntry::values`] and carries no `constraints`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ValueConstraints {
+    /// Advisory regex a single list item should match. Necessary, not
+    /// sufficient — see the type-level doc.
+    pub item_pattern: &'static str,
+    /// The required display width (`unicode_width`) of a single item, for
+    /// the rule `item_pattern` cannot express. `grim`'s validation is
+    /// authoritative.
+    pub item_width: u32,
+}
+
 /// One key=value line from `grim config list`.
 ///
-/// All eight fields are always present — even the optional ones — per the
+/// All nine fields are always present — even the optional ones — per the
 /// always-present-null policy (`subsystem-cli-api.md`): `--all` widens
 /// which keys appear as rows, never which fields a row's JSON object
 /// carries.
@@ -362,6 +387,11 @@ pub struct ConfigEntry {
     pub default: Option<String>,
     /// The allowed values for an enum key, `None` otherwise.
     pub values: Option<&'static [&'static str]>,
+    /// Machine-readable pre-check constraints on individual list items,
+    /// `None` for a scalar key or a list key with no item-shape rule
+    /// beyond membership in [`Self::values`]. See [`ValueConstraints`] for
+    /// the advisory-not-authoritative honesty contract.
+    pub constraints: Option<ValueConstraints>,
 }
 
 impl ConfigEntry {
@@ -373,6 +403,7 @@ impl ConfigEntry {
         value_type: ValueType,
         title: &'static str,
         description: &'static str,
+        constraints: Option<ValueConstraints>,
     ) -> Self {
         let set = value.is_some();
         let values = value_type.values();
@@ -386,6 +417,7 @@ impl ConfigEntry {
             description,
             default,
             values,
+            constraints,
         }
     }
 }
@@ -765,6 +797,7 @@ mod tests {
                 "Clients",
                 "Determines which clients receive installs and updates when `--client` is absent. \
                  Auto-detects clients when left empty, falling back to all clients when none are detected.",
+                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -793,6 +826,7 @@ mod tests {
                 "Clients",
                 "Determines which clients receive installs and updates when `--client` is absent. \
                  Auto-detects clients when left empty, falling back to all clients when none are detected.",
+                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -806,7 +840,7 @@ mod tests {
 
     #[test]
     fn config_entry_json_pins_full_metadata_shape() {
-        // Frozen I2 shape: exactly these 8 keys, always present.
+        // Frozen I2 shape: exactly these 9 keys, always present.
         let enum_entry = ConfigEntry::new(
             "options.tui.default_view".to_string(),
             Some("tree".to_string()),
@@ -817,6 +851,7 @@ mod tests {
             "Default view",
             "Sets the view the browser opens in. Defaults to `tree`, grouping items by path segments; \
              `flat` lists them ungrouped.",
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&enum_entry).unwrap()).unwrap();
         let obj = v.as_object().expect("entry must serialize as an object");
@@ -830,6 +865,7 @@ mod tests {
             "description",
             "default",
             "values",
+            "constraints",
         ]
         .into_iter()
         .collect();
@@ -837,6 +873,10 @@ mod tests {
         assert_eq!(v["type"], "enum");
         assert_eq!(v["values"], serde_json::json!(["flat", "tree"]));
         assert_eq!(v["default"], "tree");
+        assert!(
+            v["constraints"].is_null(),
+            "a non-constrained entry must serialize constraints as explicit null"
+        );
 
         let bool_entry = ConfigEntry::new(
             "options.show_deprecated".to_string(),
@@ -845,12 +885,33 @@ mod tests {
             "Show deprecated",
             "Controls whether deprecated artifacts appear in `grim search` and the TUI catalog. \
              Hidden by default unless already installed.",
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&bool_entry).unwrap()).unwrap();
         assert_eq!(v["type"], "boolean");
         assert!(
             v["values"].is_null(),
             "non-enum entry must serialize values as explicit null"
+        );
+        assert!(v["constraints"].is_null());
+
+        let tree_separators_entry = ConfigEntry::new(
+            "options.tui.tree_separators".to_string(),
+            Some("/".to_string()),
+            ValueType::StringList { default: Some(&["/"]) },
+            "Tree separators",
+            "Characters on which the repository path is split into nested groups in tree view.",
+            Some(ValueConstraints {
+                item_pattern: crate::config::project_config::TREE_SEPARATOR_ITEM_PATTERN,
+                item_width: 1,
+            }),
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&tree_separators_entry).unwrap()).unwrap();
+        assert_eq!(
+            v["constraints"],
+            serde_json::json!({"item_pattern": r"^[^\s\p{C}]$", "item_width": 1}),
+            "tree_separators constraints must carry the advisory item_pattern and item_width"
         );
     }
 
@@ -862,6 +923,7 @@ mod tests {
             ValueType::String { default: None },
             "Default registry",
             "Default registry for short identifiers.",
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert!(v["value"].is_null());
@@ -879,6 +941,7 @@ mod tests {
                 "Registry used when an artifact reference names no registry. Ignored when a \
                  `[[registries]]` entry is declared — the array's default entry expands short \
                  identifiers instead.",
+                None,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();

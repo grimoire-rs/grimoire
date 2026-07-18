@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim config list` items gain an always-present `constraints` field:
+  `null` for most keys, `{item_pattern, item_width}` for a list-valued key
+  whose items carry a shape rule beyond closed-set membership —
+  `options.tui.tree_separators` is the first (`item_pattern` is an
+  advisory regex, `item_width` the display-width rule the pattern cannot
+  express; `grim`'s own validation stays authoritative) *(config)*
 - `grim config registry fields` lists the 3 addressable per-registry field
   names (`oci`, `index`, `default`) and their static type/title/description
   metadata; unlike every other `config` subcommand it reads no config and

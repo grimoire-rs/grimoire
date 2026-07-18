@@ -487,7 +487,14 @@ fn apply_unset(
 /// [`KeySpec`] — the sole adapter between the command layer (which knows
 /// about `KeySpec`) and the API layer (which stays ignorant of it).
 fn entry(key: String, value: Option<String>, spec: &'static KeySpec) -> ConfigEntry {
-    ConfigEntry::new(key, value, spec.value_type, spec.title, spec.description)
+    ConfigEntry::new(
+        key,
+        value,
+        spec.value_type,
+        spec.title,
+        spec.description,
+        spec.constraints,
+    )
 }
 
 /// Collect the rows for `grim config list`. `all` widens the row set to

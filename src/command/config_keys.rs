@@ -22,9 +22,10 @@
 //! is the automated tripwire. See `.claude/rules/subsystem-config-keys.md`
 //! for the description-authoring style rules.
 
-use crate::api::ValueType;
+use crate::api::{ValueConstraints, ValueType};
 use crate::config::declaration::DefaultView;
 use crate::config::defaults;
+use crate::config::project_config::TREE_SEPARATOR_ITEM_PATTERN;
 use crate::install::client_target::ClientTarget;
 
 /// Static metadata for one dotted config key.
@@ -38,6 +39,11 @@ pub struct KeySpec {
     pub title: &'static str,
     /// One-sentence description.
     pub description: &'static str,
+    /// Machine-readable pre-check constraints on individual list items,
+    /// `None` for a scalar key or a list key with no item-shape rule
+    /// beyond closed-set membership (e.g. `options.clients`, whose closed
+    /// set is already machine-readable via `ConfigEntry::values`).
+    pub constraints: Option<ValueConstraints>,
 }
 
 /// The 7 fixed `options.*` config keys, in listing order.
@@ -78,6 +84,7 @@ impl ConfigKey {
                            `GRIM_DEFAULT_REGISTRY` environment variable when set. Falls back to \
                            `ghcr.io/grimoire-rs` when this key, `--registry`, and \
                            `GRIM_DEFAULT_REGISTRY` are all unset.",
+            constraints: None,
         };
         const CLIENTS: KeySpec = KeySpec {
             key: "options.clients",
@@ -89,6 +96,9 @@ impl ConfigKey {
             description: "Determines which clients receive installs and updates when `--client` is \
                            absent. Auto-detects clients when left empty, falling back to all clients \
                            when none are detected.",
+            // Closed set — already machine-readable via ConfigEntry::values,
+            // no item-pattern needed.
+            constraints: None,
         };
         const SHOW_DEPRECATED: KeySpec = KeySpec {
             key: "options.show_deprecated",
@@ -98,6 +108,7 @@ impl ConfigKey {
             title: "Show deprecated",
             description: "Controls whether deprecated artifacts appear in `grim search` and the TUI \
                            catalog. Hidden by default unless already installed.",
+            constraints: None,
         };
         const TUI_DEFAULT_VIEW: KeySpec = KeySpec {
             key: "options.tui.default_view",
@@ -108,6 +119,7 @@ impl ConfigKey {
             title: "Default view",
             description: "Sets the view the browser opens in. Defaults to `tree`, grouping items by \
                            path segments; `flat` lists them ungrouped.",
+            constraints: None,
         };
         const TUI_GROUP_BY_TYPE: KeySpec = KeySpec {
             key: "options.tui.group_by_type",
@@ -117,6 +129,7 @@ impl ConfigKey {
             title: "Group by type",
             description: "Controls whether a type-level group (skill, rule, agent, or bundle) appears \
                            between the registry root and path segments in tree view. Disabled by default.",
+            constraints: None,
         };
         const TUI_TREE_SEPARATORS: KeySpec = KeySpec {
             key: "options.tui.tree_separators",
@@ -126,6 +139,13 @@ impl ConfigKey {
             title: "Tree separators",
             description: "Sets the characters that split the repository path into nested groups in \
                            tree view. Defaults to `/`; each entry must be a single character.",
+            // Open list (not a closed set) whose items carry a shape rule
+            // beyond membership — advisory pattern + the width rule the
+            // pattern can't express (see TREE_SEPARATOR_ITEM_PATTERN).
+            constraints: Some(ValueConstraints {
+                item_pattern: TREE_SEPARATOR_ITEM_PATTERN,
+                item_width: 1,
+            }),
         };
         const TUI_EXPAND_LEVELS: KeySpec = KeySpec {
             key: "options.tui.expand_levels",
@@ -135,6 +155,7 @@ impl ConfigKey {
             title: "Expand levels",
             description: "Sets how many levels of the grouped tree are expanded when the browser opens. \
                            Defaults to `1` (registry roots only); `0` expands the tree fully.",
+            constraints: None,
         };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
@@ -189,6 +210,7 @@ impl RegistryField {
             title: "OCI registry ref",
             description: "Sets the OCI registry host, for example `ghcr.io` or `ghcr.io/acme` with a \
                            namespace. Mutually exclusive with `index` on the same registry entry.",
+            constraints: None,
         };
         const INDEX: KeySpec = KeySpec {
             key: "registry.<alias>.index",
@@ -197,6 +219,7 @@ impl RegistryField {
             description: "Sets a package-index locator that replaces the `_catalog` registry listing. \
                            Accepts an `http(s)://` base or a git repository URL. Mutually exclusive with \
                            `oci` on the same registry entry.",
+            constraints: None,
         };
         // Not an `[options]`/`[options.tui]` key, so there is no matching
         // `config::defaults` const — this literal instead mirrors
@@ -207,6 +230,7 @@ impl RegistryField {
             title: "Default registry flag",
             description: "Controls whether this registry is the primary one short identifiers expand \
                            against. Only one entry may set this; the first entry wins when none do.",
+            constraints: None,
         };
         match self {
             Self::Oci => &OCI,

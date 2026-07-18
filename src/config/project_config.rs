@@ -355,6 +355,19 @@ pub(crate) fn is_valid_tree_separator(entry: &str) -> bool {
     }
 }
 
+/// Advisory pre-check regex for one `options.tui.tree_separators` item:
+/// exactly one non-whitespace, non-control Unicode scalar value.
+///
+/// Necessary, NOT sufficient — the `width() == 1` rule
+/// [`is_valid_tree_separator`] also enforces (rejecting zero-width
+/// ignorables like U+200B and wide CJK glyphs) cannot be expressed as a
+/// regex. [`is_valid_tree_separator`] is the authoritative predicate; this
+/// pattern is surfaced to callers (e.g. `grim config list --all --format
+/// json`) as a machine-readable hint only. The paired `item_width: 1`
+/// constraint (see `api::ValueConstraints`) carries the width rule the
+/// pattern cannot express.
+pub(crate) const TREE_SEPARATOR_ITEM_PATTERN: &str = r"^[^\s\p{C}]$";
+
 /// Validate the authored `options.tui.tree_separators` list at load time.
 /// Reuses [`is_valid_tree_separator`] so the accepted set matches the
 /// setter exactly; classifies as a config error (exit 78).
@@ -1490,6 +1503,55 @@ tree_separators = ["/", "::"]
         let cfg = ProjectConfig::from_toml_str("[options.tui]\ntree_separators = [\"\u{00b7}\"]\n")
             .expect("U+00B7 middle dot tree_separator must be accepted");
         assert_eq!(cfg.options.tui.tree_separators, vec!["\u{00b7}".to_string()]);
+    }
+
+    // ── TREE_SEPARATOR_ITEM_PATTERN honesty: advisory, NOT sufficient ────────
+
+    #[test]
+    fn tree_separator_item_pattern_is_necessary_not_sufficient() {
+        // `TREE_SEPARATOR_ITEM_PATTERN` is exposed as a machine-readable
+        // pre-check hint (`grim config list --all --format json`). No
+        // `regex` crate is a dependency (see Cargo.toml), so this test
+        // asserts the pattern string literal and exercises the real
+        // authoritative predicate side by side, documenting sample by
+        // sample where they'd agree and where the pattern alone would lie.
+        assert_eq!(TREE_SEPARATOR_ITEM_PATTERN, r"^[^\s\p{C}]$");
+
+        // Samples where the pattern (if compiled) and the predicate agree: accept.
+        for accepted in ["/", "-", "."] {
+            assert!(
+                is_valid_tree_separator(accepted),
+                "predicate must accept {accepted:?} (pattern would also match)"
+            );
+        }
+
+        // Samples where the pattern (if compiled) and the predicate agree: reject.
+        // "" and "ab" fail the pattern's `^.$` single-scalar anchor; " " and
+        // "\t" are `\s`; "\u{1b}" ESC is `\p{C}` (control).
+        for rejected in ["", "ab", " ", "\t", "\u{1b}"] {
+            assert!(
+                !is_valid_tree_separator(rejected),
+                "predicate must reject {rejected:?} (pattern would also fail to match)"
+            );
+        }
+
+        // "字" (CJK, unicode_width 2): the pattern WOULD match (one scalar,
+        // not whitespace, not a control char) but the predicate rejects it
+        // — width()==1 cannot be expressed as a Unicode-property regex.
+        assert!(
+            !is_valid_tree_separator("字"),
+            "predicate must reject wide CJK even though the advisory pattern would match it"
+        );
+
+        // U+200B ZERO WIDTH SPACE: the documented gap. The pattern MATCHES
+        // (single scalar, not `\s`, not `\p{C}`) but the predicate FAILS it
+        // (width() == Some(0), not 1). Pattern is necessary, NOT sufficient;
+        // the predicate is authoritative.
+        assert!(
+            !is_valid_tree_separator("\u{200b}"),
+            "predicate must reject U+200B ZWSP even though it MATCHES the advisory pattern — \
+             this is the documented necessary-not-sufficient gap"
+        );
     }
 
     // ── options.clients load-time validation ─────────────────────────────────

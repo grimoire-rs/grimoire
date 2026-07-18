@@ -264,10 +264,16 @@ def test_config_get_unset_key_reports_data_not_error(
 def test_config_list_items_carry_metadata_fields(
     grim_at, project_dir: Path
 ) -> None:
-    """`config list --all --format json` items carry exactly the 8 frozen
+    """`config list --all --format json` items carry exactly the 9 frozen
     fields (`key`, `value`, `set`, `type`, `title`, `description`,
-    `default`, `values`) — the always-present-null policy applies to
-    `config list` entries too, not just single-object reports."""
+    `default`, `values`, `constraints`) — the always-present-null policy
+    applies to `config list` entries too, not just single-object reports.
+
+    `constraints` is non-null only for `options.tui.tree_separators`
+    (advisory `item_pattern` regex + `item_width`, the width rule the
+    pattern cannot express) — every other key, including the closed-set
+    `options.clients`, carries `constraints: null`.
+    """
     write_config(project_dir)
     runner = grim_at(project_dir)
 
@@ -275,8 +281,23 @@ def test_config_list_items_carry_metadata_fields(
     assert items, "config list --all on a fresh config must yield rows"
     item = items[0]
     assert set(item.keys()) == {
-        "key", "value", "set", "type", "title", "description", "default", "values",
-    }, f"item must carry exactly the 8 frozen fields; got: {sorted(item.keys())}"
+        "key", "value", "set", "type", "title", "description", "default",
+        "values", "constraints",
+    }, f"item must carry exactly the 9 frozen fields; got: {sorted(item.keys())}"
+
+    by_key = {row["key"]: row for row in items}
+    tree_separators = by_key["options.tui.tree_separators"]
+    assert tree_separators["constraints"] == {
+        "item_pattern": r"^[^\s\p{C}]$",
+        "item_width": 1,
+    }, f"tree_separators constraints must carry item_pattern/item_width; got: {tree_separators['constraints']}"
+
+    other_constraints = {
+        key: row["constraints"] for key, row in by_key.items() if key != "options.tui.tree_separators"
+    }
+    assert all(
+        value is None for value in other_constraints.values()
+    ), f"every non-tree-separators item must carry constraints: null; got: {other_constraints}"
 
 
 def test_search_surfaces_null_kind_for_unrecognized_manifest(
