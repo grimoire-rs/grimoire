@@ -18,6 +18,8 @@ from pathlib import Path
 import hook_utils
 
 _GIT_COMMIT_RE = re.compile(r"\bgit\s+commit\b")
+_GIT_DASH_C_RE = re.compile(r"\bgit\s+-C\s+(?P<q>[\"']?)(?P<path>[^\s\"';&|]+)(?P=q)")
+_CD_RE = re.compile(r"(?:^|&&|;)\s*cd\s+(?P<q>[\"']?)(?P<path>[^\s\"';&|]+)(?P=q)")
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +30,32 @@ _GIT_COMMIT_RE = re.compile(r"\bgit\s+commit\b")
 def is_git_commit(command: str) -> bool:
     """Return True if the shell command contains a git commit invocation."""
     return bool(_GIT_COMMIT_RE.search(command))
+
+
+def resolve_commit_project_dir(command: str, fallback: str) -> str:
+    """Return the root of the git worktree the commit targets.
+
+    `task verify` stamps commit-verified under the worktree it runs in, so the
+    gate must read the stamp of the tree being committed — not unconditionally
+    CLAUDE_PROJECT_DIR. Extracts `git -C <path>` or a leading `cd <path>` from
+    the command and walks up to the containing worktree root (a directory with
+    a `.git` entry). Falls back to `fallback` when the command carries no
+    directory hint or the hint is not inside a git worktree.
+    """
+    # Strip quoted segments first so text inside -m "..." (e.g. a commit
+    # message mentioning `git -C x` or `cd x`) cannot steer the resolution.
+    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
+    m = _GIT_DASH_C_RE.search(stripped) or _CD_RE.search(stripped)
+    if not m:
+        return fallback
+    try:
+        start = Path(m.group("path")).resolve()
+    except OSError:
+        return fallback
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return str(candidate)
+    return fallback
 
 
 def detect_project_tools(project_dir: str) -> list[str]:
@@ -130,6 +158,7 @@ def main() -> None:
     project_dir = hook_utils.get_project_dir()
     if not project_dir:
         sys.exit(0)
+    project_dir = resolve_commit_project_dir(command, project_dir)
     state = hook_utils.StateManager(project_dir)
 
     if state.is_recently_verified():

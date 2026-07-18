@@ -299,6 +299,65 @@ class TestPreCommitVerification:
         assert "none detected" in reason
 
 
+class TestResolveCommitProjectDir:
+    """Regression: the gate must read the verification stamp of the worktree
+    the commit targets, not unconditionally CLAUDE_PROJECT_DIR (task verify
+    stamps per-worktree, so worktree commits could never pass)."""
+
+    @staticmethod
+    def _make_worktree(tmp_path: Path, name: str) -> Path:
+        wt = tmp_path / name
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+        return wt
+
+    def test_cd_prefix_resolves_worktree_root(self, tmp_path: Path) -> None:
+        wt = self._make_worktree(tmp_path, "wt-a")
+        got = pre_commit_verification.resolve_commit_project_dir(
+            f"cd {wt} && git commit -m 'x'", "/fallback"
+        )
+        assert got == str(wt)
+
+    def test_git_dash_c_resolves_worktree_root(self, tmp_path: Path) -> None:
+        wt = self._make_worktree(tmp_path, "wt-b")
+        got = pre_commit_verification.resolve_commit_project_dir(
+            f"git -C {wt} commit --fixup=abc", "/fallback"
+        )
+        assert got == str(wt)
+
+    def test_subdir_walks_up_to_worktree_root(self, tmp_path: Path) -> None:
+        wt = self._make_worktree(tmp_path, "wt-c")
+        sub = wt / "src" / "command"
+        sub.mkdir(parents=True)
+        got = pre_commit_verification.resolve_commit_project_dir(
+            f"cd {sub} && git commit -m 'x'", "/fallback"
+        )
+        assert got == str(wt)
+
+    def test_no_directory_hint_falls_back(self) -> None:
+        got = pre_commit_verification.resolve_commit_project_dir(
+            "git commit -m 'x'", "/fallback"
+        )
+        assert got == "/fallback"
+
+    def test_non_git_path_falls_back(self, tmp_path: Path) -> None:
+        plain = tmp_path / "not-a-repo"
+        plain.mkdir()
+        got = pre_commit_verification.resolve_commit_project_dir(
+            f"cd {plain} && git commit -m 'x'", "/fallback"
+        )
+        assert got == "/fallback"
+
+    def test_quoted_message_text_cannot_steer_resolution(self, tmp_path: Path) -> None:
+        """Literal `git -C x` / `cd x` inside a quoted -m message is ignored."""
+        wt = self._make_worktree(tmp_path, "wt-d")
+        got = pre_commit_verification.resolve_commit_project_dir(
+            f'cd {wt} && git commit -m "mention git -C /tmp and cd /etc in prose"',
+            "/fallback",
+        )
+        assert got == str(wt)
+
+
 # ---------------------------------------------------------------------------
 # TestConventionalCommitValidator
 # ---------------------------------------------------------------------------
