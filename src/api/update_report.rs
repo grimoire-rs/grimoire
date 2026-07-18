@@ -10,7 +10,9 @@
 //! object (uniform `items` envelope, per subsystem-cli-api.md). `old` is
 //! `null` for an artifact that had no previous lock entry;
 //! `reaped_clients` / `kept_modified_clients` are always-present sorted
-//! client-name arrays (`[]` when no client was dropped on this row).
+//! client-name arrays (`[]` when no client was dropped on this row). Reap
+//! is only attempted against an explicitly set `[options].clients`; when
+//! it is unset (autodetect), both arrays are always `[]`.
 
 use std::io::{self, Write};
 
@@ -36,11 +38,14 @@ pub struct UpdateEntry {
     pub action: UpdateAction,
     /// Clients whose unmodified output was reaped because they left the
     /// configured client set (`[options].clients`) — sorted, always present
-    /// (`[]` when none). See [`grim update`](../commands.md#update).
+    /// (`[]` when none). Reap is only attempted against an explicitly set
+    /// `[options].clients`; unset (autodetect) ⇒ always `[]`. See
+    /// [`grim update`](../commands.md#update).
     pub reaped_clients: Vec<String>,
     /// Clients whose locally-modified output was preserved when they left the
     /// configured client set (re-run `grim update --force` to reap) — sorted,
-    /// always present (`[]` when none).
+    /// always present (`[]` when none). Same explicit-`[options].clients`-only
+    /// gate as `reaped_clients`.
     pub kept_modified_clients: Vec<String>,
 }
 

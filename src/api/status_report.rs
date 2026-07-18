@@ -27,7 +27,10 @@
 //! sorted, both always present, both `[]` when the sets agree — including
 //! for a declared-bundle row (never installs itself) and a dev-install row
 //! (installed out-of-band via `grim install <path>`, independent of the
-//! project's configured client set).
+//! project's configured client set). When `[options].clients` is unset
+//! (autodetect), there is no explicit target to diff against, so both
+//! fields stay `[]` on every item rather than diffing against live client
+//! detection.
 //!
 //! `checked` (top-level, sibling of `items` — same envelope pattern as
 //! `publish`'s `announce`) is `true` only when `--check` was passed **and**
@@ -96,11 +99,13 @@ pub struct StatusEntry {
     pub outputs: Vec<StatusOutput>,
     /// Clients the project's config targets but this artifact has no
     /// recorded output for (`desired − recorded`). Sorted; `[]` when there
-    /// is no such drift.
+    /// is no such drift, and always `[]` when `[options].clients` is unset
+    /// (autodetect — no explicit target to diff against).
     pub clients_missing: Vec<String>,
     /// Clients this artifact has a recorded output for but the project's
     /// config no longer targets (`recorded − desired`). Sorted; `[]` when
-    /// there is no such drift.
+    /// there is no such drift, and always `[]` when `[options].clients` is
+    /// unset (autodetect — no explicit target to diff against).
     pub clients_extra: Vec<String>,
     /// The publisher's deprecation message for a registry-sourced item,
     /// from `--check`'s catalog load. `null` when `checked` is `false`, the

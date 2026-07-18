@@ -241,6 +241,41 @@ def test_update_reaps_unmodified_dropped_client(
     assert state["version"] == 2, state
 
 
+def test_update_explicit_clients_unchanged_reaps_nothing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An explicitly set ``[options].clients`` that has not changed since
+    install is a reap no-op: `grim update` with no config change must not
+    drop any client, even though `[options].clients` is explicitly set
+    (not autodetect). Guards that "explicit set" alone does not trigger a
+    reap — only a *narrowing* of that set does (see
+    ``test_update_reaps_unmodified_dropped_client``)."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    _write_rule_config(project_dir, ru.fq, ["claude", "copilot"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    claude = project_dir / ".claude/rules/rust-style.md"
+    copilot = project_dir / ".github/instructions/rust-style.instructions.md"
+    assert_path_exists(claude)
+    assert_path_exists(copilot)
+
+    # No config change at all, then update.
+    rows = runner.json("update")["items"]
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == [], row
+    assert row["kept_modified_clients"] == [], row
+    assert _recorded_clients(project_dir) == {"claude", "copilot"}, row
+    assert_path_exists(claude)
+    assert_path_exists(copilot)
+
+
 def test_update_preserves_modified_dropped_client_then_force_reaps(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
