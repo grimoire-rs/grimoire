@@ -120,6 +120,14 @@ The four recognized tool namespaces are `claude`, `opencode`, `copilot`,
 and `codex`. Any key whose prefix is not one of these four is plain
 metadata and is never treated as a tool key.
 
+`codex` joined the reserved set when Codex client support landed (this
+release). A `codex.*` metadata key that was plain data under earlier
+grim versions is now a tool-namespaced key: consumed by Codex when
+Codex is a target (unknown fields warn and are dropped, the typo
+guard), and dropped for other vendors per the projection table above.
+`grim build`/`grim publish` surface an affected key through the same
+unknown-key warning.
+
 When a namespaced key collides with a top-level key of the same name,
 the namespaced key wins and a warning is emitted. This situation arises
 when a legacy `SKILL.md` carries both a top-level field and the
