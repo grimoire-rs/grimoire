@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from src.assertions import assert_not_exists, assert_path_exists
@@ -307,3 +308,50 @@ def test_update_widens_client_set_materializes_added_client(
     row = _rule_row(rows)
     assert row["reaped_clients"] == [], row
     assert _recorded_clients(project_dir) == {"claude", "copilot"}, row
+
+
+def test_update_autodetect_never_reaps_on_detection_drift(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """No `[options].clients` (autodetect): the reaper must key off the
+    *persisted* client intent, never live detection. Deleting a client's
+    marker directory between installs (e.g. the user removes `.opencode/`,
+    or a later session runs without `CLAUDE_CONFIG_DIR` exported) changes
+    what `detect_clients` sees, but must not delete the other client's
+    still-wanted output or purge the removed-marker client's record from
+    state — that would be `update` destroying live output on nothing more
+    than a detection-environment change."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    write_config(project_dir, rules={"rust-style": ru.fq})  # no [options] section
+    # Pre-create both clients' markers so autodetection finds exactly
+    # {claude, opencode}, not the empty-detection all-clients fallback.
+    (project_dir / ".claude").mkdir(parents=True, exist_ok=True)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    claude = project_dir / ".claude" / "rules" / "rust-style.md"
+    opencode = project_dir / ".opencode" / "rules" / "rust-style.md"
+    assert_path_exists(claude)
+    assert_path_exists(opencode)
+    assert _recorded_clients(project_dir) == {"claude", "opencode"}
+
+    # Detection drift: the opencode marker directory disappears (simulates
+    # the user deleting `.opencode/`), with no change to `[options].clients`
+    # (there is none — still autodetect).
+    shutil.rmtree(project_dir / ".opencode")
+
+    rows = runner.json("update")["items"]
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == [], row
+    assert row["kept_modified_clients"] == [], row
+    assert_path_exists(claude), "claude's output must survive a sibling's detection drift"
+    assert _recorded_clients(project_dir) == {"claude", "opencode"}, (
+        "autodetect must never reap a client from state on detection drift"
+    )

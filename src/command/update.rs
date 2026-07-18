@@ -163,22 +163,33 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let pruned = prune_orphans(&mut state, &new_lock, &scope.roots, args.force).map_err(map_prune_err)?;
 
     // Reap outputs whose client left the configured client set. The desired
-    // set is the project's `[options].clients` (the same `InstallTarget::parse`
-    // seam `grim status`/`grim context` report), NOT the `--client` flag: a
-    // one-off `--client` narrows *this run's* materialization but never signals
-    // a config drop, so it must not reap the other configured clients. Runs
-    // AFTER re-materialization so a no-pin-change update carries a dropped
-    // client's output forward verbatim (its edit intact) for the integrity gate
-    // to judge. `--force` (not update's implied re-materialize force) governs
-    // whether a locally modified output is deleted or preserved.
-    let desired = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &[],
-        &scope.options.clients,
-    ))?;
-    let reaped =
-        reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force).map_err(map_prune_err)?;
+    // set is the project's *explicitly configured* `[options].clients`, NOT
+    // the `--client` flag: a one-off `--client` narrows *this run's*
+    // materialization but never signals a config drop, so it must not reap
+    // the other configured clients. An unset `[options].clients` is the
+    // deliberate "autodetect" sentinel (src/config/resolved.rs), so it must
+    // gate reap off entirely: `InstallTarget::parse`/`new` collapses an empty
+    // clients vec into live `detect_clients()`, destroying the
+    // explicit-vs-detected distinction downstream — reaping against that
+    // would delete a still-wanted client's output the moment its detection
+    // marker drifts (e.g. a deleted `.opencode/` dir, an unexported
+    // `CLAUDE_CONFIG_DIR`). So the gate keys on the raw config value BEFORE
+    // the parse. Runs AFTER re-materialization so a no-pin-change update
+    // carries a dropped client's output forward verbatim (its edit intact)
+    // for the integrity gate to judge. `--force` (not update's implied
+    // re-materialize force) governs whether a locally modified output is
+    // deleted or preserved.
+    let reaped = if scope.options.clients.is_empty() {
+        Vec::new()
+    } else {
+        let desired = super::grim(InstallTarget::parse(
+            &scope.workspace,
+            scope.scope,
+            &[],
+            &scope.options.clients,
+        ))?;
+        reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force).map_err(map_prune_err)?
+    };
 
     // Refresh dev-installed artifacts (`grim install <path>`): re-pack
     // each recorded local source; on drift, re-materialize through the
