@@ -3,6 +3,7 @@
 """`grim status` acceptance tests — state is data, always exit 0."""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from src.helpers import make_artifact, write_config
@@ -177,6 +178,35 @@ def test_status_client_drift_narrow_then_widen(
     row = runner.json("--offline", "status")["items"][0]
     assert row["clients_missing"] == ["codex"]
     assert row["clients_extra"] == []
+
+
+def test_status_no_client_drift_reported_without_explicit_clients(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """No `[options].clients` (autodetect): status must never report client
+    drift sourced from live detection disagreeing with what was recorded —
+    a client's marker directory disappearing (e.g. the user deletes
+    `.opencode/`) is a detection-environment change, not a config change,
+    and must not surface as `clients_missing`/`clients_extra`."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})  # no [options]
+    # Pre-create both clients' markers so autodetection finds exactly
+    # {claude, opencode}, not the empty-detection all-clients fallback.
+    (project_dir / ".claude").mkdir(parents=True, exist_ok=True)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    # Detection drift: the opencode marker directory disappears.
+    shutil.rmtree(project_dir / ".opencode")
+
+    rows = runner.json("--offline", "status")["items"]
+    assert rows, "expected at least one status row"
+    for row in rows:
+        assert row["clients_missing"] == [], row
+        assert row["clients_extra"] == [], row
 
 
 def test_status_outdated_when_lock_advances(

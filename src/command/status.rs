@@ -11,9 +11,11 @@
 //! content hash vs. the recorded one (`modified`).
 //!
 //! Each row also reports `clients_missing`/`clients_extra`: the project's
-//! configured client target (`[options].clients`) diffed against the
-//! artifact's recorded install-state clients — entirely local, no
-//! network. See `src/api/status_report.rs`.
+//! *explicitly configured* client target (`[options].clients`) diffed
+//! against the artifact's recorded install-state clients — entirely local,
+//! no network. When `[options].clients` is unset (autodetect), both stay
+//! empty on every row rather than diffing against live detection. See
+//! `src/api/status_report.rs`.
 //!
 //! `--check` adds one coordinated catalog load (the same
 //! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) that
@@ -149,13 +151,29 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // The project's configured client target — same seam `grim context`
     // reports (`InstallTarget::parse` over `[options].clients`, no
     // `--client` flag on this command). Entirely local (config + install
-    // state); no network.
-    let desired = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &[],
-        &scope.options.clients,
-    ))?;
+    // state); no network. `None` when `[options].clients` is unset: that is
+    // the deliberate "autodetect" sentinel (see src/config/resolved.rs), and
+    // `InstallTarget::parse`/`new` collapses an empty clients vec into live
+    // `detect_clients()`, destroying the explicit-vs-detected distinction
+    // downstream — diffing against that would flag drift the instant live
+    // detection disagrees with what was recorded (e.g. a deleted client
+    // marker dir), not real config drift. So every row's
+    // `clients_missing`/`clients_extra` stays empty rather than diffing
+    // against live detection (see the `client_drift` call sites below).
+    let desired_clients: Option<Vec<ClientTarget>> = if scope.options.clients.is_empty() {
+        None
+    } else {
+        Some(
+            super::grim(InstallTarget::parse(
+                &scope.workspace,
+                scope.scope,
+                &[],
+                &scope.options.clients,
+            ))?
+            .clients()
+            .to_vec(),
+        )
+    };
 
     let mut entries = Vec::new();
 
@@ -226,7 +244,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
-        let (clients_missing, clients_extra) = client_drift(desired.clients(), recorded_clients(record));
+        let (clients_missing, clients_extra) = match &desired_clients {
+            Some(desired) => client_drift(desired, recorded_clients(record)),
+            // Autodetect: no explicit target to diff against, so report no
+            // drift rather than keying off live detection.
+            None => (Vec::new(), Vec::new()),
+        };
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
         // A directly-declared registry-locked row is the only kind eligible
         // for a fresh update re-resolution (issue #43): path/dev rows carry no
@@ -310,7 +333,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             let record = state.get(member.kind, &member.name);
             let outputs = record_outputs(record, &active, &scope.roots);
-            let (clients_missing, clients_extra) = client_drift(desired.clients(), recorded_clients(record));
+            let (clients_missing, clients_extra) = match &desired_clients {
+                Some(desired) => client_drift(desired, recorded_clients(record)),
+                // Autodetect: no explicit target to diff against, so report no
+                // drift rather than keying off live detection.
+                None => (Vec::new(), Vec::new()),
+            };
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
