@@ -13,7 +13,6 @@
 //! pattern every scope-aware command (`lock`, `install`) follows.
 
 use clap::{Args, Subcommand};
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::api::config_report::{
     ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryFieldEntry,
@@ -584,20 +583,12 @@ fn parse_u32(s: &str, key: &str) -> anyhow::Result<u32> {
 fn parse_tree_separators(s: &str) -> anyhow::Result<Vec<String>> {
     let seps: Vec<String> = s.split(',').map(str::to_string).collect();
     for sep in &seps {
-        // Mirror validate_tree_separators exactly: require exactly one char,
-        // non-control, non-whitespace, and display width == 1.
-        // The width check rejects zero-width chars (U+200B, U+202E, U+FEFF,
-        // Default_Ignorable) that pass the control/whitespace tests but would
-        // cause every subsequent config load to fail (ConfigError 78) with no
-        // CLI recovery path.
-        let valid = {
-            let mut chars = sep.chars();
-            match (chars.next(), chars.next()) {
-                (Some(ch), None) => !ch.is_control() && !ch.is_whitespace() && ch.width() == Some(1),
-                _ => false,
-            }
-        };
-        if !valid {
+        // Shares its accepted-character predicate with validate_tree_separators
+        // via is_valid_tree_separator — the width check rejects zero-width chars
+        // (U+200B, U+202E, U+FEFF, Default_Ignorable) that pass the
+        // control/whitespace tests but would cause every subsequent config load
+        // to fail (ConfigError 78) with no CLI recovery path.
+        if !crate::config::project_config::is_valid_tree_separator(sep) {
             return Err(super::config_value(format!(
                 "invalid tree separator '{sep}': must be exactly one \
                  non-control, non-whitespace, single-column character"

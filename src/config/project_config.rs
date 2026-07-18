@@ -324,32 +324,43 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
     Ok(())
 }
 
-/// Validate that every `tree_separators` entry contains exactly one Unicode
-/// scalar value that is a single-column printable character. Empty and
-/// multi-character strings are rejected so the TUI tree splitter is always
-/// handed single printable `char` inputs. Control and whitespace characters
-/// (e.g. `"\n"`, `"\t"`, `"\u{1b}"`, NBSP) are also rejected — a separator
-/// the user cannot see or type cannot meaningfully delimit a path segment.
-/// Zero-width and bidi-override characters (U+200B ZWSP, U+202E RLO,
-/// U+FEFF BOM, and any char where `unicode_width` reports width ≠ 1) are
-/// rejected to prevent invisible or display-corrupting separators.
+/// Whether `entry` is a valid tree separator: exactly one Unicode scalar
+/// value that is a single-column printable character.
+///
+/// The single source of truth shared by load-time
+/// ([`validate_tree_separators`], exit 78) and set-time (`grim config set`,
+/// exit 65) validation, so the accepted set can never drift between the two
+/// paths — mirrors [`check_clients`]. Empty and multi-character strings are
+/// rejected so the TUI tree splitter is always handed single printable
+/// `char` inputs. Control and whitespace characters (e.g. `"\n"`, `"\t"`,
+/// `"\u{1b}"`, NBSP) are also rejected — a separator the user cannot see or
+/// type cannot meaningfully delimit a path segment. Zero-width and
+/// bidi-override characters (U+200B ZWSP, U+202E RLO, U+FEFF BOM, and any
+/// char where `unicode_width` reports width ≠ 1) are rejected to prevent
+/// invisible or display-corrupting separators.
+pub(crate) fn is_valid_tree_separator(entry: &str) -> bool {
+    let mut chars = entry.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => {
+            // Reject control and whitespace chars first (clearer error context,
+            // defense in depth against future unicode-width table changes).
+            !ch.is_control()
+                && !ch.is_whitespace()
+                // Require exactly one terminal column: rejects zero-width ignorables
+                // (U+200B ZWSP, U+FEFF BOM, Default_Ignorable category) and wide
+                // chars (CJK full-width), accepting only normal single-column glyphs.
+                && ch.width() == Some(1)
+        }
+        _ => false,
+    }
+}
+
+/// Validate the authored `options.tui.tree_separators` list at load time.
+/// Reuses [`is_valid_tree_separator`] so the accepted set matches the
+/// setter exactly; classifies as a config error (exit 78).
 fn validate_tree_separators(separators: &[String], path: &Path) -> Result<(), ConfigError> {
     for entry in separators {
-        let mut chars = entry.chars();
-        let valid = match (chars.next(), chars.next()) {
-            (Some(ch), None) => {
-                // Reject control and whitespace chars first (clearer error context,
-                // defense in depth against future unicode-width table changes).
-                !ch.is_control()
-                    && !ch.is_whitespace()
-                    // Require exactly one terminal column: rejects zero-width ignorables
-                    // (U+200B ZWSP, U+FEFF BOM, Default_Ignorable category) and wide
-                    // chars (CJK full-width), accepting only normal single-column glyphs.
-                    && ch.width() == Some(1)
-            }
-            _ => false,
-        };
-        if !valid {
+        if !is_valid_tree_separator(entry) {
             return Err(ConfigError::new(
                 path.to_path_buf(),
                 ConfigErrorKind::TreeSeparatorInvalid { entry: entry.clone() },
