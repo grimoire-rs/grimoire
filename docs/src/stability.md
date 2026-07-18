@@ -48,7 +48,11 @@ drift) and `--check`-gated `deprecated`/`replaced_by`/`update_available`
 pattern: each shipped as an additive field on an already-frozen report
 shape, each always-present (`[]`/`null` when inapplicable, never an
 absent key), so a consumer written against the pre-#43 `status`/`update`
-shape keeps parsing unchanged.
+shape keeps parsing unchanged. Both drift and reap are measured only
+against an *explicitly set* `[options].clients`; when it is unset
+(autodetect), `clients_missing`/`clients_extra` stay `[]` and
+`reaped_clients` stays `[]` on every row — neither ever keys off live
+client detection, which can drift independently of the user's config.
 
 ## Unstable — may change in any minor {#unstable}
 
@@ -99,7 +103,10 @@ preserves a modified file. (The distinct dropped-client reaper on
 [`grim update`](./commands.md#update) — which removes the outputs of a
 client you dropped from `[options].clients` — applies the same
 preserve-when-modified default, but there `--force` does delete a
-locally-modified dropped-client output.)
+locally-modified dropped-client output. That reaper only fires when
+`[options].clients` is explicitly set; left unset — autodetect — `update`
+never reaps, since the desired set would otherwise track live client
+detection rather than the user's config.)
 
 The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout

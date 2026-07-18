@@ -392,6 +392,13 @@ silently discarded. `grim update --force` overrides that guard and deletes even
 a locally-modified dropped-client output. Widening the set is symmetric: a
 newly-configured client is materialized on the next `update`.
 
+This reap only fires against an **explicitly set** `[options].clients`. When
+it is unset (the default, autodetect), `update` never reaps: the desired
+client set would otherwise be re-derived from live client detection on every
+run, and a detection change (a client's marker directory removed, an
+environment variable unexported) is not the same thing as the user narrowing
+their config — reaping on that basis would delete still-wanted output.
+
 Pruning and client-reaping happen only on `update`. `grim install` materializes
 the current lock but never deletes — like [`grim remove`](#remove), it leaves
 files on disk.
@@ -418,9 +425,12 @@ to, read back from install state. It is empty for a declared-but-not-installed
 artifact. This is the supported way to script "where did grim put this file?"
 — the on-disk layout under each client's directory is an implementation
 detail and may change. Each item also carries `clients_missing` /
-`clients_extra`: the project's configured client target diffed against the
-artifact's recorded install-state clients, entirely from local state (no
-network) — sorted arrays, `[]` when the two sets agree.
+`clients_extra`: the project's *explicitly configured* `[options].clients`
+diffed against the artifact's recorded install-state clients, entirely from
+local state (no network) — sorted arrays, `[]` when the two sets agree. When
+`[options].clients` is unset (autodetect), both stay `[]` on every item
+instead: diffing against live client detection would report drift whenever
+detection disagrees with what was recorded, which is not real config drift.
 
 ```json
 {

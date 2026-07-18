@@ -183,7 +183,10 @@ set (`[options].clients`): a client that leaves the set has its outputs
 reaped, listed per update row under `reaped_clients` — again, a locally
 edited output is preserved under `kept_modified_clients` (with a warning)
 until `grim update --force` removes it. Widening the set re-materializes
-the added client on the next update.
+the added client on the next update. This reap only fires when
+`[options].clients` is explicitly set; left unset (autodetect), `update`
+never reaps — the desired set would otherwise track live client detection
+rather than your config.
 
 Update also refreshes every **local path source**: declared path
 dependencies and dev-installed records alike are re-packed, and a changed
@@ -204,9 +207,10 @@ drive automation — its `outputs`
 array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
 vendor layout itself is not a stable contract). Each item also carries
-`clients_missing`/`clients_extra` — the configured client set diffed
-against what is actually recorded installed, computed locally, no
-network.
+`clients_missing`/`clients_extra` — the *explicitly configured*
+`[options].clients` diffed against what is actually recorded installed,
+computed locally, no network. Left unset (autodetect), both stay `[]` on
+every item instead of diffing against live client detection.
 
 `grim status --check` adds one live catalog round-trip: it fills in
 `deprecated`/`replaced_by` on every registry-sourced item and, via a
