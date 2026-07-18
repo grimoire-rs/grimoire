@@ -16,8 +16,8 @@ use clap::{Args, Subcommand};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::api::config_report::{
-    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryListReport,
-    RegistryRow, RegistryShowReport, WriteAction,
+    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryFieldEntry,
+    RegistryFieldsReport, RegistryListReport, RegistryRow, RegistryShowReport, WriteAction,
 };
 use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
@@ -123,6 +123,8 @@ pub enum RegistryCommand {
     },
     /// List all registries in the scope (default marked).
     List,
+    /// List the addressable per-registry fields and their metadata.
+    Fields,
 }
 
 /// Run `grim config`.
@@ -153,6 +155,9 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
             RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
             RegistryCommand::Show { alias } => run_registry_show(ctx, alias),
             RegistryCommand::List => run_registry_list(ctx),
+            // Static metadata — no ctx, no scope resolve, no lock; must
+            // work outside any project (unlike every other registry verb).
+            RegistryCommand::Fields => run_registry_fields(),
         },
     }
 }
@@ -950,6 +955,31 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
     ))
 }
 
+/// `grim config registry fields` — static metadata for the 3 addressable
+/// per-registry fields (`oci`, `index`, `default`). Unlike every other
+/// `config` subcommand this takes no [`Context`], resolves no scope, and
+/// acquires no lock: the field set and its type/title/description are
+/// fixed at compile time (see [`RegistryField::spec`]), so the command
+/// works identically inside or outside a project.
+fn run_registry_fields() -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let items = RegistryField::ALL
+        .into_iter()
+        .map(|f| {
+            let spec = f.spec();
+            RegistryFieldEntry {
+                key: f.field_name(),
+                value_type: spec.value_type,
+                title: spec.title,
+                description: spec.description,
+            }
+        })
+        .collect();
+    Ok((
+        ConfigReport::RegistryFields(RegistryFieldsReport { items }),
+        ExitCode::Success,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1120,15 @@ mod tests {
     #[test]
     fn registry_list_parses() {
         parse(&["registry", "list"]).expect("registry list parses");
+    }
+
+    #[test]
+    fn registry_fields_parses() {
+        let a = parse(&["registry", "fields"]).expect("registry fields parses");
+        match a.command {
+            ConfigCommand::Registry(r) => assert!(matches!(r.command, RegistryCommand::Fields)),
+            _ => panic!("expected Registry"),
+        }
     }
 
     #[test]

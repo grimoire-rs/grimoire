@@ -746,6 +746,42 @@ def test_registry_add_slash_alias_exits_64(
 
 
 # ---------------------------------------------------------------------------
+# B3: registry fields — static per-field metadata, no config required
+# ---------------------------------------------------------------------------
+
+
+def test_registry_fields_works_without_config(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config registry fields`` lists the 3 addressable per-registry field
+    names and their metadata, and works in a directory with no
+    ``grimoire.toml`` at all — it is static metadata, not a config read.
+
+    Traces to B3: ``run_registry_fields`` takes no ctx, no scope resolve,
+    no lock; must work outside any project.
+    """
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    # Deliberately no write_config(project_dir) — the directory has no
+    # grimoire.toml, and grim_home has no global config either.
+
+    result = runner.json("config", "registry", "fields")
+    items = result["items"]
+
+    assert len(items) == 3, (
+        f"registry fields must list exactly the 3 per-registry fields; got: {items!r}"
+    )
+    keys = [i.get("key") for i in items]
+    assert keys == ["oci", "index", "default"], (
+        f"fields must be oci, index, default in that order; got: {keys!r}"
+    )
+    default_field = items[2]
+    assert default_field.get("type") == "boolean", (
+        f"'default' field's type must be 'boolean'; got: {default_field!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # FIX 2: dotted aliases stay addressable via dotted key
 # ---------------------------------------------------------------------------
 

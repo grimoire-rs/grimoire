@@ -126,6 +126,7 @@ grim config registry use  acme     # mark as default; clears the prior default
 grim config registry show acme     # print one registry's fields
 grim config registry rm   acme
 grim config registry list
+grim config registry fields        # per-registry field metadata; works with no config at all
 ```
 
 `registry add` requires exactly one of `--oci` / `--index` — a registry
@@ -138,6 +139,8 @@ registry.<alias>.oci <new-ref>`, or remove and re-add.
 `registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
 
 `registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (locator-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
+
+`registry fields` lists the 3 addressable per-registry field names (`oci`, `index`, `default`) with their type, title, and description — the same static metadata the `registry.<alias>.<field>` dotted-key table above documents, in machine-readable form. It reads no config and resolves no scope: unlike every other `config` subcommand it works in a directory with no `grimoire.toml`, and with no `--global`/`--config` flag needed.
 
 ### JSON output {#config-json}
 
@@ -153,6 +156,7 @@ shapes are:
 | `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null}` |
 | `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"default":bool}` |
 | `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"default":bool}` |
+| `registry fields` | `{"items": [...]}` of `{"key":"…","type":"…","title":"…","description":"…"}` — `key` is the short field name (`oci`, `index`, `default`), not a dotted key; no `value`/`set`/`default` (meaningless for a field pattern) |
 
 `list` rows carry all eight fields whether or not `--all` was passed — the flag only widens the row set, never the row shape. `value` is `null` only for an unset row (surfaced only under `--all`); `set` is `value != null`. `type` is one of `string`, `boolean`, `integer`, `enum`, `string-list`, `string-set`; `values` is non-null for `enum` and `string-set` keys (the allowed value set), `null` otherwise. `title` and `description` are fixed per-key metadata, not derived from the current value; `default` is the runtime default in CLI string form, or `null` when the key has no fixed default.
 

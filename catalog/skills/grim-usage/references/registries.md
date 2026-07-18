@@ -180,6 +180,7 @@ lock on every change.
   grim config registry use acme                       # set default, clearing all others atomically
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
+  grim config registry fields                         # oci/index/default field metadata — works with no config at all
   ```
 
   `registry use` is the correct way to change the default registry.

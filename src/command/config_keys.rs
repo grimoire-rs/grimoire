@@ -167,6 +167,18 @@ impl RegistryField {
     /// Every registry field, in `oci, index, default` order.
     pub const ALL: [RegistryField; 3] = [RegistryField::Oci, RegistryField::Index, RegistryField::Default];
 
+    /// This field's short name — the last segment of its pattern key
+    /// (`registry.<alias>.oci` → `"oci"`). Used by `grim config registry
+    /// fields`, whose rows are keyed by field name rather than a dotted
+    /// pattern (there is no alias to interpolate).
+    pub fn field_name(self) -> &'static str {
+        match self {
+            Self::Oci => "oci",
+            Self::Index => "index",
+            Self::Default => "default",
+        }
+    }
+
     /// This field's static metadata. `key` is a pattern string
     /// (`registry.<alias>.oci`) — not a literal dotted key, since the
     /// alias segment is user-supplied.
@@ -253,6 +265,21 @@ mod tests {
             ConfigKey::TuiExpandLevels.spec().value_type.default_str(),
             Some("1".to_string())
         );
+    }
+
+    /// Drift test: `field_name()` must be the literal last segment of
+    /// `spec().key` for every registry field — a renamed variant or a
+    /// `spec()`/`field_name()` edit that falls out of sync is caught here.
+    #[test]
+    fn registry_field_name_matches_spec_key_suffix() {
+        for f in RegistryField::ALL {
+            assert!(
+                f.spec().key.ends_with(f.field_name()),
+                "spec().key {:?} must end with field_name() {:?}",
+                f.spec().key,
+                f.field_name()
+            );
+        }
     }
 
     #[test]

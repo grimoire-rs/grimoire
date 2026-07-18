@@ -46,7 +46,8 @@ Every multi-item report therefore wraps its rows in a uniform envelope:
 envelope object may gain sibling fields in a minor release — `grim
 publish` already carries one (`announce`). Commands with enveloped
 reports: `lock`, `install`, `status`, `update`, `search`,
-`config list`, `config registry list`, and `publish`.
+`config list`, `config registry list`, `config registry fields`, and
+`publish`.
 
 Everything else reports a **single flat object** — those commands concern
 exactly one subject (one config file, one artifact, one credential), so
@@ -67,6 +68,7 @@ One row object per item inside `{"items": [...]}`:
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value, set, type, title, description, default, values}` | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
+| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
 | `publish` | `{ref, kind, digest, tags, status, pushed_to}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url}` or null) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
 `kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
@@ -89,6 +91,13 @@ values, each drawn from the closed `values` list — the same non-null
 shape `enum` rows carry. `options.clients` is the one `string-set` key
 today, so it is the one non-`enum` row whose `values` is a list
 (`["claude","opencode","copilot","codex"]`) rather than `null`.
+
+`config registry fields` describes the field *pattern*
+(`registry.<alias>.oci`, `.index`, `.default`), not any resolved alias's
+values, so its rows are a slimmer shape than `config list`'s
+`ConfigEntry`: just `key`/`type`/`title`/`description`, always exactly 3
+items in `oci, index, default` order. It resolves no scope and reads no
+file, so it succeeds identically inside or outside a project.
 
 ### Single-object reports {#shapes-single}
 

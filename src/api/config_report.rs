@@ -14,6 +14,8 @@
 //!   only with `--all`) render an empty `Value` cell.
 //! - `RegistryList`: one table (`Alias | Type | Source | Default`).
 //! - `RegistryShow`: one-row table (`Alias | Type | Source | Default`).
+//! - `RegistryFields`: one table (`Key | Type | Title | Description`) —
+//!   static per-registry-field metadata, no scope/file read involved.
 //!
 //! JSON format:
 //! - `Get`: `{"key":"…","value":"…"|null,"set":bool,"scope":"…"}`.
@@ -27,6 +29,10 @@
 //! - `RegistryList`: `{"items": [...]}` of `{"alias","oci","index","default"}`
 //!   objects.
 //! - `RegistryShow`: single object matching struct fields.
+//! - `RegistryFields`: `{"items": [...]}` of `{"key","type","title",
+//!   "description"}` objects — `key` is the short field name (`"oci"`),
+//!   deliberately diverging from `ConfigEntry`'s dotted keys; no
+//!   `value`/`set`/`default` (meaningless for a field pattern).
 
 use std::fmt;
 use std::io::{self, Write};
@@ -49,6 +55,8 @@ pub enum ConfigReport {
     RegistryList(RegistryListReport),
     /// Result of `grim config registry show`.
     RegistryShow(RegistryShowReport),
+    /// Result of `grim config registry fields`.
+    RegistryFields(RegistryFieldsReport),
 }
 
 impl Printable for ConfigReport {
@@ -59,6 +67,7 @@ impl Printable for ConfigReport {
             Self::List(r) => r.print_plain(w),
             Self::RegistryList(r) => r.print_plain(w),
             Self::RegistryShow(r) => r.print_plain(w),
+            Self::RegistryFields(r) => r.print_plain(w),
         }
     }
 
@@ -69,6 +78,7 @@ impl Printable for ConfigReport {
             Self::List(r) => r.print_json(w),
             Self::RegistryList(r) => r.print_json(w),
             Self::RegistryShow(r) => r.print_json(w),
+            Self::RegistryFields(r) => r.print_json(w),
         }
     }
 }
@@ -509,9 +519,75 @@ impl Printable for RegistryShowReport {
     }
 }
 
+/// Result of `grim config registry fields`.
+///
+/// Static metadata — the 3 addressable per-registry field names
+/// (`oci`, `index`, `default`) and their type/title/description. No
+/// scope, no file read: this describes the field *pattern*
+/// (`registry.<alias>.<field>`), not any resolved alias's values, so it
+/// works identically inside or outside a project.
+///
+/// Plain format: one table — `Key | Type | Title | Description`.
+///
+/// JSON format: `{"items": [...]}` of [`RegistryFieldEntry`] objects —
+/// uniform `items` envelope per `subsystem-cli-api.md`.
+#[derive(Debug, Serialize)]
+pub struct RegistryFieldsReport {
+    /// The 3 registry fields, in `oci, index, default` order.
+    pub items: Vec<RegistryFieldEntry>,
+}
+
+impl Printable for RegistryFieldsReport {
+    fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
+        use crate::cli::printer::print_table;
+        let rows: Vec<Vec<String>> = self
+            .items
+            .iter()
+            .map(|e| {
+                vec![
+                    e.key.to_string(),
+                    e.value_type.to_string(),
+                    e.title.to_string(),
+                    e.description.to_string(),
+                ]
+            })
+            .collect();
+        print_table(w, &["Key", "Type", "Title", "Description"], &rows)
+    }
+
+    fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        writeln!(w, "{json}")
+    }
+}
+
+/// One row in `grim config registry fields`.
+///
+/// Deliberately **not** a [`ConfigEntry`]: `value`/`set`/`default` are
+/// meaningless for a field pattern (there is no alias to resolve a value
+/// against), so this type carries only the field's identity and static
+/// metadata. `key` is the SHORT field name (e.g. `"oci"`) — unlike
+/// `ConfigEntry::key`, which carries the full dotted key
+/// (`registry.<alias>.oci`).
+///
+/// All four fields are always present (no optional columns to widen).
+#[derive(Debug, Serialize)]
+pub struct RegistryFieldEntry {
+    /// The short field name: `"oci"`, `"index"`, or `"default"`.
+    pub key: &'static str,
+    /// The field's declared value type.
+    #[serde(rename = "type")]
+    pub value_type: ValueType,
+    /// Short human title, e.g. `"OCI registry ref"`.
+    pub title: &'static str,
+    /// One-sentence description of the field.
+    pub description: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::config_keys::RegistryField;
     use crate::install::client_target::ClientTarget;
 
     #[test]
@@ -910,6 +986,73 @@ mod tests {
         assert_eq!(v["index"], "https://index.example");
         let oci = v.get("oci").expect("oci key must always be present");
         assert!(oci.is_null(), "oci must be explicit null for an index row");
+    }
+
+    #[test]
+    fn registry_fields_report_json_is_items_envelope_with_short_keys() {
+        // ADR: `config registry fields` rows are keyed by the SHORT field
+        // name (`oci`), not a `registry.<alias>.oci` dotted pattern —
+        // there is no alias to interpolate for static metadata.
+        let r = RegistryFieldsReport {
+            items: RegistryField::ALL
+                .into_iter()
+                .map(|f| {
+                    let spec = f.spec();
+                    RegistryFieldEntry {
+                        key: f.field_name(),
+                        value_type: spec.value_type,
+                        title: spec.title,
+                        description: spec.description,
+                    }
+                })
+                .collect(),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(
+            v.is_object(),
+            "registry fields JSON must be an items envelope; got: {v}"
+        );
+        let items = v["items"].as_array().expect("items must be an array");
+        assert_eq!(
+            items.len(),
+            3,
+            "must list exactly the 3 registry fields; got: {items:?}"
+        );
+        assert_eq!(items[0]["key"], "oci", "first field must be 'oci'; got: {items:?}");
+        assert_eq!(
+            items[0]["type"], "string",
+            "oci field type must be 'string'; got: {items:?}"
+        );
+        assert_eq!(items[2]["key"], "default");
+        assert_eq!(
+            items[2]["type"], "boolean",
+            "default field type must be 'boolean'; got: {items:?}"
+        );
+        // Deliberately NOT a ConfigEntry shape: no value/set/default fields.
+        let obj = items[0].as_object().expect("item must be an object");
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> = ["key", "type", "title", "description"].into_iter().collect();
+        assert_eq!(keys, expected, "RegistryFieldEntry JSON must pin exactly this shape");
+    }
+
+    #[test]
+    fn registry_fields_report_plain_is_one_table() {
+        let r = RegistryFieldsReport {
+            items: vec![RegistryFieldEntry {
+                key: "oci",
+                value_type: ValueType::String { default: None },
+                title: "OCI registry ref",
+                description: "A plain OCI registry ref.",
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(text.lines().count(), 2, "must render exactly one table; got: {text:?}");
+        assert!(text.contains("oci"), "key must appear; got: {text:?}");
+        assert!(text.contains("OCI registry ref"), "title must appear; got: {text:?}");
     }
 
     #[test]

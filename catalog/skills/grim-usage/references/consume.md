@@ -199,9 +199,10 @@ the supported way to script against install locations (the on-disk
 vendor layout itself is not a stable contract).
 
 Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
-`config list`, `config registry list`, `publish`) wrap their rows in a
-uniform `{"items": [...]}` envelope under `--format json` — read the
-array from `items`, never the top level. Failures under `--format json`
+`config list`, `config registry list`, `config registry fields`, `publish`)
+wrap their rows in a uniform `{"items": [...]}` envelope under
+`--format json` — read the array from `items`, never the top level.
+Failures under `--format json`
 emit a structured `{"error": {code, exit, message}}` document on stdout;
 some failures add a machine-readable `reason` (e.g. `stale-lock` when a
 partial `grim update <name>` is refused because the lock no longer matches

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim config registry fields` lists the 3 addressable per-registry field
+  names (`oci`, `index`, `default`) and their static type/title/description
+  metadata; unlike every other `config` subcommand it reads no config and
+  resolves no scope, so it works in a directory with no `grimoire.toml`.
+  JSON rows are keyed by the short field name (`"oci"`), not the dotted
+  `registry.<alias>.oci` key `config list` uses *(config)*
 - The JSON error document gains two new `reason` subtypes: `no-config`
   (a project-scope command found no `grimoire.toml` walking up from the
   working directory — exit 79, distinct from an explicit `--config <path>`
