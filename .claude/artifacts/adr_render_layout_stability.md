@@ -197,6 +197,12 @@ seam the plugin mode needs (`sync_config`, `json_splice`, entry-typed
   loudly.
 - The recorded mechanics (Decision 3) describe today's Claude surfaces;
   the future implementer must re-verify them before building.
+- The re-render trigger (`output_at_current_layout`) is a path-move
+  proxy — blind to shape changes at a stable index path, to the
+  `render="plugin"` config flip (Decision 3/4), and to entry-output
+  relocations; mitigation recorded in
+  `design_render_scheme_versioning.md` (render_scheme stamp, deferred
+  YAGNI).
 
 **Risks:**
 - Vendor changes their plugin registration format before grim implements
@@ -271,3 +277,4 @@ every path under any vendor root.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-09 | Architect (release-prepare) | Initial accepted version |
+| 2026-07-18 | Claude (release-compat audit) | Documented trigger blind spots; linked design_render_scheme_versioning.md |
