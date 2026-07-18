@@ -203,7 +203,18 @@ from, `path: <path>` for a declared local path source, or
 drive automation — its `outputs`
 array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
-vendor layout itself is not a stable contract).
+vendor layout itself is not a stable contract). Each item also carries
+`clients_missing`/`clients_extra` — the configured client set diffed
+against what is actually recorded installed, computed locally, no
+network.
+
+`grim status --check` adds one live catalog round-trip: it fills in
+`deprecated`/`replaced_by` on every registry-sourced item and, via a
+fresh per-artifact tag re-resolution, `update_available` — "is a newer
+version out there right now" versus status's normal offline read. The
+top-level `checked` field says whether the check actually ran online;
+`checked == false` means all three of those item fields are `null`.
+Confirm the current flag set with `grim status --help`.
 
 Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`, `publish`)

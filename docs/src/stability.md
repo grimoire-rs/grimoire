@@ -41,6 +41,15 @@ serializes as an explicit `null`, never as an absent key. A consumer can
 therefore distinguish "not applicable" (`null`) from "talking to an older
 grim that predates the field" (key missing) without version sniffing.
 
+[`grim status`][status]'s `clients_missing`/`clients_extra` (client-set
+drift) and `--check`-gated `deprecated`/`replaced_by`/`update_available`
+(plus the top-level `checked`), and [`grim update`][update]'s
+`reaped_clients`/`kept_modified_clients`, are the newest instances of this
+pattern: each shipped as an additive field on an already-frozen report
+shape, each always-present (`[]`/`null` when inapplicable, never an
+absent key), so a consumer written against the pre-#43 `status`/`update`
+shape keeps parsing unchanged.
+
 ## Unstable — may change in any minor {#unstable}
 
 Two things are deliberately excluded from the guarantee above, because
@@ -193,6 +202,7 @@ unaffected — they read straight from disk and never touch a manifest.
 <!-- internal -->
 [json-interface]: ./json-interface.md
 [status]: ./commands.md#status
+[update]: ./commands.md#update
 [install]: ./commands.md#install
 [install-dev]: ./commands.md#install-dev
 [context]: ./commands.md#context
