@@ -85,6 +85,12 @@ upgrade that moved a layout re-materializes the artifact at its new
 path, re-anchors the install record, and reaps the unmodified old
 output. A locally modified old file is never deleted — the same
 preservation rule the [untracked-destination guard](#unstable) applies.
+This layout-migration reaper has no `--force` override: it always
+preserves a modified file. (The distinct dropped-client reaper on
+[`grim update`](./commands.md#update) — which removes the outputs of a
+client you dropped from `[options].clients` — applies the same
+preserve-when-modified default, but there `--force` does delete a
+locally-modified dropped-client output.)
 
 The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout

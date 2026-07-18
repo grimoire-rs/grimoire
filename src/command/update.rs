@@ -22,7 +22,7 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::installer::{InstallIntent, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
-use crate::install::prune::{PruneOutcome, PrunedArtifact, prune_orphans};
+use crate::install::prune::{PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans, reap_dropped_clients};
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -156,10 +156,29 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // Map PruneError to the top-level error type, preserving AnchorError
     // identity so classify_error maps TraversalAttempt → DataError(65) rather
     // than flattening it to IoError(74) — ARCH-4/SC-03 exit-code contract.
-    let pruned = prune_orphans(&mut state, &new_lock, &scope.roots, args.force).map_err(|e| match e {
+    let map_prune_err = |e| match e {
         crate::install::prune::PruneError::Anchor { source, .. } => crate::error::Error::Anchor(source),
         crate::install::prune::PruneError::Io { path, source } => state_io(&path, source),
-    })?;
+    };
+    let pruned = prune_orphans(&mut state, &new_lock, &scope.roots, args.force).map_err(map_prune_err)?;
+
+    // Reap outputs whose client left the configured client set. The desired
+    // set is the project's `[options].clients` (the same `InstallTarget::parse`
+    // seam `grim status`/`grim context` report), NOT the `--client` flag: a
+    // one-off `--client` narrows *this run's* materialization but never signals
+    // a config drop, so it must not reap the other configured clients. Runs
+    // AFTER re-materialization so a no-pin-change update carries a dropped
+    // client's output forward verbatim (its edit intact) for the integrity gate
+    // to judge. `--force` (not update's implied re-materialize force) governs
+    // whether a locally modified output is deleted or preserved.
+    let desired = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+    ))?;
+    let reaped =
+        reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force).map_err(map_prune_err)?;
 
     // Refresh dev-installed artifacts (`grim install <path>`): re-pack
     // each recorded local source; on drift, re-materialize through the
@@ -196,6 +215,19 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             }
         }
     }
+    // A reaped dropped client is, by definition, outside `target.clients()`;
+    // union it in too so any managed config entry it owned (an MCP
+    // registration, OpenCode's `instructions` glob) is reconciled against the
+    // now-shrunken state rather than left dangling.
+    for r in &reaped {
+        for client in r.reaped.iter() {
+            if let Ok(client) = client.parse::<ClientTarget>()
+                && !sync_clients.contains(&client)
+            {
+                sync_clients.push(client);
+            }
+        }
+    }
     // The artifacts and install state are already persisted, so a config-sync
     // failure (an unparseable / unreadable vendor config) is warn-only: the
     // update succeeds, registration is skipped, never a hard command failure.
@@ -213,7 +245,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // lock; then propagate the first hard install error if there was one.
     // (`update` forces re-materialization, so there are no `Refused`
     // outcomes — a hard error is a fetch/IO/integrity failure.)
-    let report = build_report(&new_lock, previous.as_ref(), &pruned);
+    let report = build_report(&new_lock, previous.as_ref(), &pruned, &reaped);
     for o in outcomes {
         if let Err(e) = o.result {
             return Err(e.into());
@@ -318,10 +350,19 @@ async fn refresh_dev_installs(
     }
 }
 
-fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned: &[PrunedArtifact]) -> UpdateReport {
+fn build_report(
+    new_lock: &GrimoireLock,
+    previous: Option<&GrimoireLock>,
+    pruned: &[PrunedArtifact],
+    reaped: &[ReapedClients],
+) -> UpdateReport {
     let prev_index: BTreeMap<(ArtifactKind, &str), &LockedArtifact> = previous
         .map(|p| p.iter_artifacts().map(|a| ((a.kind, a.name.as_str()), a)).collect())
         .unwrap_or_default();
+    // Dropped-client reaps attach to the still-declared artifact's own row
+    // (the artifact stays in the lock; only a client left the set).
+    let reaped_index: BTreeMap<(ArtifactKind, &str), &ReapedClients> =
+        reaped.iter().map(|r| ((r.kind, r.name.as_str()), r)).collect();
 
     let mut entries: Vec<UpdateEntry> = new_lock
         .iter_artifacts()
@@ -331,18 +372,23 @@ fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned
                 Some(o) if o.eq_content(&a.source) => UpdateAction::Unchanged,
                 _ => UpdateAction::Updated,
             };
+            let drop = reaped_index.get(&(a.kind, a.name.as_str()));
             UpdateEntry {
                 kind: a.kind,
                 name: a.name.clone(),
                 old: old.map(|o| o.content_digest()),
                 new: Some(a.source.content_digest()),
                 action,
+                reaped_clients: drop.map(|d| d.reaped.clone()).unwrap_or_default(),
+                kept_modified_clients: drop.map(|d| d.kept_modified.clone()).unwrap_or_default(),
             }
         })
         .collect();
 
     // Orphans the prune pass acted on: a pruned artifact has no new pin, so
-    // its `new` column is empty; `old` is its last-installed digest.
+    // its `new` column is empty; `old` is its last-installed digest. A
+    // whole-artifact prune is disjoint from a per-client reap (the reaped
+    // artifact stays in the lock), so these rows carry empty client arrays.
     entries.extend(pruned.iter().map(|p| UpdateEntry {
         kind: p.kind,
         name: p.name.clone(),
@@ -352,6 +398,8 @@ fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned
             PruneOutcome::Pruned => UpdateAction::Removed,
             PruneOutcome::KeptModified => UpdateAction::KeptModified,
         },
+        reaped_clients: Vec::new(),
+        kept_modified_clients: Vec::new(),
     }));
 
     UpdateReport::new(entries)
@@ -396,7 +444,7 @@ mod tests {
     fn report_marks_changed_and_unchanged() {
         let prev = lock_of(vec![locked("a", 'a'), locked("b", 'b')]);
         let new = lock_of(vec![locked("a", 'a'), locked("b", 'c')]);
-        let r = build_report(&new, Some(&prev), &[]);
+        let r = build_report(&new, Some(&prev), &[], &[]);
         let v = serde_json::to_value(&r).unwrap();
         let a = v["items"]
             .as_array()
@@ -418,10 +466,36 @@ mod tests {
     #[test]
     fn report_old_is_null_for_new_artifact() {
         let new = lock_of(vec![locked("fresh", 'f')]);
-        let r = build_report(&new, None, &[]);
+        let r = build_report(&new, None, &[], &[]);
         let v = serde_json::to_value(&r).unwrap();
         assert!(v["items"][0]["old"].is_null());
         assert_eq!(v["items"][0]["action"], "updated");
+        // Both client-drop arrays are always present, even with no reap.
+        assert_eq!(v["items"][0]["reaped_clients"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["kept_modified_clients"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn report_attaches_dropped_clients_to_the_still_locked_row() {
+        let new = lock_of(vec![locked("keep", 'a')]);
+        let reaped = vec![ReapedClients {
+            kind: ArtifactKind::Skill,
+            name: "keep".to_string(),
+            reaped: vec!["copilot".to_string()],
+            kept_modified: vec!["opencode".to_string()],
+        }];
+        let r = build_report(&new, Some(&new), &[], &reaped);
+        let v = serde_json::to_value(&r).unwrap();
+        let keep = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "keep")
+            .unwrap();
+        // The artifact stays in the lock; the drop attaches to its own row.
+        assert_eq!(keep["action"], "unchanged");
+        assert_eq!(keep["reaped_clients"], serde_json::json!(["copilot"]));
+        assert_eq!(keep["kept_modified_clients"], serde_json::json!(["opencode"]));
     }
 
     #[test]
@@ -445,7 +519,7 @@ mod tests {
                 clients: vec![],
             },
         ];
-        let r = build_report(&new, None, &pruned);
+        let r = build_report(&new, None, &pruned, &[]);
         let v = serde_json::to_value(&r).unwrap();
         let arr = v["items"].as_array().unwrap();
         assert_eq!(arr.len(), 3, "1 locked + 2 pruned rows");

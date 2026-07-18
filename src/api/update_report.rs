@@ -6,9 +6,11 @@
 //! Plain format: 5-column table (Kind | Name | Old | New | Action).
 //!
 //! JSON format: `{"items": [...]}` where each item is a
-//! `{kind, name, old, new, action}` object (uniform `items` envelope, per
-//! subsystem-cli-api.md). `old` is `null` for an artifact that had no
-//! previous lock entry.
+//! `{kind, name, old, new, action, reaped_clients, kept_modified_clients}`
+//! object (uniform `items` envelope, per subsystem-cli-api.md). `old` is
+//! `null` for an artifact that had no previous lock entry;
+//! `reaped_clients` / `kept_modified_clients` are always-present sorted
+//! client-name arrays (`[]` when no client was dropped on this row).
 
 use std::io::{self, Write};
 
@@ -32,6 +34,14 @@ pub struct UpdateEntry {
     #[serde(serialize_with = "serialize_opt_digest")]
     pub new: Option<Digest>,
     pub action: UpdateAction,
+    /// Clients whose unmodified output was reaped because they left the
+    /// configured client set (`[options].clients`) — sorted, always present
+    /// (`[]` when none). See [`grim update`](../commands.md#update).
+    pub reaped_clients: Vec<String>,
+    /// Clients whose locally-modified output was preserved when they left the
+    /// configured client set (re-run `grim update --force` to reap) — sorted,
+    /// always present (`[]` when none).
+    pub kept_modified_clients: Vec<String>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -101,6 +111,8 @@ mod tests {
             old: None,
             new: Some(Algorithm::Sha256.hash(b"new")),
             action: UpdateAction::Updated,
+            reaped_clients: Vec::new(),
+            kept_modified_clients: Vec::new(),
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -121,6 +133,8 @@ mod tests {
                 old: None,
                 new: Some(Algorithm::Sha256.hash(b"x")),
                 action: UpdateAction::Updated,
+                reaped_clients: Vec::new(),
+                kept_modified_clients: Vec::new(),
             },
             UpdateEntry {
                 kind: ArtifactKind::Rule,
@@ -128,6 +142,8 @@ mod tests {
                 old: Some(old.clone()),
                 new: Some(old),
                 action: UpdateAction::Unchanged,
+                reaped_clients: vec!["copilot".to_string()],
+                kept_modified_clients: Vec::new(),
             },
         ]);
         let mut buf = Vec::new();
@@ -136,7 +152,11 @@ mod tests {
         assert!(v.is_object());
         assert!(v["items"].is_array());
         assert!(v["items"][0]["old"].is_null());
+        // Both new fields are always present, even on a row with no drop.
+        assert_eq!(v["items"][0]["reaped_clients"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["kept_modified_clients"], serde_json::json!([]));
         assert!(v["items"][1]["old"].as_str().unwrap().starts_with("sha256:"));
         assert_eq!(v["items"][1]["action"], "unchanged");
+        assert_eq!(v["items"][1]["reaped_clients"], serde_json::json!(["copilot"]));
     }
 }

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim update` reaps the outputs of a client that dropped out of the
+  configured client set (`[options].clients`): when a client leaves the
+  set, its now-untargeted files are removed and the client is dropped from
+  the install record. Integrity-gated exactly like the orphan prune — a
+  clean, unmodified output is deleted (listed under the update row's new
+  `reaped_clients` array), while a locally-modified output is **preserved**
+  (file kept, client kept in state, listed under `kept_modified_clients`
+  with a stderr warning) so an accidental config edit never silently
+  discards your work. `grim update --force` deletes even a modified
+  dropped-client output. Widening the set is symmetric — a newly-configured
+  client materializes on the next `update`. The two update-item fields are
+  always-present sorted arrays (`[]` when no client left the set on that
+  row); the plain table is unchanged (issue #43) *(update)*
 - `grim status --check` populates `update_available` on every
   directly-declared, registry-locked item via a fresh per-artifact tag
   re-resolution (bounded concurrency): grim re-discovers each repo's

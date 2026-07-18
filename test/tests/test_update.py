@@ -3,10 +3,36 @@
 """`grim update` acceptance tests (rolling release)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from src.assertions import assert_not_exists, assert_path_exists
 from src.helpers import make_artifact, write_config
 from src.registry import retag
+
+
+def _write_rule_config(project_dir: Path, rule_ref: str, clients: list[str]) -> None:
+    """Write a grimoire.toml declaring one rule with an explicit
+    ``[options].clients`` array."""
+    clients_toml = ", ".join(f'"{c}"' for c in clients)
+    (project_dir / "grimoire.toml").write_text(
+        f"[options]\nclients = [{clients_toml}]\n\n"
+        "[rules]\n"
+        f'rust-style = "{rule_ref}"\n'
+    )
+
+
+def _rule_row(rows: list[dict], name: str = "rust-style") -> dict:
+    return next(r for r in rows if r["name"] == name)
+
+
+def _recorded_clients(project_dir: Path, name: str = "rust-style") -> set[str]:
+    """The client names recorded in ``.grimoire/state.json`` for ``name``."""
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    for rec in state.get("records", []):
+        if rec.get("name") == name:
+            return {o["client"] for o in rec.get("outputs", [])}
+    return set()
 
 
 def test_update_rewrites_lock_and_rematerializes(
@@ -173,3 +199,111 @@ def test_partial_update_with_stale_lock_exits_65(
         f"partial update on a stale lock must exit 65, got "
         f"{result.returncode}; {result.stderr}"
     )
+
+
+def test_update_reaps_unmodified_dropped_client(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Narrowing ``[options].clients`` from claude+copilot to claude and
+    running `grim update` reaps the dropped client's unmodified output:
+    the file is deleted, the install record no longer lists it, and the
+    update report row surfaces it under ``reaped_clients``."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    _write_rule_config(project_dir, ru.fq, ["claude", "copilot"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    claude = project_dir / ".claude/rules/rust-style.md"
+    copilot = project_dir / ".github/instructions/rust-style.instructions.md"
+    assert_path_exists(claude)
+    assert_path_exists(copilot)
+
+    # Drop copilot from the configured client set, then update (no tag move).
+    _write_rule_config(project_dir, ru.fq, ["claude"])
+    rows = runner.json("update")["items"]
+
+    assert_path_exists(claude)
+    assert_not_exists(copilot)
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == ["copilot"], row
+    assert row["kept_modified_clients"] == [], row
+    assert _recorded_clients(project_dir) == {"claude"}, "copilot must leave the record"
+
+    # State stays a valid V2 file.
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    assert state["version"] == 2, state
+
+
+def test_update_preserves_modified_dropped_client_then_force_reaps(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A user-edited output for a dropped client is preserved (file kept,
+    still in state, reported under ``kept_modified_clients``) on a plain
+    `grim update`; `grim update --force` then deletes it and drops it from
+    the record."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    _write_rule_config(project_dir, ru.fq, ["claude", "copilot"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    copilot = project_dir / ".github/instructions/rust-style.instructions.md"
+    assert_path_exists(copilot)
+    # Hand-edit the copilot output so its content drifts from the record.
+    copilot.write_text("locally edited by the user\n")
+
+    # Drop copilot from config, update WITHOUT --force: the edit is preserved.
+    _write_rule_config(project_dir, ru.fq, ["claude"])
+    rows = runner.json("update")["items"]
+    row = _rule_row(rows)
+    assert row["kept_modified_clients"] == ["copilot"], row
+    assert row["reaped_clients"] == [], row
+    assert copilot.read_text() == "locally edited by the user\n", "edit preserved"
+    assert "copilot" in _recorded_clients(project_dir), "kept-modified stays in state"
+
+    # --force reaps even the modified output.
+    rows = runner.json("update", "--force")["items"]
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == ["copilot"], row
+    assert_not_exists(copilot)
+    assert _recorded_clients(project_dir) == {"claude"}, "force drops copilot from state"
+
+
+def test_update_widens_client_set_materializes_added_client(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Adding a client to ``[options].clients`` materializes it on the next
+    `grim update` (covers_targets widening) — the reaper is drop-only and
+    never removes a still-configured client."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    _write_rule_config(project_dir, ru.fq, ["claude"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    copilot = project_dir / ".github/instructions/rust-style.instructions.md"
+    assert_not_exists(copilot)
+
+    # Widen to claude+copilot and update: copilot must materialize.
+    _write_rule_config(project_dir, ru.fq, ["claude", "copilot"])
+    rows = runner.json("update")["items"]
+    assert_path_exists(copilot)
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == [], row
+    assert _recorded_clients(project_dir) == {"claude", "copilot"}, row

@@ -382,8 +382,19 @@ work; re-run with `--force` to prune it anyway. This mirrors the install
 integrity gate, where a locally modified artifact is refused rather than
 overwritten without `--force`.
 
-Pruning happens only on `update`. `grim install` materializes the current lock
-but never deletes — like [`grim remove`](#remove), it leaves files on disk.
+Narrowing the configured client set (`[options].clients`) is reconciled the
+same way: when a client drops out of the set, `update` **reaps** the outputs it
+no longer targets. A clean, unmodified output is deleted and the client is
+listed under the row's `reaped_clients`. An output you have edited locally is
+**kept** — the file stays, the client stays in the install record, and it is
+reported under `kept_modified_clients` (with a stderr warning) rather than
+silently discarded. `grim update --force` overrides that guard and deletes even
+a locally-modified dropped-client output. Widening the set is symmetric: a
+newly-configured client is materialized on the next `update`.
+
+Pruning and client-reaping happen only on `update`. `grim install` materializes
+the current lock but never deletes — like [`grim remove`](#remove), it leaves
+files on disk.
 
 `update` also refreshes every [local path source](#add-path): a declared
 path dependency and a [dev-installed](#install-dev) record alike are

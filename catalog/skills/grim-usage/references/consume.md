@@ -178,6 +178,13 @@ locally, in which case it is kept and reported as `kept-modified` until
 you re-run with `--force`. Your local edits are never silently
 discarded.
 
+The same reconciliation applies when you narrow the configured client
+set (`[options].clients`): a client that leaves the set has its outputs
+reaped, listed per update row under `reaped_clients` — again, a locally
+edited output is preserved under `kept_modified_clients` (with a warning)
+until `grim update --force` removes it. Widening the set re-materializes
+the added client on the next update.
+
 Update also refreshes every **local path source**: declared path
 dependencies and dev-installed records alike are re-packed, and a changed
 content hash re-materializes them — the local equivalent of a floating

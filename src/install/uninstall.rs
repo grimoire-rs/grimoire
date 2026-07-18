@@ -191,7 +191,10 @@ pub fn remove_entry(
 /// `removed` when it was present. An absent path is tolerated (idempotent).
 /// `symlink_metadata` does not traverse links, so a symlinked target is
 /// unlinked as a file, never followed into an unrelated tree.
-fn remove_output(path: &std::path::Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
+///
+/// Shared with [`super::prune::reap_dropped_clients`], which reaps a single
+/// dropped-client output through this same seam.
+pub(crate) fn remove_output(path: &std::path::Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.is_dir() {

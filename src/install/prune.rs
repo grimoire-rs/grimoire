@@ -22,7 +22,8 @@ use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
-use crate::install::install_state::InstallState;
+use crate::install::client_target::ClientTarget;
+use crate::install::install_state::{ClientOutput, InstallState};
 use crate::install::path_anchor::{AnchorError, AnchorRoots};
 use crate::install::uninstall::{UninstallError, uninstall};
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -315,6 +316,214 @@ fn prune_error(path: PathBuf, source: UninstallError) -> PruneError {
         UninstallError::Anchor(e) => PruneError::Anchor { path, source: e },
         UninstallError::Io(io) => PruneError::Io { path, source: io },
     }
+}
+
+/// Per-artifact record of the dropped-client outputs a
+/// [`reap_dropped_clients`] pass acted on. Only artifacts that lost at least
+/// one client appear, in deterministic `(kind, name)` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReapedClients {
+    /// The artifact kind.
+    pub kind: ArtifactKind,
+    /// The config binding name.
+    pub name: String,
+    /// Clients whose unmodified (or `force`-removed) output was deleted and
+    /// dropped from the record, sorted.
+    pub reaped: Vec<String>,
+    /// Clients whose output was locally modified and preserved (no `force`),
+    /// sorted. Left in the record so a later `grim update --force` can still
+    /// reap them.
+    pub kept_modified: Vec<String>,
+}
+
+/// Reap the outputs of every artifact whose client left the configured
+/// client set (`desired`) — the per-client counterpart of [`prune_orphans`],
+/// run on `grim update` after re-materialization.
+///
+/// For each non-dev record, an output whose client parses to a
+/// [`ClientTarget`] absent from `desired` is a *dropped-client* output:
+/// - unmodified (its on-disk footprint matches the recorded hash, or the
+///   files are already gone) → its file(s) / support dir are deleted, or its
+///   managed MCP entry is spliced out of the shared config, and the output is
+///   dropped from the record;
+/// - locally modified → **preserved** (file kept, output kept in the record,
+///   reported under [`ReapedClients::kept_modified`]) unless `force`, in which
+///   case it is deleted like an unmodified one.
+///
+/// A record left with zero outputs (every client dropped) is removed whole so
+/// the "outputs is never empty" invariant holds. The caller owns saving
+/// `state`.
+///
+/// The integrity gate and its security-class propagation mirror
+/// [`prune_orphans`]: a **security-class** [`AnchorError`] (a tampered `../`
+/// relative or a symlink escaping its anchor root) is FATAL — it propagates as
+/// [`PruneError::Anchor`] (→ `DataError(65)`) and is never reaped. A
+/// resolution-absence failure (anchor root absent on this machine) or plain
+/// I/O while hashing leaves that output untouched with a `tracing::warn!`.
+///
+/// # Errors
+///
+/// A [`PruneError`] from a security-class anchor failure, or an I/O failure
+/// deleting a present output / splicing an entry.
+pub fn reap_dropped_clients(
+    state: &mut InstallState,
+    desired: &[ClientTarget],
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<Vec<ReapedClients>, PruneError> {
+    // Snapshot `(kind, name, outputs)` so the immutable inspection (and the
+    // filesystem deletes it drives) finishes before any state mutation.
+    // `iter_records` is `(kind, name)`-ordered, so the result is deterministic.
+    // A dev-install record is out-of-band from the configured client set
+    // (materialized to whatever one-off `--client` list `grim install <path>`
+    // chose), so it is never reaped — matching status's dev-row drift contract.
+    let records: Vec<(ArtifactKind, String, Vec<ClientOutput>)> = state
+        .iter_records()
+        .filter(|r| !r.dev)
+        .map(|r| (r.kind, r.name.clone(), r.outputs.clone()))
+        .collect();
+
+    let mut acted = Vec::new();
+    for (kind, name, outputs) in &records {
+        let mut reaped = Vec::new();
+        let mut kept_modified = Vec::new();
+        for out in outputs {
+            // Only a recognized client absent from the desired set is a
+            // dropped-client output. An unparseable/legacy client string is
+            // left alone — it can never belong to the desired `ClientTarget`
+            // set, and its vendor splice format cannot be resolved safely.
+            let Ok(client) = out.client.parse::<ClientTarget>() else {
+                continue;
+            };
+            if desired.contains(&client) {
+                continue;
+            }
+            // Integrity gate: is the footprint present, and does it still match
+            // the recorded hash?
+            let present = match out.is_present(roots) {
+                Ok(present) => present,
+                Err(e) if is_security_class(&e) => {
+                    return Err(PruneError::Anchor {
+                        path: roots.workspace.clone(),
+                        source: e,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping unresolvable dropped-client output '{}' of '{name}': {e}",
+                        out.client
+                    );
+                    continue;
+                }
+            };
+            let delete = if present {
+                let actual = match out.current_hash(roots) {
+                    Ok(actual) => actual,
+                    Err(e) if is_security_class(&e) => {
+                        return Err(PruneError::Anchor {
+                            path: roots.workspace.clone(),
+                            source: e,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "skipping unresolvable dropped-client output '{}' of '{name}': {e}",
+                            out.client
+                        );
+                        continue;
+                    }
+                };
+                if actual != out.content_hash && !force {
+                    // Locally modified: preserve the user's edit and keep the
+                    // output in the record so `--force` can still reap it later.
+                    tracing::warn!(
+                        "keeping locally-modified output for dropped client '{}' of '{name}'; re-run `grim update --force` to remove it",
+                        out.client
+                    );
+                    kept_modified.push(out.client.clone());
+                    continue;
+                }
+                true
+            } else {
+                // Already gone on disk — nothing to delete, but still drop the
+                // stale output from the record.
+                false
+            };
+            if delete {
+                delete_output(out, roots)?;
+            }
+            reaped.push(out.client.clone());
+        }
+        if !reaped.is_empty() || !kept_modified.is_empty() {
+            reaped.sort();
+            kept_modified.sort();
+            acted.push(ReapedClients {
+                kind: *kind,
+                name: name.clone(),
+                reaped,
+                kept_modified,
+            });
+        }
+    }
+
+    // Mutation pass: drop every reaped output from its record; a record left
+    // with no outputs (every client dropped) is removed whole so the
+    // "outputs is never empty" invariant holds.
+    for r in &acted {
+        if r.reaped.is_empty() {
+            continue;
+        }
+        let Some(mut rec) = state.get(r.kind, &r.name).cloned() else {
+            continue;
+        };
+        rec.outputs.retain(|o| !r.reaped.contains(&o.client));
+        if rec.outputs.is_empty() {
+            state.remove(r.kind, &r.name);
+        } else {
+            state.record(rec);
+        }
+    }
+
+    Ok(acted)
+}
+
+/// Delete one dropped-client output's on-disk footprint: an entry output's
+/// managed member is spliced out of its shared config file (never the file
+/// itself); a file/dir output's target and, for a multi-file rule, its sibling
+/// support dir are removed. The per-output half of [`uninstall`], reusing the
+/// same [`remove_output`](crate::install::uninstall) /
+/// [`remove_entry`](crate::install::uninstall) seams.
+fn delete_output(out: &ClientOutput, roots: &AnchorRoots) -> Result<(), PruneError> {
+    // Resolution already succeeded in `is_present`; a failure here maps to
+    // `PruneError::Anchor`, preserving a security-class error's identity.
+    let target = out.resolved_target(roots).map_err(|source| PruneError::Anchor {
+        path: roots.workspace.clone(),
+        source,
+    })?;
+    if let Some(pointer) = &out.entry {
+        return crate::install::uninstall::remove_entry(&target, pointer, out.mcp_format())
+            .map_err(|source| PruneError::Io { path: target, source });
+    }
+    let mut removed = Vec::new();
+    crate::install::uninstall::remove_output(&target, &mut removed).map_err(|source| PruneError::Io {
+        path: target.clone(),
+        source,
+    })?;
+    match out.resolved_support_dir(roots) {
+        Ok(Some(dir)) => crate::install::uninstall::remove_output(&dir, &mut removed)
+            .map_err(|source| PruneError::Io { path: dir, source })?,
+        Ok(None) => {}
+        Err(e) if is_security_class(&e) => {
+            return Err(PruneError::Anchor {
+                path: target,
+                source: e,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("skipping unresolvable support dir for dropped-client output: {e}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -743,6 +952,270 @@ mod tests {
             classify_error(&top_err),
             ExitCode::DataError,
             "a path-traversal through the prune path must classify as DataError(65), not IoError(74)"
+        );
+    }
+
+    // ── reap_dropped_clients (per-client drop reaper) ───────────────────────
+
+    /// Materialize a file at `root/rel` and return its content hash.
+    fn write_file(root: &std::path::Path, rel: &str) -> Digest {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("# {rel}\n")).unwrap();
+        content_hash(&path).unwrap()
+    }
+
+    /// A `Workspace`-anchored file output for `client` at `relative`. Unit
+    /// tests key the reaper on the client *string* (not the anchor), so both
+    /// clients resolve through the workspace root; the CopilotRoot layout is
+    /// covered by the acceptance suite.
+    fn output_ws(client: &str, relative: &str, hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            },
+            content_hash: hash,
+            support_dir: None,
+            entry: None,
+        }
+    }
+
+    /// A two-client (claude + copilot) rule record materialized on disk.
+    fn install_two_client_rule(
+        state: &mut InstallState,
+        ws: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let claude_rel = ".claude/rules/r.md";
+        let copilot_rel = ".github/instructions/r.instructions.md";
+        let ch = write_file(ws, claude_rel);
+        let coh = write_file(ws, copilot_rel);
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "r".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("r")),
+            dev: false,
+            outputs: vec![
+                output_ws("claude", claude_rel, ch),
+                output_ws("copilot", copilot_rel, coh),
+            ],
+        });
+        (ws.join(claude_rel), ws.join(copilot_rel))
+    }
+
+    #[test]
+    fn reaps_unmodified_dropped_client_deletes_file_and_drops_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (claude, copilot) = install_two_client_rule(&mut state, ws);
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].kept_modified.is_empty());
+        assert!(claude.exists(), "the still-configured client's file is untouched");
+        assert!(!copilot.exists(), "the dropped client's file is deleted");
+        let rec = state.get(ArtifactKind::Rule, "r").unwrap();
+        assert_eq!(
+            rec.outputs.iter().map(|o| o.client.as_str()).collect::<Vec<_>>(),
+            vec!["claude"],
+            "copilot output dropped from the record"
+        );
+    }
+
+    #[test]
+    fn keeps_modified_dropped_client_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (_claude, copilot) = install_two_client_rule(&mut state, ws);
+        // Hand-edit the copilot output so its content drifts from the record.
+        std::fs::write(&copilot, b"locally edited\n").unwrap();
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].kept_modified, vec!["copilot".to_string()]);
+        assert!(acted[0].reaped.is_empty());
+        assert!(copilot.exists(), "a modified dropped-client file is preserved");
+        assert_eq!(std::fs::read_to_string(&copilot).unwrap(), "locally edited\n");
+        let rec = state.get(ArtifactKind::Rule, "r").unwrap();
+        assert!(
+            rec.outputs.iter().any(|o| o.client == "copilot"),
+            "kept-modified output stays in the record for a later --force"
+        );
+    }
+
+    #[test]
+    fn force_reaps_modified_dropped_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (_claude, copilot) = install_two_client_rule(&mut state, ws);
+        std::fs::write(&copilot, b"locally edited\n").unwrap();
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), true).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].kept_modified.is_empty());
+        assert!(!copilot.exists(), "--force deletes even a modified dropped-client file");
+        let rec = state.get(ArtifactKind::Rule, "r").unwrap();
+        assert!(rec.outputs.iter().all(|o| o.client != "copilot"));
+    }
+
+    #[test]
+    fn still_configured_client_is_never_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (claude, copilot) = install_two_client_rule(&mut state, ws);
+
+        // Both clients still in the desired set → nothing dropped.
+        let acted = reap_dropped_clients(
+            &mut state,
+            &[ClientTarget::Claude, ClientTarget::Copilot],
+            &roots(ws),
+            false,
+        )
+        .unwrap();
+
+        assert!(acted.is_empty());
+        assert!(claude.exists() && copilot.exists());
+        assert_eq!(state.get(ArtifactKind::Rule, "r").unwrap().outputs.len(), 2);
+    }
+
+    #[test]
+    fn already_gone_dropped_client_output_still_drops_from_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (_claude, copilot) = install_two_client_rule(&mut state, ws);
+        // The copilot file vanished out from under us; the record must still
+        // shed the stale output.
+        std::fs::remove_file(&copilot).unwrap();
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        let rec = state.get(ArtifactKind::Rule, "r").unwrap();
+        assert!(rec.outputs.iter().all(|o| o.client != "copilot"));
+    }
+
+    #[test]
+    fn record_with_every_client_dropped_is_removed_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let (claude, copilot) = install_two_client_rule(&mut state, ws);
+
+        // Neither recorded client is in the desired set → both drop, so the
+        // record has no outputs left and is removed whole.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::OpenCode], &roots(ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["claude".to_string(), "copilot".to_string()]);
+        assert!(!claude.exists() && !copilot.exists());
+        assert!(
+            state.get(ArtifactKind::Rule, "r").is_none(),
+            "a record with every output reaped is removed whole (outputs never empty)"
+        );
+    }
+
+    #[test]
+    fn dev_record_is_never_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let copilot_rel = ".github/instructions/r.instructions.md";
+        let coh = write_file(ws, copilot_rel);
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "r".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("r")),
+            dev: true,
+            outputs: vec![output_ws("copilot", copilot_rel, coh)],
+        });
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+
+        assert!(
+            acted.is_empty(),
+            "a dev-install record is out-of-band from the client set"
+        );
+        assert!(ws.join(copilot_rel).exists());
+        assert!(state.get(ArtifactKind::Rule, "r").is_some());
+    }
+
+    #[test]
+    fn reaps_entry_output_splices_member_never_deletes_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"},\n    \"user\": {\"command\": \"x\"}\n  }\n}\n",
+        )
+        .unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = output_ws("copilot", ".mcp.json", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+
+        // `--force` reaps regardless of the entry's semantic drift, focusing the
+        // assertion on the splice behavior.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), true).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(cfg.is_file(), "the shared config file must survive an entry reap");
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("grim").is_none(), "managed entry spliced out");
+        assert_eq!(doc["mcpServers"]["user"]["command"], "x", "foreign entry preserved");
+        assert!(
+            state.get(ArtifactKind::Mcp, "grim").is_none(),
+            "the sole output reaped → record removed whole"
+        );
+    }
+
+    // ARCH-4/SC-03: a SECURITY-CLASS AnchorError (a tampered `../` relative)
+    // on a dropped-client output is FATAL — it propagates as
+    // PruneError::Anchor (→ DataError 65) and is never reaped.
+    #[test]
+    fn security_class_traversal_on_dropped_client_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "evil".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("evil")),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "copilot".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: "../escape/target.md".to_string(),
+                },
+                content_hash: Digest::Sha256("d".repeat(64)),
+                support_dir: None,
+                entry: None,
+            }],
+        });
+
+        let err = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false)
+            .expect_err("a security-class traversal must propagate, not be reaped");
+        assert!(matches!(err, PruneError::Anchor { .. }), "expected Anchor, got {err:?}");
+        assert!(
+            state.get(ArtifactKind::Rule, "evil").is_some(),
+            "a fatal error never reaps the record"
         );
     }
 }
