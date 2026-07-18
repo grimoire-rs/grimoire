@@ -110,6 +110,65 @@ def test_status_json_includes_installed_outputs(
     assert not_installed["outputs"] == []
 
 
+def test_status_item_carries_client_drift_fields(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Every status item carries the always-present `clients_missing` /
+    `clients_extra` arrays alongside the existing 6-key shape — the
+    frozen key set grows to 8, and both new fields default to `[]` when
+    the desired and recorded client sets agree."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
+    runner = grim_at(project_dir)
+    # A single-client config, installed, gives desired == recorded == {claude}
+    # — the no-drift case (an undeclared/uninstalled row instead has a
+    # nonempty `clients_missing`, exercised by the narrow/widen test below).
+    runner.run("config", "set", "options.clients", "claude", check=False)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    rows = runner.json("status")["items"]
+    assert set(rows[0].keys()) == {
+        "kind", "name", "source", "pinned", "state", "outputs",
+        "clients_missing", "clients_extra",
+    }, f"status item must carry exactly the 8 frozen fields; got: {sorted(rows[0].keys())}"
+    assert rows[0]["clients_missing"] == []
+    assert rows[0]["clients_extra"] == []
+
+
+def test_status_client_drift_narrow_then_widen(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`clients_missing`/`clients_extra` report client-set drift entirely
+    from local state (config + install record), no network: narrowing
+    `options.clients` below what's installed names the dropped client in
+    `clients_extra`; widening beyond what's installed names the new
+    client in `clients_missing`."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.clients", "claude,opencode", check=False)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    # Narrow to just claude: opencode's recorded output is now extra.
+    runner.run("config", "set", "options.clients", "claude", check=False)
+    row = runner.json("--offline", "status")["items"][0]
+    assert row["clients_missing"] == []
+    assert row["clients_extra"] == ["opencode"]
+
+    # Widen to include codex, never installed: it's now missing, and the
+    # still-present opencode output is no longer extra.
+    runner.run(
+        "config", "set", "options.clients", "claude,opencode,codex", check=False
+    )
+    row = runner.json("--offline", "status")["items"][0]
+    assert row["clients_missing"] == ["codex"]
+    assert row["clients_extra"] == []
+
+
 def test_status_outdated_when_lock_advances(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim status` items gain two always-present, always-empty-when-clean
+  arrays, `clients_missing` and `clients_extra`: the project's configured
+  client target (`[options].clients`, the same seam `grim context`
+  reports) diffed against the artifact's recorded install-state clients —
+  entirely local, no network. `clients_missing` is desired-but-not-yet-
+  installed-here; `clients_extra` is installed-here-but-dropped-from-
+  config. Both sorted for deterministic JSON. A declared-bundle row
+  (never installs itself) and a dev-install row (materialized out-of-band
+  via `grim install <path>`, independent of `[options].clients`) always
+  report `[]` for both — diffing them against the project's desired set
+  doesn't answer a meaningful question for either *(status)*
 - `grim config list` items gain an always-present `constraints` field:
   `null` for most keys, `{item_pattern, item_width}` for a list-valued key
   whose items carry a shape rule beyond closed-set membership —

@@ -16,6 +16,18 @@
 //! no recorded outputs (not installed, or a bundle row). Vendor on-disk
 //! layout is unstable — this field is the supported discovery channel for
 //! where an artifact was materialized.
+//!
+//! `clients_missing` / `clients_extra` report client-set drift, entirely
+//! from local state (config + install record) — no network. `desired` is
+//! the project's configured client target (`[options].clients`, same seam
+//! as `grim context`); `recorded` is the client names on the artifact's
+//! install-state record. `clients_missing` is `desired − recorded`
+//! (configured but never installed here); `clients_extra` is
+//! `recorded − desired` (installed here but dropped from config). Both
+//! sorted, both always present, both `[]` when the sets agree — including
+//! for a declared-bundle row (never installs itself) and a dev-install row
+//! (installed out-of-band via `grim install <path>`, independent of the
+//! project's configured client set).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -53,6 +65,14 @@ pub struct StatusEntry {
     /// Per-client materialized output locations. Empty when the artifact
     /// has no recorded install-state outputs.
     pub outputs: Vec<StatusOutput>,
+    /// Clients the project's config targets but this artifact has no
+    /// recorded output for (`desired − recorded`). Sorted; `[]` when there
+    /// is no such drift.
+    pub clients_missing: Vec<String>,
+    /// Clients this artifact has a recorded output for but the project's
+    /// config no longer targets (`recorded − desired`). Sorted; `[]` when
+    /// there is no such drift.
+    pub clients_extra: Vec<String>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -129,6 +149,8 @@ mod tests {
                     client: "claude".to_string(),
                     path: "/w/.claude/skills/code-review".into(),
                 }],
+                clients_missing: Vec::new(),
+                clients_extra: Vec::new(),
             },
             StatusEntry {
                 kind: ArtifactKind::Rule,
@@ -137,6 +159,8 @@ mod tests {
                 pinned: None,
                 state: ArtifactStatus::Missing,
                 outputs: Vec::new(),
+                clients_missing: Vec::new(),
+                clients_extra: Vec::new(),
             },
         ]);
         let mut buf = Vec::new();
@@ -158,6 +182,8 @@ mod tests {
             pinned: None,
             state: ArtifactStatus::Stale,
             outputs: Vec::new(),
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -168,6 +194,8 @@ mod tests {
         assert_eq!(v["items"][0]["source"], "direct");
         assert_eq!(v["items"][0]["state"], "stale");
         assert_eq!(v["items"][0]["outputs"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["clients_missing"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["clients_extra"], serde_json::json!([]));
     }
 
     #[test]
@@ -182,11 +210,32 @@ mod tests {
                 client: "claude".to_string(),
                 path: "/w/.claude/skills/s".into(),
             }],
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["outputs"][0]["client"], "claude");
         assert_eq!(v["items"][0]["outputs"][0]["path"], "/w/.claude/skills/s");
+    }
+
+    #[test]
+    fn json_client_drift_fields_are_always_present_arrays() {
+        let r = StatusReport::new(vec![StatusEntry {
+            kind: ArtifactKind::Skill,
+            name: "s".to_string(),
+            source: "direct".to_string(),
+            pinned: Some(pinned("s")),
+            state: ArtifactStatus::Installed,
+            outputs: Vec::new(),
+            clients_missing: vec!["opencode".to_string()],
+            clients_extra: vec!["copilot".to_string()],
+        }]);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"][0]["clients_missing"], serde_json::json!(["opencode"]));
+        assert_eq!(v["items"][0]["clients_extra"], serde_json::json!(["copilot"]));
     }
 }

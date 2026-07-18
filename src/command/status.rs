@@ -4,12 +4,18 @@
 //! `grim status` — read-only state report for every declared artifact.
 //!
 //! No network and no flock: state is data, not a failure, so `status`
-//! exits 0 even when artifacts are missing or modified. The only failure
-//! exits are a config (78/79) or lock (78) load error. Per declared
+//! exits 0 even when artifacts are missing or modified. Per declared
 //! artifact the state is derived from: the live config vs. the lock's
 //! declaration hash (`stale`), the lock pin vs. the install-state record
 //! (`outdated`), the recorded pin missing (`missing`), and the on-disk
 //! content hash vs. the recorded one (`modified`).
+//!
+//! Each row also reports `clients_missing`/`clients_extra`: the project's
+//! configured client target (`[options].clients`) diffed against the
+//! artifact's recorded install-state clients — entirely local, no
+//! network. See `src/api/status_report.rs`.
+
+use std::collections::BTreeSet;
 
 use clap::Args;
 
@@ -20,7 +26,7 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
 use crate::install::path_anchor::AnchorRoots;
-use crate::install::target::detect_clients;
+use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -51,8 +57,9 @@ pub struct StatusArgs {
 ///
 /// # Errors
 ///
-/// Only a config (78/79) or lock-parse (78) load failure; artifact state
-/// is data and never fails the command.
+/// A config (78/79) or lock-parse (78) load failure, or an invalid
+/// configured client name in `[options].clients` (65, same as `grim
+/// context`); artifact state itself is data and never fails the command.
 pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve_in(
         ctx,
@@ -88,8 +95,23 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 
     // The currently-active client set: a record's per-client outputs are
     // reconciled against this so a client the user removed since install does
-    // not flag its now-absent files as `missing`.
+    // not flag its now-absent files as `missing`. This answers "which
+    // clients are present on disk right now" — a different question from
+    // `desired` below ("which clients does the project's config target"):
+    // `active` degrades gracefully (never removed-client-lies-missing),
+    // `desired` is compared straight against the recorded set for drift.
     let active = detect_clients(&scope.workspace, scope.scope);
+
+    // The project's configured client target — same seam `grim context`
+    // reports (`InstallTarget::parse` over `[options].clients`, no
+    // `--client` flag on this command). Entirely local (config + install
+    // state); no network.
+    let desired = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+    ))?;
 
     let mut entries = Vec::new();
 
@@ -115,6 +137,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned: None,
             state,
             outputs: Vec::new(),
+            // A bundle never installs itself (no recorded outputs, ever) —
+            // comparing an always-empty recorded set against the desired
+            // client set would just echo the whole desired set as
+            // "missing" on every row, which isn't real drift.
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
         });
     }
 
@@ -146,6 +174,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
+        let (clients_missing, clients_extra) = client_drift(desired.clients(), recorded_clients(record));
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
@@ -153,6 +182,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned: locked.and_then(|l| l.source.pinned().cloned()),
             state: entry_state,
             outputs,
+            clients_missing,
+            clients_extra,
         });
     }
 
@@ -172,6 +203,13 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned: None,
             state: entry_state,
             outputs,
+            // A dev install is deliberately out-of-band from the declared
+            // config: it was materialized to whatever `--client` list the
+            // one-off `grim install <path>` invocation chose, independent
+            // of `[options].clients`. Diffing it against the project's
+            // desired set would flag spurious drift on every dev row.
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
         });
     }
 
@@ -195,6 +233,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             let record = state.get(member.kind, &member.name);
             let outputs = record_outputs(record, &active, &scope.roots);
+            let (clients_missing, clients_extra) = client_drift(desired.clients(), recorded_clients(record));
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -202,6 +241,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 pinned: member.source.pinned().cloned(),
                 state: st,
                 outputs,
+                clients_missing,
+                clients_extra,
             });
         }
     }
@@ -253,6 +294,28 @@ fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots
             })
         })
         .collect()
+}
+
+/// The client names on an artifact's install record, unfiltered by
+/// presence or active-client reconciliation — the raw "what did we last
+/// install this to" set `clients_missing`/`clients_extra` diff against.
+/// `None` (never installed) yields no clients.
+fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
+    record.map(|r| r.outputs.as_slice()).unwrap_or(&[])
+}
+
+/// Diff the project's `desired` client target against an artifact's
+/// `recorded` install-state client outputs: `clients_missing` is
+/// `desired − recorded` (configured but never installed here);
+/// `clients_extra` is `recorded − desired` (installed here but dropped
+/// from config). Both sorted for deterministic JSON output.
+fn client_drift(desired: &[ClientTarget], recorded: &[ClientOutput]) -> (Vec<String>, Vec<String>) {
+    let desired: BTreeSet<String> = desired.iter().map(ToString::to_string).collect();
+    let recorded: BTreeSet<String> = recorded.iter().map(|o| o.client.clone()).collect();
+    (
+        desired.difference(&recorded).cloned().collect(),
+        recorded.difference(&desired).cloned().collect(),
+    )
 }
 
 /// Derive the reported state for one declared artifact.
@@ -428,6 +491,66 @@ mod tests {
             agents_skills: None,
             codex_root: None,
         }
+    }
+
+    fn client_output(client: &str) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: format!("{client}.md"),
+            },
+            content_hash: Digest::Sha256("a".repeat(64)),
+            support_dir: None,
+            entry: None,
+        }
+    }
+
+    /// C2 spec: narrowing the desired set below what's recorded names the
+    /// dropped client in `clients_extra`; `clients_missing` stays empty.
+    #[test]
+    fn client_drift_narrowed_desired_reports_extra() {
+        let recorded = [client_output("claude"), client_output("opencode")];
+        let (missing, extra) = client_drift(&[ClientTarget::Claude], &recorded);
+        assert_eq!(missing, Vec::<String>::new());
+        assert_eq!(extra, vec!["opencode".to_string()]);
+    }
+
+    /// C2 spec: widening the desired set beyond what's recorded names the
+    /// new client in `clients_missing`; `clients_extra` stays empty.
+    #[test]
+    fn client_drift_widened_desired_reports_missing() {
+        let recorded = [client_output("claude")];
+        let (missing, extra) = client_drift(&[ClientTarget::Claude, ClientTarget::OpenCode], &recorded);
+        assert_eq!(missing, vec!["opencode".to_string()]);
+        assert_eq!(extra, Vec::<String>::new());
+    }
+
+    #[test]
+    fn client_drift_matching_sets_are_both_empty() {
+        let recorded = [client_output("claude"), client_output("opencode")];
+        let (missing, extra) = client_drift(&[ClientTarget::Claude, ClientTarget::OpenCode], &recorded);
+        assert!(missing.is_empty());
+        assert!(extra.is_empty());
+    }
+
+    /// Output is sorted for deterministic JSON, independent of input order.
+    #[test]
+    fn client_drift_output_is_sorted() {
+        let recorded: [ClientOutput; 0] = [];
+        let (missing, _extra) = client_drift(
+            &[ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode],
+            &recorded,
+        );
+        assert_eq!(
+            missing,
+            vec!["claude".to_string(), "codex".to_string(), "opencode".to_string()]
+        );
+    }
+
+    #[test]
+    fn recorded_clients_none_record_is_empty() {
+        assert!(recorded_clients(None).is_empty());
     }
 
     #[test]

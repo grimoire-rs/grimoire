@@ -63,7 +63,7 @@ One row object per item inside `{"items": [...]}`:
 |---------|-----------|-------------|
 | `lock` | `{kind, name, pinned, action}` | `action`: `locked`, `unchanged` |
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
-| `status` | `{kind, name, source, pinned, state, outputs}` — `pinned` null until locked; `outputs` is `[{client, path}]` (see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
+| `status` | `{kind, name, source, pinned, state, outputs, clients_missing, clients_extra}` — `pinned` null until locked; `outputs` is `[{client, path}]`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row — see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action}` — `old` null for a first lock, `new` null for a pruned row | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
