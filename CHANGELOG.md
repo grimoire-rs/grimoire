@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim status --check` runs one coordinated catalog load against the
+  scope's configured registries and populates `deprecated` /
+  `replaced_by` on every registry-sourced item, matched by
+  `(registry, repository)` — the same fields `grim search` already
+  reports. The report gains a top-level `checked` field (sibling of
+  `items`) and each item gains `deprecated`, `replaced_by`, and a
+  reserved `update_available` (always `null` until a future release
+  populates it). `checked` is `true` only when `--check` ran online;
+  combined with `--offline` (or `GRIM_OFFLINE`) the check is skipped
+  with one stderr warning, `checked` stays `false`, and the three new
+  fields stay `null` — exit code is unaffected (`status` still always
+  exits `0`). A single registry's catalog refresh failing degrades only
+  that registry's rows to `null`; `checked` still reports `true` since
+  the check did run online *(status)*
 - `grim status` items gain two always-present, always-empty-when-clean
   arrays, `clients_missing` and `clients_extra`: the project's configured
   client target (`[options].clients`, the same seam `grim context`

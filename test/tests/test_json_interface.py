@@ -228,13 +228,15 @@ def test_list_reports_use_items_envelope(
 
 def test_empty_result_is_items_empty_array(grim_at, project_dir: Path) -> None:
     """A multi-item report with no rows is `{"items": []}`, never an
-    absent key, `null`, or a bare `[]`."""
+    absent key, `null`, or a bare `[]`. `status` also carries the
+    always-present sibling envelope key `checked` (`false` without
+    `--check`)."""
     write_config(project_dir)  # no skills/rules/bundles/agents declared
     runner = grim_at(project_dir)
 
     result = runner.run("--format", "json", "status", check=False)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"items": []}
+    assert json.loads(result.stdout) == {"items": [], "checked": False}
 
 
 def test_config_get_unset_key_reports_data_not_error(

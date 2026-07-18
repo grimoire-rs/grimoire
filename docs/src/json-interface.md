@@ -44,7 +44,8 @@ Every multi-item report therefore wraps its rows in a uniform envelope:
 
 `items` is always present (an empty result is `{"items": []}`), and the
 envelope object may gain sibling fields in a minor release — `grim
-publish` already carries one (`announce`). Commands with enveloped
+publish` carries `announce`, `grim status` carries `checked` (see the
+[status row](#shapes-items) below). Commands with enveloped
 reports: `lock`, `install`, `status`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`, and
 `publish`.
@@ -63,7 +64,7 @@ One row object per item inside `{"items": [...]}`:
 |---------|-----------|-------------|
 | `lock` | `{kind, name, pinned, action}` | `action`: `locked`, `unchanged` |
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
-| `status` | `{kind, name, source, pinned, state, outputs, clients_missing, clients_extra}` — `pinned` null until locked; `outputs` is `[{client, path}]`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row — see [grim status][commands-status]) | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
+| `status` | `{kind, name, source, pinned, state, outputs, clients_missing, clients_extra, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `pinned` null until locked; `outputs` is `[{client, path}]`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action}` — `old` null for a first lock, `new` null for a pruned row | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
@@ -82,6 +83,28 @@ artifact's kind — e.g. a rule installed with only [Codex][codex-subagents-docs
 selected (Codex has no path-scoped rule mechanism), or an mcp descriptor
 no selected client can register. Nothing was written to disk in that
 case, so there is no path to report; `status` is `skipped`.
+
+#### `status --check` nullability {#status-check-nullability}
+
+`status`'s top-level `checked` gates three per-item fields —
+`deprecated`, `replaced_by`, `update_available` — added by
+[`--check`](./commands.md#status-check):
+
+| `checked` | Item condition | `deprecated` / `replaced_by` | `update_available` |
+|-----------|-----------------|-------------------------------|---------------------|
+| `false` (no `--check`, or `--check --offline`) | any | `null` | `null` |
+| `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` | `null` |
+| `true` | registry pin, no catalog match (dropped repo, or that item's registry degraded) | `null` | `null` |
+| `true` | registry pin, catalog match, not deprecated | `null` | `null` |
+| `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) | `null` |
+
+**The consumer rule: `checked == false` implies every one of the three
+fields is `null` on every item, full stop — never conditional on the
+item.** `checked == true` means the check ran online across the scope's
+registries; it does not guarantee every item resolved (a single
+registry's catalog refresh failing degrades only that registry's rows,
+same as `grim search`). `update_available` is reserved for a future
+release and is always `null` today, independent of `checked`.
 
 `config list`'s `type` field is one of `string`, `boolean`, `integer`,
 `enum`, `string-list`, `string-set`. `string-list` is an ordered, open

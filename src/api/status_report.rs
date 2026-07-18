@@ -28,6 +28,29 @@
 //! for a declared-bundle row (never installs itself) and a dev-install row
 //! (installed out-of-band via `grim install <path>`, independent of the
 //! project's configured client set).
+//!
+//! `checked` (top-level, sibling of `items` — same envelope pattern as
+//! `publish`'s `announce`) is `true` only when `--check` was passed **and**
+//! the invocation ran online; `false` on a plain `grim status` (no `--check`
+//! ⇒ no network, ever) or a `--check` run that is offline (degrades with one
+//! stderr warning). This is the consumer rule for the three
+//! catalog-derived item fields below: **`checked == false` implies every one
+//! of them is `null` on every item.** `checked == true` means the check ran
+//! online across the scope's registries — one registry's catalog refresh
+//! failing degrades only *that* registry's rows to `null`, `checked` still
+//! reports `true` (the attempt was made online; see
+//! [`crate::catalog::load_catalog`]'s per-registry degrade).
+//!
+//! `deprecated` / `replaced_by` mirror `grim search`'s fields of the same
+//! name: the publisher's deprecation notice and named successor, matched
+//! against the freshly-loaded catalog by `(registry, repository)` for a
+//! registry-sourced item (`pinned` is `Some`). `null` for a declared-bundle
+//! row, a dev-install row, or a path-sourced item (none carry a registry
+//! pin) — and for any item when `checked` is `false`.
+//!
+//! `update_available` is reserved for a future release — always `null`
+//! today, added now so the JSON shape does not grow again once it is
+//! populated (frozen-additive: see `docs/src/stability.md`).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -73,6 +96,16 @@ pub struct StatusEntry {
     /// config no longer targets (`recorded − desired`). Sorted; `[]` when
     /// there is no such drift.
     pub clients_extra: Vec<String>,
+    /// The publisher's deprecation message for a registry-sourced item,
+    /// from `--check`'s catalog load. `null` when `checked` is `false`, the
+    /// item carries no registry pin, or the catalog carries no notice.
+    pub deprecated: Option<String>,
+    /// The publisher-named successor reference for a registry-sourced item,
+    /// from `--check`'s catalog load. `null` under the same conditions as
+    /// `deprecated`.
+    pub replaced_by: Option<String>,
+    /// Reserved: always `null` until a future release populates it.
+    pub update_available: Option<bool>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -90,12 +123,16 @@ fn serialize_opt_pinned<S: Serializer>(pinned: &Option<PinnedIdentifier>, s: S) 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     items: Vec<StatusEntry>,
+    /// Whether `--check` ran a live catalog lookup for this report. See the
+    /// module doc for the full consumer contract.
+    checked: bool,
 }
 
 impl StatusReport {
-    /// Build from operation results.
-    pub fn new(items: Vec<StatusEntry>) -> Self {
-        Self { items }
+    /// Build from operation results. `checked` is `true` iff `--check` was
+    /// passed and the run was online (see the module doc).
+    pub fn new(items: Vec<StatusEntry>, checked: bool) -> Self {
+        Self { items, checked }
     }
 }
 
@@ -136,33 +173,45 @@ mod tests {
         PinnedIdentifier::try_from(id).unwrap()
     }
 
+    /// A minimal entry with every field at its "nothing to report" default;
+    /// tests override only the fields they exercise via struct-update syntax.
+    fn base_entry(name: &str) -> StatusEntry {
+        StatusEntry {
+            kind: ArtifactKind::Rule,
+            name: name.to_string(),
+            source: "direct".to_string(),
+            pinned: None,
+            state: ArtifactStatus::Missing,
+            outputs: Vec::new(),
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
+            deprecated: None,
+            replaced_by: None,
+            update_available: None,
+        }
+    }
+
     #[test]
     fn plain_single_table() {
-        let r = StatusReport::new(vec![
-            StatusEntry {
-                kind: ArtifactKind::Skill,
-                name: "code-review".to_string(),
-                source: "direct".to_string(),
-                pinned: Some(pinned("code-review")),
-                state: ArtifactStatus::Installed,
-                outputs: vec![StatusOutput {
-                    client: "claude".to_string(),
-                    path: "/w/.claude/skills/code-review".into(),
-                }],
-                clients_missing: Vec::new(),
-                clients_extra: Vec::new(),
-            },
-            StatusEntry {
-                kind: ArtifactKind::Rule,
-                name: "rust-style".to_string(),
-                source: "bundle: ghcr.io/acme/stack".to_string(),
-                pinned: None,
-                state: ArtifactStatus::Missing,
-                outputs: Vec::new(),
-                clients_missing: Vec::new(),
-                clients_extra: Vec::new(),
-            },
-        ]);
+        let r = StatusReport::new(
+            vec![
+                StatusEntry {
+                    kind: ArtifactKind::Skill,
+                    pinned: Some(pinned("code-review")),
+                    state: ArtifactStatus::Installed,
+                    outputs: vec![StatusOutput {
+                        client: "claude".to_string(),
+                        path: "/w/.claude/skills/code-review".into(),
+                    }],
+                    ..base_entry("code-review")
+                },
+                StatusEntry {
+                    source: "bundle: ghcr.io/acme/stack".to_string(),
+                    ..base_entry("rust-style")
+                },
+            ],
+            false,
+        );
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -175,16 +224,13 @@ mod tests {
 
     #[test]
     fn json_pinned_null_when_unlocked() {
-        let r = StatusReport::new(vec![StatusEntry {
-            kind: ArtifactKind::Rule,
-            name: "x".to_string(),
-            source: "direct".to_string(),
-            pinned: None,
-            state: ArtifactStatus::Stale,
-            outputs: Vec::new(),
-            clients_missing: Vec::new(),
-            clients_extra: Vec::new(),
-        }]);
+        let r = StatusReport::new(
+            vec![StatusEntry {
+                state: ArtifactStatus::Stale,
+                ..base_entry("x")
+            }],
+            false,
+        );
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -200,19 +246,19 @@ mod tests {
 
     #[test]
     fn json_outputs_carries_client_and_path() {
-        let r = StatusReport::new(vec![StatusEntry {
-            kind: ArtifactKind::Skill,
-            name: "s".to_string(),
-            source: "direct".to_string(),
-            pinned: Some(pinned("s")),
-            state: ArtifactStatus::Installed,
-            outputs: vec![StatusOutput {
-                client: "claude".to_string(),
-                path: "/w/.claude/skills/s".into(),
+        let r = StatusReport::new(
+            vec![StatusEntry {
+                kind: ArtifactKind::Skill,
+                pinned: Some(pinned("s")),
+                state: ArtifactStatus::Installed,
+                outputs: vec![StatusOutput {
+                    client: "claude".to_string(),
+                    path: "/w/.claude/skills/s".into(),
+                }],
+                ..base_entry("s")
             }],
-            clients_missing: Vec::new(),
-            clients_extra: Vec::new(),
-        }]);
+            false,
+        );
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -222,20 +268,63 @@ mod tests {
 
     #[test]
     fn json_client_drift_fields_are_always_present_arrays() {
-        let r = StatusReport::new(vec![StatusEntry {
-            kind: ArtifactKind::Skill,
-            name: "s".to_string(),
-            source: "direct".to_string(),
-            pinned: Some(pinned("s")),
-            state: ArtifactStatus::Installed,
-            outputs: Vec::new(),
-            clients_missing: vec!["opencode".to_string()],
-            clients_extra: vec!["copilot".to_string()],
-        }]);
+        let r = StatusReport::new(
+            vec![StatusEntry {
+                kind: ArtifactKind::Skill,
+                pinned: Some(pinned("s")),
+                state: ArtifactStatus::Installed,
+                clients_missing: vec!["opencode".to_string()],
+                clients_extra: vec!["copilot".to_string()],
+                ..base_entry("s")
+            }],
+            false,
+        );
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["clients_missing"], serde_json::json!(["opencode"]));
         assert_eq!(v["items"][0]["clients_extra"], serde_json::json!(["copilot"]));
+    }
+
+    /// C3 contract: `checked` rides the envelope as a sibling of `items`,
+    /// and `deprecated`/`replaced_by`/`update_available` are always-present
+    /// (never an absent key) even when null — the additive-field policy.
+    #[test]
+    fn json_checked_and_remote_fields_always_present() {
+        let r = StatusReport::new(vec![base_entry("x")], false);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["checked"], false);
+        let item = &v["items"][0];
+        assert!(item.as_object().unwrap().contains_key("deprecated"));
+        assert!(item.as_object().unwrap().contains_key("replaced_by"));
+        assert!(item.as_object().unwrap().contains_key("update_available"));
+        assert!(item["deprecated"].is_null());
+        assert!(item["replaced_by"].is_null());
+        assert!(item["update_available"].is_null());
+    }
+
+    /// `checked: true` carries populated `deprecated`/`replaced_by` on a
+    /// matched item; `update_available` stays null regardless (reserved for
+    /// a future commit).
+    #[test]
+    fn json_checked_true_carries_populated_deprecation_fields() {
+        let r = StatusReport::new(
+            vec![StatusEntry {
+                pinned: Some(pinned("old-skill")),
+                deprecated: Some("use new-skill instead".to_string()),
+                replaced_by: Some("ghcr.io/acme/new-skill".to_string()),
+                ..base_entry("old-skill")
+            }],
+            true,
+        );
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["checked"], true);
+        assert_eq!(v["items"][0]["deprecated"], "use new-skill instead");
+        assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/new-skill");
+        assert!(v["items"][0]["update_available"].is_null());
     }
 }

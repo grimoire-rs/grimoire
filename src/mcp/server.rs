@@ -89,6 +89,10 @@ impl GrimMcpServer {
         let status_args = crate::command::status::StatusArgs {
             global: args.scope.global(),
             config: args.scope.config,
+            // No tool param: the MCP tool never spends network on a live
+            // catalog check (parity with `grim_search`'s hardcoded
+            // `show_deprecated: false` — no per-call override yet).
+            check: false,
             workspace: args.scope.workspace,
         };
         match crate::command::status::run(&self.inner.ctx, &status_args).await {

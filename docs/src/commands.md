@@ -406,7 +406,10 @@ per-[client](./concepts.md#clients) locations the artifact was materialized
 to, read back from install state. It is empty for a declared-but-not-installed
 artifact. This is the supported way to script "where did grim put this file?"
 — the on-disk layout under each client's directory is an implementation
-detail and may change.
+detail and may change. Each item also carries `clients_missing` /
+`clients_extra`: the project's configured client target diffed against the
+artifact's recorded install-state clients, entirely from local state (no
+network) — sorted arrays, `[]` when the two sets agree.
 
 ```json
 {
@@ -419,10 +422,44 @@ detail and may change.
       "state": "installed",
       "outputs": [
         { "client": "claude", "path": "/repo/.claude/skills/code-review" }
-      ]
+      ],
+      "clients_missing": [],
+      "clients_extra": [],
+      "deprecated": null,
+      "replaced_by": null,
+      "update_available": null
     }
-  ]
+  ],
+  "checked": false
 }
+```
+
+### grim status --check {#status-check}
+
+`--check` adds one live catalog lookup — the same
+[`load_catalog`](#search) seam `grim search`/`tui`/`mcp` share, scoped to
+the project's configured registries — and fills in `deprecated` /
+`replaced_by` on every registry-sourced row (a directly-declared or
+bundle-member artifact; a declared bundle, a dev-install, or a
+[path-sourced](#add-path) artifact carries no registry pin, so it is never
+matched). It costs one network round-trip regardless of how many artifacts
+are declared.
+
+`checked` (top-level, alongside `items`) reports whether the check actually
+ran: `true` only when `--check` was passed and the invocation is online.
+Combined with `--offline` (or `$GRIM_OFFLINE`), the check is skipped
+entirely — one stderr warning explains why, `checked` stays `false`, every
+`deprecated`/`replaced_by` stays `null`, and the command still exits `0`. A
+single registry's catalog refresh failing (offline cache, transport error)
+degrades only that registry's rows to `null`; `checked` still reports `true`
+— the attempt was made online, it just came back partial for that source.
+
+`update_available` is reserved for a future release and is always `null`
+today, regardless of `checked`.
+
+```sh
+grim status --check
+grim status --check --format json
 ```
 
 ## grim context {#context}

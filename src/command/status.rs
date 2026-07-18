@@ -14,13 +14,22 @@
 //! configured client target (`[options].clients`) diffed against the
 //! artifact's recorded install-state clients — entirely local, no
 //! network. See `src/api/status_report.rs`.
+//!
+//! `--check` adds one coordinated catalog load (the same
+//! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) and
+//! populates `deprecated`/`replaced_by` on every registry-sourced row,
+//! matched by `(registry, repository)`. Skipped entirely when the
+//! invocation is offline (`--offline` or `$GRIM_OFFLINE`): the report's
+//! top-level `checked` stays `false` and one stderr warning explains why.
+//! See `src/api/status_report.rs` for the full nullability contract.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use clap::Args;
 
 use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::{StatusEntry, StatusOutput, StatusReport};
+use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
@@ -45,6 +54,14 @@ pub struct StatusArgs {
     /// Explicit project config path.
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Re-check every registry-sourced artifact against the live catalog
+    /// for deprecation / replacement (and, in a future release, update
+    /// availability). Requires network; skipped with a stderr warning when
+    /// combined with `--offline` (or `$GRIM_OFFLINE`) — the report's
+    /// `checked` field reports whether the check actually ran.
+    #[arg(long)]
+    pub check: bool,
 
     /// Walk-up seed for project-config discovery (no CLI surface — set by
     /// the `grim mcp` per-call `workspace` parameter; the CLI default is
@@ -143,6 +160,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // "missing" on every row, which isn't real drift.
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            // A bundle declaration carries no registry pin of its own —
+            // `--check` has nothing to match it against.
+            deprecated: None,
+            replaced_by: None,
+            update_available: None,
         });
     }
 
@@ -184,6 +206,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             outputs,
             clients_missing,
             clients_extra,
+            // Populated below by `apply_catalog_check` when `--check` ran
+            // online; stays null otherwise.
+            deprecated: None,
+            replaced_by: None,
+            update_available: None,
         });
     }
 
@@ -210,6 +237,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // desired set would flag spurious drift on every dev row.
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            // A dev install carries no registry pin (always a local path
+            // source) — `--check` has nothing to match it against.
+            deprecated: None,
+            replaced_by: None,
+            update_available: None,
         });
     }
 
@@ -243,11 +275,71 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 outputs,
                 clients_missing,
                 clients_extra,
+                deprecated: None,
+                replaced_by: None,
+                update_available: None,
             });
         }
     }
 
-    Ok((StatusReport::new(entries), ExitCode::Success))
+    // `--check`: one coordinated catalog load, then populate `deprecated` /
+    // `replaced_by` on every registry-sourced row. `checked` is `true` iff
+    // the check ran online — a single degraded registry (offline cache,
+    // transport failure) still counts, since `load_catalog` degrades that
+    // registry's group to empty rather than failing the whole browse; only
+    // a fully offline invocation flips `checked` back to `false`.
+    let checked = should_check(args.check, ctx.offline());
+    if args.check && !checked {
+        tracing::warn!("`--check` requires network access; skipped because grim is running offline");
+    }
+    if checked {
+        let access = super::access_seam(ctx)?;
+        let registries = super::registries_for_scope(ctx, &scope);
+        let badges = BadgeContext {
+            lock: lock.as_ref(),
+            state: &state,
+            roots: &scope.roots,
+            active: &active,
+        };
+        match crate::catalog::load_catalog(&ctx.paths(), &registries, "", &access, &badges, ctx.offline(), false).await
+        {
+            Ok(results) => apply_catalog_check(&mut entries, &results.into_flat_rows()),
+            Err(e) => {
+                tracing::warn!("`--check` catalog load failed; deprecation/replacement fields stay null: {e:#}");
+            }
+        }
+    }
+
+    Ok((StatusReport::new(entries, checked), ExitCode::Success))
+}
+
+/// Whether `--check` actually runs a live catalog lookup this invocation:
+/// the flag was passed **and** the run is online. This is the sole gate for
+/// the top-level `checked` field grim status reports — see
+/// `src/api/status_report.rs` for the full consumer contract.
+fn should_check(check: bool, offline: bool) -> bool {
+    check && !offline
+}
+
+/// Populate `deprecated` / `replaced_by` on every registry-sourced entry
+/// (`pinned` is `Some`) from a freshly-loaded catalog, matched by
+/// `(registry, repository)` — the same identity `PinnedIdentifier` carries.
+/// An entry with no pin (declared-bundle row, dev-install row, path source)
+/// or an unmatched repository is left untouched (stays `None`).
+fn apply_catalog_check(entries: &mut [StatusEntry], rows: &[CatalogRow]) {
+    let by_repo: HashMap<(&str, &str), &CatalogRow> = rows
+        .iter()
+        .map(|r| ((r.registry.as_str(), r.repository.as_str()), r))
+        .collect();
+    for entry in entries.iter_mut() {
+        let Some(pinned) = entry.pinned.as_ref() else {
+            continue;
+        };
+        if let Some(row) = by_repo.get(&(pinned.registry(), pinned.repository())) {
+            entry.deprecated = row.deprecated.clone();
+            entry.replaced_by = row.replaced_by.clone();
+        }
+    }
 }
 
 /// Every declared artifact (skills, then rules, then agents, then mcp) as
@@ -473,6 +565,99 @@ mod tests {
         let id = Identifier::new_registry("x", "localhost:5000")
             .clone_with_digest(Digest::Sha256(std::iter::repeat_n(byte, 64).collect()));
         PinnedIdentifier::try_from(id).unwrap()
+    }
+
+    /// A minimal `StatusEntry` for `apply_catalog_check` tests — only
+    /// `pinned` varies between cases.
+    fn check_entry(pinned: Option<PinnedIdentifier>) -> StatusEntry {
+        StatusEntry {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            source: "direct".to_string(),
+            pinned,
+            state: ArtifactStatus::Installed,
+            outputs: Vec::new(),
+            clients_missing: Vec::new(),
+            clients_extra: Vec::new(),
+            deprecated: None,
+            replaced_by: None,
+            update_available: None,
+        }
+    }
+
+    fn catalog_row(
+        registry: &str,
+        repository: &str,
+        deprecated: Option<&str>,
+        replaced_by: Option<&str>,
+    ) -> CatalogRow {
+        CatalogRow {
+            kind: Some("skill".to_string()),
+            registry: registry.to_string(),
+            repository: repository.to_string(),
+            summary: None,
+            description: None,
+            keywords: Vec::new(),
+            repository_url: None,
+            revision: None,
+            created: None,
+            deprecated: deprecated.map(str::to_string),
+            replaced_by: replaced_by.map(str::to_string),
+            oci: crate::catalog::OciMeta::default(),
+            latest_tag: None,
+            version: None,
+            badge: crate::install::status_badge::StatusBadge::NotInstalled,
+        }
+    }
+
+    /// C3 spec: `checked` is `true` only when `--check` was passed AND the
+    /// run is online — offline always wins regardless of the flag.
+    #[test]
+    fn should_check_true_only_when_check_and_online() {
+        assert!(should_check(true, false));
+        assert!(!should_check(true, true));
+        assert!(!should_check(false, false));
+        assert!(!should_check(false, true));
+    }
+
+    /// C3 spec: a registry-sourced entry (`pinned` is `Some`) matched by
+    /// `(registry, repository)` picks up the catalog row's deprecation
+    /// notice and successor reference.
+    #[test]
+    fn apply_catalog_check_populates_matching_registry_entry() {
+        let mut entries = vec![check_entry(Some(pinned('a')))];
+        let rows = vec![catalog_row(
+            "localhost:5000",
+            "x",
+            Some("use new-skill instead"),
+            Some("ghcr.io/acme/new-skill"),
+        )];
+        apply_catalog_check(&mut entries, &rows);
+        assert_eq!(entries[0].deprecated.as_deref(), Some("use new-skill instead"));
+        assert_eq!(entries[0].replaced_by.as_deref(), Some("ghcr.io/acme/new-skill"));
+    }
+
+    /// C3 spec: a declared-bundle / dev-install / path-sourced row (no
+    /// registry pin) has nothing to match against — `apply_catalog_check`
+    /// must leave it untouched, never panic on the missing pin.
+    #[test]
+    fn apply_catalog_check_leaves_unpinned_entry_untouched() {
+        let mut entries = vec![check_entry(None)];
+        let rows = vec![catalog_row("localhost:5000", "x", Some("use new-skill instead"), None)];
+        apply_catalog_check(&mut entries, &rows);
+        assert!(entries[0].deprecated.is_none());
+        assert!(entries[0].replaced_by.is_none());
+    }
+
+    /// A pin whose `(registry, repository)` has no row in the freshly-loaded
+    /// catalog (e.g. dropped from the registry, or a registry that degraded
+    /// to an empty group) stays null rather than matching the wrong row.
+    #[test]
+    fn apply_catalog_check_leaves_unmatched_repo_null() {
+        let mut entries = vec![check_entry(Some(pinned('a')))];
+        let rows = vec![catalog_row("localhost:5000", "some-other-repo", Some("msg"), None)];
+        apply_catalog_check(&mut entries, &rows);
+        assert!(entries[0].deprecated.is_none());
     }
 
     fn locked(byte: char) -> LockedArtifact {
