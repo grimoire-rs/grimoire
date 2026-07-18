@@ -18,6 +18,7 @@ pub mod index_announce;
 pub mod index_source;
 pub mod registry_catalog;
 pub mod search_match;
+pub mod update_availability;
 
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
