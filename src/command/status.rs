@@ -16,19 +16,27 @@
 //! network. See `src/api/status_report.rs`.
 //!
 //! `--check` adds one coordinated catalog load (the same
-//! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) and
+//! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) that
 //! populates `deprecated`/`replaced_by` on every registry-sourced row,
-//! matched by `(registry, repository)`. Skipped entirely when the
-//! invocation is offline (`--offline` or `$GRIM_OFFLINE`): the report's
-//! top-level `checked` stays `false` and one stderr warning explains why.
-//! See `src/api/status_report.rs` for the full nullability contract.
+//! matched by `(registry, repository)`; and, for every directly-declared,
+//! registry-locked row, a fresh per-artifact tag re-resolution (bounded
+//! concurrency, the `crate::catalog::update_availability` seam the TUI's
+//! `↑ outdated` badge uses) that populates `update_available`. Both are
+//! skipped entirely when the invocation is offline (`--offline` or
+//! `$GRIM_OFFLINE`): the report's top-level `checked` stays `false` and one
+//! stderr warning explains why. See `src/api/status_report.rs` for the full
+//! nullability contract.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use clap::Args;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::{StatusEntry, StatusOutput, StatusReport};
+use crate::catalog::update_availability::{outdated_from_resolve, resolve_latest_digest};
 use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
@@ -39,10 +47,28 @@ use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
-use crate::oci::ArtifactKind;
+use crate::oci::access::OciAccess;
+use crate::oci::access::error::AccessError;
 use crate::oci::reference::ArtifactRef;
+use crate::oci::{ArtifactKind, Digest, Identifier};
 
 use super::scope_resolution;
+
+/// Maximum concurrent per-artifact update re-resolutions under `--check`.
+/// Mirrors the TUI's `ROW_CHECK_CONCURRENCY`: a polite cap so a large lock
+/// never opens hundreds of simultaneous registry connections at once.
+const UPDATE_CHECK_CONCURRENCY: usize = 8;
+
+/// One directly-declared, registry-locked artifact scheduled for a fresh
+/// update-availability re-resolution: where to write the result back
+/// (`index` into the entries vec), the tagless `registry/repository`
+/// identifier to re-resolve, and the lock pin the fresh digest is compared
+/// against.
+struct UpdateCheck {
+    index: usize,
+    base: Identifier,
+    locked: Digest,
+}
 
 /// `grim status` arguments.
 #[derive(Debug, Args)]
@@ -56,10 +82,11 @@ pub struct StatusArgs {
     pub config: Option<std::path::PathBuf>,
 
     /// Re-check every registry-sourced artifact against the live catalog
-    /// for deprecation / replacement (and, in a future release, update
-    /// availability). Requires network; skipped with a stderr warning when
-    /// combined with `--offline` (or `$GRIM_OFFLINE`) — the report's
-    /// `checked` field reports whether the check actually ran.
+    /// for deprecation / replacement, and re-resolve each directly-declared
+    /// registry-locked artifact's current tag to report update availability.
+    /// Requires network; skipped with a stderr warning when combined with
+    /// `--offline` (or `$GRIM_OFFLINE`) — the report's `checked` field
+    /// reports whether the check actually ran.
     #[arg(long)]
     pub check: bool,
 
@@ -170,6 +197,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 
     // Directly-declared skills and rules.
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
+    // Per-artifact update-availability re-resolutions, filled below only for
+    // directly-declared registry-locked rows and run under `--check`.
+    let mut update_checks: Vec<UpdateCheck> = Vec::new();
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
         let record = state.get(decl.kind, &decl.name);
@@ -197,17 +227,32 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             None => "direct".to_string(),
         };
         let (clients_missing, clients_extra) = client_drift(desired.clients(), recorded_clients(record));
+        let pinned = locked.and_then(|l| l.source.pinned().cloned());
+        // A directly-declared registry-locked row is the only kind eligible
+        // for a fresh update re-resolution (issue #43): path/dev rows carry no
+        // pin, and a bundle member updates via its bundle rather than its own
+        // tag (built in the bundle-member loop below, never here). Schedule the
+        // tagless `registry/repository` identifier + the lock pin as the
+        // comparison baseline — the entry's index is its position in `entries`.
+        if let Some(p) = pinned.as_ref() {
+            update_checks.push(UpdateCheck {
+                index: entries.len(),
+                base: Identifier::new_registry(p.repository(), p.registry()),
+                locked: p.digest(),
+            });
+        }
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
             source,
-            pinned: locked.and_then(|l| l.source.pinned().cloned()),
+            pinned,
             state: entry_state,
             outputs,
             clients_missing,
             clients_extra,
-            // Populated below by `apply_catalog_check` when `--check` ran
-            // online; stays null otherwise.
+            // Populated below by `apply_catalog_check` (deprecated/replaced_by)
+            // and `resolve_update_availability` (update_available) when
+            // `--check` ran online; stays null otherwise.
             deprecated: None,
             replaced_by: None,
             update_available: None,
@@ -308,6 +353,13 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 tracing::warn!("`--check` catalog load failed; deprecation/replacement fields stay null: {e:#}");
             }
         }
+        // Fresh per-artifact update-availability re-resolution — independent of
+        // the catalog load above (issue #21: the cached catalog tag can hide a
+        // newer semver release). A failed re-resolve leaves that row's
+        // `update_available` null; every other row's stays null too.
+        for (index, avail) in resolve_update_availability(&access, update_checks).await {
+            entries[index].update_available = avail;
+        }
     }
 
     Ok((StatusReport::new(entries, checked), ExitCode::Success))
@@ -339,6 +391,64 @@ fn apply_catalog_check(entries: &mut [StatusEntry], rows: &[CatalogRow]) {
             entry.deprecated = row.deprecated.clone();
             entry.replaced_by = row.replaced_by.clone();
         }
+    }
+}
+
+/// Re-resolve every scheduled artifact's current registry latest-tag digest
+/// fresh (issue #21's `list_tags` + representative-tag resolve) with bounded
+/// concurrency, mapping each to its `update_available`. Mirrors the TUI's
+/// per-row background sweep ([`crate::tui::update_check`]): a
+/// [`Semaphore`]-bounded [`JoinSet`], the same
+/// [`resolve_latest_digest`]/[`outdated_from_resolve`] seam, the lock pin as
+/// the comparison baseline. Returns `(index, update_available)` pairs — the
+/// caller writes each back into `entries[index]`; collecting into a `Vec`
+/// after every task joins makes the merge deterministic regardless of task
+/// completion order.
+async fn resolve_update_availability(
+    access: &Arc<dyn OciAccess>,
+    checks: Vec<UpdateCheck>,
+) -> Vec<(usize, Option<bool>)> {
+    let permits = Arc::new(Semaphore::new(UPDATE_CHECK_CONCURRENCY));
+    let mut set: JoinSet<(usize, Option<bool>)> = JoinSet::new();
+    for check in checks {
+        let access = Arc::clone(access);
+        let permits = Arc::clone(&permits);
+        set.spawn(async move {
+            // Hold a permit for the lifetime of the registry call so
+            // concurrency stays bounded. `acquire_owned` fails only on a closed
+            // semaphore, which never happens (we hold the `Arc`); degrade that
+            // impossible case to a null result rather than an unbounded call.
+            let _permit = match permits.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => return (check.index, None),
+            };
+            let resolved = resolve_latest_digest(&*access, &check.base).await;
+            (check.index, update_available_from_resolve(&check.locked, resolved))
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        // A panicked task degrades to no result for that row (`update_available`
+        // stays null); a read-only status report never fails on a check.
+        if let Ok(pair) = joined {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+/// Map a per-artifact re-resolution outcome to `update_available`.
+///
+/// A **completed** resolve (`Ok`) yields `Some`: `true` when the registry's
+/// fresh representative-tag digest differs from the lock pin, `false` when it
+/// matches — or when the tag vanished (`Ok(None)`), since absence is never a
+/// newer pin (mirrors [`outdated_from_resolve`]'s `None ⇒ false`). A **failed**
+/// resolve (`Err` — transport/auth) yields `None`: absence of an answer must
+/// never lie as `false`.
+fn update_available_from_resolve(locked: &Digest, resolved: Result<Option<Digest>, AccessError>) -> Option<bool> {
+    match resolved {
+        Ok(fresh) => Some(outdated_from_resolve(locked, fresh.as_ref())),
+        Err(_) => None,
     }
 }
 
@@ -658,6 +768,76 @@ mod tests {
         let rows = vec![catalog_row("localhost:5000", "some-other-repo", Some("msg"), None)];
         apply_catalog_check(&mut entries, &rows);
         assert!(entries[0].deprecated.is_none());
+    }
+
+    // ── C4: update-availability null/bool mapping + deterministic merge ────
+
+    /// The load-bearing nullability contract (issue #43): a **completed**
+    /// re-resolve yields `Some(bool)` — `false` even when the tag vanished
+    /// (`Ok(None)`), since absence is never a newer pin — while a **failed**
+    /// re-resolve yields `None`, so absence never lies as `false`.
+    #[test]
+    fn update_available_maps_completed_and_failed_resolves() {
+        let locked = Algorithm::Sha256.hash(b"locked");
+        let newer = Algorithm::Sha256.hash(b"newer");
+        // completed, digest differs ⇒ Some(true).
+        assert_eq!(update_available_from_resolve(&locked, Ok(Some(newer))), Some(true));
+        // completed, digest matches ⇒ Some(false).
+        assert_eq!(
+            update_available_from_resolve(&locked, Ok(Some(locked.clone()))),
+            Some(false)
+        );
+        // completed, tag vanished / no representative ⇒ Some(false), not None.
+        assert_eq!(update_available_from_resolve(&locked, Ok(None)), Some(false));
+        // failed (transport/auth/offline) ⇒ None — absence must not read false.
+        assert_eq!(
+            update_available_from_resolve(
+                &locked,
+                Err(AccessError::without_identifier(
+                    crate::oci::access::error::AccessErrorKind::OfflineMiss
+                ))
+            ),
+            None
+        );
+    }
+
+    /// The bounded-concurrency merge keys each result back by its `entries`
+    /// index and is order-independent: a row whose registry carries a newer
+    /// representative tag maps to `Some(true)`, a row pinned at its sole tag
+    /// maps to `Some(false)`.
+    #[tokio::test]
+    async fn resolve_update_availability_merges_by_index() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let reg = MemoryRegistry::new();
+        // repo a: locked at 1.0.0, registry now also carries a higher 2.0.0.
+        let a = Identifier::new_registry("ns/a", "localhost:5000");
+        let a1 = Algorithm::Sha256.hash(b"a-1.0.0");
+        let a2 = Algorithm::Sha256.hash(b"a-2.0.0");
+        reg.put_tag(&a, "1.0.0", &a1).await.unwrap();
+        reg.put_tag(&a, "2.0.0", &a2).await.unwrap();
+        // repo b: locked at its sole tag ⇒ up to date.
+        let b = Identifier::new_registry("ns/b", "localhost:5000");
+        let b1 = Algorithm::Sha256.hash(b"b-1.0.0");
+        reg.put_tag(&b, "1.0.0", &b1).await.unwrap();
+
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        // Non-contiguous indices prove the result is keyed by index, not order.
+        let checks = vec![
+            UpdateCheck {
+                index: 5,
+                base: a,
+                locked: a1,
+            },
+            UpdateCheck {
+                index: 2,
+                base: b,
+                locked: b1,
+            },
+        ];
+        let mut got = resolve_update_availability(&access, checks).await;
+        got.sort_by_key(|(i, _)| *i);
+        assert_eq!(got, vec![(2, Some(false)), (5, Some(true))]);
     }
 
     fn locked(byte: char) -> LockedArtifact {

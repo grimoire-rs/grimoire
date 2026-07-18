@@ -48,9 +48,15 @@
 //! row, a dev-install row, or a path-sourced item (none carry a registry
 //! pin) — and for any item when `checked` is `false`.
 //!
-//! `update_available` is reserved for a future release — always `null`
-//! today, added now so the JSON shape does not grow again once it is
-//! populated (frozen-additive: see `docs/src/stability.md`).
+//! `update_available` is a fresh per-artifact re-resolution under `--check`
+//! (issue #43): for a directly-declared, registry-locked item grim
+//! re-discovers the registry's current representative tag and compares its
+//! digest to the lock pin. `true` when the registry is newer, `false` when
+//! it matches (or the tag vanished — a completed re-resolve that finds
+//! nothing newer). `null` when `checked` is `false`, for a row with no lock
+//! pin (declared-bundle / dev-install / path source), for a bundle member
+//! (it updates via its bundle, not its own tag), or when the re-resolution
+//! failed — absence never lies as `false`.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -104,7 +110,10 @@ pub struct StatusEntry {
     /// from `--check`'s catalog load. `null` under the same conditions as
     /// `deprecated`.
     pub replaced_by: Option<String>,
-    /// Reserved: always `null` until a future release populates it.
+    /// Whether the registry carries a newer digest than the lock pin, from
+    /// `--check`'s fresh per-artifact re-resolution. `null` when the check
+    /// did not run, the row has no lock pin, it is a bundle member, or the
+    /// re-resolution failed. See the module doc for the full contract.
     pub update_available: Option<bool>,
 }
 
@@ -306,8 +315,9 @@ mod tests {
     }
 
     /// `checked: true` carries populated `deprecated`/`replaced_by` on a
-    /// matched item; `update_available` stays null regardless (reserved for
-    /// a future commit).
+    /// matched item; the report is a pure serializer, so an entry the command
+    /// left with `update_available: None` still renders as `null` (the
+    /// command owns the value — see `command::status`).
     #[test]
     fn json_checked_true_carries_populated_deprecation_fields() {
         let r = StatusReport::new(

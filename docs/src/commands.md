@@ -454,8 +454,19 @@ single registry's catalog refresh failing (offline cache, transport error)
 degrades only that registry's rows to `null`; `checked` still reports `true`
 — the attempt was made online, it just came back partial for that source.
 
-`update_available` is reserved for a future release and is always `null`
-today, regardless of `checked`.
+`update_available` is populated by a **fresh per-artifact re-resolution**,
+independent of that one catalog lookup: for each directly-declared,
+registry-locked row grim re-discovers the registry's current
+representative tag and compares its digest to the lock pin — the same "is a
+newer version available?" decision the [TUI](#tui)'s `↑ outdated` badge
+uses (so a newer semver release surfaces even when the cached catalog tag
+is stale). It is `true` when the registry's latest digest differs from the
+lock pin, `false` when it matches (or the tag vanished), and `null` for a
+row with no lock pin (declared-bundle, dev-install, [path source](#add-path)),
+a bundle-member row (it updates via its bundle, not its own tag), or an
+artifact whose re-resolution failed — a completed re-resolve never reports
+`null`, and a failed one never lies as `false`. These per-artifact checks
+run with bounded concurrency; `status` still always exits `0`.
 
 ```sh
 grim status --check

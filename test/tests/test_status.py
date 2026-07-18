@@ -250,8 +250,9 @@ def test_status_check_populates_deprecation_fields(
     row = next(r for r in result["items"] if r["name"] == "old-skill")
     assert row["deprecated"] == "use new-skill instead"
     assert row["replaced_by"] == "ghcr.io/acme/new-skill"
-    # Reserved for a future release — always null regardless of `checked`.
-    assert row["update_available"] is None
+    # The skill is locked at its only tag, so the fresh re-resolution finds
+    # nothing newer ⇒ a completed re-resolve reports `false`, never `null`.
+    assert row["update_available"] is False
 
 
 def test_status_default_run_leaves_remote_fields_null(
@@ -295,3 +296,66 @@ def test_status_check_offline_degrades(
     row = next(r for r in doc["items"] if r["name"] == "old-skill")
     assert row["deprecated"] is None
     assert row["replaced_by"] is None
+    # `--check --offline` never re-resolves ⇒ update_available stays null.
+    assert row["update_available"] is None
+
+
+# ── --check: fresh per-artifact update availability (issue #43, C4) ─────
+
+
+def test_status_check_reports_update_available(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`--check` re-resolves each directly-declared, registry-locked row's
+    current latest tag fresh (issue #43/#21) and reports `update_available`:
+    `true` when the registry now carries a newer digest than the lock pin,
+    and `null` for a path-sourced row (no registry pin)."""
+    repo = f"{unique_repo}/s"
+    v1 = make_artifact(repo, "skill", {"s/SKILL.md": "v1\n"}, tag="1.0.0")
+
+    # A local path-sourced skill carries no registry pin ⇒ never re-resolved.
+    local = project_dir / "skills" / "local"
+    local.mkdir(parents=True)
+    (local / "SKILL.md").write_text(
+        "---\nname: local\ndescription: Local demo skill.\n---\n# local\n"
+    )
+
+    write_config(
+        project_dir, skills={"s": v1.pinned, "local": "./skills/local"}
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    # The registry now carries a strictly newer release the lock has not seen.
+    v2 = make_artifact(repo, "skill", {"s/SKILL.md": "v2\n"}, tag="2.0.0")
+    assert v1.digest != v2.digest
+
+    result = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )
+    assert result["checked"] is True
+    rows = {r["name"]: r for r in result["items"]}
+    assert rows["s"]["update_available"] is True, rows["s"]
+    assert rows["local"]["update_available"] is None, rows["local"]
+
+
+def test_status_check_installed_at_latest_reports_false(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An artifact already locked at the registry's highest tag re-resolves
+    to the same digest ⇒ `update_available` is `false` (a completed
+    re-resolve that finds nothing newer, never `null`)."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v1\n"}, tag="1.0.0")
+    v2 = make_artifact(repo, "skill", {"s/SKILL.md": "v2\n"}, tag="2.0.0")
+
+    write_config(project_dir, skills={"s": v2.pinned})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    row = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )["items"][0]
+    assert row["update_available"] is False, row

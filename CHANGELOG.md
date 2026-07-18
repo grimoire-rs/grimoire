@@ -9,14 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grim status --check` populates `update_available` on every
+  directly-declared, registry-locked item via a fresh per-artifact tag
+  re-resolution (bounded concurrency): grim re-discovers each repo's
+  current representative tag on the registry and compares its digest to
+  the lock pin — the same "is a newer version available?" decision the
+  TUI's `↑ outdated` badge uses (issues #43, #21), independent of the
+  cached catalog tag, so a newer semver release surfaces even when the
+  cache is stale. `true` when the registry's latest digest differs from
+  the lock pin, `false` when it matches (or the tag vanished); `null` for
+  a row with no lock pin (declared-bundle, dev-install, path source), a
+  bundle-member row (it updates via its bundle, not its own tag), or an
+  artifact whose re-resolution failed — a completed re-resolve never
+  reports `null`, and a failed one never lies as `false`. Exit code is
+  unaffected (`status` still always exits `0`) *(status)*
 - `grim status --check` runs one coordinated catalog load against the
   scope's configured registries and populates `deprecated` /
   `replaced_by` on every registry-sourced item, matched by
   `(registry, repository)` — the same fields `grim search` already
   reports. The report gains a top-level `checked` field (sibling of
-  `items`) and each item gains `deprecated`, `replaced_by`, and a
-  reserved `update_available` (always `null` until a future release
-  populates it). `checked` is `true` only when `--check` ran online;
+  `items`) and each item gains `deprecated`, `replaced_by`, and
+  `update_available`. `checked` is `true` only when `--check` ran online;
   combined with `--offline` (or `GRIM_OFFLINE`) the check is skipped
   with one stderr warning, `checked` stays `false`, and the three new
   fields stay `null` — exit code is unaffected (`status` still always

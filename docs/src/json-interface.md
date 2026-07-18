@@ -88,23 +88,46 @@ case, so there is no path to report; `status` is `skipped`.
 
 `status`'s top-level `checked` gates three per-item fields —
 `deprecated`, `replaced_by`, `update_available` — added by
-[`--check`](./commands.md#status-check):
+[`--check`](./commands.md#status-check). `checked == false` (no `--check`,
+or `--check --offline`) forces all three to `null` on every item.
 
-| `checked` | Item condition | `deprecated` / `replaced_by` | `update_available` |
-|-----------|-----------------|-------------------------------|---------------------|
-| `false` (no `--check`, or `--check --offline`) | any | `null` | `null` |
-| `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` | `null` |
-| `true` | registry pin, no catalog match (dropped repo, or that item's registry degraded) | `null` | `null` |
-| `true` | registry pin, catalog match, not deprecated | `null` | `null` |
-| `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) | `null` |
+`deprecated` / `replaced_by` come from the freshly-loaded catalog, matched
+by `(registry, repository)`:
+
+| `checked` | Item condition | `deprecated` / `replaced_by` |
+|-----------|-----------------|-------------------------------|
+| `false` | any | `null` |
+| `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
+| `true` | registry pin (direct or bundle member), no catalog match (dropped repo, or that item's registry degraded) | `null` |
+| `true` | registry pin, catalog match, not deprecated | `null` |
+| `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) |
+
+`update_available` is a **fresh per-artifact re-resolution** (issue #43),
+computed independently of the catalog match above: for each
+directly-declared, registry-locked row, grim re-discovers the registry's
+current representative tag (issue #21's `list_tags` + latest-tag resolve)
+and compares that digest to the lock pin — the same "is a newer version
+available?" decision the TUI's `↑ outdated` badge uses:
+
+| `checked` | Item condition | `update_available` |
+|-----------|-----------------|---------------------|
+| `false` | any | `null` |
+| `true` | no lock pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
+| `true` | bundle-member pin — a member updates via its bundle, not its own tag | `null` |
+| `true` | direct registry pin, re-resolution failed (transport/auth) | `null` |
+| `true` | direct registry pin, re-resolution completed, registry digest **differs** from the lock pin | `true` |
+| `true` | direct registry pin, re-resolution completed, registry digest **matches** the lock pin (or the tag vanished) | `false` |
 
 **The consumer rule: `checked == false` implies every one of the three
 fields is `null` on every item, full stop — never conditional on the
 item.** `checked == true` means the check ran online across the scope's
-registries; it does not guarantee every item resolved (a single
-registry's catalog refresh failing degrades only that registry's rows,
-same as `grim search`). `update_available` is reserved for a future
-release and is always `null` today, independent of `checked`.
+registries; it does not guarantee every item resolved. A single
+registry's catalog refresh failing degrades only that registry's rows'
+`deprecated`/`replaced_by` (same as `grim search`); a single artifact's
+re-resolution failing leaves just that row's `update_available` `null`. A
+completed re-resolution that finds nothing newer reports `false` — only a
+failed re-resolution (or an ineligible row) reports `null`, so absence
+never lies as `false`.
 
 `config list`'s `type` field is one of `string`, `boolean`, `integer`,
 `enum`, `string-list`, `string-set`. `string-list` is an ordered, open
