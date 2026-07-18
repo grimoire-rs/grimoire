@@ -244,12 +244,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
-        let (clients_missing, clients_extra) = match &desired_clients {
-            Some(desired) => client_drift(desired, recorded_clients(record)),
-            // Autodetect: no explicit target to diff against, so report no
-            // drift rather than keying off live detection.
-            None => (Vec::new(), Vec::new()),
-        };
+        let (clients_missing, clients_extra) = client_drift(desired_clients.as_deref(), recorded_clients(record));
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
         // A directly-declared registry-locked row is the only kind eligible
         // for a fresh update re-resolution (issue #43): path/dev rows carry no
@@ -333,12 +328,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             let record = state.get(member.kind, &member.name);
             let outputs = record_outputs(record, &active, &scope.roots);
-            let (clients_missing, clients_extra) = match &desired_clients {
-                Some(desired) => client_drift(desired, recorded_clients(record)),
-                // Autodetect: no explicit target to diff against, so report no
-                // drift rather than keying off live detection.
-                None => (Vec::new(), Vec::new()),
-            };
+            let (clients_missing, clients_extra) = client_drift(desired_clients.as_deref(), recorded_clients(record));
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -539,7 +529,13 @@ fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
 /// `desired − recorded` (configured but never installed here);
 /// `clients_extra` is `recorded − desired` (installed here but dropped
 /// from config). Both sorted for deterministic JSON output.
-fn client_drift(desired: &[ClientTarget], recorded: &[ClientOutput]) -> (Vec<String>, Vec<String>) {
+///
+/// `desired: None` means autodetect — no explicit target to diff against,
+/// so both vectors come back empty rather than keying off live detection.
+fn client_drift(desired: Option<&[ClientTarget]>, recorded: &[ClientOutput]) -> (Vec<String>, Vec<String>) {
+    let Some(desired) = desired else {
+        return (Vec::new(), Vec::new());
+    };
     let desired: BTreeSet<String> = desired.iter().map(ToString::to_string).collect();
     let recorded: BTreeSet<String> = recorded.iter().map(|o| o.client.clone()).collect();
     (
@@ -904,7 +900,7 @@ mod tests {
     #[test]
     fn client_drift_narrowed_desired_reports_extra() {
         let recorded = [client_output("claude"), client_output("opencode")];
-        let (missing, extra) = client_drift(&[ClientTarget::Claude], &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude]), &recorded);
         assert_eq!(missing, Vec::<String>::new());
         assert_eq!(extra, vec!["opencode".to_string()]);
     }
@@ -914,7 +910,7 @@ mod tests {
     #[test]
     fn client_drift_widened_desired_reports_missing() {
         let recorded = [client_output("claude")];
-        let (missing, extra) = client_drift(&[ClientTarget::Claude, ClientTarget::OpenCode], &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded);
         assert_eq!(missing, vec!["opencode".to_string()]);
         assert_eq!(extra, Vec::<String>::new());
     }
@@ -922,7 +918,7 @@ mod tests {
     #[test]
     fn client_drift_matching_sets_are_both_empty() {
         let recorded = [client_output("claude"), client_output("opencode")];
-        let (missing, extra) = client_drift(&[ClientTarget::Claude, ClientTarget::OpenCode], &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded);
         assert!(missing.is_empty());
         assert!(extra.is_empty());
     }
@@ -932,13 +928,23 @@ mod tests {
     fn client_drift_output_is_sorted() {
         let recorded: [ClientOutput; 0] = [];
         let (missing, _extra) = client_drift(
-            &[ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode],
+            Some(&[ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode]),
             &recorded,
         );
         assert_eq!(
             missing,
             vec!["claude".to_string(), "codex".to_string(), "opencode".to_string()]
         );
+    }
+
+    /// Autodetect (`desired: None`) reports no drift — there is no explicit
+    /// target to diff the recorded outputs against.
+    #[test]
+    fn client_drift_none_desired_is_no_drift() {
+        let recorded = [client_output("claude"), client_output("opencode")];
+        let (missing, extra) = client_drift(None, &recorded);
+        assert!(missing.is_empty());
+        assert!(extra.is_empty());
     }
 
     #[test]
