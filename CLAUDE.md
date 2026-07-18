@@ -157,14 +157,12 @@ Layout moves ship automatic state migration, an old-path reaper, and an upgrade 
 
 ## Workflow
 
-**Worktrees**: Four git worktrees with fixed branch names:
-
-| Directory | Branch |
-|-----------|--------|
-| `grimoire` | `goat` |
-| `grim-evelynn` | `evelynn` |
-| `grim-sion` | `sion` |
-| `grim-soraka` | `soraka` |
+**Worktrees**: `grimoire` is the primary checkout (`main`). Feature work
+happens in ad hoc git worktrees created as siblings, named
+`../grimoire-wt-<topic>` on a matching `<type>/<topic>` branch (e.g.
+`../grimoire-wt-status-check` on `feat/status-check`) — created and torn
+down per task, not a fixed roster. `git worktree list` shows what is
+currently checked out.
 
 **Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/)
 (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes optional. No

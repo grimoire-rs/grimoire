@@ -359,34 +359,20 @@ class TestClaudeMd:
             f"CLAUDE.md says '{stated}' principles but has {actual} headings"
         )
 
-    def test_worktree_count_matches_table(self, claude_md_text: str) -> None:
-        """The stated worktree count must match the table rows.
+    def test_worktrees_documented_as_ad_hoc(self, claude_md_text: str) -> None:
+        """Worktrees are created ad hoc (../grimoire-wt-<topic>), not a fixed
+        roster — CLAUDE.md must not reassert a stale fixed count/table.
 
-        Bug captured: Says 'Three git worktrees' but table has four entries.
+        Bug captured: a fixed "N git worktrees" + table pattern drifts out of
+        sync with reality (the prior table named worktrees that no longer
+        exist) and needs re-verifying by hand on every worktree churn. The
+        ad hoc convention makes the count itself not a fact to state.
         """
-        match = re.search(r"\*\*Worktrees\*\*: (\w+) git worktrees", claude_md_text)
-        assert match, "Could not find worktree count in CLAUDE.md"
-        stated = match.group(1)
-
-        word_to_num = {
-            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-        }
-        stated_num = word_to_num.get(stated.lower(), int(stated) if stated.isdigit() else None)
-
-        # Count table rows (lines with | that aren't headers or separators)
-        in_worktree = False
-        rows = 0
-        for line in claude_md_text.splitlines():
-            if "Worktrees" in line:
-                in_worktree = True
-                continue
-            if in_worktree:
-                if line.strip().startswith("| `"):
-                    rows += 1
-                elif line.strip() and not line.strip().startswith("|"):
-                    break
-        assert stated_num == rows, (
-            f"CLAUDE.md says '{stated}' worktrees but table has {rows} entries"
+        assert "grimoire-wt-" in claude_md_text, (
+            "CLAUDE.md should document the ../grimoire-wt-<topic> worktree convention"
+        )
+        assert not re.search(r"\*\*Worktrees\*\*: \w+ git worktrees", claude_md_text), (
+            "CLAUDE.md should not reassert a fixed worktree count/table"
         )
 
 
