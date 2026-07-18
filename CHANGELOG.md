@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits `0`). A single registry's catalog refresh failing degrades only
   that registry's rows to `null`; `checked` still reports `true` since
   the check did run online *(status)*
+- `grim_status` MCP tool gains an optional `check` argument (default
+  `false`) that forwards to `command::status::run`'s live catalog
+  re-check — same semantics as CLI `grim status --check` (issue #43): the
+  report's top-level `checked` and per-item `deprecated` / `replaced_by`
+  / `update_available` fields populate the same way over MCP as over the
+  CLI. A read tool regardless — network reads only, no `--allow-writes`
+  gate (precedent: `grim_search`'s catalog browse) *(mcp)*
 - `grim status` items gain two always-present, always-empty-when-clean
   arrays, `clients_missing` and `clients_extra`: the project's configured
   client target (`[options].clients`, the same seam `grim context`

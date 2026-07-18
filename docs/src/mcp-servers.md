@@ -333,7 +333,9 @@ the source descriptor [`catalog/mcp/grim.toml`][catalog-mcp-grim] shown
 descriptor. Once registered it exposes five tools — `grim_search`,
 `grim_status`, `grim_fetch`, `grim_describe`, and (behind `--allow-writes`)
 `grim_render` — each taking the install scope as optional per-call
-arguments; the full tool table lives at [`grim mcp`](./commands.md#mcp).
+arguments; `grim_status` also takes an optional `check` argument for a
+live catalog re-check (network read, same as CLI `grim status --check`);
+the full tool table lives at [`grim mcp`](./commands.md#mcp).
 
 ## Limitations {#limitations}
 

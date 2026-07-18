@@ -398,6 +398,113 @@ def test_mcp_search_ignores_agent_supplied_registry(
     )
 
 
+def test_mcp_status_default_call_leaves_checked_false(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path
+) -> None:
+    """Default ``grim_status`` call (no ``check`` argument) is unchanged: the
+    top-level ``checked`` stays ``false``. The new ``check`` arg defaults
+    off, so an existing harness that never sends it keeps behaving exactly
+    as before.
+    """
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_status", "arguments": {}},
+            },
+        ],
+    )
+
+    call = responses[2]["result"]
+    assert call["isError"] is False, f"grim_status must not error: {call!r}"
+    payload = json.loads(call["content"][0]["text"])
+    assert payload["checked"] is False, (
+        f"default call must leave checked false, got: {payload!r}"
+    )
+
+
+def test_mcp_status_check_true_forwards_to_command_status_run(
+    grim_at: Callable[[Path], GrimRunner],
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """``{"check": true}`` forwards to ``command::status::run``'s live
+    catalog re-check (issue #43), same as CLI ``grim status --check``: the
+    top-level ``checked`` flips to ``true`` and the matching row picks up
+    ``deprecated`` / ``replaced_by`` / ``update_available`` from a fresh
+    registry lookup. Needs the network, so the server runs non-offline; the
+    registry is declared directly in ``grimoire.toml`` (scoped to this
+    test's throwaway namespace) since the MCP tool exposes no per-call
+    registry override.
+    """
+    repo = f"{unique_repo}/old-skill"
+    make_artifact(
+        repo,
+        "skill",
+        {"old-skill/SKILL.md": "---\nname: old-skill\n---\n# old\n"},
+        tag="stable",
+        annotations={
+            "com.grimoire.deprecated": "use new-skill instead",
+            "com.grimoire.replaced-by": "ghcr.io/acme/new-skill",
+        },
+    )
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\n'
+        f'alias = "reg"\n'
+        f'oci = "{REGISTRY_HOST}/{unique_repo}"\n'
+        f'default = true\n'
+        f"\n"
+        f"[skills]\n"
+        f'old-skill = "{REGISTRY_HOST}/{repo}:stable"\n'
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_status", "arguments": {"check": True}},
+            },
+        ],
+        offline=False,
+    )
+
+    call = responses[2]["result"]
+    assert call["isError"] is False, f"grim_status --check must not error: {call!r}"
+    mcp_payload = json.loads(call["content"][0]["text"])
+    assert mcp_payload["checked"] is True, (
+        f"check:true must flip checked, got: {mcp_payload!r}"
+    )
+
+    cli_payload = runner.json("status", "--check")
+    assert mcp_payload == cli_payload, (
+        "MCP grim_status(check=true) must equal CLI status --check --format json;\n"
+        f"  MCP: {mcp_payload!r}\n  CLI: {cli_payload!r}"
+    )
+
+    row = next(r for r in mcp_payload["items"] if r["name"] == "old-skill")
+    assert row["deprecated"] == "use new-skill instead"
+    assert row["replaced_by"] == "ghcr.io/acme/new-skill"
+    assert row["update_available"] is False
+
+
 def _call_status(runner: GrimRunner, cwd: Path, arguments: dict) -> list:
     """Drive one offline ``grim_status`` tool call, return the parsed payload."""
     responses = _drive(

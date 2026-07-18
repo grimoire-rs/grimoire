@@ -83,16 +83,16 @@ impl GrimMcpServer {
     /// Report the install status of every declared artifact in the requested
     /// scope. Returns the same JSON payload as `grim status --format json`.
     #[tool(
-        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Returns a JSON object with an `items` array."
+        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Set `check: true` to re-check the live catalog for deprecation/replacement and re-resolve update availability (optional network read, same as CLI `grim status --check`; the report's `checked` field says whether it actually ran). Returns a JSON object with an `items` array."
     )]
     async fn grim_status(&self, Parameters(args): Parameters<StatusToolArgs>) -> Result<String, ErrorData> {
         let status_args = crate::command::status::StatusArgs {
             global: args.scope.global(),
             config: args.scope.config,
-            // No tool param: the MCP tool never spends network on a live
-            // catalog check (parity with `grim_search`'s hardcoded
-            // `show_deprecated: false` — no per-call override yet).
-            check: false,
+            // Forwarded straight through — same semantics as the CLI's
+            // `--check` (network reads only, no `--allow-writes` gate;
+            // precedent: `grim_search`'s catalog browse is also unguarded).
+            check: args.check,
             workspace: args.scope.workspace,
         };
         match crate::command::status::run(&self.inner.ctx, &status_args).await {

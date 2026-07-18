@@ -156,6 +156,16 @@ pub struct RenderToolArgs {
 /// Arguments for the `grim_status` tool.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct StatusToolArgs {
+    /// Re-check every registry-sourced artifact against the live catalog for
+    /// deprecation/replacement, and re-resolve each directly-declared
+    /// registry-locked artifact's current tag for update availability.
+    /// Requires network; the report's `checked` field says whether the check
+    /// actually ran (skipped when offline). Same semantics as the CLI's
+    /// `grim status --check`. A read tool regardless — network reads only,
+    /// no `--allow-writes` gate (precedent: `grim_search`'s catalog browse).
+    #[serde(default)]
+    pub check: bool,
+
     /// Per-call scope selection.
     #[serde(flatten, default)]
     pub scope: ScopeToolArgs,
@@ -220,6 +230,31 @@ mod tests {
             for key in ["global", "config", "workspace"] {
                 assert!(props.get(key).is_some(), "missing flattened property {key} in {schema}");
             }
+        }
+    }
+
+    #[test]
+    fn status_args_check_flag_defaults_false_and_deserializes_true() {
+        // Absent `check` ⇒ default false (parity with the CLI's `--check`
+        // being off by default).
+        let bare: StatusToolArgs = serde_json::from_str("{}").unwrap();
+        assert!(!bare.check);
+
+        let checked: StatusToolArgs = serde_json::from_str(r#"{"check": true}"#).unwrap();
+        assert!(checked.check);
+    }
+
+    #[test]
+    fn status_args_expose_check_in_json_schema() {
+        // The new `check` property must survive alongside the flattened
+        // `scope` fields — a schemars flatten-guard extension: flatten +
+        // a sibling non-flattened field must not shadow one another in the
+        // generated schema.
+        let schema = serde_json::to_value(schemars::schema_for!(StatusToolArgs)).unwrap();
+        let props = schema.get("properties").expect("schema has properties");
+        assert!(props.get("check").is_some(), "missing check property in {schema}");
+        for key in ["global", "config", "workspace"] {
+            assert!(props.get(key).is_some(), "missing flattened property {key} in {schema}");
         }
     }
 
