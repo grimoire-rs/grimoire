@@ -798,7 +798,7 @@ like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
 | `z` | Fold the whole tree: if anything is collapsed, expand everything; otherwise collapse back to the configured [`expand_levels`][options-tui] depth. Tree mode only. |
 | `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle); on a leaf entry, open the detail pane as usual. |
 | `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
-| `i` / `u` / `d` on a group | Install, update, or uninstall every leaf in the subtree (when no other rows are individually marked). Batch behavior follows the same selection precedence as the flat view. |
+| `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on not-yet-installed or integrity-missing leaves, `u`/`d` act on installed ones (including outdated, modified, or integrity-missing). Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
 
 Each group row shows a rollup glyph reflecting the worst install state of
 its descendants — `↑` when any descendant is outdated, `✱` when any is

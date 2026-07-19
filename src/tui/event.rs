@@ -10,7 +10,7 @@
 //! place); this module operates on the abstract input so the whole
 //! decision table is unit-testable headlessly.
 
-use super::state::{Mode, TuiState, ViewMode};
+use super::state::{ArtifactState, Mode, TuiState, ViewMode};
 
 /// Rows one `PageUp`/`PageDown` press scrolls the detail pane. A fixed
 /// step (not the live pane height, which the pure layer cannot know);
@@ -277,11 +277,45 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
     }
 }
 
-/// A batch action over the current targets (marked set, else selection).
-/// `None` when there is nothing to act on.
-fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
-    let rows = state.action_targets();
+/// Whether `op` may act on a row currently in `state` — the same allowed
+/// sets as the single-Member fast-path gates in `handle()`'s `i`/`u`/`d`
+/// arms; keep both in sync. F13: explicit arms, no `_ =>` wildcard over
+/// the closed `ArtifactState` enum.
+fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
+    match op {
+        BatchOp::Install => matches!(state, ArtifactState::NotInstalled | ArtifactState::IntegrityMissing),
+        BatchOp::Update | BatchOp::Uninstall => matches!(
+            state,
+            ArtifactState::Installed
+                | ArtifactState::ViaBundle
+                | ArtifactState::Outdated
+                | ArtifactState::Modified
+                | ArtifactState::IntegrityMissing
+        ),
+    }
+}
+
+/// A batch action over the current targets (marked set, else selection),
+/// filtered to rows `op` may act on (bug #2: an unfiltered forward let
+/// `u`/`d` on a group reach `NotInstalled` descendants, which `perform()`
+/// would install rather than reject). `None` when there is nothing to act
+/// on, or when filtering empties the set (a status breadcrumb explains why,
+/// mirroring the single-Member gates' wording).
+fn batch(state: &mut TuiState, op: BatchOp) -> TuiAction {
+    let targets = state.action_targets();
+    let had_targets = !targets.is_empty();
+    let rows: Vec<usize> = targets
+        .into_iter()
+        .filter(|&idx| state.rows.get(idx).is_some_and(|row| op_allows(op, row.state)))
+        .collect();
     if rows.is_empty() {
+        if had_targets {
+            let reason = match op {
+                BatchOp::Install => "already installed",
+                BatchOp::Update | BatchOp::Uninstall => "not installed",
+            };
+            state.set_status(reason);
+        }
         TuiAction::None
     } else {
         TuiAction::Batch { op, rows }
@@ -686,6 +720,11 @@ mod tests {
     fn install_update_no_marks_target_selection() {
         let mut s = seeded();
         s.move_selection(1); // select row index 1
+        // bug #2 follow-up: this test asserts both Install and Update batch
+        // over the same row — IntegrityMissing is the one ArtifactState
+        // both ops' allowed sets include (op_allows), so it exercises the
+        // op-aware filter without tripping it.
+        s.rows[1].state = ArtifactState::IntegrityMissing;
         assert_eq!(
             handle(&mut s, TuiInput::Char('i')),
             TuiAction::Batch {
@@ -709,9 +748,27 @@ mod tests {
         );
     }
 
+    // bug #2: flat-mode single selection has no Member-gate fast path (that
+    // path is Tree-mode-only), so `batch()`'s op_allows filter is the ONLY
+    // gate here — lock it down for both refusal ops.
+    #[test]
+    fn update_delete_on_not_installed_row_in_flat_mode_is_refused() {
+        let mut s = seeded();
+        s.move_selection(1); // row 1 stays ArtifactState::NotInstalled
+        assert_eq!(handle(&mut s, TuiInput::Update), TuiAction::None);
+        assert!(!s.status_line.is_empty(), "status breadcrumb must explain the refusal");
+        s.status_line.clear();
+        assert_eq!(handle(&mut s, TuiInput::Delete), TuiAction::None);
+        assert!(!s.status_line.is_empty(), "status breadcrumb must explain the refusal");
+    }
+
     #[test]
     fn marks_drive_batch_over_selection() {
         let mut s = seeded();
+        // bug #2 follow-up: row 2 is asserted against Install (marked, with
+        // row 0) and then Update (single selection after clearing marks) —
+        // IntegrityMissing is allowed by both ops' filter (op_allows).
+        s.rows[2].state = ArtifactState::IntegrityMissing;
         // Mark row 0 and row 2.
         handle(&mut s, TuiInput::Mark);
         s.move_selection(2);
@@ -754,6 +811,10 @@ mod tests {
     fn delete_emits_uninstall_batch_and_is_literal_in_search() {
         let mut s = seeded();
         s.move_selection(2);
+        // bug #2 follow-up: Uninstall's op_allows filter requires an
+        // installed-ish state — this test only exercises delete, so
+        // Installed (not IntegrityMissing) matches the intent plainly.
+        s.rows[2].state = ArtifactState::Installed;
         assert_eq!(
             handle(&mut s, TuiInput::Char('d')),
             TuiAction::Batch {
@@ -1813,9 +1874,21 @@ mod tree_event_tests {
     // Step 3.3: `i`/`u`/`d` on a group emit Batch over descendant rows.
     // After a group space-mark cascades descendants into `marked`,
     // install/update/delete must target those descendant row indices.
+    //
+    // bug #2 follow-up: `two_leaf_state()`'s default `NotInstalled` rows
+    // would now be filtered OUT of Update/Delete (only `Install` allows
+    // `NotInstalled`), breaking this test's ability to assert a full-set
+    // `Batch` across all three ops. `IntegrityMissing` is the one state
+    // every op's allowed set includes (Install: reinstall a missing
+    // record; Update/Uninstall: recover/remove it) — set it here, locally,
+    // so this test keeps guarding "batch fires over every cascaded
+    // descendant row" for i/u/d alike without weakening the op-aware gate
+    // this fixture would otherwise trip.
     #[test]
     fn i_u_d_after_group_mark_emit_batch_over_descendants() {
         let mut s = two_leaf_state();
+        s.rows[0].state = ArtifactState::IntegrityMissing;
+        s.rows[1].state = ArtifactState::IntegrityMissing;
         // Switch to tree mode; position 0 is then the `acme` group.
         handle(&mut s, TuiInput::ViewToggle);
 
@@ -1970,5 +2043,194 @@ mod tree_event_tests {
         // `z` again expands everything.
         handle(&mut s, TuiInput::Char('z'));
         assert_eq!(s.flattened().len(), full, "z expands the whole tree");
+    }
+}
+
+// ── Bug 2 regression: group / marked-set batch actions must apply the same
+// per-op ArtifactState gate the single-Member fast path already enforces
+// (event.rs:360-475). `batch()` (event.rs ~282-289) currently forwards
+// `state.action_targets()` verbatim — every descendant/marked row, with no
+// state filtering — so pressing `u` with a GROUP selected (or a NotInstalled
+// row marked) sends NotInstalled descendants through `perform()` and they
+// get fully installed (`integrity_gate` is a no-op with no `InstallRecord`;
+// see `src/install/installer.rs:819`). These tests encode the intended
+// post-fix contract: `batch()` filters targets by the op's allowed
+// `ArtifactState` set (mirroring the Member gates' arms) before emitting
+// `TuiAction::Batch`, and emits `TuiAction::None` + a status breadcrumb when
+// filtering empties the set. In a separate `mod` per this file's convention
+// (see the NOTE above `p2_event_member_node_tests`) to avoid merge conflicts.
+#[cfg(test)]
+mod bug2_group_batch_state_gate_tests {
+    use super::*;
+    use crate::tui::state::{ArtifactState, TuiRow, TuiState};
+
+    fn group_row(repo: &str, state: ArtifactState) -> TuiRow {
+        let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
+        TuiRow {
+            oci: crate::catalog::OciMeta::default(),
+            kind: "skill".to_string(),
+            registry: reg.to_string(),
+            repository: repo_path.to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            revision: None,
+            created: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            deprecated: None,
+            pinned_version: None,
+            state,
+            source: None,
+        }
+    }
+
+    /// A tree-mode state with `(leaf-name, state)` rows all under one
+    /// `reg/acme/...` group (mirrors `tree_seeded()` / `two_leaf_state()`
+    /// elsewhere in this file), selection left on the group header (pos 0).
+    fn group_state(rows: Vec<(&str, ArtifactState)>) -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(
+            rows.into_iter()
+                .map(|(leaf, state)| group_row(&format!("reg/acme/{leaf}"), state))
+                .collect(),
+        );
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree; position 0 is the `acme` group.
+        s.selected = 0;
+        assert!(s.selected_is_group(), "precondition: position 0 must be the acme group");
+        s
+    }
+
+    // a) Group with one Installed + one NotInstalled descendant: `u` must
+    // target ONLY the Installed row.
+    // Fails today: batch() forwards action_targets() unfiltered → rows == [0, 1].
+    #[test]
+    fn update_group_selection_excludes_not_installed_descendant() {
+        let mut s = group_state(vec![
+            ("alpha", ArtifactState::Installed),
+            ("beta", ArtifactState::NotInstalled),
+        ]);
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                op: BatchOp::Update,
+                rows: vec![0],
+            },
+            "update on a mixed group must exclude the NotInstalled descendant"
+        );
+    }
+
+    // b) Group whose descendants are ALL NotInstalled: `u` must be a no-op
+    // (TuiAction::None) with a status breadcrumb set, not a Batch.
+    // Fails today: batch() emits Batch{Update, [0, 1]}.
+    #[test]
+    fn update_group_all_not_installed_emits_none_with_status() {
+        let mut s = group_state(vec![
+            ("alpha", ArtifactState::NotInstalled),
+            ("beta", ArtifactState::NotInstalled),
+        ]);
+        assert!(s.status_line.is_empty(), "precondition: no status set yet");
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::None,
+            "update on an all-NotInstalled group must be a no-op, not a Batch"
+        );
+        assert!(
+            !s.status_line.is_empty(),
+            "a status breadcrumb must explain why nothing happened"
+        );
+    }
+
+    // c) Marked set spanning Installed + NotInstalled rows: `u` must exclude
+    // the NotInstalled index — the marks branch of action_targets() is
+    // equally unfiltered today (marking a NotInstalled row and pressing `u`
+    // hits the same defect as a group selection).
+    // Fails today: rows == [0, 1].
+    #[test]
+    fn update_marked_set_excludes_not_installed() {
+        let mut s = group_state(vec![
+            ("alpha", ArtifactState::Installed),
+            ("beta", ArtifactState::NotInstalled),
+        ]);
+        // Explicit marks win over the group selection (C-5); mark both leaves.
+        s.marked.insert(0);
+        s.marked.insert(1);
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                op: BatchOp::Update,
+                rows: vec![0],
+            },
+            "marked-set update must exclude the NotInstalled row"
+        );
+    }
+
+    // d) Mirror for `i`: group with NotInstalled + Installed + IntegrityMissing
+    // descendants — install must target NotInstalled and IntegrityMissing,
+    // excluding the already-Installed row.
+    // Fails today: rows == [0, 1, 2] (unfiltered).
+    #[test]
+    fn install_group_selection_targets_not_installed_and_integrity_missing_only() {
+        let mut s = group_state(vec![
+            ("alpha", ArtifactState::NotInstalled),
+            ("beta", ArtifactState::Installed),
+            ("gamma", ArtifactState::IntegrityMissing),
+        ]);
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![0, 2],
+            },
+            "install on a mixed group must exclude the already-Installed descendant"
+        );
+    }
+
+    // e) Mirror for `d`: group with an Installed + a NotInstalled descendant
+    // — delete must exclude the NotInstalled row.
+    // Fails today: rows == [0, 1].
+    #[test]
+    fn delete_group_selection_excludes_not_installed_descendant() {
+        let mut s = group_state(vec![
+            ("alpha", ArtifactState::Installed),
+            ("beta", ArtifactState::NotInstalled),
+        ]);
+        assert_eq!(
+            handle(&mut s, TuiInput::Delete),
+            TuiAction::Batch {
+                op: BatchOp::Uninstall,
+                rows: vec![0],
+            },
+            "delete on a mixed group must exclude the NotInstalled descendant"
+        );
+    }
+
+    // f) A group mixing Installed / ViaBundle / Outdated / Modified /
+    // IntegrityMissing / NotInstalled: `u` keeps every state EXCEPT
+    // NotInstalled (mirrors the single-Member Update gate's allowed set at
+    // event.rs:419-423).
+    // Fails today: rows include index 5 (NotInstalled) too.
+    #[test]
+    fn update_group_selection_keeps_every_allowed_state_except_not_installed() {
+        let mut s = group_state(vec![
+            ("n1", ArtifactState::Installed),
+            ("n2", ArtifactState::ViaBundle),
+            ("n3", ArtifactState::Outdated),
+            ("n4", ArtifactState::Modified),
+            ("n5", ArtifactState::IntegrityMissing),
+            ("n6", ArtifactState::NotInstalled),
+        ]);
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                op: BatchOp::Update,
+                rows: vec![0, 1, 2, 3, 4],
+            },
+            "update must keep every allowed state and exclude only NotInstalled"
+        );
     }
 }
