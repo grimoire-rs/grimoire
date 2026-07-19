@@ -36,6 +36,8 @@ mod store;
 mod tls;
 mod tui;
 
+use std::io::{self, Write};
+
 use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
@@ -177,10 +179,19 @@ fn main() -> std::process::ExitCode {
     match runtime.block_on(app::run(cli)) {
         Ok(code) => code.into(),
         Err(err) => {
+            // grim's own stdout was closed by the downstream reader
+            // (`grim … | head`): exit 0 silently. Every write below would
+            // target the now-dead pipe, so short-circuit before any of them —
+            // this is the `| head` contract (ripgrep/cargo convention), not a
+            // failure worth a code or a diagnostic.
+            if crate::error::is_stdout_pipe_closed(&err) {
+                return ExitCode::Success.into();
+            }
             // Full chain via the alternate format, printed exactly once on
             // stderr (a `tracing::error!` here would duplicate the line —
-            // the default filter also writes to stderr).
-            eprintln!("{err:#}");
+            // the default filter also writes to stderr). Best-effort: a
+            // closed stderr must not itself panic this error path.
+            let _ = writeln!(io::stderr(), "{err:#}");
             let classification = classify(&err);
             emit_error_document(format, classification.exit, &format!("{err:#}"), classification.reason);
             classification.exit.into()
@@ -217,7 +228,10 @@ fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reas
         return;
     }
     if let Ok(rendered) = serde_json::to_string_pretty(&error_document(code, message, reason)) {
-        println!("{rendered}");
+        // Best-effort: this is already the error path, and the reader may
+        // have closed stdout (the same dead-pipe hazard the stderr write
+        // above guards against).
+        let _ = writeln!(io::stdout(), "{rendered}");
     }
 }
 

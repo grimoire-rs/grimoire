@@ -15,9 +15,6 @@ use std::io::{self, IsTerminal, Write};
 /// (`grim … | head`). `main.rs` maps it to a silent exit 0. A network or
 /// file EPIPE never carries this type, so a mid-push connection reset can
 /// never masquerade as a graceful shutdown.
-// Wired into the stdout write sites and the main.rs error arm in the
-// following commits; the `dead_code` allow is removed there once used.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[error("stdout closed by downstream reader")]
 pub struct StdoutPipeClosed;
@@ -29,7 +26,6 @@ pub struct StdoutPipeClosed;
 /// Tag only at grim's own stdout write sites — never a network or file
 /// write — so [`crate::error::is_stdout_pipe_closed`] stays a reliable
 /// "the reader hung up" signal and cannot be tripped by a registry EPIPE.
-#[allow(dead_code)]
 pub fn tag_stdout_pipe(err: io::Error) -> anyhow::Error {
     if err.kind() == io::ErrorKind::BrokenPipe {
         anyhow::Error::new(StdoutPipeClosed)

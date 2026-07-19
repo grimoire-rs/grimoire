@@ -13,7 +13,7 @@ use std::io::Write;
 
 use crate::cli::exit_code::ExitCode;
 use crate::cli::options::OutputFormat;
-use crate::cli::printer::Printable;
+use crate::cli::printer::{Printable, tag_stdout_pipe};
 use crate::context::Context;
 use crate::{Cli, Command};
 
@@ -37,7 +37,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             .color(crate::cli::color::choice())
             .styles(crate::cli::color::clap_styles());
         cmd.print_help()?;
-        println!();
+        // Best-effort trailing newline: a closed stdout must not panic the
+        // bare-`grim` discovery path.
+        let _ = writeln!(std::io::stdout());
         return Ok(ExitCode::Success);
     };
 
@@ -163,11 +165,18 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 }
 
 /// Render `report` to stdout in the requested format.
-fn render<R: Printable>(report: &R, format: OutputFormat) -> std::io::Result<()> {
+///
+/// The single seam where every dispatch arm's stdout write is tagged: a
+/// `BrokenPipe` (the downstream reader closed the pipe, `grim … | head`)
+/// becomes the [`StdoutPipeClosed`](crate::cli::printer::StdoutPipeClosed)
+/// sentinel that `main.rs` maps to a silent exit 0; any other I/O fault
+/// passes through unchanged for normal classification.
+fn render<R: Printable>(report: &R, format: OutputFormat) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     match format {
-        OutputFormat::Plain => report.print_plain(&mut out)?,
-        OutputFormat::Json => report.print_json(&mut out)?,
+        OutputFormat::Plain => report.print_plain(&mut out),
+        OutputFormat::Json => report.print_json(&mut out),
     }
-    out.flush()
+    .and_then(|()| out.flush())
+    .map_err(tag_stdout_pipe)
 }

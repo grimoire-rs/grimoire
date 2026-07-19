@@ -220,9 +220,6 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
 /// `io::Error` of kind `BrokenPipe`: a registry TCP or file EPIPE must stay a
 /// loud failure, so only the sentinel tagged at grim's stdout write sites
 /// ([`crate::cli::printer::tag_stdout_pipe`]) qualifies.
-// Called from the main.rs error arm in the next commit; the `dead_code`
-// allow is removed there once wired.
-#[allow(dead_code)]
 pub fn is_stdout_pipe_closed(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.downcast_ref::<StdoutPipeClosed>().is_some())
 }
