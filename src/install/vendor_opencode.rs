@@ -99,8 +99,12 @@ impl Vendor for OpenCodeVendor {
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        // A client whose only footprint is its grim-managed MCP config is
+        // still a real OpenCode user — check that path too (same
+        // `opencode.json`/`.jsonc` grim already manages for both scopes).
+        let config_present = self.mcp_config_path(workspace, scope).is_some_and(|p| p.is_file());
         match scope {
-            ConfigScope::Project => workspace.join(".opencode").exists(),
+            ConfigScope::Project => workspace.join(".opencode").exists() || config_present,
             // Global: a present native skills dir (or its
             // `$OPENCODE_CONFIG_DIR` override) OR a present global
             // `opencode.json` config file. A configured-but-empty OpenCode
@@ -108,7 +112,7 @@ impl Vendor for OpenCodeVendor {
             // counts as a real OpenCode user.
             ConfigScope::Global => {
                 global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()).is_some_and(|p| p.exists())
-                    || opencode_config::config_path_for_scope(workspace, scope).is_some_and(|p| p.is_file())
+                    || config_present
             }
         }
     }

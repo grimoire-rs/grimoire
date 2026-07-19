@@ -84,8 +84,11 @@ def test_bundle_status_ignores_removed_client(
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
     assert (project_dir / ".opencode/skills/code-review").is_dir()
 
-    # The user disables the opencode client.
+    # The user disables the opencode client. `opencode.json` is also a
+    # detection signal (it carries grim's managed rule/MCP entries), so
+    # fully removing the client means removing its config file too.
     shutil.rmtree(project_dir / ".opencode")
+    (project_dir / "opencode.json").unlink(missing_ok=True)
 
     status = runner.json("status")["items"]
     # Every currently-active client (claude) has intact files ⇒ nothing is

@@ -199,6 +199,45 @@ def test_install_registers_entries_in_every_client_config(
     assert row["state"] == "installed"
 
 
+def test_project_status_reports_installed_for_claude_mcp_without_claude_dir(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Project-scope sibling of the global regression
+    (test_global_status_reports_installed_for_claude_mcp_without_claude_dir):
+    ``.mcp.json`` (Claude's project MCP config) is a SIBLING of ``.claude/``,
+    not something inside it — ``Vendor::detect`` checks only ``.claude/``."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+
+    # CRITICAL repro condition: another vendor IS detected (.codex/) so
+    # detect_clients returns a non-empty set that excludes claude. No
+    # .claude/ dir is ever created.
+    (project_dir / ".codex").mkdir()
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    rows = runner.json("install", "--client", "claude")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    # Sanity: write side is correct — fails only on the read side below.
+    claude_json = project_dir / ".mcp.json"
+    assert claude_json.is_file()
+    assert json.loads(claude_json.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert not (project_dir / ".claude").exists(), "install must not create .claude itself"
+
+    state_text = (project_dir / ".grimoire" / "state.json").read_text()
+    assert "grim-mcp" in state_text and '"claude"' in state_text, (
+        f"install-state record must carry the mcp entry: {state_text}"
+    )
+
+    status_rows = runner.json("status")["items"]
+    row = next(r for r in status_rows if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", (
+        "read side must report the mcp artifact installed: Vendor::detect() for "
+        "Claude checks only .claude/, never the sibling .mcp.json config; "
+        f"got state={row['state']!r}"
+    )
+
+
 def test_reformatting_the_config_is_not_modified_but_a_value_change_is(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -525,6 +564,112 @@ def test_global_claude_splice_preserves_user_state(
     # Uninstall restores the original bytes exactly.
     runner.json("uninstall", "mcp", "grim-mcp", "--global")
     assert claude_json.read_text() == user_state, "uninstall must restore the original file byte-for-byte"
+
+
+def test_global_status_reports_installed_for_claude_mcp_without_claude_dir(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Regression: a global MCP install pinned to Claude must be reported
+    ``installed`` by ``grim status --global`` even when no ``~/.claude``
+    directory ever exists — only ``~/.claude.json`` (the MCP config, a
+    SIBLING of ``~/.claude``, not something inside it). ``Vendor::detect``
+    for Claude checks only the ``~/.claude`` directory, never the MCP
+    config file, so when another client IS detected (Codex here, via its
+    own native config root) the non-empty-active-set fallback in
+    ``detect_clients`` never fires and the recorded Claude output is
+    filtered out of the active set on every read-side derivation — even
+    though both the config file and the install-state record are correct.
+    """
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor_dir = tmp_path / "src"
+    descriptor = descriptor_dir / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    # CRITICAL repro condition: another vendor IS detected (Codex, via its
+    # native config root ~/.codex) so `detect_clients` returns the
+    # non-empty set [codex] and the all-clients fallback never fires. No
+    # ~/.claude directory is ever created.
+    (runner.home / ".codex").mkdir()
+    assert not (runner.home / ".claude").exists()
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "claude")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    # Sanity: the write side is correct — both the config file and the
+    # install-state record carry the entry, so the assertion below can
+    # only fail because of the READ side.
+    claude_json = runner.home / ".claude.json"
+    assert claude_json.is_file(), "install must write ~/.claude.json even without ~/.claude"
+    claude_doc = json.loads(claude_json.read_text())
+    assert claude_doc["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert not (runner.home / ".claude").exists(), "install must not create ~/.claude itself"
+
+    state_text = (grim_home / "state" / "global.json").read_text()
+    assert "grim-mcp" in state_text and '"claude"' in state_text, (
+        f"install-state record must carry the mcp entry: {state_text}"
+    )
+
+    status_rows = runner.json("status", "--global")["items"]
+    row = next(r for r in status_rows if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", (
+        "read side must report the mcp artifact installed: Vendor::detect() for "
+        "Claude checks only ~/.claude, never the sibling ~/.claude.json MCP "
+        f"config; got state={row['state']!r}"
+    )
+
+
+def test_global_status_reports_installed_for_copilot_mcp_without_copilot_skills_dir(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Same regression class for Copilot: the global MCP config lives at
+    ``~/.copilot/mcp-config.json``, a SIBLING of ``~/.copilot/skills`` (the
+    directory ``Vendor::detect`` actually checks) — a Copilot-pinned MCP
+    install with no ``~/.copilot/skills`` present, but another vendor
+    detected, must still read back as installed. Mirrors
+    ``test_global_status_reports_installed_for_claude_mcp_without_claude_dir``."""
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    # CRITICAL repro condition, same as the Claude variant above.
+    (runner.home / ".codex").mkdir()
+    assert not (runner.home / ".copilot").exists()
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "copilot")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    copilot_json = runner.home / ".copilot" / "mcp-config.json"
+    assert copilot_json.is_file(), "install must write ~/.copilot/mcp-config.json even without ~/.copilot/skills"
+    copilot_doc = json.loads(copilot_json.read_text())
+    assert copilot_doc["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert not (runner.home / ".copilot" / "skills").exists(), "install must not create ~/.copilot/skills itself"
+
+    state_text = (grim_home / "state" / "global.json").read_text()
+    assert "grim-mcp" in state_text and '"copilot"' in state_text, (
+        f"install-state record must carry the mcp entry: {state_text}"
+    )
+
+    status_rows = runner.json("status", "--global")["items"]
+    row = next(r for r in status_rows if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", (
+        "read side must report the mcp artifact installed: Vendor::detect() for "
+        "Copilot checks only ~/.copilot/skills, never the sibling "
+        f"~/.copilot/mcp-config.json; got state={row['state']!r}"
+    )
 
 
 def test_global_copilot_skips_env_ref_descriptors(

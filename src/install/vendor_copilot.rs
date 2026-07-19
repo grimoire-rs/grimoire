@@ -75,6 +75,10 @@ impl Vendor for CopilotVendor {
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        // A client whose only footprint is its grim-managed MCP config is
+        // still a real Copilot user — check that path too (`.vscode/mcp.json`
+        // for project scope, `mcp-config.json` for global scope).
+        let mcp_present = self.mcp_config_path(workspace, scope).is_some_and(|p| p.is_file());
         match scope {
             // Project: a Copilot-SPECIFIC marker, NOT bare `.github` —
             // nearly every repo carries `.github/` for CI with nothing to
@@ -83,12 +87,14 @@ impl Vendor for CopilotVendor {
             // `.github/instructions/` directory.
             ConfigScope::Project => {
                 let github = workspace.join(".github");
-                github.join("copilot-instructions.md").is_file() || github.join("instructions").is_dir()
+                github.join("copilot-instructions.md").is_file() || github.join("instructions").is_dir() || mcp_present
             }
             // Global: the native `~/.copilot` skills root (or its
             // `$COPILOT_HOME` override) being present marks Copilot CLI as a
             // configured client on this machine.
-            ConfigScope::Global => global_skills_root(env_dir("COPILOT_HOME"), home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => {
+                global_skills_root(env_dir("COPILOT_HOME"), home_dir()).is_some_and(|p| p.exists()) || mcp_present
+            }
         }
     }
 

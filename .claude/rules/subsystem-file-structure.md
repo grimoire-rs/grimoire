@@ -294,10 +294,16 @@ for the active scope:
 
 | Client | Project signal | Global signal |
 |--------|----------------|---------------|
-| **Claude** | `<workspace>/.claude` | native root (`$CLAUDE_CONFIG_DIR` or `~/.claude`) exists |
-| **OpenCode** | `<workspace>/.opencode` | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
-| **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` | native skills root (`$COPILOT_HOME/skills` or `~/.copilot/skills`) exists — the `skills/` subdir, not the bare `~/.copilot` parent |
+| **Claude** | `<workspace>/.claude` **or** `<workspace>/.mcp.json` (a grim-managed MCP config is still a real Claude footprint, even without `.claude/`) | native root (`$CLAUDE_CONFIG_DIR` or `~/.claude`) exists **or** the sibling `.claude.json` MCP config exists |
+| **OpenCode** | `<workspace>/.opencode` **or** the resolved project `opencode.json`/`.jsonc` exists (the same file grim manages for both rules and MCP entries) | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
+| **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` — **or** `<workspace>/.vscode/mcp.json` exists | native skills root (`$COPILOT_HOME/skills` or `~/.copilot/skills`) exists — the `skills/` subdir, not the bare `~/.copilot` parent — **or** the global `mcp-config.json` exists |
 | **Codex** | `<workspace>/.codex` — **not** the shared `.agents/skills` dir (a weak cross-vendor marker, like Copilot's bare `.github` caveat) | native config root (`$CODEX_HOME` or `~/.codex`) exists |
+
+A client whose only footprint on a machine/workspace is a grim-installed
+MCP entry still counts as detected — its config file lives outside the
+vendor's skills/root marker for every client above except Codex (whose
+`config.toml` sits inside the directory `detect()` already checks, so no
+extra clause is needed there).
 
 Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
 scope)`), driven by `install::target::detect_clients`, which iterates

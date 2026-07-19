@@ -199,12 +199,18 @@ impl Vendor for ClaudeVendor {
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        // A client whose only footprint is its grim-managed MCP config is
+        // still a real Claude user — check that path too (`.mcp.json` for
+        // project scope, `.claude.json` for global scope).
+        let mcp_present = self.mcp_config_path(workspace, scope).is_some_and(|p| p.is_file());
         match scope {
-            ConfigScope::Project => workspace.join(".claude").exists(),
+            ConfigScope::Project => workspace.join(".claude").exists() || mcp_present,
             // Global: the native user-level root Claude actually discovers
             // (or its `$CLAUDE_CONFIG_DIR` override) being present marks
             // Claude as a configured client on this machine.
-            ConfigScope::Global => global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => {
+                global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).is_some_and(|p| p.exists()) || mcp_present
+            }
         }
     }
 
