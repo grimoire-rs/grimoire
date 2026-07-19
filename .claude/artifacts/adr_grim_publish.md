@@ -145,13 +145,19 @@ multi-item pattern (`InstallReport`/`UpdateReport`):
 > **Amended (announce CI ergonomics, 0.8.x):** three coupled changes ship
 > together.
 >
-> 1. **Report shape.** The JSON shape is now a wrapper object
->    `{"entries": [...], "announce": null|{outcome, branch, url?}}` so CI can
+> 1. **Report shape.** The JSON shape is now a wrapper object so CI can
 >    consume the `--announce` outcome (topic branch always present, on every
 >    outcome: pull-request / branch-pushed / up-to-date) without grepping
 >    stderr. `announce` is `null` for a non-announce run, dry-run, fail-fast
->    stop, or an announce failure. The bare-array rule in
->    subsystem-cli-api.md records publish as its documented exception; the
+>    stop, or an announce failure. **Superseded shape (re-sync note):** this
+>    amendment originally wrote `{"entries": [...], "announce": null|{outcome,
+>    branch, url?}}`; the shipped envelope is the uniform `items` form
+>    `{"items": [...], "descriptions": {...}, "announce": null|{outcome,
+>    branch, url, fork}}` (per subsystem-cli-api.md — publish is no longer a
+>    bare-array exception; `entries` was renamed `items`, `descriptions` was
+>    added, and `announce` gained an always-present `fork` field, all
+>    additive). The `announce.fork` field and the auto-fork behavior behind
+>    it are recorded in [adr_announce_fork.md](./adr_announce_fork.md). The
 >    plain table is unchanged.
 > 2. **GitLab job-token transport fallback.** On GitLab CI, when
 >    `GITLAB_CI` is truthy, `CI_JOB_TOKEN` is set/non-empty, and the index
@@ -243,8 +249,9 @@ distinct filename — see D7 rejections.
 
 ## NFRs
 
-- **Operability:** JSON report (wrapper object `{entries, announce}` — see
-  the D6 amendment; originally a bare array) for CI consumption; per-entry
+- **Operability:** JSON report (uniform `items` envelope
+  `{items, descriptions, announce}` — see the D6 amendment; originally a
+  bare array, briefly `{entries, announce}`) for CI consumption; per-entry
   status; deterministic ordering.
 - **Latency:** sequential pushes (publish.py parity). Parallel push rejected
   for v1 — registry index writes for the catalog are serialized deliberately
