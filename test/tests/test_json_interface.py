@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from src.helpers import make_artifact, make_description, write_config
 from src.registry import REGISTRY_HOST
@@ -153,6 +156,9 @@ def test_error_reason_marks_no_config(grim_at, project_dir: Path) -> None:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX fcntl.flock sidecar contention"
+)
 def test_error_reason_marks_locked_and_retryable(
     grim_at, project_dir: Path
 ) -> None:
@@ -166,12 +172,6 @@ def test_error_reason_marks_locked_and_retryable(
     rather than racing two subprocesses."""
     import fcntl
     import os
-    import sys
-
-    if sys.platform == "win32":
-        import pytest
-
-        pytest.skip("POSIX fcntl.flock sidecar contention")
 
     write_config(project_dir)
     runner = grim_at(project_dir)
