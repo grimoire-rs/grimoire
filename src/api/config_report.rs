@@ -128,8 +128,7 @@ impl Printable for ConfigGetReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
@@ -205,8 +204,7 @@ impl Printable for ConfigWriteReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
@@ -236,8 +234,7 @@ impl Printable for ConfigListReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
@@ -477,8 +474,7 @@ impl Printable for RegistryListReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
@@ -546,8 +542,7 @@ impl Printable for RegistryShowReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
@@ -588,8 +583,7 @@ impl Printable for RegistryFieldsReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 

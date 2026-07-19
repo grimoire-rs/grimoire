@@ -28,6 +28,37 @@ pub trait Printable {
     fn print_json(&self, w: &mut impl Write) -> io::Result<()>;
 }
 
+/// Serialize `value` to pretty JSON, colorized when `colored` is set.
+///
+/// The plain branch is `serde_json::to_string_pretty` — byte-identical to
+/// what every report emitted before this shared sink existed. The colored
+/// branch routes through `colored_json` with an explicit `On` mode: the
+/// TTY/env gate is decided once in [`crate::cli::color`], so this layer only
+/// applies the already-made decision.
+fn render_json(value: &impl serde::Serialize, colored: bool) -> io::Result<String> {
+    if colored {
+        let value = serde_json::to_value(value).map_err(io::Error::other)?;
+        colored_json::to_colored_json(&value, colored_json::ColorMode::On).map_err(io::Error::other)
+    } else {
+        serde_json::to_string_pretty(value).map_err(io::Error::other)
+    }
+}
+
+/// Writes `value` as pretty JSON followed by a newline — the single sink for
+/// every report's `print_json`.
+///
+/// Colorization is resolved once via [`crate::cli::color::json_colored`], which
+/// returns `false` until `main` initializes it. That default keeps report unit
+/// tests (which render directly, without init) deterministic and ANSI-free.
+///
+/// # Errors
+///
+/// Returns any serialization or I/O error encountered while writing to `w`.
+pub fn write_json_pretty(w: &mut impl Write, value: &impl serde::Serialize) -> io::Result<()> {
+    let json = render_json(value, crate::cli::color::json_colored())?;
+    writeln!(w, "{json}")
+}
+
 /// Writes a column-aligned table.
 ///
 /// Columns are padded to the widest cell (header or data). Headers are
@@ -209,5 +240,32 @@ mod tests {
     #[test]
     fn truncate_ellipsis_zero_max_is_empty() {
         assert_eq!(truncate_ellipsis("anything", 0), "");
+    }
+
+    #[test]
+    fn render_json_plain_is_ansi_free_and_parses() {
+        let value = serde_json::json!({ "name": "grim", "count": 2 });
+        let out = render_json(&value, false).unwrap();
+        assert!(!out.contains('\x1b'), "plain render must carry no ANSI: {out:?}");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed, value);
+    }
+
+    #[test]
+    fn render_json_colored_carries_ansi() {
+        let value = serde_json::json!({ "name": "grim" });
+        let out = render_json(&value, true).unwrap();
+        assert!(out.contains("\x1b["), "colored render must carry ANSI: {out:?}");
+    }
+
+    #[test]
+    fn write_json_pretty_defaults_to_plain_round_trip() {
+        // `json_colored()` is false while the OnceLock is uninitialized (no
+        // test calls `color::init`), so the sink writes plain, parseable JSON.
+        let value = serde_json::json!({ "items": [1, 2, 3] });
+        let mut buf = Vec::new();
+        write_json_pretty(&mut buf, &value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(parsed, value);
     }
 }

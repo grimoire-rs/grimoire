@@ -267,8 +267,7 @@ impl Printable for PublishReport {
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        writeln!(w, "{json}")
+        crate::cli::printer::write_json_pretty(w, self)
     }
 }
 
