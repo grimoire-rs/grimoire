@@ -32,7 +32,7 @@ a reference file has accreted one, delete it and link instead.
 ## Durable Search Terms
 
 - `grimoire grim oci package manager skills rules agents`
-- `github michael-herwig grimoire releases changelog`
+- `github grimoire-rs grimoire releases changelog`
 - `grim release cascade tags pin bundle`
 - `grim exit codes sysexits`
 
