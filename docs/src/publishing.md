@@ -897,7 +897,7 @@ special-cased always-moving tag.
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
 | `--push-registry <host[/prefix]>` | Push to this endpoint instead of the (pull) `registry`, keeping every baked and reported name on the pull registry. Overrides the manifest's `push_registry`. A malformed value exits 65 before any push. See [Push vs pull registries](#batch-publish-push-registry). |
-| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index or failed API call after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
+| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. When the credential lacks push access to the index repository, grim automatically forks it (creating or reusing a fork in the token's account) and opens the PR/MR cross-repository against the upstream index instead — see [Announcing Packages](./package-index.md#announcing). Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`, `fork`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). An unreachable index, a failed API call, or a fork that could not be created or verified after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch and any fork used — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
 ### Validation and fail-fast {#batch-publish-validation}
@@ -973,7 +973,8 @@ wrapper object on stdout:
   "announce": {
     "outcome": "pull-request",
     "branch": "announce/acme-1a2b3c4d",
-    "url": "https://github.com/grimoire-rs/index/pull/7"
+    "url": "https://github.com/grimoire-rs/index/pull/7",
+    "fork": { "repo": "acme-bot/index", "created": false }
   }
 }
 ```
@@ -990,8 +991,14 @@ when no companion was resolved for this run. Each entry's `digest` is
 touching the registry). `announce` carries the completed `--announce`
 outcome: `outcome`
 is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
-deterministic topic branch on the index repository — is always present;
-`url` is always present and non-null only for `pull-request`. `announce` is `null` whenever the
+deterministic topic branch, pushed to a fork when one was involved and to
+the index repository directly otherwise — is always present; `url` is
+always present and non-null only for `pull-request`. `fork` is `{repo,
+created}` — the fork's full name and whether grim created it or reused an
+existing one — when the branch landed on a fork rather than the index
+repository directly, and `null` otherwise: a direct push succeeded,
+`[announce] fork = false` disabled forking, or the target forge/host does
+not support it. `announce` is `null` whenever the
 announce step did not complete: `--announce` not passed, a dry run, a
 fail-fast stop, or an announce failure (which still exits 69 with the
 entries rendered). A CI pipeline that needs the pushed branch — for

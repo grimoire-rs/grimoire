@@ -26,6 +26,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -36,6 +37,21 @@ INDEX_HOST = "git.example.test"
 MR_URL = "https://git.example.test/acme/index/-/merge_requests/7"
 PR_URL = "https://git.example.test/acme/index/pull/7"
 TOKEN = "glpat-test-secret-value"
+
+# ── auto-fork fixtures ─────────────────────────────────────────────────────
+# The upstream index project derived from INDEX_URL (the `.git` suffix is
+# stripped by grim's project-path parsing).
+UPSTREAM_PROJECT = "acme/index"
+UPSTREAM_ENCODED = quote(UPSTREAM_PROJECT, safe="")  # "acme%2Findex"
+UPSTREAM_PROJECT_ID = 100
+FORK_PROJECT_ID = 200
+FORK_OWNER = "forkuser"
+# The fork clone/push URL — a distinct host path a second insteadOf rewrite
+# points at a second local bare repo (the "fork").
+FORK_URL = "https://git.example.test/forkuser/index.git"
+# A renamed fork: the upstream repo is `index`, the fork is `grimoire-index`.
+RENAMED_FORK_FULL_NAME = "forkuser/grimoire-index"
+RENAMED_FORK_URL = "https://git.example.test/forkuser/grimoire-index.git"
 
 
 def _write(p: Path, body: str) -> None:
@@ -103,6 +119,33 @@ def _index_remote(tmp_path: Path, runner) -> Path:
     return bare
 
 
+def _index_and_fork_remote(tmp_path: Path, runner, fork_url: str = FORK_URL) -> tuple[Path, Path]:
+    """Two local bare repos — the upstream index and a fork of it — with a
+    two-entry insteadOf rewrite so INDEX_URL clones/pushes hit the upstream
+    bare and `fork_url` (the fork's clone URL) hits the fork bare."""
+    upstream = _bare_index_repo(tmp_path)
+    fork = tmp_path / "fork.git"
+    subprocess.run(
+        ["git", "clone", "--bare", "-q", str(upstream), str(fork)],
+        check=True,
+        capture_output=True,
+    )
+    runner.env.update(
+        {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": f"url.{upstream}.insteadOf",
+            "GIT_CONFIG_VALUE_0": INDEX_URL,
+            "GIT_CONFIG_KEY_1": f"url.{fork}.insteadOf",
+            "GIT_CONFIG_VALUE_1": fork_url,
+        }
+    )
+    return upstream, fork
+
+
+def _heads(bare: Path) -> str:
+    return _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+
+
 def _manifest(
     project_dir: Path,
     ns: str,
@@ -113,6 +156,7 @@ def _manifest(
     host: str | None = None,
     forge: str | None = None,
     api_url: str | None = None,
+    fork: bool | None = None,
 ) -> None:
     announce = [f'repository = "{repository}"', 'namespace = "acme"']
     if owner_id is not None:
@@ -123,6 +167,8 @@ def _manifest(
         announce.append(f'forge = "{forge}"')
     if api_url is not None:
         announce.append(f'api_url = "{api_url}"')
+    if fork is not None:
+        announce.append(f"fork = {'true' if fork else 'false'}")
     _write(
         project_dir / "publish.toml",
         f'registry = "{REGISTRY_HOST}"\n'
@@ -140,13 +186,64 @@ class _ForgeApi:
     (default), "user" (a visible user namespace whose namespace id differs
     from the user id), or "missing" (404 — how a foreign user namespace
     looks to a project bot token, since the endpoint is membership-scoped).
+
+    Auto-fork knobs: `push_access` drives the upstream repo/project
+    `permissions` (True ⇒ the token can push, so no fork). `fork_exists`
+    makes the conventional-path fork already present (reuse, created=false);
+    otherwise a POST creates it. `fork_full_name` / `fork_clone_url` /
+    `parent_full_name` / `forked_from_id` populate the fork response body —
+    a mismatched parent exercises the security guard, a differing full_name
+    the renamed-fork path. `import_status` / `import_error` drive the
+    GitLab fork-readiness poll body (`"failed"` fast-fails with the error).
+    `import_status` accepts a plain string (constant reply) or a list —
+    consumed one entry per GET request that returns a fork body, last
+    value sticky once exhausted — to exercise a pending→ready poll
+    sequence. `pr_fails` makes the PR/MR-creation POST always return 500
+    (a fork resolves successfully but the change-request API call fails,
+    exercising the BranchPushed-with-fork outcome).
+
+    GitLab identity-based reuse (a 409 on fork-create): `GET
+    /projects/<upstream_id>/forks` and the numeric-id readiness poll `GET
+    /projects/<FORK_PROJECT_ID>` both reply with `_fork_json()`, so the same
+    knobs above (`fork_full_name`, `forked_from_id`, ...) shape the
+    enumerated fork too.
     """
 
-    def __init__(self, conflict: bool = False, namespaces: str = "group") -> None:
+    def __init__(
+        self,
+        conflict: bool = False,
+        namespaces: str = "group",
+        *,
+        push_access: bool = True,
+        fork_exists: bool = False,
+        fork_conflict: bool = False,
+        fork_owner: str = FORK_OWNER,
+        fork_full_name: str = f"{FORK_OWNER}/index",
+        fork_clone_url: str = FORK_URL,
+        parent_full_name: str = UPSTREAM_PROJECT,
+        forked_from_id: int = UPSTREAM_PROJECT_ID,
+        import_status: str | list[str] = "finished",
+        import_error: str | None = None,
+        pr_fails: bool = False,
+    ) -> None:
         api = self
         self.requests: list[tuple[str, str]] = []
+        self.bodies: list[tuple[str, dict]] = []
         self.conflict = conflict
         self.namespaces = namespaces
+        self.push_access = push_access
+        self.fork_exists = fork_exists
+        self.fork_conflict = fork_conflict
+        self.forked = False
+        self.fork_owner = fork_owner
+        self.fork_full_name = fork_full_name
+        self.fork_clone_url = fork_clone_url
+        self.parent_full_name = parent_full_name
+        self.forked_from_id = forked_from_id
+        self.import_status = import_status
+        self._import_status_idx = 0
+        self.import_error = import_error
+        self.pr_fails = pr_fails
 
         class Handler(BaseHTTPRequestHandler):
             def _reply(self, code: int, body: object) -> None:
@@ -161,6 +258,8 @@ class _ForgeApi:
                 api.requests.append(("GET", self.path))
                 if "/users?" in self.path:
                     self._reply(200, [{"id": 44, "username": "acme"}])
+                elif self.path == "/user":
+                    self._reply(200, {"login": api.fork_owner, "username": api.fork_owner})
                 elif "/namespaces/" in self.path:
                     if api.namespaces == "user":
                         self._reply(200, {"kind": "user", "id": 999, "full_path": "acme"})
@@ -172,6 +271,29 @@ class _ForgeApi:
                     self._reply(200, [{"web_url": MR_URL}])
                 elif "/pulls?" in self.path:
                     self._reply(200, [{"html_url": PR_URL}])
+                elif self.path in (f"/repos/{UPSTREAM_PROJECT}", f"/projects/{UPSTREAM_ENCODED}"):
+                    self._reply(
+                        200,
+                        {
+                            "default_branch": "main",
+                            "id": UPSTREAM_PROJECT_ID,
+                            "permissions": api._permissions(),
+                        },
+                    )
+                elif api._is_fork_get(self.path):
+                    if api.fork_exists or api.forked:
+                        self._reply(200, api._fork_json(advance=True))
+                    else:
+                        self._reply(404, {})
+                elif self.path.split("?", 1)[0] == f"/projects/{UPSTREAM_PROJECT_ID}/forks":
+                    # GitLab existing-fork enumeration (409 reuse path):
+                    # grim selects by forked_from_project.id + namespace and
+                    # requests `?owned=true&per_page=100&page=N`, so match the
+                    # path with the query stripped.
+                    self._reply(200, [api._fork_json(advance=True)])
+                elif self.path == f"/projects/{FORK_PROJECT_ID}":
+                    # Numeric-id readiness poll after enumeration selects a fork.
+                    self._reply(200, api._fork_json(advance=True))
                 elif "/projects/" in self.path or "/repos/" in self.path:
                     self._reply(200, {"default_branch": "main"})
                 else:
@@ -179,11 +301,31 @@ class _ForgeApi:
 
             def do_POST(self) -> None:  # noqa: N802 (http.server API)
                 api.requests.append(("POST", self.path))
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
-                if self.path.endswith("/merge_requests"):
-                    self._reply(409 if api.conflict else 201, {"web_url": MR_URL})
+                raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                try:
+                    body = json.loads(raw) if raw else {}
+                except ValueError:
+                    body = {}
+                api.bodies.append((self.path, body))
+                if self.path.endswith("/forks"):  # GitHub fork (idempotent 202)
+                    api.forked = True
+                    self._reply(202, api._fork_json())
+                elif self.path.endswith("/fork"):  # GitLab fork (201, or 409 if it exists)
+                    api.forked = True
+                    if api.fork_conflict:
+                        self._reply(409, {"message": "409 Conflict: already forked"})
+                    else:
+                        self._reply(201, api._fork_json())
+                elif self.path.endswith("/merge_requests"):
+                    if api.pr_fails:
+                        self._reply(500, {"message": "internal error"})
+                    else:
+                        self._reply(409 if api.conflict else 201, {"web_url": MR_URL})
                 elif self.path.endswith("/pulls"):
-                    self._reply(422 if api.conflict else 201, {"html_url": PR_URL})
+                    if api.pr_fails:
+                        self._reply(500, {"message": "internal error"})
+                    else:
+                        self._reply(422 if api.conflict else 201, {"html_url": PR_URL})
                 else:
                     self._reply(404, {})
 
@@ -194,6 +336,49 @@ class _ForgeApi:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
+    def _permissions(self) -> dict:
+        """Permissions readable by both forge readers: GitHub `push` (bool)
+        and GitLab `project_access.access_level` (Developer 30 = can push)."""
+        if self.push_access:
+            return {"push": True, "project_access": {"access_level": 40}, "group_access": None}
+        return {"push": False, "project_access": {"access_level": 20}, "group_access": None}
+
+    def _current_import_status(self) -> str:
+        """The `import_status` for the current call: a scalar is constant,
+        a list is indexed by how many GET-triggered calls have advanced it
+        (sticky at the last entry once exhausted)."""
+        if isinstance(self.import_status, list):
+            idx = min(self._import_status_idx, len(self.import_status) - 1)
+            return self.import_status[idx]
+        return self.import_status
+
+    def _fork_json(self, *, advance: bool = False) -> dict:
+        """One body carrying both GitHub and GitLab fork fields (grim reads
+        only the relevant ones per forge kind). `advance=True` (GET-triggered
+        reads — the readiness poll) consumes the next `import_status` entry
+        when it's a list; POST-triggered bodies (fork creation) never
+        advance it, so a poll sequence starts at the list's first entry."""
+        status = self._current_import_status()
+        if advance and isinstance(self.import_status, list):
+            self._import_status_idx = min(self._import_status_idx + 1, len(self.import_status) - 1)
+        body = {
+            "full_name": self.fork_full_name,
+            "clone_url": self.fork_clone_url,
+            "owner": {"login": self.fork_owner},
+            "parent": {"full_name": self.parent_full_name},
+            "id": FORK_PROJECT_ID,
+            "path_with_namespace": self.fork_full_name,
+            "http_url_to_repo": self.fork_clone_url,
+            "forked_from_project": {"id": self.forked_from_id},
+            "import_status": status,
+        }
+        if self.import_error is not None:
+            body["import_error"] = self.import_error
+        return body
+
+    def _is_fork_get(self, path: str) -> bool:
+        return path in (f"/repos/{self.fork_full_name}", f"/projects/{quote(self.fork_full_name, safe='')}")
+
     def close(self) -> None:
         self.server.shutdown()
 
@@ -202,8 +387,8 @@ class _ForgeApi:
 def forge_api():
     apis: list[_ForgeApi] = []
 
-    def make(conflict: bool = False, namespaces: str = "group") -> _ForgeApi:
-        api = _ForgeApi(conflict, namespaces)
+    def make(conflict: bool = False, namespaces: str = "group", **kwargs) -> _ForgeApi:
+        api = _ForgeApi(conflict, namespaces, **kwargs)
         apis.append(api)
         return api
 
@@ -615,6 +800,9 @@ def test_publish_announce_json_reports_branch_pushed(
     # the pull-request outcome.
     assert "url" in announce, f"url key must always be present: {announce}"
     assert announce["url"] is None, f"url must be null off pull-request: {announce}"
+    # Same contract for fork: present as a key, null on an upstream push.
+    assert "fork" in announce, f"fork key must always be present: {announce}"
+    assert announce["fork"] is None, f"fork must be null on an upstream push: {announce}"
 
 
 def test_publish_announce_json_pull_request_carries_url_and_branch(
@@ -951,3 +1139,493 @@ def test_announce_pointer_keeps_pull_reference(
         "the metadata read-back must have succeeded via the push endpoint "
         f"(a pull-name lookup would degrade to the fallback), got {meta['description']!r}"
     )
+
+
+# ── auto-fork on no push access (issue: announce-fork) ──────────────────────
+
+
+def test_publish_announce_github_forks_when_no_push_access(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """No push access to the upstream index: grim forks it, pushes the branch
+    to the fork, and opens a cross-repository PR whose head is fork-qualified."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-new"
+    _make_skill_source(project_dir, name, "Fork me.")
+    api = forge_api(push_access=False)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    # Fork-create disclosure: the stderr line names the fork and that it was
+    # created in the publisher's own account (distinct from the reuse wording).
+    assert "opened from fork forkuser/index, created in your account" in result.stderr, result.stderr
+    data = json.loads(result.stdout)
+
+    # The branch lands on the fork bare, never the upstream index.
+    branch = _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+    assert data["announce"]["outcome"] == "pull-request", data
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+    assert ("POST", "/repos/acme/index/forks") in api.requests, api.requests
+    # The PR head is the fork owner, not a bare branch.
+    pull_bodies = [b for p, b in api.bodies if p.endswith("/pulls")]
+    assert pull_bodies and pull_bodies[0]["head"] == f"forkuser:{branch}", pull_bodies
+
+
+def test_publish_announce_push_access_skips_fork(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """With push access to the upstream index, no fork is created — the
+    branch goes straight to the index and `announce.fork` is null."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-nofork"
+    _make_skill_source(project_dir, name, "No fork.")
+    api = forge_api(push_access=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    assert data["announce"]["fork"] is None, data
+    assert not any(p.endswith("/forks") for _, p in api.requests), api.requests
+    _announce_branch(bare)  # pushed to the upstream index as before
+
+
+def test_publish_announce_reuses_existing_fork(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """An existing fork at the conventional path is reused (created=false) —
+    no fork POST is issued."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-reuse"
+    _make_skill_source(project_dir, name, "Reuse fork.")
+    api = forge_api(push_access=False, fork_exists=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    # Fork-reuse disclosure: distinct wording from the create path — no
+    # "created in your account".
+    assert "opened from your existing fork forkuser/index" in result.stderr, result.stderr
+    data = json.loads(result.stdout)
+
+    _announce_branch(fork)
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": False}, data
+    assert not any(p.endswith("/forks") for _, p in api.requests), api.requests
+
+
+def test_publish_announce_renamed_fork_uses_response_full_name(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """A renamed fork (upstream `index`, fork `grimoire-index`): the push URL
+    and reported repo come from the fork response body, never a
+    `{login}/{basename}` guess."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-renamed"
+    _make_skill_source(project_dir, name, "Renamed fork.")
+    api = forge_api(
+        push_access=False,
+        fork_full_name=RENAMED_FORK_FULL_NAME,
+        fork_clone_url=RENAMED_FORK_URL,
+    )
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner, fork_url=RENAMED_FORK_URL)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    branch = _announce_branch(fork)
+    assert data["announce"]["fork"]["repo"] == RENAMED_FORK_FULL_NAME, data
+    pull_bodies = [b for p, b in api.bodies if p.endswith("/pulls")]
+    assert pull_bodies and pull_bodies[0]["head"] == f"forkuser:{branch}", pull_bodies
+
+
+def test_publish_announce_gitlab_forks_cross_project_mr(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """GitLab: no push access forks the project and opens a cross-project MR
+    posted from the fork's project with target_project_id set to the upstream
+    (real GitLab has no source_project_id create attribute)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-gitlab"
+    _make_skill_source(project_dir, name, "GitLab fork.")
+    api = forge_api(push_access=False)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    _announce_branch(fork)
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+    assert ("POST", "/projects/acme%2Findex/fork") in api.requests, api.requests
+    # The MR is created FROM the fork project, targeting the upstream.
+    assert ("POST", f"/projects/{FORK_PROJECT_ID}/merge_requests") in api.requests, api.requests
+    mr_bodies = [b for p, b in api.bodies if p.endswith("/merge_requests")]
+    assert mr_bodies and mr_bodies[0].get("target_project_id") == UPSTREAM_PROJECT_ID, mr_bodies
+
+
+def test_publish_announce_fork_disabled_pushes_upstream(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """`[announce] fork = false` forces the upstream push even without push
+    access — no fork API call, `announce.fork` null (today's behavior)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-off"
+    _make_skill_source(project_dir, name, "Fork off.")
+    api = forge_api(push_access=False)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url, fork=False)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    _announce_branch(upstream)  # pushed straight to the index
+    assert "announce/" not in _heads(fork), "fork must not be touched"
+    assert data["announce"]["fork"] is None, data
+    assert not any(p.endswith("/forks") for _, p in api.requests), api.requests
+
+
+def test_publish_announce_fork_of_foreign_repo_rejected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Security guard: a fork whose parent does not match the upstream is
+    rejected (exit 69) and nothing is pushed to the index."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-foreign"
+    _make_skill_source(project_dir, name, "Foreign fork.")
+    api = forge_api(push_access=False, parent_full_name="stranger/index", forked_from_id=999)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "announce failed" in result.stderr
+    data = json.loads(result.stdout)
+    # The publish itself succeeded; only the announce fork was rejected.
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+
+
+def test_publish_announce_github_hostile_fork_clone_url_rejected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Security guard: a hostile GitHub fork `clone_url` using git's `ext::`
+    remote-helper transport must never reach `git push` — rejected (exit 69)
+    before any push happens, so the embedded command never executes."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-rce-gh"
+    _make_skill_source(project_dir, name, "RCE guard GitHub.")
+    sentinel = tmp_path / "pwned"
+    api = forge_api(push_access=False, fork_clone_url=f'ext::sh -c "touch {sentinel}"')
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "announce failed" in result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+    assert not sentinel.exists(), "hostile clone_url must never execute"
+
+
+def test_publish_announce_gitlab_hostile_fork_url_rejected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Same guard, GitLab: a hostile `http_url_to_repo` using `ext::` is
+    rejected before any push — no command execution."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-rce-gl"
+    _make_skill_source(project_dir, name, "RCE guard GitLab.")
+    sentinel = tmp_path / "pwned"
+    api = forge_api(push_access=False, fork_clone_url=f'ext::sh -c "touch {sentinel}"')
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "announce failed" in result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+    assert not sentinel.exists(), "hostile clone_url must never execute"
+
+
+def test_publish_announce_fork_push_url_cross_repo_redirect_rejected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Security guard: a fork response can pass the scheme + parent/source
+    checks yet still point `clone_url` at a different repository on the same
+    trusted host (`git.example.test`, the index host — not a scheme
+    violation). The identity-binding guard must reject that redirect before
+    any push, distinct from a plain network failure (asserted via the
+    specific guard message, not just the exit code)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-redirect"
+    _make_skill_source(project_dir, name, "Cross-repo redirect guard.")
+    api = forge_api(push_access=False, fork_clone_url=f"https://{INDEX_HOST}/victim/other-repo.git")
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "does not match the fork identity" in result.stderr, result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+
+
+def test_publish_announce_fork_push_url_leading_dash_rejected(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """A fork push URL starting with `-` (could be parsed as a git flag,
+    e.g. an SSH ProxyCommand injection) is rejected by the same https-only
+    guard as the `ext::` case — exit 69, nothing pushed anywhere."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-dash"
+    _make_skill_source(project_dir, name, "Dash guard.")
+    api = forge_api(push_access=False, fork_clone_url="-oProxyCommand=evil")
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+
+
+def test_publish_announce_json_reports_fork_populated(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """The JSON announce section carries a populated fork object when the
+    branch was pushed to a fork (the null case is covered by the
+    branch-pushed test)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-json"
+    _make_skill_source(project_dir, name, "Fork JSON.")
+    api = forge_api(push_access=False)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+
+
+# ── GitLab identity-based fork reuse via enumeration (Wave 2) ──────────────
+
+
+def test_publish_announce_gitlab_reuses_fork_via_enumeration(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Steady-state GitLab publisher case: a 409 on fork-create means the
+    fork already exists, so grim enumerates `GET /projects/:id/forks` and
+    adopts the entry whose `forked_from_project.id` and namespace match —
+    the identity-based path that replaced the `{user}/{basename}` guess
+    (ADR D6 / issue: announce-fork)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-gl-reuse"
+    _make_skill_source(project_dir, name, "GitLab reuse.")
+    api = forge_api(push_access=False, fork_conflict=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    # Fork-reuse disclosure, same wording as the GitHub reuse path.
+    assert "opened from your existing fork forkuser/index" in result.stderr, result.stderr
+
+    data = json.loads(result.stdout)
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": False}, data
+    _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+    assert any(
+        m == "GET" and p.split("?", 1)[0] == f"/projects/{UPSTREAM_PROJECT_ID}/forks"
+        for m, p in api.requests
+    ), api.requests
+
+
+def test_publish_announce_gitlab_reuses_renamed_fork_via_enumeration(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """A renamed fork (upstream `index`, fork `grimoire-index`) is still
+    found by enumeration and reused — proving the rename tolerance the old
+    `{user}/{basename}` guess lacked."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-gl-renamed"
+    _make_skill_source(project_dir, name, "GitLab renamed reuse.")
+    api = forge_api(
+        push_access=False,
+        fork_conflict=True,
+        fork_full_name=RENAMED_FORK_FULL_NAME,
+        fork_clone_url=RENAMED_FORK_URL,
+    )
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner, fork_url=RENAMED_FORK_URL)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    assert data["announce"]["fork"] == {"repo": RENAMED_FORK_FULL_NAME, "created": False}, data
+    _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+
+
+def test_publish_announce_gitlab_reuse_rejects_wrong_source_fork(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """The enumerated fork in the user's namespace was forked from a
+    different upstream project — the source-lineage guard rejects it even
+    though the namespace matches (exit 69, nothing pushed anywhere)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-gl-wrongsource"
+    _make_skill_source(project_dir, name, "GitLab wrong source.")
+    api = forge_api(push_access=False, fork_conflict=True, forked_from_id=999)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "announce failed" in result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    # The publish itself succeeded; only the announce fork reuse was rejected.
+    assert data["announce"] is None, data
+    assert data["items"][0]["status"] == "pushed", data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+
+
+def test_publish_announce_gitlab_fork_import_failed_fast_fails(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """A freshly-created fork whose import fails fast-fails the readiness
+    poll instead of running to the wall-clock deadline. The classification
+    itself is unit-covered (`gitlab_import_readiness_classifies_status`);
+    this proves the failure reaches the CLI exit path end to end."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-gl-importfail"
+    _make_skill_source(project_dir, name, "GitLab import failed.")
+    api = forge_api(push_access=False, import_status="failed", import_error="disk full")
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+
+    assert result.returncode == 69, f"expected 69, got {result.returncode}: {result.stderr}"
+    assert "disk full" in result.stderr, result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+    data = json.loads(result.stdout)
+    assert data["announce"] is None, data
+    assert "announce/" not in _heads(bare), "no branch may reach the index"
+
+
+def test_publish_announce_gitlab_fork_import_pending_then_ready(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """The readiness poll retries through `import_status="started"` twice
+    before succeeding once GitLab reports `"finished"` — the Pending→Ready
+    path of the poll loop, previously exercised only via the status
+    classifier unit test and the immediate-`"failed"` fast-fail acceptance
+    test above. Costs ~6s of real wall-clock backoff (2s + 4s): `PollBounds`
+    are an internal Rust default with no CLI/env override, so this is real
+    time, not simulated."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-gl-pending"
+    _make_skill_source(project_dir, name, "GitLab pending poll.")
+    api = forge_api(push_access=False, import_status=["started", "started", "finished"])
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    assert TOKEN not in result.stdout + result.stderr, "token must never be printed"
+
+    data = json.loads(result.stdout)
+    assert data["announce"]["outcome"] == "pull-request", data
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+    _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+
+
+def test_publish_announce_github_fork_branch_pushed_when_pr_creation_fails(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """The fork resolves and the branch pushes to it, but the PR-creation API
+    call itself errors (a 500, distinct from the 422-reuse path) — the
+    outcome degrades to BranchPushed while still carrying the fork, and the
+    stderr disclosure uses the fork-aware branch-pushed wording (distinct
+    from both the pull-request fork wording and the no-fork branch-pushed
+    wording)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-branchpushed"
+    _make_skill_source(project_dir, name, "Fork branch pushed.")
+    api = forge_api(push_access=False, pr_fails=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+
+    branch = _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+    assert (
+        f"announced: pushed branch '{branch}' to your fork forkuser/index — "
+        "open the pull/merge request from the fork's branch banner"
+    ) in result.stderr, result.stderr
+
+    data = json.loads(result.stdout)
+    assert data["announce"]["outcome"] == "branch-pushed", data
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data

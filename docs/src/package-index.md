@@ -186,6 +186,48 @@ enterprise instances included, no `gh`/`glab` CLI needed. A GitLab host
 without an API token gets the MR via [git push options][push-options]
 instead; a plain git host is left with the pushed branch.
 
+Most contributors to a public index have no push access to it — that is
+the normal case for [grimoire-rs/index][index-repo] itself. Rather than
+fail with a permission error, `--announce` detects the missing access (a
+GET against the repository or project, when a token is present) and
+automatically forks the index into your account — reusing an existing
+fork if you already have one, even one renamed since it was created, on
+both GitHub and GitLab. On GitLab the reuse is identity-based: grim
+enumerates the upstream's forks and matches one owned by the
+authenticated user, scoped to your **personal namespace** — a fork later
+moved into a group namespace is not reused (tracked follow-up). Because
+that listing can briefly lag behind a fork's creation, grim retries the
+enumeration with short backoff for up to about 10 seconds before giving
+up, so a fork created moments earlier — by this run or a concurrent one
+— is not missed. It pushes the topic branch to that fork and opens the
+pull/merge request cross-repository, against the real upstream. grim
+verifies the fork is genuinely derived from the upstream repository
+before pushing to it, so a same-named repository that happens to sit in
+your account is never mistaken for the fork. Set `fork = false` in
+`[announce]` to opt out and always push directly, which fails the same
+way it always has when you lack access; detection only applies with a
+token present and a GitHub or GitLab forge, so a token-less or
+plain-git target behaves exactly as before. This is a different use of
+a fork than
+[self-hosting a copy of the index](#self-hosting-fork): that fork becomes
+its own independent index, while the fork `--announce` creates here exists
+only to carry one contribution back to someone else's index.
+
+When grim has to create a fork rather than reuse one, readiness works
+differently per forge. On GitLab, forking runs an import job: grim polls
+the fork's import status with exponential backoff (2 seconds, doubling to
+a 30-second cap) up to a 5-minute wall-clock deadline before pushing. A
+first `--announce` to a GitLab repository you lack push access to can
+pause for a few seconds to a couple of minutes while the import
+completes; it is not a hang. On GitHub, fork metadata is ready
+immediately — there is no import to wait for — but the fork's git objects
+provision asynchronously behind that metadata, so the first push can 404
+even though the fork already exists. grim covers this with a single
+~3-second retry on that push; if the objects still are not ready by then,
+the announce fails (exit 69), the packages are already published, and
+re-running `--announce` succeeds once the fork has settled, since the
+fork is adopted rather than recreated.
+
 The full `[announce]` surface:
 
 ```toml
@@ -199,6 +241,7 @@ host       = "github.com"        # index/<host>/ segment; default: derived
 api_url    = "https://api.github.com"  # default: CI env / forge convention
 namespace  = "your-login"        # full group path on GitLab
 owner_id   = 12345               # default: resolved via the forge API
+fork       = false               # default: true (auto-fork on missing push access)
 ```
 
 Every field except `repository` resolves automatically in the common
@@ -224,6 +267,10 @@ cases:
   authenticated GitHub API user.
 - **`owner_id`** — explicit > forge API lookup (GitHub always; GitLab
   with a token). A plain host requires it explicitly.
+- **`fork`** — default `true` (auto-fork when the credential lacks push
+  access to `repository`); `fork = false` forces every announce straight
+  at `repository`, failing with the same permission error grim raised
+  before auto-forking existed.
 
 The host-match gate is deliberate: a GitLab pipeline announcing to a
 GitHub index inherits **nothing** from the GitLab CI environment — wire
@@ -281,6 +328,11 @@ in one step — the repo ships **both** a GitHub Actions workflow and a
 stay inert). For the full corporate GitLab walkthrough — CI variables,
 auto-merge by group membership, release mirrors — see
 [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
+
+This is a fork you run as your own index, long-lived and configured as a
+`[[registries]]` target — distinct from the throwaway fork
+[`--announce` creates automatically](#announcing) to contribute a pointer
+back to someone else's index.
 
 ## Relationship to Registries {#registries}
 

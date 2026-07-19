@@ -191,10 +191,15 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                     CommandError::ConfigValue(_) => ExitCode::DataError,
                 }),
                 // Announce needs remote resources (the index repository, the
-                // GitHub API); a local I/O fault classifies as I/O.
+                // GitHub API); a local I/O fault classifies as I/O. A failed
+                // required fork is a remote-resource fault too — the packages
+                // ARE published; only the cross-repo announce needs a retry.
                 Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
-                    AnnounceError::Git { .. } | AnnounceError::OwnerLookup { .. } => ExitCode::Unavailable,
+                    AnnounceError::Git { .. }
+                    | AnnounceError::OwnerLookup { .. }
+                    | AnnounceError::Fork { .. }
+                    | AnnounceError::Client(_) => ExitCode::Unavailable,
                 }),
             };
         }
@@ -951,6 +956,22 @@ mod tests {
         ))
         .into();
         assert_eq!(classify_error(&err), ExitCode::IoError);
+    }
+
+    #[test]
+    fn announce_client_build_failure_classifies_as_unavailable() {
+        // Regression: `forge::client()` used to be wrapped in a bare
+        // `anyhow::anyhow!` at the publish call site, which `classify`
+        // never matches and silently falls through to exit 1 — contradicting
+        // the documented "git/API failures exit 69" invariant. Routing the
+        // failure through `AnnounceError::Client` must classify as
+        // Unavailable like every other announce-tier remote-resource fault.
+        let bad_url = reqwest::Client::new()
+            .get("not a valid url")
+            .build()
+            .expect_err("an unparseable URL must fail to build a request");
+        let err: anyhow::Error = Error::from(AnnounceError::Client(bad_url)).into();
+        assert_eq!(classify_error(&err), ExitCode::Unavailable);
     }
 
     #[test]

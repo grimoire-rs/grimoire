@@ -230,11 +230,12 @@ Announce also tolerates GitLab's `HOME`-less step environments.
 
 The outcome is machine-readable: `grim publish --format json` emits a
 wrapper object `{"items": [...], "announce": ...}` where `announce`
-carries `{outcome, branch, url}` — `outcome` is `pull-request`,
-`branch-pushed`, or `up-to-date`, and `branch` (the deterministic topic
+carries `{outcome, branch, url, fork}` — `outcome` is `pull-request`,
+`branch-pushed`, or `up-to-date`; `branch` (the deterministic topic
 branch) is always present, so CI reads it from stdout instead of grepping
-stderr. `announce` is `null` when the step did not complete (no
-`--announce`, dry run, a fail-fast stop, or failure).
+stderr; `fork` is `{repo, created}` when the branch landed on a fork grim
+created or reused, else `null`. `announce` is `null` when the step did
+not complete (no `--announce`, dry run, a fail-fast stop, or failure).
 
 The default index auto-merges an announcement PR when: only your own
 namespace's `metadata.json` paths changed, you own that namespace (login

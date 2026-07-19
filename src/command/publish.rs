@@ -155,6 +155,13 @@ pub struct AnnounceSpec {
     /// for a plain git host or a GitLab host without a token. Set it
     /// explicitly for hermetic/offline runs.
     pub owner_id: Option<u64>,
+
+    /// Whether to auto-fork the index when the authenticated forge token has
+    /// no push access to it. Default (unset or `true`): fork the index, push
+    /// the announce branch to the fork, and open a cross-repository PR/MR.
+    /// `false` forces the upstream push (today's behavior). A fork is never
+    /// attempted without a forge API token.
+    pub fork: Option<bool>,
 }
 
 /// A repository description companion source (`[description]` table, top-level
@@ -1058,10 +1065,10 @@ async fn run_announce(
     entries: &[PlannedEntry],
     push: Option<&(String, Option<String>)>,
 ) -> anyhow::Result<crate::api::publish_report::PublishAnnounce> {
-    use crate::api::publish_report::{AnnounceStatus, PublishAnnounce};
+    use crate::api::publish_report::{AnnounceStatus, PublishAnnounce, PublishFork};
     use crate::catalog::forge::{self, CiEnv, ForgeKind};
     use crate::catalog::index_announce::{
-        AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, index_host,
+        AnnounceError, AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, index_host,
         job_token_credential_config,
     };
 
@@ -1089,13 +1096,17 @@ async fn run_announce(
         &host,
         &ci_env,
     );
+    // One client for the whole announce run — every forge call below (and
+    // inside `announce()`) shares it instead of paying for a fresh TLS
+    // handshake per call.
+    let http = super::grim(forge::client().map_err(AnnounceError::Client))?;
 
     let namespace = match spec
         .and_then(|s| s.namespace.clone())
         .or_else(|| forge.ci_namespace.clone())
     {
         Some(ns) => ns,
-        None => forge::github_login(&forge).await.ok_or_else(|| {
+        None => forge::github_login(&http, &forge).await.ok_or_else(|| {
             super::config_usage(
                 "no announce namespace: set `[announce] namespace` in publish.toml \
                  (auto-detection needs a host-matched CI environment or a GitHub \
@@ -1108,7 +1119,7 @@ async fn run_announce(
         Some(id) => id,
         None => match (forge.kind, forge.token.is_some()) {
             (ForgeKind::GitHub, _) | (ForgeKind::GitLab, true) => {
-                super::grim(forge::lookup_owner_id(&forge, &namespace).await)?
+                super::grim(forge::lookup_owner_id(&http, &forge, &namespace).await)?
             }
             _ => {
                 return Err(super::config_usage(format!(
@@ -1150,6 +1161,9 @@ async fn run_announce(
     }
 
     let credential_config = job_token_credential_config(&ci_env, &repo_url);
+    // Auto-fork unless the manifest explicitly opts out (`[announce] fork =
+    // false`). None/true both mean "fork when the token has no push access".
+    let allow_fork = spec.and_then(|s| s.fork) != Some(false);
     let request = AnnounceRequest {
         repo_url,
         host,
@@ -1158,26 +1172,64 @@ async fn run_announce(
         forge,
         packages,
         credential_config,
+        allow_fork,
     };
-    let section = match super::grim(announce(&request).await)? {
-        AnnounceOutcome::PullRequest { url, branch } => {
-            let _ = writeln!(io::stderr(), "announced: {url}");
+    let publish_fork = |fork: Option<crate::catalog::index_announce::AnnouncedFork>| {
+        fork.map(|f| PublishFork {
+            repo: f.repo,
+            created: f.created,
+        })
+    };
+    let section = match super::grim(announce(&http, &request).await)? {
+        AnnounceOutcome::PullRequest { url, branch, fork } => {
+            match &fork {
+                Some(f) if f.created => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "announced: {url} (opened from fork {}, created in your account)",
+                        f.repo
+                    );
+                }
+                Some(f) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "announced: {url} (opened from your existing fork {})",
+                        f.repo
+                    );
+                }
+                None => {
+                    let _ = writeln!(io::stderr(), "announced: {url}");
+                }
+            }
             PublishAnnounce {
                 outcome: AnnounceStatus::PullRequest,
                 branch,
                 url: Some(url),
+                fork: publish_fork(fork),
             }
         }
-        AnnounceOutcome::BranchPushed { branch } => {
-            let _ = writeln!(
-                io::stderr(),
-                "announced: pushed branch '{branch}' to {} — open the merge request to publish the pointers",
-                request.repo_url
-            );
+        AnnounceOutcome::BranchPushed { branch, fork } => {
+            match &fork {
+                Some(f) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "announced: pushed branch '{branch}' to your fork {} — open the pull/merge request from the fork's branch banner",
+                        f.repo
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "announced: pushed branch '{branch}' to {} — open the merge request to publish the pointers",
+                        request.repo_url
+                    );
+                }
+            }
             PublishAnnounce {
                 outcome: AnnounceStatus::BranchPushed,
                 branch,
                 url: None,
+                fork: publish_fork(fork),
             }
         }
         AnnounceOutcome::UpToDate { branch } => {
@@ -1186,6 +1238,7 @@ async fn run_announce(
                 outcome: AnnounceStatus::UpToDate,
                 branch,
                 url: None,
+                fork: None,
             }
         }
     };

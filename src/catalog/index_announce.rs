@@ -77,6 +77,11 @@ pub struct AnnounceRequest {
     /// credential — see [`job_token_credential_config`]. `None` leaves
     /// the git transport on ambient credentials only.
     pub credential_config: Option<String>,
+    /// Whether an auto-fork is permitted when the authenticated token has no
+    /// push access to the upstream index (`[announce] fork` — default true;
+    /// `false` forces the upstream push). A fork is never attempted without a
+    /// forge API token regardless of this flag.
+    pub allow_fork: bool,
 }
 
 /// The `credential.helper=…` git config value injecting the GitLab CI job
@@ -116,6 +121,19 @@ pub fn job_token_credential_config(env: &super::forge::CiEnv, repo_url: &str) ->
     ))
 }
 
+/// The fork an announce pushed its branch to, for the machine-readable
+/// report. Present only when a cross-repository fork was opened or reused;
+/// absent when the branch went straight to the upstream index.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AnnouncedFork {
+    /// The fork's canonical `owner/repo` (GitHub `full_name`, GitLab
+    /// `path_with_namespace`).
+    pub repo: String,
+    /// Whether this run created the fork (`false` when an existing fork was
+    /// reused).
+    pub created: bool,
+}
+
 /// What the announce achieved. Every variant carries the deterministic
 /// topic branch so CI can consume it regardless of outcome.
 #[derive(Debug, PartialEq, Eq)]
@@ -127,11 +145,15 @@ pub enum AnnounceOutcome {
         url: String,
         /// The pushed topic branch name.
         branch: String,
+        /// The fork the branch was pushed to, or `None` for an upstream push.
+        fork: Option<AnnouncedFork>,
     },
     /// The topic branch was pushed; open the merge request on the host.
     BranchPushed {
         /// The pushed branch name.
         branch: String,
+        /// The fork the branch was pushed to, or `None` for an upstream push.
+        fork: Option<AnnouncedFork>,
     },
     /// The index already carries exactly this metadata — nothing to do.
     UpToDate {
@@ -164,6 +186,19 @@ pub enum AnnounceError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Forking the index repository failed after the permission probe showed
+    /// no push access: the fork could not be created, security-verified, or
+    /// made ready. Distinct from a plain push failure — a fork was required
+    /// (the caller cannot push upstream) and could not be provided.
+    #[error("fork of the index repository failed: {detail}")]
+    Fork {
+        /// The specific fork-step failure.
+        detail: String,
+    },
+    /// The shared forge HTTP client (permission probes, owner lookup,
+    /// forking, announcing) could not be constructed.
+    #[error("could not build the forge HTTP client")]
+    Client(#[from] reqwest::Error),
 }
 
 /// Announce `request.packages` to the index repository.
@@ -172,7 +207,7 @@ pub enum AnnounceError {
 ///
 /// [`AnnounceError`] for a git clone/commit/push failure, a local I/O
 /// failure, or a failed owner-id lookup.
-pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, AnnounceError> {
+pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Result<AnnounceOutcome, AnnounceError> {
     let workdir = tempfile::tempdir()?;
     let clone = workdir.path().join("index");
     // Fallback transport credential for every remote-touching invocation
@@ -188,6 +223,7 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
                 "--depth",
                 "1",
                 "--quiet",
+                "--",
                 &request.repo_url,
                 &clone.display().to_string(),
             ],
@@ -250,19 +286,44 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     let api_capable =
         request.forge.token.is_some() && matches!(request.forge.kind, ForgeKind::GitHub | ForgeKind::GitLab);
     if api_capable || request.forge.kind == ForgeKind::GitHub {
-        git(
-            Some(&clone),
-            "push",
-            &with_credential(cred, &["push", "--quiet", "--force", "origin", &branch]),
-        )
-        .await?;
+        // With no push access to the upstream index, fork it and push the
+        // branch there instead — additive: turns today's exit-69 push failure
+        // into a cross-repository PR/MR. Requires a forge API token;
+        // `[announce] fork = false` opts out; ambiguous permission degrades to
+        // the upstream push. The credential helper is host-scoped and the fork
+        // shares the host, so it covers the fork push unchanged.
+        let fork = if request.allow_fork && api_capable {
+            super::forge::ensure_fork(http, &request.forge, &request.repo_url).await?
+        } else {
+            None
+        };
+        let push_target = fork.as_ref().map_or("origin", |f| f.push_url.as_str());
+        push_announce_branch(&clone, cred, push_target, &branch, fork.is_some()).await?;
+        let announced = fork.as_ref().map(|f| AnnouncedFork {
+            repo: f.full_name.clone(),
+            created: f.created,
+        });
         if api_capable
-            && let Some(url) =
-                super::forge::create_change_request(&request.forge, &request.repo_url, &branch, &message).await
+            && let Some(url) = super::forge::create_change_request(
+                http,
+                &request.forge,
+                &request.repo_url,
+                &branch,
+                &message,
+                fork.as_ref(),
+            )
+            .await
         {
-            return Ok(AnnounceOutcome::PullRequest { url, branch });
+            return Ok(AnnounceOutcome::PullRequest {
+                url,
+                branch,
+                fork: announced,
+            });
         }
-        return Ok(AnnounceOutcome::BranchPushed { branch });
+        return Ok(AnnounceOutcome::BranchPushed {
+            branch,
+            fork: announced,
+        });
     }
 
     // GitLab without a token, or a plain git host: ask the server to open
@@ -282,6 +343,7 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
                 "merge_request.create",
                 "-o",
                 &title_option,
+                "--",
                 "origin",
                 &branch,
             ],
@@ -290,8 +352,12 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     .await;
     match options_push {
         Ok(stderr) => Ok(match merge_request_url(&stderr) {
-            Some(url) => AnnounceOutcome::PullRequest { url, branch },
-            None => AnnounceOutcome::BranchPushed { branch },
+            Some(url) => AnnounceOutcome::PullRequest {
+                url,
+                branch,
+                fork: None,
+            },
+            None => AnnounceOutcome::BranchPushed { branch, fork: None },
         }),
         Err(_) => {
             // `?` propagates the retry's error — same root cause when the
@@ -299,10 +365,10 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
             git(
                 Some(&clone),
                 "push",
-                &with_credential(cred, &["push", "--quiet", "--force", "origin", &branch]),
+                &with_credential(cred, &["push", "--quiet", "--force", "--", "origin", &branch]),
             )
             .await?;
-            Ok(AnnounceOutcome::BranchPushed { branch })
+            Ok(AnnounceOutcome::BranchPushed { branch, fork: None })
         }
     }
 }
@@ -453,6 +519,52 @@ fn with_credential<'a>(config: Option<&'a str>, args: &[&'a str]) -> Vec<&'a str
     }
 }
 
+/// Delay before the single fork-push retry ([`push_announce_branch`]).
+// ponytail: fixed 3s, one retry. GitHub provisions a fresh fork's git
+// objects asynchronously — the fork's metadata reads ready before its first
+// push can (a brand-new fork's initial push can 404) — so one short retry
+// absorbs the normal provisioning delay. The readiness poll in forge.rs
+// already bounded the metadata wait; bump this only if fresh-fork pushes
+// routinely need longer than one 3s retry.
+const FORK_PUSH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Force-push `branch` to `target`. When `is_fork` (a just-resolved fork push
+/// target), retry once on the transient "not ready" signature GitHub emits
+/// while a fresh fork's git objects are still provisioning: a fork's metadata
+/// reads ready before its objects do, so the first push to a brand-new fork
+/// can 404 even though the readiness poll passed. The upstream push (and any
+/// non-transient failure) is never retried.
+async fn push_announce_branch(
+    clone: &Path,
+    cred: Option<&str>,
+    target: &str,
+    branch: &str,
+    is_fork: bool,
+) -> Result<(), AnnounceError> {
+    let args = with_credential(cred, &["push", "--quiet", "--force", "--", target, branch]);
+    match git(Some(clone), "push", &args).await {
+        Err(err) if is_fork && fork_push_not_ready(&err) => {
+            tracing::info!("fork push target not ready yet (git objects still provisioning); retrying once");
+            tokio::time::sleep(FORK_PUSH_RETRY_DELAY).await;
+            git(Some(clone), "push", &args).await
+        }
+        result => result,
+    }
+}
+
+/// Whether a push failure looks like a fresh fork whose git objects are not
+/// yet provisioned — GitHub answers the first push to a brand-new fork with a
+/// 404 / "repository not found" even though its metadata already reads. The
+/// push URL is already identity-verified ([`super::forge`]), so a "not found"
+/// here is the provisioning gap, not a misdirected push.
+fn fork_push_not_ready(err: &AnnounceError) -> bool {
+    let AnnounceError::Git { detail, .. } = err else {
+        return false;
+    };
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("not found") || detail.contains("404")
+}
+
 /// Run a git subprocess, mapping a nonzero exit to [`AnnounceError::Git`].
 async fn git(cwd: Option<&Path>, action: &'static str, args: &[&str]) -> Result<(), AnnounceError> {
     git_output_impl(cwd, action, args).await.map(|_| ())
@@ -482,6 +594,15 @@ async fn git_output_impl(
         cmd.current_dir(dir);
     }
     let output = cmd
+        // Hard-disable git's `ext::` remote-helper transport for every
+        // invocation (clone + pushes route through here). A push target or
+        // clone URL of the form `ext::sh -c '…'` — reachable from a hostile
+        // forge's fork response or a crafted index URL — otherwise executes
+        // an arbitrary command (RCE). A global `-c` must precede the verb, so
+        // it is prepended before the caller's args. Credential-helper config
+        // (`with_credential`) is unaffected.
+        .arg("-c")
+        .arg("protocol.ext.allow=never")
         .args(args)
         // Never hang on an interactive credential prompt.
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -653,6 +774,27 @@ mod tests {
             job_token_credential_config(&gitlab_ci_env("gitlab.example.com"), "/tmp/index.git"),
             None
         );
+    }
+
+    #[test]
+    fn fork_push_not_ready_detects_transient_provisioning_signatures() {
+        let git_err = |detail: &str| AnnounceError::Git {
+            action: "push",
+            detail: detail.to_string(),
+        };
+        // GitHub's metadata-ready-before-git-objects-ready signatures.
+        assert!(fork_push_not_ready(&git_err("remote: Repository not found.")));
+        assert!(fork_push_not_ready(&git_err(
+            "fatal: unable to access '...': The requested URL returned error: 404"
+        )));
+        // A genuine auth/other failure is not the provisioning gap.
+        assert!(!fork_push_not_ready(&git_err(
+            "remote: Permission to acme/index.git denied"
+        )));
+        // A non-git error is never the fork-push gap.
+        assert!(!fork_push_not_ready(&AnnounceError::Fork {
+            detail: "unrelated".to_string(),
+        }));
     }
 
     #[test]

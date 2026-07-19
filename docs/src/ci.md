@@ -46,6 +46,10 @@ jobs:
         run: |
           echo "$REGISTRY_TOKEN" | grim login ghcr.io -u "$GITHUB_ACTOR" \
             --password-stdin --allow-insecure-store
+      - name: Wire announce token into git
+        env:
+          GH_TOKEN: ${{ secrets.INDEX_ANNOUNCE_TOKEN }}
+        run: gh auth setup-git
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.INDEX_ANNOUNCE_TOKEN }}
@@ -59,18 +63,30 @@ wins) or, as here, from `GH_TOKEN`/`GITHUB_TOKEN` when the index lives on
 the same GitHub host the CI runs on. The git push itself uses ambient git
 credentials — on GitHub runners, `gh auth setup-git` or a credential
 helper fed from the same token. The announce credential must be able to
-**push a branch** to the index repository:
+**push a branch** — either straight to the index repository, or, when it
+lacks write access there, to a fork grim creates or reuses on your behalf:
 
 - **Your own or your organization's index** — a fine-grained PAT or GitHub
   App installation token with `contents` + `pull-requests` write on the
   index repository. This is exactly how the [first-party catalog
   publishes][publish-catalog].
-- **The public index, without write access** — point
-  `[announce] repository` (or `--announce-repo`) at your **fork** of
-  [grimoire-rs/index][index-repo] and open the pull request from the
-  branch banner GitHub shows on the fork. The
+- **The public index, without write access** — no extra setup needed. grim
+  detects the missing push permission, forks [grimoire-rs/index][index-repo]
+  into the token's account (creating the fork through the GitHub API, or
+  reusing one that already exists — including a fork renamed since it was
+  created), pushes the announce branch there, and opens the pull request
+  cross-repository against the upstream index. The
   [auto-merge validation](./package-index.md#spec-validation) checks the
-  PR author, so the PR must come from you either way.
+  PR author, so the PR must come from you either way. Set `[announce] fork
+  = false` to disable this and always push directly instead (which fails
+  the same way it always has, without write access). A token that cannot
+  create the fork — a fine-grained PAT scoped to a single repository, say —
+  or a fork that never becomes readable/pushable in time hard-errors here
+  (exit 69: the fork could not be created, verified, or readied; the
+  packages are already published, only the announce needs a retry).
+  Recover by hand: fork the index yourself, point `[announce] repository`
+  (or `--announce-repo`) at your **fork**, and open the pull request from
+  the branch banner GitHub shows on it.
 
 Skipping `--announce` needs no extra token at all — publish is fully
 self-contained on `GITHUB_TOKEN`.
@@ -133,10 +149,18 @@ include:
       announce_token: $INDEX_ANNOUNCE_TOKEN   # masked CI/CD variable
 ```
 
-The same write-access rule as on GitHub Actions applies: use a token that
-can push to the index repository, or announce to your fork
-(`announce_repo: https://github.com/<you>/index`) and open the PR from the
-fork's branch banner.
+The same write-access rule as on GitHub Actions applies: with a token that
+can push to the index repository, grim pushes there directly; without one,
+it automatically forks the index into the token's account, pushes the
+branch to the fork, and opens the PR cross-repository — no
+`announce_repo` override needed. Fork reuse is identity-based and
+tolerant of a rename, scoped to your **personal namespace** on GitLab (a
+fork later moved into a group namespace is not reused — see [Announcing
+Packages](./package-index.md#announcing) for the full behavior, including
+the bounded wait while a newly created fork becomes ready). Set
+`[announce] fork = false` in `publish.toml` to fall back to the manual
+workaround (`announce_repo: https://github.com/<you>/index`, opening the
+PR from the fork's branch banner) for a token that cannot create forks.
 
 ### Announcing to a self-hosted index {#gitlab-announce-self-hosted}
 
@@ -185,7 +209,7 @@ and opens the MR via push options where the server permits, else leaves
 the branch for a manual MR.
 
 The outcome is machine-readable: `grim publish --announce --format json`
-reports `{outcome, branch, url}` under `announce`
+reports `{outcome, branch, url, fork}` under `announce`
 ([Report output](./publishing.md#batch-publish-report)) — a downstream
 job reads the branch from there instead of grepping stderr. Grim also
 runs fine in GitLab's `HOME`-less step environments: registry

@@ -13,9 +13,10 @@
 //! manifest `push_registry` split was active); `descriptions` is a
 //! sibling `{"items": [...]}` of published description companions
 //! (`{ref, repository, digest, files}`, digest `null` under `--dry-run`);
-//! `announce` is `{outcome, branch, url}` when the `--announce` step
+//! `announce` is `{outcome, branch, url, fork}` when the `--announce` step
 //! completed, else `null` (no `--announce`, dry run, fail-fast, or announce
-//! failure).
+//! failure). `fork` is `{repo, created}` when the branch was pushed to a
+//! fork, else `null`.
 
 use std::io::{self, Write};
 
@@ -95,7 +96,8 @@ impl Serialize for AnnounceStatus {
 /// `branch` is always present: the topic branch is deterministic and
 /// known for every completed outcome, so CI can consume it without
 /// grepping stderr. `url` is always present as a key and non-null only
-/// for [`AnnounceStatus::PullRequest`].
+/// for [`AnnounceStatus::PullRequest`]. `fork` is always present as a key
+/// and non-null only when the branch was pushed to a fork.
 #[derive(Debug, Serialize)]
 pub struct PublishAnnounce {
     /// What the announce achieved.
@@ -104,6 +106,23 @@ pub struct PublishAnnounce {
     pub branch: String,
     /// The opened PR/MR URL; `null` unless the outcome is `pull-request`.
     pub url: Option<String>,
+    /// The fork the announce branch was pushed to; `null` when it went
+    /// straight to the upstream index. Additive always-present field.
+    pub fork: Option<PublishFork>,
+}
+
+/// The fork an announce pushed its branch to (JSON only — plain output keeps
+/// the announce outcome as stderr prose).
+///
+/// JSON format: `{repo, created}` — `repo` is the fork's canonical
+/// `owner/repo`, `created` is `true` when this run created the fork and
+/// `false` when an existing fork was reused.
+#[derive(Debug, Serialize)]
+pub struct PublishFork {
+    /// The fork's canonical `owner/repo` the branch was pushed to.
+    pub repo: String,
+    /// Whether this run created the fork (`false` when reused).
+    pub created: bool,
 }
 
 /// One published (or, under `--dry-run`, planned) description companion.
@@ -403,6 +422,7 @@ mod tests {
             outcome: AnnounceStatus::PullRequest,
             branch: "announce/acme-12345678".to_string(),
             url: Some("https://gitlab.example.com/g/index/-/merge_requests/7".to_string()),
+            fork: None,
         }));
         let v = serde_json::to_value(&pr).unwrap();
         assert_eq!(v["announce"]["outcome"], "pull-request");
@@ -416,12 +436,54 @@ mod tests {
             outcome: AnnounceStatus::BranchPushed,
             branch: "announce/acme-12345678".to_string(),
             url: None,
+            fork: None,
         }));
         let v = serde_json::to_value(&pushed).unwrap();
         assert_eq!(v["announce"]["outcome"], "branch-pushed");
         assert_eq!(v["announce"]["branch"], "announce/acme-12345678");
         let url = v["announce"].get("url").expect("url key must always be present");
         assert!(url.is_null(), "url must be explicit null off the pull-request outcome");
+    }
+
+    #[test]
+    fn json_announce_fork_is_always_present_null_or_populated() {
+        let entry = || PublishEntry {
+            reference: "registry.example/acme/s:1.0.0".to_string(),
+            kind: ArtifactKind::Skill,
+            digest: None,
+            tags: vec![],
+            status: PublishStatus::Pushed,
+            pushed_to: None,
+        };
+        // Upstream push (no fork): the key is present and explicit null.
+        let no_fork = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
+            outcome: AnnounceStatus::BranchPushed,
+            branch: "announce/acme-12345678".to_string(),
+            url: None,
+            fork: None,
+        }));
+        let v = serde_json::to_value(&no_fork).unwrap();
+        assert!(
+            v["announce"]
+                .get("fork")
+                .expect("fork key must always be present")
+                .is_null(),
+            "fork must be explicit null on an upstream push"
+        );
+
+        // Cross-repository push: the fork object carries repo + created.
+        let forked = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
+            outcome: AnnounceStatus::PullRequest,
+            branch: "announce/acme-12345678".to_string(),
+            url: Some("https://github.com/acme/index/pull/7".to_string()),
+            fork: Some(PublishFork {
+                repo: "forkuser/index".to_string(),
+                created: true,
+            }),
+        }));
+        let v = serde_json::to_value(&forked).unwrap();
+        assert_eq!(v["announce"]["fork"]["repo"], "forkuser/index");
+        assert_eq!(v["announce"]["fork"]["created"], true);
     }
 
     #[test]
@@ -438,6 +500,7 @@ mod tests {
             outcome: AnnounceStatus::UpToDate,
             branch: "announce/acme-12345678".to_string(),
             url: None,
+            fork: None,
         }));
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();

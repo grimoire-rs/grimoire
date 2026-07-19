@@ -44,7 +44,7 @@ grim that predates the field" (key missing) without version sniffing.
 [`grim status`][status]'s `clients_missing`/`clients_extra` (client-set
 drift) and `--check`-gated `deprecated`/`replaced_by`/`update_available`
 (plus the top-level `checked`), and [`grim update`][update]'s
-`reaped_clients`/`kept_modified_clients`, are the newest instances of this
+`reaped_clients`/`kept_modified_clients`, are instances of this
 pattern: each shipped as an additive field on an already-frozen report
 shape, each always-present (`[]`/`null` when inapplicable, never an
 absent key), so a consumer written against the pre-#43 `status`/`update`
@@ -53,6 +53,14 @@ against an *explicitly set* `[options].clients`; when it is unset
 (autodetect), `clients_missing`/`clients_extra` stay `[]` and
 `reaped_clients` stays `[]` on every row — neither ever keys off live
 client detection, which can drift independently of the user's config.
+
+The newest instance is [`grim publish`][publishing-report]'s
+`announce.fork` (`{repo, created}` or `null`), added when `--announce`
+gained automatic fork detection. It extends the already-frozen `announce`
+object the same always-present-null way: `null` when the branch pushed
+straight to the index repository (no fork involved, or `[announce] fork =
+false`), populated with the fork's full name and whether it was newly
+created once forking activated.
 
 ## Unstable — may change in any minor {#unstable}
 
@@ -212,6 +220,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [json-interface]: ./json-interface.md
 [status]: ./commands.md#status
 [update]: ./commands.md#update
+[publishing-report]: ./publishing.md#batch-publish-report
 [install]: ./commands.md#install
 [install-dev]: ./commands.md#install-dev
 [context]: ./commands.md#context
