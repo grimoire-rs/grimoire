@@ -409,6 +409,43 @@ The error document appears only when the command could not produce a
 report at all. A robust consumer therefore branches on the top-level
 `error` key first, then on the exit code.
 
+## Broken pipe {#broken-pipe}
+
+`grim status --format json | head` closes its downstream reader as soon
+as `head` has the lines it wants, often while grim is still mid-write.
+That write into a closed pipe surfaces as a `BrokenPipe` I/O error: Rust
+leaves `SIGPIPE` ignored (`SIG_IGN`) from process start, so the kernel
+never kills grim the way it would kill a C program on the same pipe — the
+error instead propagates through grim's own code exactly like any other
+I/O failure.
+
+Unhandled, that propagation is a well-known trap for Rust CLIs.
+[ripgrep's issue tracker documents the same SIGPIPE race][ripgrep-sigpipe],
+and [early Cargo panicked on a plain `cargo install --list | grep`][cargo-broken-pipe]
+until [Cargo scoped EPIPE tolerance to its own `Shell` output
+path][cargo-shell-fix]. grim hit the identical failure mode: `grim
+completions zsh | head` and a `--format json` report whose reader closed
+early both used to panic or print a stray "broken pipe" line to stderr.
+
+grim now follows the convention ripgrep and Cargo converged on: when the
+reader closes grim's own stdout, **grim exits `0` silently**. The
+consumer sees only the bytes that made it through before the pipe
+closed, then a clean exit — the ordinary `| head` contract every
+well-behaved Unix filter already honors. No [error document](#error-document)
+is written on this path; printing one into the same closed pipe is the
+panic this behavior replaces.
+
+This is **not a new exit code**: `0` already means success, and a closed
+pipe now maps onto it instead of falling through to `1` with stderr noise
+or a hard panic. The [documented exit codes][stability-frozen] are
+unchanged, and the [exit-code / JSON interplay](#exit-interplay) above
+still holds — a closed pipe is simply the case where no report,
+successful or otherwise, could be produced at all. The suppression is
+scoped narrowly to grim's own stdout write: a registry connection reset
+mid-push or mid-fetch is an unrelated failure and still exits non-zero
+with its ordinary error handling — only a downstream reader closing
+*grim's own* stdout triggers the silent `0`.
+
 ## MCP parity {#mcp-parity}
 
 The [MCP server][commands-mcp] tools return the same payloads:
@@ -459,3 +496,6 @@ can ship in a minor release.
 [clap]: https://docs.rs/clap/latest/clap/
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
+[ripgrep-sigpipe]: https://github.com/BurntSushi/ripgrep/issues/2939
+[cargo-broken-pipe]: https://github.com/rust-lang/cargo/issues/5234
+[cargo-shell-fix]: https://github.com/rust-lang/cargo/pull/8236

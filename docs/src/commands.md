@@ -22,6 +22,10 @@ These apply to every subcommand:
 | `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, silent elsewhere). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
 | `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
 
+A downstream reader that closes the pipe early — `grim status --format
+json | head` — makes grim exit `0` silently instead of erroring or
+printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
+
 ## The lifecycle commands
 
 | Command | Purpose |
@@ -1185,6 +1189,7 @@ registers the same entry — in every detected client, not just Claude Code
 [global-options]: #global-options
 [options-tui]: ./configuration.md#options-tui
 [json-mcp-parity]: ./json-interface.md#mcp-parity
+[json-broken-pipe]: ./json-interface.md#broken-pipe
 [path-source-trust]: ./stability.md#limitations-path-source-trust
 
 <!-- external -->
