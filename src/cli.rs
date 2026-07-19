@@ -3,6 +3,7 @@
 
 //! CLI shell: exit codes, global options, and the shared output layer.
 
+pub mod color;
 pub mod exit_code;
 pub mod options;
 pub mod printer;
