@@ -105,9 +105,9 @@ pub enum RemovedStatus {
 
 Two exemption tiers from the table-plain norm:
 
-- **Fully exempt** (`schema`, `tui`, `mcp`): no report module at all — the
-  command emits a document / owns the terminal / speaks JSON-RPC, wired
-  directly in `app.rs`.
+- **Fully exempt** (`schema`, `tui`, `mcp`, `completions`): no report
+  module at all — the command emits a document / owns the terminal /
+  speaks JSON-RPC, wired directly in `app.rs`.
 - **Payload-plain, JSON-standard** (`fetch`): the report module exists and
   `print_json` is a normal report, but `print_plain` writes the raw
   content payload — exact bytes, no table, no added trailing newline — so

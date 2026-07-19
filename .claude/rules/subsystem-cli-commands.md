@@ -36,10 +36,14 @@ Index of shipped `grim` subcommands — keep in sync with `src/command/`
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext). Verifies the credential against the registry **before** storing by default (`/v2/` ping + challenge answer, scope-less): rejected → 80 nothing stored, unreachable/5xx/429 → 69 nothing stored, anonymous registry → 0 stored (`verification: no-auth-required`). `--no-verify` skips (store-only, `verification: skipped`); offline skips silently with a warning unless `--verify` is explicit → 81 |
 | `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
 | `grim schema --kind <config\|publish\|lock\|mcp>` | Print the JSON Schema for `grimoire.toml`, `publish.toml`, `grimoire.lock`, or the MCP descriptor (`mcp/<name>.toml`) to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
+| `grim completions <shell>` | Print a `clap_complete`-generated completion script (`bash`, `elvish`, `fish`, `powershell`, `zsh`) to stdout; no eval hook, no shell auto-detect. Missing/unrecognized `<shell>` → 64. Document emitter, not a `Printable` report |
 | `grim mcp [--allow-writes]` | Run a local STDIO Model Context Protocol server (rmcp SDK). Long-running, `Printable`-exempt (returns `ExitCode` directly, like `tui`/`schema`); stdout is the JSON-RPC channel. Read tools (`grim_search`, `grim_status`, `grim_fetch`) always on; the write tool `grim_render` gated behind `--allow-writes` (rmcp `disable_route`: hidden + rejected). Scope per tool call (`global`/`config`/`workspace` args; precedence in that order, default cwd walk-up) — launch scope flags removed, `--global`/`--config` exit 64 |
 | `grim --version` | Print the compiled version (clap built-in; no subcommand) |
 
 Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
+`--color <auto|always|never>` (default `auto`; styles clap help/errors and
+`--format json`; `auto` is TTY-gated and honors `NO_COLOR`/`CLICOLOR`/
+`CLICOLOR_FORCE`/`TERM=dumb`, `always` overrides `NO_COLOR`),
 `--progress <auto|json|none>` (experimental; NDJSON events on stderr),
 `--offline`, `--log-level`, `--config <path>`, `--global`,
 `--registry <ref>` (repeatable / comma-separated).

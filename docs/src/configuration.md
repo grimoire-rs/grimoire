@@ -381,6 +381,10 @@ applies.
 | `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
 | `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
 | `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
+| `NO_COLOR` | Any non-empty value disables color under [`--color auto`](./commands.md#global-options) — the highest-priority `auto` signal, overriding even `CLICOLOR_FORCE`. Only `--color always` overrides it. | unset |
+| `CLICOLOR_FORCE` | A non-empty value other than `0` forces color on under `--color auto`, even when stdout is not a terminal — beaten only by `NO_COLOR`. | unset |
+| `CLICOLOR` | `0` disables color under `--color auto`. Any other value has no effect (color already follows the terminal check). | unset |
+| `TERM` | `dumb` disables color under `--color auto`, the same terminal-capability convention most color-aware CLIs follow. | unset |
 
 Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
 `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,

@@ -9,9 +9,9 @@
 //! the parser does not accept. The script is written verbatim to stdout.
 //!
 //! Like `schema`, this command emits a document rather than a `Printable`
-//! report, so (per subsystem-cli-api.md "Commands That Exec a Child Process")
-//! it is wired directly in `app.rs` without an `api/` report module — the
-//! script it prints is the payload, not a table.
+//! report, so (per subsystem-cli-api.md "Payload-Plain Reports", fully-exempt
+//! tier) it is wired directly in `app.rs` without an `api/` report module —
+//! the script it prints is the payload, not a table.
 
 use clap::{Args, CommandFactory};
 

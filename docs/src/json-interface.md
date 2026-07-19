@@ -29,6 +29,28 @@ owns the terminal and emits no report. In plain mode, `grim fetch` prints
 raw artifact content ([payload-plain](#fetch)); its `--format json` is a
 normal report.
 
+## Color and the document {#color}
+
+The [`--color`][commands-color] flag can add ANSI escape codes to a
+`--format json` document, and those codes are not valid JSON syntax —
+inserted between a document's stdout bytes, they make the stream fail a
+strict parser (`serde_json`, Python's `json`, `jq`) even though the
+underlying values are unchanged.
+
+Two conditions add color: `--color always`, unconditionally, and the
+default `auto` mode when stdout happens to be a terminal. Neither holds
+for a pipe, a redirect, or a CI runner, so the byte stream a script
+already parses is unaffected by this flag — piped `--format json` output
+is identical to what earlier releases produced. Never pass `--color
+always` into an automated pipeline that parses the document; it is meant
+for a human watching a colorized JSON document scroll past in a terminal,
+not for scripting.
+
+The [error document](#error-document) is exempt: it is written with
+`serde_json::to_string_pretty` directly, bypassing the color-resolution
+path every other report goes through, so it is never colorized regardless
+of `--color`.
+
 ## The items envelope {#items-envelope}
 
 A bare JSON array can never grow: adding any cross-cutting field to a
@@ -419,6 +441,7 @@ multiplexing consumer genuinely needs one, adding a field is additive and
 can ship in a minor release.
 
 <!-- internal -->
+[commands-color]: ./commands.md#global-options
 [commands-status]: ./commands.md#status
 [commands-search]: ./commands.md#search
 [commands-context]: ./commands.md#context

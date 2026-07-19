@@ -14,6 +14,7 @@ These apply to every subcommand:
 | Flag | Effect |
 |------|--------|
 | `--format <plain\|json>` | Output format for structured results (default `plain`). |
+| `--color <auto\|always\|never>` | When to colorize clap's help/error output and `--format json` (default `auto`): colorize only when stdout is a terminal, honoring `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM=dumb` — see [environment variables](./configuration.md#environment-variables). `always` overrides every one of those signals, including `NO_COLOR`. |
 | `--global` | Operate on the global scope instead of the discovered project. |
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
@@ -44,6 +45,7 @@ These apply to every subcommand:
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
 | [`grim schema`](#schema) | Print the JSON Schema for `grimoire.toml` or `publish.toml`. |
+| [`grim completions`](#completions) | Print a shell completion script. |
 | [`grim mcp`](#mcp) | Run a local STDIO MCP server for AI agent integration. |
 
 ## grim init {#init}
@@ -1077,6 +1079,29 @@ The same schemas are published to the docs site; see [Editor schema
 support](./configuration.md#editor-schema) for the hosted URLs and the
 `#:schema` directive that wires an editor up to them.
 
+## grim completions {#completions}
+
+`grim completions <shell>` prints a shell completion script to stdout for
+one of five shells: `bash`, `elvish`, `fish`, `powershell`, `zsh`. The
+script is generated from grim's real [clap][clap] command tree via
+[`clap_complete`][clap-complete], so it can never describe a flag or
+subcommand the parser does not actually accept, and it stays current as
+commands are added — no separately maintained completion file to fall out
+of sync.
+
+There is no shell auto-detection and no eval-time hook: `<shell>` is a
+required positional argument, and the command writes the plain script —
+nothing else — to stdout, so it composes directly with redirection:
+
+```sh
+grim completions bash > ~/.local/share/bash-completion/completions/grim
+grim completions zsh  > ~/.zfunc/_grim   # add ~/.zfunc to fpath before compinit
+grim completions fish > ~/.config/fish/completions/grim.fish
+```
+
+A successful run exits `0`. Omitting `<shell>` or passing a value outside
+the five supported shells is a usage error and exits `64`.
+
 ## grim mcp {#mcp}
 
 `grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
@@ -1169,3 +1194,5 @@ registers the same entry — in every detected client, not just Claude Code
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
 [opencode]: https://opencode.ai/
 [json-rpc]: https://www.jsonrpc.org/specification
+[clap]: https://docs.rs/clap/latest/clap/
+[clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/
