@@ -15,9 +15,12 @@
 //! Process") it is wired directly in `app.rs` without an `api/` report
 //! module — the JSON it prints is the payload, not a table.
 
+use std::io::Write;
+
 use clap::{Args, ValueEnum};
 
 use crate::cli::exit_code::ExitCode;
+use crate::cli::printer::tag_stdout_pipe;
 
 /// Base URL the published schemas are hosted at (the GitHub Pages docs
 /// site). Joined with each kind's filename to form the `$id`.
@@ -139,10 +142,11 @@ fn decorate(schema: &schemars::Schema, id: &str, title: &str) -> anyhow::Result<
 /// # Errors
 ///
 /// Propagates a schema-serialization failure from [`generate`] (unreachable
-/// in practice).
+/// in practice), or a broken-pipe-tagged error when writing to stdout fails
+/// (e.g. the downstream reader of `grim schema … | head` closed the pipe).
 pub fn run(args: &SchemaArgs) -> anyhow::Result<ExitCode> {
     let json = generate(args.kind)?;
-    println!("{json}");
+    writeln!(std::io::stdout(), "{json}").map_err(tag_stdout_pipe)?;
     Ok(ExitCode::Success)
 }
 
