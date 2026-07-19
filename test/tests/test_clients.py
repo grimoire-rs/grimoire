@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.assertions import assert_not_exists, assert_path_exists
 from src.helpers import make_artifact
 
@@ -357,3 +359,86 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
     assert not any(r["name"] == "rust-style" for r in status), (
         f"a zero-output record must uninstall cleanly, got: {status}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wave-1 vendor declined-kind semantics (mirrors the Codex-declines-Rule
+# blocks above, one row per new vendor).
+#
+# Rule declines: Junie/Gemini/Zed/Amp have no grim-ownable per-file rule
+# surface (adr_vendor_wave_expansion.md §2 — Kiro is Native, so excluded).
+# Agent declines: Kiro (#8040 CLI/IDE schema collision), Junie (EAP-only),
+# Zed (ACP, no file format), Amp (runtime-spawned subagents).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client", ["junie", "gemini", "zed", "amp"])
+def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, client: str
+) -> None:
+    """A rule installed with ``--client <declining-vendor>`` warns on stderr,
+    reports ``skipped`` with a null target and zero outputs, writes no file,
+    and uninstalls cleanly."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", client, format="json")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert rows[0]["target"] is None, rows
+    assert "no native target" in result.stderr.lower(), (
+        f"a declined rule for {client} must warn on stderr; got: {result.stderr!r}"
+    )
+    assert client in result.stderr.lower()
+
+    # Zero outputs: the status record carries no materialized output.
+    status = runner.json("status")["items"]
+    assert status[0]["outputs"] == [], f"a declined rule must record zero outputs: {status}"
+
+    # Clean uninstall — no crash, no orphaned record.
+    out = runner.json("uninstall", "rule", "rust-style")
+    assert out["status"] in ("uninstalled", "removed"), out
+    after = runner.json("status")["items"]
+    assert not any(r["name"] == "rust-style" for r in after), after
+
+
+@pytest.mark.parametrize("client", ["kiro", "junie", "zed", "amp"])
+def test_declined_agent_vendor_warns_skips_and_uninstalls_clean(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, client: str
+) -> None:
+    """An agent installed with ``--client <declining-vendor>`` warns on stderr,
+    reports ``skipped`` with a null target and zero outputs, and uninstalls
+    cleanly. Cursor and Gemini support agents and are excluded here."""
+    ag = make_artifact(
+        f"{unique_repo}/my-agent",
+        "agent",
+        {"my-agent.md": "---\nname: my-agent\ndescription: d\nmodel: sonnet\n---\n# my-agent\nbody\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[agents]\nmy-agent = "{ag.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", client, format="json")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert rows[0]["target"] is None, rows
+    assert "no native target" in result.stderr.lower(), (
+        f"a declined agent for {client} must warn on stderr; got: {result.stderr!r}"
+    )
+    assert client in result.stderr.lower()
+
+    status = runner.json("status")["items"]
+    assert status[0]["outputs"] == [], f"a declined agent must record zero outputs: {status}"
+
+    out = runner.json("uninstall", "agent", "my-agent")
+    assert out["status"] in ("uninstalled", "removed"), out
+    after = runner.json("status")["items"]
+    assert not any(r["name"] == "my-agent" for r in after), after

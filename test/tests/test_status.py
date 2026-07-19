@@ -389,3 +389,36 @@ def test_status_check_installed_at_latest_reports_false(
         "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
     )["items"][0]
     assert row["update_available"] is False, row
+
+
+def test_status_json_lists_new_vendor_client_name_additively(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A skill installed for a wave-1 vendor (Cursor) surfaces the new client
+    name inside the existing ``outputs`` array — additive, no shape change.
+
+    Contract: adr_vendor_wave_expansion.md "Compatibility" — new client-name
+    strings appear inside already-frozen JSON shapes; the per-item key set is
+    unchanged.
+    """
+    import json
+
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "---\nname: s\ndescription: d\n---\n# body\n"}, tag="v1")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.json("install", "--client", "cursor")
+
+    row = runner.json("status")["items"][0]
+    assert row["state"] == "installed", row
+    # The per-item shape is unchanged (frozen 8-key set + drift arrays).
+    assert set(row.keys()) >= {
+        "kind", "name", "source", "pinned", "state", "outputs",
+        "clients_missing", "clients_extra",
+    }, f"status item shape must be additive-only: {sorted(row)}"
+    # The new vendor name appears inside the existing outputs array.
+    clients = {o["client"] for o in row["outputs"]}
+    assert "cursor" in clients, f"the new vendor client name must surface in outputs: {clients}"
+    for output in row["outputs"]:
+        assert set(output.keys()) == {"client", "path"}, output

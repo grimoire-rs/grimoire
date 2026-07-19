@@ -173,3 +173,171 @@ fn gemini_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 pub(crate) fn gemini_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".gemini"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests for Gemini CLI — from the design record
+    //! (`adr_vendor_wave_expansion.md` +
+    //! `research_vendor_verification_junie_gemini.md`). `agent_index` / `mcp_entry`
+    //! are `unimplemented!()` stubs, so those tests fail by panic until
+    //! implementation.
+    use super::*;
+    use crate::oci::mcp::McpDescriptor;
+    use crate::skill::AgentFrontmatter;
+    use std::path::Path;
+
+    fn agent(doc: &str) -> ParsedAgent {
+        AgentFrontmatter::parse_doc(doc, Path::new("code-reviewer.md")).unwrap()
+    }
+
+    // ── kind_support: only rules declined (GEMINI.md hierarchy only) ──
+
+    #[test]
+    fn kind_support_declines_only_rule() {
+        assert_eq!(GeminiVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(
+            GeminiVendor.kind_support(ArtifactKind::Agent),
+            KindSupport::Native,
+            "native `.gemini/agents/`"
+        );
+        assert_eq!(GeminiVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        assert_eq!(
+            GeminiVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Declined,
+            "GEMINI.md hierarchy only, no ownable per-file surface"
+        );
+    }
+
+    // ── native agent render: name+description required, gemini.* 5-field lift ──
+
+    #[test]
+    fn agent_index_emits_required_keys_and_lifts_typed_registry_fields() {
+        // name + description are required; the gemini.* registry lifts with
+        // native types: temperature (float number), max_turns / timeout_mins
+        // (int), model + kind (string). The common `tools` becomes a YAML
+        // sequence; the body is byte-identical.
+        let doc = "---\nname: rev\ndescription: Reviews.\ntools: Read, Grep\nmetadata:\n  gemini.model: gemini-2.5-pro\n  gemini.temperature: \"0.5\"\n  gemini.max-turns: \"10\"\n  gemini.timeout-mins: \"30\"\n  gemini.kind: code\n---\nYou review.\n";
+        let out = GeminiVendor.agent_index(&agent(doc), "r@sha256:d").unwrap().unwrap();
+        let d = &out.document;
+        assert!(d.contains("name: rev"), "required name: {d}");
+        assert!(d.contains("description: Reviews."), "required description: {d}");
+        // Native-typed scalars (no quotes → real YAML number/int).
+        assert!(d.contains("temperature: 0.5"), "float lift: {d}");
+        assert!(d.contains("max_turns: 10"), "int lift, native underscore key: {d}");
+        assert!(d.contains("timeout_mins: 30"), "int lift, native underscore key: {d}");
+        assert!(d.contains("model: gemini-2.5-pro"), "model lift: {d}");
+        assert!(d.contains("kind: code"), "kind lift: {d}");
+        assert!(
+            !d.contains("max-turns") && !d.contains("timeout-mins"),
+            "hyphenated registry keys must not leak: {d}"
+        );
+        // tools → YAML sequence (trimmed segments).
+        assert!(
+            d.contains("- Read") && d.contains("- Grep"),
+            "tools projected as a sequence: {d}"
+        );
+        assert!(
+            d.find("name:").unwrap() < d.find("description:").unwrap(),
+            "name before description: {d}"
+        );
+        assert!(d.ends_with("You review.\n"), "body verbatim: {d}");
+    }
+
+    #[test]
+    fn agent_index_rejects_bad_gemini_float_literal() {
+        let doc = "---\nname: rev\ndescription: d\nmetadata:\n  gemini.temperature: warm\n---\nbody\n";
+        assert!(
+            GeminiVendor.agent_index(&agent(doc), "p").is_err(),
+            "non-float temperature must fail render"
+        );
+    }
+
+    #[test]
+    fn agent_index_is_deterministic() {
+        let doc = "---\nname: rev\ndescription: d\nmetadata:\n  gemini.model: gemini-2.5-pro\n---\nbody\n";
+        let a = GeminiVendor.agent_index(&agent(doc), "p").unwrap().unwrap();
+        let b = GeminiVendor.agent_index(&agent(doc), "p").unwrap().unwrap();
+        assert_eq!(a.document, b.document, "regeneration must be byte-identical");
+    }
+
+    // ── mcp_entry: transport map stdio→command, sse→url, http→httpUrl ──
+
+    #[test]
+    fn mcp_entry_stdio_maps_to_command_under_mcp_servers_pointer() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]",
+        )
+        .unwrap();
+        let (pointer, value) = GeminiVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(pointer, "/mcpServers/grim");
+        assert_eq!(value["command"], "grim");
+        assert!(
+            value.get("url").is_none() && value.get("httpUrl").is_none(),
+            "stdio uses `command`: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_sse_maps_to_url_and_http_maps_to_http_url() {
+        // The url/httpUrl distinction is load-bearing — a wrong key is a dead
+        // server entry.
+        let sse = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"sse\"\nurl = \"https://api.example.com/sse\"",
+        )
+        .unwrap();
+        let (_, sse_val) = GeminiVendor
+            .mcp_entry(ConfigScope::Project, "srv", &sse)
+            .expect("sse registers");
+        assert_eq!(sse_val["url"], "https://api.example.com/sse", "sse → `url`: {sse_val}");
+        assert!(sse_val.get("httpUrl").is_none(), "sse must not use httpUrl: {sse_val}");
+
+        let http = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://api.example.com/mcp\"",
+        )
+        .unwrap();
+        let (_, http_val) = GeminiVendor
+            .mcp_entry(ConfigScope::Project, "srv", &http)
+            .expect("http registers");
+        assert_eq!(
+            http_val["httpUrl"], "https://api.example.com/mcp",
+            "http → `httpUrl`: {http_val}"
+        );
+        assert!(http_val.get("url").is_none(), "http must not use `url`: {http_val}");
+    }
+
+    #[test]
+    fn mcp_entry_passes_env_refs_through_unchanged() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }",
+        )
+        .unwrap();
+        let (_, value) = GeminiVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(
+            value["env"]["TOKEN"], "${GITHUB_TOKEN}",
+            "`${{VAR}}` native passthrough: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_and_ws() {
+        let oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            GeminiVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
+            "oauth skipped"
+        );
+        let ws =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
+                .unwrap();
+        assert!(
+            GeminiVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
+            "ws skipped"
+        );
+    }
+}

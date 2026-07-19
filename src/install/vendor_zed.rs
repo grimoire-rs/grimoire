@@ -128,3 +128,90 @@ fn zed_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 pub(crate) fn zed_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     xdg_config.map(|c| c.join("zed"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests for Zed — skills + MCP only; rules and agents
+    //! declined (`adr_vendor_wave_expansion.md` +
+    //! `research_vendor_verification_zed_amp.md`). `mcp_entry` is an
+    //! `unimplemented!()` stub, so those tests fail by panic until implementation.
+    use super::*;
+    use crate::oci::mcp::McpDescriptor;
+
+    // ── kind_support: rules + agents declined ──
+
+    #[test]
+    fn kind_support_declines_rule_and_agent() {
+        assert_eq!(ZedVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(ZedVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        assert_eq!(
+            ZedVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Declined,
+            "no scoping anywhere"
+        );
+        assert_eq!(
+            ZedVendor.kind_support(ArtifactKind::Agent),
+            KindSupport::Declined,
+            "ACP-only, no file format"
+        );
+    }
+
+    // ── mcp_entry: `context_servers` container, FLAT entry shape ──
+
+    #[test]
+    fn mcp_entry_stdio_is_flat_under_context_servers_pointer() {
+        // Zed's key is `context_servers` (not `mcpServers`); the entry is a
+        // FLAT `{command, args, env}` shape (the nested `command:{path,...}`
+        // shape is stale-blog-only).
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]",
+        )
+        .unwrap();
+        let (pointer, value) = ZedVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(pointer, "/context_servers/grim");
+        assert_eq!(
+            value["command"], "grim",
+            "flat command, not nested `command.path`: {value}"
+        );
+        assert_eq!(value["args"][0], "mcp");
+        assert!(
+            value.get("mcpServers").is_none(),
+            "Zed does not use the mcpServers key: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_skips_env_ref_bearing_descriptor() {
+        // Zed has no env-ref substitution upstream → skip ref-bearing
+        // descriptors rather than write a broken literal.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }",
+        )
+        .unwrap();
+        assert!(
+            ZedVendor.mcp_entry(ConfigScope::Project, "grim", &d).is_none(),
+            "an env-ref-bearing descriptor must be skipped for Zed"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_and_ws() {
+        let oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            ZedVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
+            "oauth skipped"
+        );
+        let ws =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
+                .unwrap();
+        assert!(
+            ZedVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
+            "ws skipped"
+        );
+    }
+}

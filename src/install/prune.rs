@@ -712,6 +712,110 @@ mod tests {
         }
     }
 
+    // ── `.agents/skills` refcount guard (adr_vendor_wave_expansion §3) ──
+    //
+    // Contract tests for `shared_by_surviving_sibling` (currently
+    // `unimplemented!()` — these fail by panic until the implementation phase).
+    // Shared-pool members (Codex/Gemini/Zed/Amp) converge on one
+    // `$HOME/.agents/skills/<name>` dir; each member's `ClientOutput` in a
+    // single record resolves to the SAME path. The guard decides whether
+    // deleting that footprint would clobber a surviving sibling's skill.
+
+    /// `AnchorRoots` with the shared skills anchor resolvable (so pool outputs
+    /// resolve to a concrete path).
+    fn shared_roots(ws: &std::path::Path) -> AnchorRoots {
+        let mut r = roots(ws);
+        r.agents_skills = Some(ws.join(".agents/skills"));
+        r
+    }
+
+    /// A shared-pool skill output for `client` at `<agents_skills>/<name>`.
+    fn pool_output(client: &str, name: &str) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::AgentsSkills,
+                relative: name.to_string(),
+            },
+            content_hash: Digest::Sha256("a".repeat(64)),
+            support_dir: None,
+            entry: None,
+        }
+    }
+
+    #[test]
+    fn refcount_guard_dir_survives_when_one_of_three_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = shared_roots(dir.path());
+        let outputs = [
+            pool_output("codex", "s"),
+            pool_output("gemini", "s"),
+            pool_output("zed", "s"),
+        ];
+        // Dropping only codex; gemini + zed survive with the same path.
+        assert!(
+            shared_by_surviving_sibling(&outputs[0], &outputs, &["codex".to_string()], &roots),
+            "dropping one of three pool members must keep the shared dir (siblings survive)"
+        );
+    }
+
+    #[test]
+    fn refcount_guard_dir_removed_when_all_siblings_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = shared_roots(dir.path());
+        let outputs = [
+            pool_output("codex", "s"),
+            pool_output("gemini", "s"),
+            pool_output("zed", "s"),
+        ];
+        let dropping = ["codex".to_string(), "gemini".to_string(), "zed".to_string()];
+        assert!(
+            !shared_by_surviving_sibling(&outputs[0], &outputs, &dropping, &roots),
+            "dropping every pool member leaves no survivor — the footprint is safe to delete"
+        );
+    }
+
+    #[test]
+    fn refcount_guard_dir_survives_when_multi_dropped_but_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = shared_roots(dir.path());
+        let outputs = [
+            pool_output("codex", "s"),
+            pool_output("gemini", "s"),
+            pool_output("zed", "s"),
+        ];
+        // Dropping codex + gemini together; zed is kept — must NOT delete.
+        // (The drop set is explicit precisely so two members dropping together
+        // do not each see the other as "surviving".)
+        let dropping = ["codex".to_string(), "gemini".to_string()];
+        assert!(
+            shared_by_surviving_sibling(&outputs[0], &outputs, &dropping, &roots),
+            "a kept sibling (zed) pins the shared dir even when two members drop together"
+        );
+    }
+
+    #[test]
+    fn refcount_guard_ignores_sibling_with_mismatched_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = shared_roots(dir.path());
+        // Same target, but different support dirs ⇒ NOT the same footprint.
+        let mut reaping = pool_output("codex", "s");
+        reaping.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::AgentsSkills,
+            relative: "s-a".to_string(),
+        });
+        let mut sibling = pool_output("gemini", "s");
+        sibling.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::AgentsSkills,
+            relative: "s-b".to_string(),
+        });
+        let outputs = [reaping.clone(), sibling];
+        assert!(
+            !shared_by_surviving_sibling(&reaping, &outputs, &["codex".to_string()], &roots),
+            "a sibling that resolves to the same target but a DIFFERENT support dir does not share the footprint"
+        );
+    }
+
     #[test]
     fn prunes_clean_orphan_not_in_lock() {
         let dir = tempfile::tempdir().unwrap();

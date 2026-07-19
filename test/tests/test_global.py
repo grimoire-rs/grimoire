@@ -831,3 +831,312 @@ def test_global_no_client_flag_installs_to_detected_clients_only(
     assert not (runner.home / ".config/opencode/skills/cx-only-skill").exists(), (
         "OpenCode was not detected and must not receive the skill"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wave-1 vendor global-scope roots
+#
+# Global paths are HARDCODED defaults derived from $HOME — no new vendor
+# config-dir env override (CURSOR_CONFIG_DIR, KIRO_HOME, JUNIE_*_LOCATIONS,
+# GEMINI_CONFIG_DIR) is honored in wave 1 (adr_vendor_wave_expansion.md §1),
+# so no env-override tests exist for the new vendors by design.
+# Client-native skill dirs: Cursor/Kiro/Junie. Shared $HOME/.agents/skills
+# pool: Gemini/Zed/Amp (+ Codex).
+# ---------------------------------------------------------------------------
+
+_MCP_STDIO_DESCRIPTOR = (
+    'description = "A stdio MCP server."\n\n'
+    "[server]\n"
+    'transport = "stdio"\n'
+    'command = "grim"\n'
+    'args = ["mcp"]\n'
+)
+
+
+def _release_global_mcp(runner: GrimRunner, tmp_path: Path, registry: str, unique_repo: str) -> str:
+    descriptor = tmp_path / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(_MCP_STDIO_DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    return ref
+
+
+# ── Cursor ────────────────────────────────────────────────────────────────
+
+
+def test_global_install_cursor_skill_lands_in_home_dot_cursor(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Cursor skill → ``$HOME/.cursor/skills/<name>/`` (native dir)."""
+    sk = make_artifact(
+        f"{unique_repo}/cur-skill",
+        "skill",
+        {"cur-skill/SKILL.md": "---\nname: cur-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncur-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "cursor")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".cursor/skills/cur-skill/SKILL.md").is_file(), (
+        "global Cursor skill must land in $HOME/.cursor/skills/"
+    )
+    assert not (grim_home / ".cursor/skills/cur-skill").exists()
+
+
+def test_global_install_cursor_rule_lands_in_home_dot_cursor_rules(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Cursor rule → ``$HOME/.cursor/rules/<name>.mdc``."""
+    ru = make_artifact(
+        f"{unique_repo}/cur-rule",
+        "rule",
+        {"cur-rule.md": "---\npaths: ['**/*.rs']\n---\n# Cursor rule\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncur-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "cursor")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".cursor/rules/cur-rule.mdc").is_file(), (
+        "global Cursor rule must land in $HOME/.cursor/rules/<name>.mdc"
+    )
+
+
+def test_global_install_cursor_mcp_lands_in_home_dot_cursor(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Global Cursor MCP → ``$HOME/.cursor/mcp.json``."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "cursor")["items"]
+    assert rows[0]["status"] == "installed", rows
+    cfg = runner.home / ".cursor/mcp.json"
+    assert cfg.is_file(), "global Cursor MCP entry must land in $HOME/.cursor/mcp.json"
+    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+
+
+# ── Kiro ──────────────────────────────────────────────────────────────────
+
+
+def test_global_install_kiro_skill_lands_in_home_dot_kiro(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Kiro skill → ``$HOME/.kiro/skills/<name>/`` (native dir)."""
+    sk = make_artifact(
+        f"{unique_repo}/kiro-skill",
+        "skill",
+        {"kiro-skill/SKILL.md": "---\nname: kiro-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkiro-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".kiro/skills/kiro-skill/SKILL.md").is_file(), (
+        "global Kiro skill must land in $HOME/.kiro/skills/"
+    )
+
+
+def test_global_install_kiro_rule_lands_in_home_dot_kiro_steering(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Kiro rule → ``$HOME/.kiro/steering/<name>.md``."""
+    ru = make_artifact(
+        f"{unique_repo}/kiro-rule",
+        "rule",
+        {"kiro-rule.md": "---\npaths: ['**/*.rs']\n---\n# Kiro steering\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nkiro-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".kiro/steering/kiro-rule.md").is_file(), (
+        "global Kiro rule must land in $HOME/.kiro/steering/<name>.md"
+    )
+
+
+# ── Junie ─────────────────────────────────────────────────────────────────
+
+
+def test_global_install_junie_skill_lands_in_home_dot_junie(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Junie skill → ``$HOME/.junie/skills/<name>/`` (native dir)."""
+    sk = make_artifact(
+        f"{unique_repo}/junie-skill",
+        "skill",
+        {"junie-skill/SKILL.md": "---\nname: junie-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\njunie-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "junie")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".junie/skills/junie-skill/SKILL.md").is_file(), (
+        "global Junie skill must land in $HOME/.junie/skills/"
+    )
+
+
+def test_global_install_junie_mcp_lands_in_home_dot_junie_mcp(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Global Junie MCP → ``$HOME/.junie/mcp/mcp.json``."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "junie")["items"]
+    assert rows[0]["status"] == "installed", rows
+    cfg = runner.home / ".junie/mcp/mcp.json"
+    assert cfg.is_file(), "global Junie MCP entry must land in $HOME/.junie/mcp/mcp.json"
+    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+
+
+# ── Gemini (skills via shared pool; native agents) ─────────────────────────
+
+
+def test_global_install_gemini_skill_lands_in_shared_agents_skills(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Gemini skill → the shared ``$HOME/.agents/skills/<name>/`` pool
+    (same-tier precedence favors ``.agents/skills`` over ``.gemini/skills``)."""
+    sk = make_artifact(
+        f"{unique_repo}/gem-skill",
+        "skill",
+        {"gem-skill/SKILL.md": "---\nname: gem-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ngem-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "gemini")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".agents/skills/gem-skill/SKILL.md").is_file(), (
+        "global Gemini skill must land in the shared $HOME/.agents/skills pool"
+    )
+    assert not (runner.home / ".gemini/skills/gem-skill").exists(), (
+        "Gemini skills must NOT double-install into a native .gemini/skills dir"
+    )
+
+
+def test_global_install_gemini_agent_lands_in_home_dot_gemini(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Gemini agent → ``$HOME/.gemini/agents/<name>.md`` (native file)."""
+    ag = make_artifact(
+        f"{unique_repo}/gem-agent",
+        "agent",
+        {"gem-agent.md": "---\nname: gem-agent\ndescription: d\nmodel: sonnet\n---\n# a\nbody\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ngem-agent = "{ag.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "gemini")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".gemini/agents/gem-agent.md").is_file(), (
+        "global Gemini agent must land in $HOME/.gemini/agents/<name>.md"
+    )
+
+
+# ── Zed (skills via shared pool; MCP under ~/.config/zed) ───────────────────
+
+
+def test_global_install_zed_skill_lands_in_shared_agents_skills(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Zed skill → the shared ``$HOME/.agents/skills/<name>/`` pool."""
+    sk = make_artifact(
+        f"{unique_repo}/zed-skill",
+        "skill",
+        {"zed-skill/SKILL.md": "---\nname: zed-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nzed-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "zed")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".agents/skills/zed-skill/SKILL.md").is_file(), (
+        "global Zed skill must land in the shared $HOME/.agents/skills pool"
+    )
+
+
+def test_global_install_zed_mcp_lands_in_config_zed_settings(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Global Zed MCP → ``$HOME/.config/zed/settings.json``, key
+    ``context_servers`` — proving the ``~/.config/zed`` global root."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "zed")["items"]
+    assert rows[0]["status"] == "installed", rows
+    cfg = runner.home / ".config/zed/settings.json"
+    assert cfg.is_file(), "global Zed MCP entry must land in $HOME/.config/zed/settings.json"
+    assert json.loads(cfg.read_text())["context_servers"]["grim-mcp"]["command"] == "grim"
+
+
+# ── Amp (skills via shared pool; MCP under ~/.config/amp) ───────────────────
+
+
+def test_global_install_amp_skill_lands_in_shared_agents_skills(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global Amp skill → the shared ``$HOME/.agents/skills/<name>/`` pool."""
+    sk = make_artifact(
+        f"{unique_repo}/amp-skill",
+        "skill",
+        {"amp-skill/SKILL.md": "---\nname: amp-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\namp-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "amp")["items"]
+    assert rows[0]["status"] == "installed"
+    assert (runner.home / ".agents/skills/amp-skill/SKILL.md").is_file(), (
+        "global Amp skill must land in the shared $HOME/.agents/skills pool"
+    )
+
+
+def test_global_install_amp_mcp_lands_in_config_amp_settings(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Global Amp MCP → ``$HOME/.config/amp/settings.json``, literal dotted
+    key ``amp.mcpServers`` — proving the ``~/.config/amp`` global root."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "amp")["items"]
+    assert rows[0]["status"] == "installed", rows
+    cfg = runner.home / ".config/amp/settings.json"
+    assert cfg.is_file(), "global Amp MCP entry must land in $HOME/.config/amp/settings.json"
+    doc = json.loads(cfg.read_text())
+    assert "amp.mcpServers" in doc, f"Amp global container key must be 'amp.mcpServers': {list(doc)}"
+    assert doc["amp.mcpServers"]["grim-mcp"]["command"] == "grim"

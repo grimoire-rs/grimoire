@@ -119,3 +119,80 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 pub(crate) fn junie_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".junie"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests for Junie — skills + MCP only; rules and agents
+    //! declined (`adr_vendor_wave_expansion.md` +
+    //! `research_vendor_verification_junie_gemini.md`). `mcp_entry` is an
+    //! `unimplemented!()` stub, so those tests fail by panic until implementation.
+    use super::*;
+    use crate::oci::mcp::McpDescriptor;
+
+    // ── kind_support: rules + agents declined (no ownable surface / EAP-only) ──
+
+    #[test]
+    fn kind_support_declines_rule_and_agent() {
+        assert_eq!(JunieVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(JunieVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        assert_eq!(
+            JunieVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Declined,
+            "no ownable per-file surface (`.junie/AGENTS.md` only)"
+        );
+        assert_eq!(
+            JunieVendor.kind_support(ArtifactKind::Agent),
+            KindSupport::Declined,
+            "`.junie/agents/*.md` is EAP-only, not GA"
+        );
+    }
+
+    // ── mcp_entry: `mcpServers`, but env refs undocumented → skip ref-bearing ──
+
+    #[test]
+    fn mcp_entry_plain_stdio_registers_under_mcp_servers_pointer() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]",
+        )
+        .unwrap();
+        let (pointer, value) = JunieVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("ref-free stdio registers");
+        assert_eq!(pointer, "/mcpServers/grim");
+        assert_eq!(value["command"], "grim");
+        assert_eq!(value["args"][0], "mcp");
+    }
+
+    #[test]
+    fn mcp_entry_skips_env_ref_bearing_descriptor() {
+        // Junie's env-ref support is undocumented → a descriptor carrying any
+        // `${VAR}` is skipped rather than written as a broken literal.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }",
+        )
+        .unwrap();
+        assert!(
+            JunieVendor.mcp_entry(ConfigScope::Project, "grim", &d).is_none(),
+            "an env-ref-bearing descriptor must be skipped for Junie"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_and_ws() {
+        let oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            JunieVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
+            "oauth skipped"
+        );
+        let ws =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
+                .unwrap();
+        assert!(
+            JunieVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
+            "ws skipped"
+        );
+    }
+}

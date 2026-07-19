@@ -126,3 +126,170 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 pub(crate) fn kiro_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".kiro"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests for Kiro — from the design record
+    //! (`adr_vendor_wave_expansion.md` mapping table +
+    //! `research_vendor_verification_cursor_kiro.md`). `rule_index` / `mcp_entry`
+    //! are `unimplemented!()` stubs, so those tests fail by panic until
+    //! implementation.
+    use super::*;
+    use crate::oci::mcp::McpDescriptor;
+    use crate::skill::RuleFrontmatter;
+    use std::path::Path;
+
+    fn rule(doc: &str) -> crate::skill::rule_frontmatter::ParsedRule {
+        RuleFrontmatter::parse_doc(doc, Path::new("style.md")).unwrap()
+    }
+
+    // ── kind_support: agents declined (CLI/IDE schema collision #8040) ──
+
+    #[test]
+    fn kind_support_declines_only_agent() {
+        assert_eq!(KiroVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(
+            KiroVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Native,
+            "steering is native both scopes"
+        );
+        assert_eq!(KiroVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        assert_eq!(
+            KiroVendor.kind_support(ArtifactKind::Agent),
+            KindSupport::Declined,
+            "Kiro CLI expects an incompatible JSON agent schema in the same dir (#8040)"
+        );
+    }
+
+    // ── steering render: scoped → fileMatch + fileMatchPattern ARRAY ──
+
+    #[test]
+    fn rule_index_scoped_emits_file_match_and_pattern_array() {
+        // `paths` → `inclusion: fileMatch` + `fileMatchPattern` (array form,
+        // NOT a comma-joined string); `always`/`auto` never emitted.
+        let doc = "---\npaths:\n  - \"src/**/*.rs\"\n  - \"Cargo.toml\"\n---\n# Rust\nbody\n";
+        let out = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        assert!(
+            out.document.contains("inclusion: fileMatch"),
+            "scoped ⇒ fileMatch: {}",
+            out.document
+        );
+        assert!(
+            out.document.contains("fileMatchPattern"),
+            "carries fileMatchPattern: {}",
+            out.document
+        );
+        assert!(
+            out.document.contains("src/**/*.rs") && out.document.contains("Cargo.toml"),
+            "both globs kept: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("src/**/*.rs,Cargo.toml"),
+            "array form, NOT a comma-joined string: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("inclusion: always"),
+            "scoped is not always: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("auto"),
+            "`auto` inclusion is never emitted: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("paths:"),
+            "canonical `paths:` must not leak: {}",
+            out.document
+        );
+    }
+
+    #[test]
+    fn rule_index_unscoped_emits_inclusion_always() {
+        // Design choice pinned from the ADR §1 mapping table: unscoped →
+        // `inclusion: always` (not fileMatch, never `auto`).
+        let out = KiroVendor
+            .rule_index(&rule("# Rule\nguidance\n"), "p")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.document.contains("inclusion: always"),
+            "unscoped ⇒ always: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("fileMatch"),
+            "no fileMatch when unscoped: {}",
+            out.document
+        );
+        assert!(
+            !out.document.contains("auto"),
+            "`auto` inclusion is never emitted: {}",
+            out.document
+        );
+    }
+
+    #[test]
+    fn rule_index_is_deterministic() {
+        let doc = "---\npaths: [\"a\"]\n---\nbody\n";
+        let a = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        let b = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        assert_eq!(a.document, b.document, "regeneration must be byte-identical");
+    }
+
+    // ── mcp_entry: `mcpServers`, no `type`, `${VAR}` passthrough ──
+
+    #[test]
+    fn mcp_entry_stdio_has_no_type_key_and_maps_command() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]",
+        )
+        .unwrap();
+        let (pointer, value) = KiroVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(pointer, "/mcpServers/grim");
+        assert_eq!(value["command"], "grim");
+        assert!(
+            value.get("type").is_none(),
+            "Kiro's mcpServers schema has no `type` field: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_passes_env_refs_through_unchanged() {
+        // Kiro reads `${VARIABLE_NAME}` natively — passthrough, no translation.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }",
+        )
+        .unwrap();
+        let (_, value) = KiroVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(
+            value["env"]["TOKEN"], "${GITHUB_TOKEN}",
+            "`${{VAR}}` passthrough, not translated: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_and_ws() {
+        let oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            KiroVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
+            "oauth skipped"
+        );
+        let ws =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
+                .unwrap();
+        assert!(
+            KiroVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
+            "ws skipped"
+        );
+    }
+}

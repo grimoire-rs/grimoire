@@ -473,33 +473,187 @@ mod tests {
         }
     }
 
-    // ── G4 parity-test shells (adr_client_compat_matrix) — bodies filled in
-    // the Specify phase; they fail with `unimplemented` against the stubs ──
+    // ── kind_support grid + G4 parity tests (adr_client_compat_matrix) ──
+
+    /// Full 10-vendor × kind grid asserted against the `adr_vendor_wave_expansion`
+    /// §1 mapping table: Skill/Rule/Agent via [`Vendor::kind_support`], MCP via
+    /// the boolean [`Vendor::mcp_config_path`] surface.
+    #[test]
+    fn kind_support_grid_matches_adr_mapping_table() {
+        use crate::install::vendor::KindSupport::{Declined, Degraded, Native};
+        // (client, Skill, Rule, Agent). Every wave-1 vendor also exposes an
+        // MCP config surface (asserted below).
+        let grid = [
+            (ClientTarget::Claude, Native, Native, Native),
+            (ClientTarget::OpenCode, Native, Degraded, Native),
+            (ClientTarget::Copilot, Native, Native, Native),
+            (ClientTarget::Codex, Native, Declined, Native),
+            (ClientTarget::Cursor, Native, Native, Native),
+            (ClientTarget::Kiro, Native, Native, Declined),
+            (ClientTarget::Junie, Native, Declined, Declined),
+            (ClientTarget::Gemini, Native, Declined, Native),
+            (ClientTarget::Zed, Native, Declined, Declined),
+            (ClientTarget::Amp, Native, Declined, Declined),
+        ];
+        assert_eq!(
+            grid.len(),
+            ClientTarget::ALL.len(),
+            "grid must cover every ClientTarget"
+        );
+        let project = crate::config::scope::ConfigScope::Project;
+        for (client, skill, rule, agent) in grid {
+            let v = client.vendor();
+            assert_eq!(v.kind_support(ArtifactKind::Skill), skill, "{client} skill");
+            assert_eq!(v.kind_support(ArtifactKind::Rule), rule, "{client} rule");
+            assert_eq!(v.kind_support(ArtifactKind::Agent), agent, "{client} agent");
+            assert!(
+                v.mcp_config_path(Path::new("/w"), project).is_some(),
+                "{client} must expose an MCP config surface"
+            );
+        }
+    }
+
+    /// A documented support-matrix cell.
+    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+    enum Cell {
+        Yes,     // ✓
+        Partial, // ◐
+        No,      // ✗
+    }
+
+    /// Parse the first markdown table of a docs page into `(client, [Skill,
+    /// Rule, Agent, MCP])` rows. Cell parsing keys on the `✓`/`◐`/`✗` token
+    /// only, whitespace- and formatting-insensitive; an unrecognized cell
+    /// (e.g. a `TODO` placeholder) is a `None` that fails the caller's assert.
+    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 4])> {
+        let mut rows = Vec::new();
+        let mut in_table = false;
+        for line in md.lines() {
+            let line = line.trim();
+            if !line.starts_with('|') {
+                if in_table {
+                    break; // table ended
+                }
+                continue;
+            }
+            in_table = true;
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            // Separator row (|----|----|).
+            if cells
+                .iter()
+                .all(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':'))
+            {
+                continue;
+            }
+            // Header row (first cell is the literal "Client").
+            if cells.first().is_some_and(|c| c.eq_ignore_ascii_case("Client")) {
+                continue;
+            }
+            if cells.len() < 5 {
+                continue;
+            }
+            let name = cells[0].to_ascii_lowercase();
+            let cell = |c: &str| {
+                if c.contains('✓') {
+                    Some(Cell::Yes)
+                } else if c.contains('◐') {
+                    Some(Cell::Partial)
+                } else if c.contains('✗') {
+                    Some(Cell::No)
+                } else {
+                    None
+                }
+            };
+            rows.push((name, [cell(cells[1]), cell(cells[2]), cell(cells[3]), cell(cells[4])]));
+        }
+        rows
+    }
 
     /// Table-parity: reads `docs/src/clients.md` at compile time, parses the
-    /// first markdown table, and asserts for every `(client, kind)` in
-    /// `ClientTarget::ALL × [Skill, Rule, Agent, Mcp]` that a documented `✗`
-    /// ⇔ `kind_support(kind) == Declined` (MCP: `mcp_config_path` is `None`),
-    /// a `◐` ⇔ `Degraded` for the Rule column, and `✓`/`◐` ⇔ supported.
-    /// Row set must equal `ClientTarget::ALL` exactly.
+    /// first markdown table, and asserts for every `(client, kind)` that a
+    /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_path` is
+    /// `None`), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
+    /// set equals `ClientTarget::ALL` exactly.
     #[test]
     fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
-        todo!("Specify phase: parse docs/src/clients.md matrix and assert against kind_support / mcp_config_path")
+        use crate::install::vendor::KindSupport;
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/clients.md"))
+            .expect("docs/src/clients.md exists (matrix parity)");
+        let rows = parse_first_matrix(&md);
+
+        let documented: std::collections::BTreeSet<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> = ClientTarget::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            documented, expected,
+            "clients.md row set must equal ClientTarget::ALL exactly"
+        );
+
+        let project = crate::config::scope::ConfigScope::Project;
+        for (name, cells) in &rows {
+            let client: ClientTarget = name.parse().unwrap_or_else(|_| panic!("unknown client row '{name}'"));
+            let v = client.vendor();
+            for (idx, kind) in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent]
+                .into_iter()
+                .enumerate()
+            {
+                let cell =
+                    cells[idx].unwrap_or_else(|| panic!("unparsed {kind:?} cell for '{name}' (TODO placeholder?)"));
+                let expected = match v.kind_support(kind) {
+                    KindSupport::Native => Cell::Yes,
+                    KindSupport::Degraded => Cell::Partial,
+                    KindSupport::Declined => Cell::No,
+                };
+                assert_eq!(cell, expected, "{name} {kind:?} cell must track kind_support");
+            }
+            // MCP column: boolean surface — ✗ ⇔ no config path, ✓/◐ ⇔ some.
+            let mcp = cells[3].unwrap_or_else(|| panic!("unparsed MCP cell for '{name}' (TODO placeholder?)"));
+            let supported = v.mcp_config_path(Path::new("/w"), project).is_some();
+            assert_eq!(mcp != Cell::No, supported, "{name} MCP cell must track mcp_config_path");
+        }
+    }
+
+    /// Scope `md` to the `{#emit-matrix}` section (heading to the next `## `),
+    /// falling back to the whole document if the anchor is absent.
+    fn emit_matrix_section(md: &str) -> &str {
+        let Some(start) = md.find("{#emit-matrix}") else {
+            return md;
+        };
+        let rest = &md[start..];
+        match rest[1..].find("\n## ") {
+            Some(end) => &rest[..end + 1],
+            None => rest,
+        }
     }
 
     /// Emit-matrix row-presence: every `ClientTarget` name appears in the
-    /// `docs/src/agents.md` emit-matrix table (catches "added a vendor,
+    /// `docs/src/agents.md` emit-matrix section (catches "added a vendor,
     /// forgot the emit matrix" without over-constraining prose).
     #[test]
     fn agents_emit_matrix_lists_every_client() {
-        todo!("Specify phase: assert every ClientTarget name appears in docs/src/agents.md emit matrix")
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/agents.md"))
+            .expect("docs/src/agents.md exists");
+        let section = emit_matrix_section(&md).to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            assert!(
+                section.contains(client.as_str()),
+                "agents.md emit matrix must list every client — missing '{client}'"
+            );
+        }
     }
 
     /// Emit-matrix row-presence for `docs/src/mcp-servers.md` — same
     /// invariant as [`agents_emit_matrix_lists_every_client`].
     #[test]
     fn mcp_servers_emit_matrix_lists_every_client() {
-        todo!("Specify phase: assert every ClientTarget name appears in docs/src/mcp-servers.md emit matrix")
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/mcp-servers.md"))
+            .expect("docs/src/mcp-servers.md exists");
+        let section = emit_matrix_section(&md).to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            assert!(
+                section.contains(client.as_str()),
+                "mcp-servers.md emit matrix must list every client — missing '{client}'"
+            );
+        }
     }
 
     #[test]
@@ -509,6 +663,12 @@ mod tests {
             ("opencode", ClientTarget::OpenCode),
             ("copilot", ClientTarget::Copilot),
             ("codex", ClientTarget::Codex),
+            ("cursor", ClientTarget::Cursor),
+            ("kiro", ClientTarget::Kiro),
+            ("junie", ClientTarget::Junie),
+            ("gemini", ClientTarget::Gemini),
+            ("zed", ClientTarget::Zed),
+            ("amp", ClientTarget::Amp),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);

@@ -1750,16 +1750,102 @@ mod tests {
                 unreachable!("Codex rules are skipped, not classified")
             }
 
+            // ── Wave-1 vendors (adr_vendor_wave_expansion mapping table) ──
+
+            // Cursor: all four kinds native under `.cursor` / `~/.cursor`
+            // (Mcp is excluded from this file loop, handled by the vendor
+            // MCP writers).
+            (ConfigScope::Project, ClientTarget::Cursor, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".cursor/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Cursor, ArtifactKind::Rule) => {
+                (PathAnchor::Workspace, format!(".cursor/rules/{name}.mdc"))
+            }
+            (ConfigScope::Project, ClientTarget::Cursor, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".cursor/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Skill) => {
+                (PathAnchor::CursorRoot, format!("skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Rule) => {
+                (PathAnchor::CursorRoot, format!("rules/{name}.mdc"))
+            }
+            (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Agent) => {
+                (PathAnchor::CursorRoot, format!("agents/{name}.md"))
+            }
+
+            // Kiro: skills + steering rules native (agents declined — skipped
+            // before this table).
+            (ConfigScope::Project, ClientTarget::Kiro, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".kiro/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Kiro, ArtifactKind::Rule) => {
+                (PathAnchor::Workspace, format!(".kiro/steering/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Kiro, ArtifactKind::Skill) => {
+                (PathAnchor::KiroRoot, format!("skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Kiro, ArtifactKind::Rule) => {
+                (PathAnchor::KiroRoot, format!("steering/{name}.md"))
+            }
+
+            // Junie: skills only (rules + agents declined).
+            (ConfigScope::Project, ClientTarget::Junie, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".junie/skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Junie, ArtifactKind::Skill) => {
+                (PathAnchor::JunieRoot, format!("skills/{name}"))
+            }
+
+            // Gemini: skills via the shared `.agents/skills` pool; agents
+            // native under `.gemini` / `~/.gemini` (rules declined).
+            (ConfigScope::Project, ClientTarget::Gemini, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Gemini, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".gemini/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Gemini, ArtifactKind::Skill) => {
+                (PathAnchor::AgentsSkills, name.to_string())
+            }
+            (ConfigScope::Global, ClientTarget::Gemini, ArtifactKind::Agent) => {
+                (PathAnchor::GeminiRoot, format!("agents/{name}.md"))
+            }
+
+            // Zed: skills via the shared pool only (rules + agents declined).
+            (ConfigScope::Project, ClientTarget::Zed, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Zed, ArtifactKind::Skill) => {
+                (PathAnchor::AgentsSkills, name.to_string())
+            }
+
+            // Amp: skills via the shared pool only (rules + agents declined).
+            (ConfigScope::Project, ClientTarget::Amp, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Amp, ArtifactKind::Skill) => {
+                (PathAnchor::AgentsSkills, name.to_string())
+            }
+
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
             // MCP descriptors register into client configs, not files —
             // their entry anchors land with the vendor MCP writers.
             (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
-            // ponytail: the wave-1 vendor (Cursor/Kiro/Junie/Gemini/Zed/Amp)
-            // anchor-table arms + the `combo_count` assertion are Specify's to
-            // author. Stubbed to compile only — this test currently panics for
-            // the new vendors, by design (re-stub gate is `cargo check`, not run).
-            _ => todo!("Specify: fill the wave-1 vendor anchor table + update combo_count"),
+            // Declined (scope, client, kind) triples never reach `from_target`
+            // (the installer skips them at the `kind_support` gate), so the test
+            // loop `continue`s before calling this function — unreachable here.
+            (_, ClientTarget::Kiro, ArtifactKind::Agent)
+            | (_, ClientTarget::Junie, ArtifactKind::Rule)
+            | (_, ClientTarget::Junie, ArtifactKind::Agent)
+            | (_, ClientTarget::Gemini, ArtifactKind::Rule)
+            | (_, ClientTarget::Zed, ArtifactKind::Rule)
+            | (_, ClientTarget::Zed, ArtifactKind::Agent)
+            | (_, ClientTarget::Amp, ArtifactKind::Rule)
+            | (_, ClientTarget::Amp, ArtifactKind::Agent) => {
+                unreachable!("declined (client, kind) pairs are skipped by the test loop before this call")
+            }
         }
     }
 
@@ -1792,20 +1878,21 @@ mod tests {
             copilot_root: Some(PathBuf::from("/copilot")),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
-            // /agents/skills is the Codex skills root; /codex its config root.
+            // /agents/skills is the shared skills root (Codex/Gemini/Zed/Amp);
+            // the rest are each vendor's own config root.
             agents_skills: Some(PathBuf::from("/agents/skills")),
             codex_root: Some(PathBuf::from("/codex")),
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
+            cursor_root: Some(PathBuf::from("/cursor")),
+            kiro_root: Some(PathBuf::from("/kiro")),
+            junie_root: Some(PathBuf::from("/junie")),
+            gemini_root: Some(PathBuf::from("/gemini")),
+            zed_root: Some(PathBuf::from("/zed")),
+            amp_root: Some(PathBuf::from("/amp")),
         };
 
         let name = "test-artifact";
         let scopes = [ConfigScope::Project, ConfigScope::Global];
-        let clients = ClientTarget::ALL; // [Claude, OpenCode, Copilot, Codex]
+        let clients = ClientTarget::ALL; // all 10 wave-1 vendors
         let kinds = [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent];
         // ArtifactKind::Bundle is excluded — bundles are never materialised.
 
@@ -1873,13 +1960,15 @@ mod tests {
             }
         }
 
-        // Exhaustiveness guard: 2 scopes × 4 clients × 3 kinds = 24, minus the
-        // 2 Codex-rule combos the `supports_kind` gate skips = 22 combos.
-        // If a new ClientTarget or ArtifactKind variant is added, this fails,
-        // forcing the table to be extended.
+        // Exhaustiveness guard: 2 scopes × 10 clients × 3 kinds = 60, minus the
+        // 9 declined (client, kind) pairs the `kind_support` gate skips
+        // (Codex-Rule, Kiro-Agent, Junie-Rule/Agent, Gemini-Rule, Zed-Rule/Agent,
+        // Amp-Rule/Agent) × 2 scopes = 18 → 42 combos. If a new ClientTarget or
+        // ArtifactKind variant is added, this fails, forcing the table to be
+        // extended.
         assert_eq!(
-            combo_count, 22,
-            "expected 22 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 42,
+            "expected 42 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }

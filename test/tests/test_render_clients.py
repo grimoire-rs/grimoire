@@ -733,3 +733,464 @@ def test_release_warns_but_succeeds_for_unknown_namespaced_key(
     assert "claude.modle" in result.stderr, (
         f"expected typo-guard warning for 'claude.modle' in stderr:\n{result.stderr}"
     )
+
+
+# ===========================================================================
+# Wave-1 vendor render surfaces (Cursor, Kiro, Junie, Gemini, Zed, Amp)
+#
+# Contract sources: adr_vendor_wave_expansion.md (§1 mapping table) +
+# research_vendor_verification_{cursor_kiro,junie_gemini,zed_amp}.md
+# (live-verified 2026-07-19).  Each vendor's native path and transform is
+# pinned there; these tests encode the WHAT, not the stub bodies.
+# ===========================================================================
+
+
+def _push_rule(unique_repo: str, name: str, doc: str) -> "src.registry.PublishedArtifact":
+    return make_artifact(f"{unique_repo}/{name}", "rule", {f"{name}.md": doc}, tag="v1")
+
+
+def _push_multi_path_rule(unique_repo: str, name: str = "rust-style") -> "src.registry.PublishedArtifact":
+    """A scoped rule with two glob paths (tests comma-joining, not YAML array)."""
+    doc = (
+        "---\n"
+        'paths: ["**/*.rs", "**/*.md"]\n'
+        "---\n"
+        "# Rust Style\n"
+        "Use 4 spaces.\n"
+    )
+    return _push_rule(unique_repo, name, doc)
+
+
+def _push_unscoped_rule(unique_repo: str, name: str = "always-rule") -> "src.registry.PublishedArtifact":
+    """A rule carrying no ``paths:`` scoping (applies everywhere)."""
+    return _push_rule(unique_repo, name, "# Always On\nApplies everywhere.\n")
+
+
+def _push_agent(
+    unique_repo: str, name: str, extra_metadata: str, model: str = "sonnet"
+) -> "src.registry.PublishedArtifact":
+    """Push an agent whose ``metadata:`` map carries vendor-namespaced keys."""
+    doc = (
+        f"---\n"
+        f"name: {name}\n"
+        f"description: A test agent.\n"
+        f"model: {model}\n"
+        f"tools: Bash,Read\n"
+        f"metadata:\n"
+        f"{extra_metadata}"
+        f"---\n"
+        f"# {name}\n"
+        f"Agent body text.\n"
+    )
+    return make_artifact(f"{unique_repo}/{name}", "agent", {f"{name}.md": doc}, tag="v1")
+
+
+_MCP_STDIO_DESCRIPTOR = (
+    'description = "A stdio MCP server."\n\n'
+    "[server]\n"
+    'transport = "stdio"\n'
+    'command = "grim"\n'
+    'args = ["mcp"]\n'
+)
+
+_MCP_HTTP_DESCRIPTOR = (
+    'description = "A remote HTTP MCP server."\n\n'
+    "[server]\n"
+    'transport = "http"\n'
+    'url = "https://api.example.com/mcp"\n'
+)
+
+
+def _add_mcp(
+    runner, project_dir: Path, registry: str, unique_repo: str, body: str = _MCP_STDIO_DESCRIPTOR
+) -> str:
+    """Release an MCP descriptor and declare it (locked, not yet installed).
+
+    Mirrors the release→add pattern in ``test_mcp_artifact.py``; the caller
+    then runs ``install --client <vendor>`` to exercise a single vendor's
+    MCP config splice in isolation.
+    """
+    descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(body)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    return ref
+
+
+# ---------------------------------------------------------------------------
+# Cursor
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_scoped_rule_maps_paths_to_comma_string_globs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Cursor scoped rule → ``.cursor/rules/<name>.mdc`` with ``globs`` as a
+    comma-separated STRING (not a YAML array) and ``alwaysApply: false``."""
+    _push_multi_path_rule(unique_repo)
+    write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "cursor")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    mdc = project_dir / ".cursor/rules/rust-style.mdc"
+    assert mdc.is_file(), "Cursor rule must materialize at .cursor/rules/<name>.mdc"
+    text = mdc.read_text()
+
+    # Both globs on a SINGLE `globs:` line proves a comma-joined string, not a
+    # YAML sequence (which would put each glob on its own `- ` line). Tolerant
+    # of `,` vs `, ` spacing.
+    globs_line = next(
+        (l for l in text.splitlines() if l.strip().startswith("globs:")), ""
+    )
+    assert "**/*.rs" in globs_line and "**/*.md" in globs_line, (
+        f"Cursor globs must be one comma-joined string line, got globs line {globs_line!r}:\n{text}"
+    )
+    assert "," in globs_line, f"multi-path globs must be comma-separated:\n{text}"
+    assert "alwaysApply: false" in text, f"scoped rule must set alwaysApply: false:\n{text}"
+    # `paths:` is not a Cursor-native key.
+    assert "paths:" not in text, f"paths: must not survive into the Cursor render:\n{text}"
+    assert "Use 4 spaces." in text
+
+
+def test_cursor_unscoped_rule_sets_always_apply_true(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Cursor unscoped rule (no ``paths:``) → ``alwaysApply: true``."""
+    _push_unscoped_rule(unique_repo)
+    write_config(project_dir, rules={"always-rule": f"{registry}/{unique_repo}/always-rule:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "cursor")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    mdc = project_dir / ".cursor/rules/always-rule.mdc"
+    assert mdc.is_file(), "Cursor rule must materialize at .cursor/rules/<name>.mdc"
+    text = mdc.read_text()
+    assert "alwaysApply: true" in text, f"unscoped rule must set alwaysApply: true:\n{text}"
+    assert "Applies everywhere." in text
+
+
+def test_cursor_agent_lifts_cursor_namespaced_keys(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Cursor agent → ``.cursor/agents/<name>.md`` with ``cursor.*`` keys lifted
+    to native typed frontmatter; the raw namespaced keys are gone."""
+    _push_agent(
+        unique_repo,
+        "cur-agent",
+        extra_metadata=(
+            "  cursor.model: opus\n"
+            '  cursor.readonly: "true"\n'
+            '  cursor.is-background: "false"\n'
+        ),
+    )
+    write_config(project_dir, agents={"cur-agent": f"{registry}/{unique_repo}/cur-agent:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "cursor")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    agent_md = project_dir / ".cursor/agents/cur-agent.md"
+    assert agent_md.is_file(), "Cursor agent must materialize at .cursor/agents/<name>.md"
+    text = agent_md.read_text()
+
+    # cursor.model overrides the common model (claude.model precedent).
+    assert "model: opus" in text, f"cursor.model must lift to native model:\n{text}"
+    # Bool keys lift to native UNQUOTED YAML bools.
+    assert "readonly: true" in text, f"cursor.readonly must lift to a native bool:\n{text}"
+    assert "background: false" in text, (
+        f"cursor.is-background must lift to a native bool (unquoted):\n{text}"
+    )
+    # No raw namespaced keys survive.
+    assert "cursor." not in text, f"cursor.* namespaced keys must be gone:\n{text}"
+    assert "Agent body text." in text
+
+
+def test_cursor_skill_strips_foreign_claude_key(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Cursor skill → ``.cursor/skills/<name>/SKILL.md`` with a foreign
+    ``claude.*`` metadata key stripped (Cursor's registry is empty in wave 1)."""
+    _push_namespaced_skill(unique_repo)
+    write_config(project_dir, skills={"my-skill": f"{registry}/{unique_repo}/my-skill:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "cursor")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    skill_md = project_dir / ".cursor/skills/my-skill/SKILL.md"
+    assert skill_md.is_file(), "Cursor skill must materialize at .cursor/skills/<name>/SKILL.md"
+    text = skill_md.read_text()
+    assert "claude." not in text, f"foreign claude.* keys must be stripped for cursor:\n{text}"
+    # Claude-native lifted field must not leak into the Cursor render either.
+    assert "user-invocable" not in text, f"claude native field must not appear:\n{text}"
+    # Plain metadata survives.
+    assert "keywords: testing,automation" in text, f"plain metadata must be kept:\n{text}"
+
+
+def test_cursor_mcp_entry_lands_in_cursor_mcp_json(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Cursor MCP → ``.cursor/mcp.json``, container key ``mcpServers``,
+    stdio entry carries ``type: "stdio"``."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "cursor")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".cursor/mcp.json"
+    assert cfg.is_file(), "Cursor MCP entry must land in .cursor/mcp.json"
+    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["command"] == "grim"
+    assert entry["type"] == "stdio", f"Cursor stdio entry needs type: stdio; got {entry}"
+
+
+# ---------------------------------------------------------------------------
+# Kiro
+# ---------------------------------------------------------------------------
+
+
+def test_kiro_scoped_rule_maps_to_filematch_array(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Kiro scoped rule → ``.kiro/steering/<name>.md`` with
+    ``inclusion: fileMatch`` and a ``fileMatchPattern`` ARRAY."""
+    _push_multi_path_rule(unique_repo)
+    write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "kiro")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    steering = project_dir / ".kiro/steering/rust-style.md"
+    assert steering.is_file(), "Kiro rule must materialize at .kiro/steering/<name>.md"
+    text = steering.read_text()
+    assert "inclusion: fileMatch" in text, f"scoped Kiro rule needs inclusion: fileMatch:\n{text}"
+    assert "fileMatchPattern:" in text, f"scoped Kiro rule needs fileMatchPattern:\n{text}"
+    # Array form — tolerant of YAML block (`fileMatchPattern:\n  - **/*.rs`)
+    # and flow (`fileMatchPattern: ["**/*.rs"]`) sequences; rejects a bare
+    # scalar string value.
+    fm_tail = text.split("fileMatchPattern:", 1)[1].splitlines()
+    same_line = fm_tail[0].strip()
+    next_line = fm_tail[1].strip() if len(fm_tail) > 1 else ""
+    assert same_line.startswith("[") or next_line.startswith("-"), (
+        f"fileMatchPattern must be an array (flow or block), not a scalar:\n{text}"
+    )
+    assert "**/*.rs" in text, f"the scoped glob must survive into fileMatchPattern:\n{text}"
+    assert "Use 4 spaces." in text
+
+
+def test_kiro_unscoped_rule_sets_inclusion_always(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Kiro unscoped rule → ``inclusion: always`` (project scope, no warning)."""
+    _push_unscoped_rule(unique_repo)
+    write_config(project_dir, rules={"always-rule": f"{registry}/{unique_repo}/always-rule:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    result = runner.run("install", "--client", "kiro", format="json", log_level="warn")
+    rows = json.loads(result.stdout)["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    steering = project_dir / ".kiro/steering/always-rule.md"
+    assert steering.is_file(), "Kiro rule must materialize at .kiro/steering/<name>.md"
+    text = steering.read_text()
+    # Either inclusion: always is emitted, or frontmatter is omitted entirely
+    # (always is Kiro's default) — but never a fileMatch.
+    assert "fileMatch" not in text, f"unscoped Kiro rule must not carry fileMatch:\n{text}"
+    assert "Applies everywhere." in text
+    # Project scope: the global inert-#9176 warning must NOT fire.
+    assert "9176" not in result.stderr, (
+        f"project-scope Kiro rule must not emit the global-inertness warning:\n{result.stderr}"
+    )
+
+
+def test_kiro_mcp_entry_lands_in_kiro_settings_mcp_json(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Kiro MCP → ``.kiro/settings/mcp.json``, container key ``mcpServers``."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "kiro")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".kiro/settings/mcp.json"
+    assert cfg.is_file(), "Kiro MCP entry must land in .kiro/settings/mcp.json"
+    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["command"] == "grim"
+
+
+# ---------------------------------------------------------------------------
+# Junie
+# ---------------------------------------------------------------------------
+
+
+def test_junie_mcp_entry_lands_in_junie_mcp_mcp_json(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Junie MCP → ``.junie/mcp/mcp.json``, container key ``mcpServers``."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "junie")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".junie/mcp/mcp.json"
+    assert cfg.is_file(), "Junie MCP entry must land in .junie/mcp/mcp.json"
+    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["command"] == "grim"
+
+
+# ---------------------------------------------------------------------------
+# Gemini
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_agent_lifts_gemini_namespaced_keys(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Gemini agent → ``.gemini/agents/<name>.md`` with ``gemini.*`` keys lifted."""
+    _push_agent(
+        unique_repo,
+        "gem-agent",
+        extra_metadata=(
+            "  gemini.model: gemini-2.5-pro\n"
+            '  gemini.temperature: "0.5"\n'
+            '  gemini.max-turns: "10"\n'
+        ),
+    )
+    write_config(project_dir, agents={"gem-agent": f"{registry}/{unique_repo}/gem-agent:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "gemini")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    agent_md = project_dir / ".gemini/agents/gem-agent.md"
+    assert agent_md.is_file(), "Gemini agent must materialize at .gemini/agents/<name>.md"
+    text = agent_md.read_text()
+    assert "model: gemini-2.5-pro" in text, f"gemini.model must lift to native model:\n{text}"
+    # Numeric key lifts to a native UNQUOTED number.
+    assert "temperature: 0.5" in text, f"gemini.temperature must lift to a native float:\n{text}"
+    assert "gemini." not in text, f"gemini.* namespaced keys must be gone:\n{text}"
+    assert "Agent body text." in text
+
+
+def test_gemini_mcp_stdio_entry_lands_in_gemini_settings_json(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Gemini MCP (stdio) → ``.gemini/settings.json``, key ``mcpServers``,
+    stdio transport uses ``command``."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "gemini")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".gemini/settings.json"
+    assert cfg.is_file(), "Gemini MCP entry must land in .gemini/settings.json"
+    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["command"] == "grim"
+
+
+def test_gemini_mcp_http_transport_maps_to_http_url_not_url(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Gemini MCP (http) → ``httpUrl`` key, NOT ``url`` (which Gemini reserves
+    for SSE). Wrong key = dead server entry."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo, body=_MCP_HTTP_DESCRIPTOR)
+    rows = runner.json("install", "--client", "gemini")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    entry = json.loads((project_dir / ".gemini/settings.json").read_text())["mcpServers"]["grim-mcp"]
+    assert entry.get("httpUrl") == "https://api.example.com/mcp", (
+        f"grim http transport must map to Gemini's httpUrl key; got {entry}"
+    )
+    assert "url" not in entry, f"http transport must NOT use the SSE `url` key: {entry}"
+
+
+# ---------------------------------------------------------------------------
+# Zed
+# ---------------------------------------------------------------------------
+
+
+def test_zed_mcp_entry_lands_in_zed_settings_context_servers(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Zed MCP → ``.zed/settings.json``, container key ``context_servers``,
+    flat entry shape (``command`` at the top level)."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "zed")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".zed/settings.json"
+    assert cfg.is_file(), "Zed MCP entry must land in .zed/settings.json"
+    doc = json.loads(cfg.read_text())
+    assert "context_servers" in doc, f"Zed container key must be context_servers: {doc}"
+    entry = doc["context_servers"]["grim-mcp"]
+    # Flat shape — command sits directly on the entry, not nested under command:{path}.
+    assert entry["command"] == "grim", f"Zed entry must be flat with top-level command: {entry}"
+
+
+# ---------------------------------------------------------------------------
+# Amp
+# ---------------------------------------------------------------------------
+
+
+def test_amp_mcp_entry_lands_in_amp_settings_dotted_key(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Amp MCP → ``.amp/settings.json``, literal dotted container key
+    ``amp.mcpServers`` (a single JSON key, not nested)."""
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "amp")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    cfg = project_dir / ".amp/settings.json"
+    assert cfg.is_file(), "Amp MCP entry must land in .amp/settings.json"
+    doc = json.loads(cfg.read_text())
+    assert "amp.mcpServers" in doc, (
+        f"Amp container key must be the literal dotted key 'amp.mcpServers': {list(doc)}"
+    )
+    # It must be a single literal key, not a nested {amp: {mcpServers: ...}}.
+    assert "amp" not in doc or not isinstance(doc.get("amp"), dict), (
+        f"'amp.mcpServers' must be one literal key, not nested amp.mcpServers: {doc}"
+    )
+    entry = doc["amp.mcpServers"]["grim-mcp"]
+    assert entry["command"] == "grim"
+
+
+# ---------------------------------------------------------------------------
+# Modified-output refusal is unchanged for a new-vendor render surface
+# (plan Acceptance table: "modified-output refusal unchanged")
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_rule_drift_refused_then_forced(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Editing an installed Cursor ``.mdc`` render is detected as drift:
+    a plain install refuses (65); ``--force`` restores the rendered content."""
+    _push_multi_path_rule(unique_repo)
+    write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.json("install", "--client", "cursor")
+
+    installed = project_dir / ".cursor/rules/rust-style.mdc"
+    installed.write_text("hand edited\n")
+
+    refused = runner.run("install", "--client", "cursor", check=False)
+    assert refused.returncode == 65, (
+        f"modified Cursor render must refuse with 65, got {refused.returncode}; {refused.stderr}"
+    )
+    assert installed.read_text() == "hand edited\n", "a refused install must not overwrite the edit"
+
+    forced = runner.run("install", "--client", "cursor", "--force", check=False)
+    assert forced.returncode == 0, forced.stderr
+    assert "alwaysApply: false" in installed.read_text(), "force must restore the rendered content"

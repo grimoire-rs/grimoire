@@ -129,3 +129,88 @@ fn amp_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 pub(crate) fn amp_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     xdg_config.map(|c| c.join("amp"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests for Amp — skills + MCP only; rules and agents
+    //! declined (`adr_vendor_wave_expansion.md` +
+    //! `research_vendor_verification_zed_amp.md`). `mcp_entry` is an
+    //! `unimplemented!()` stub, so those tests fail by panic until implementation.
+    use super::*;
+    use crate::oci::mcp::McpDescriptor;
+
+    // ── kind_support: rules + agents declined ──
+
+    #[test]
+    fn kind_support_declines_rule_and_agent() {
+        assert_eq!(AmpVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(AmpVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        assert_eq!(
+            AmpVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Declined,
+            "AGENTS.md only, no scoping"
+        );
+        assert_eq!(
+            AmpVendor.kind_support(ArtifactKind::Agent),
+            KindSupport::Declined,
+            "runtime-spawned, no file format"
+        );
+    }
+
+    // ── mcp_entry: literal dotted `"amp.mcpServers"` key ──
+
+    #[test]
+    fn mcp_entry_uses_literal_dotted_amp_mcp_servers_key() {
+        // The container is the literal single dotted JSON key
+        // `"amp.mcpServers"` (pointer-safe: a `.` is not a JSON Pointer
+        // separator), NOT a nested `amp` → `mcpServers` object.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]",
+        )
+        .unwrap();
+        let (pointer, value) = AmpVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(
+            pointer, "/amp.mcpServers/grim",
+            "single dotted key, not a nested `/amp/mcpServers/` pointer"
+        );
+        assert_eq!(value["command"], "grim");
+        assert_eq!(value["args"][0], "mcp");
+    }
+
+    #[test]
+    fn mcp_entry_passes_env_refs_through_unchanged() {
+        // Amp reads `${VAR_NAME}` natively — passthrough, no translation.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }",
+        )
+        .unwrap();
+        let (_, value) = AmpVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(
+            value["env"]["TOKEN"], "${GITHUB_TOKEN}",
+            "`${{VAR_NAME}}` passthrough, not translated: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_and_ws() {
+        let oauth = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
+        )
+        .unwrap();
+        assert!(
+            AmpVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
+            "oauth skipped"
+        );
+        let ws =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
+                .unwrap();
+        assert!(
+            AmpVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
+            "ws skipped"
+        );
+    }
+}
