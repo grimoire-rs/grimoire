@@ -11,6 +11,33 @@
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 
+/// Marker error: grim's own stdout was closed by the downstream reader
+/// (`grim … | head`). `main.rs` maps it to a silent exit 0. A network or
+/// file EPIPE never carries this type, so a mid-push connection reset can
+/// never masquerade as a graceful shutdown.
+// Wired into the stdout write sites and the main.rs error arm in the
+// following commits; the `dead_code` allow is removed there once used.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+#[error("stdout closed by downstream reader")]
+pub struct StdoutPipeClosed;
+
+/// Convert a stdout-write error: `BrokenPipe` → the [`StdoutPipeClosed`]
+/// sentinel, anything else passes through unchanged (keeps today's
+/// classification for real I/O faults).
+///
+/// Tag only at grim's own stdout write sites — never a network or file
+/// write — so [`crate::error::is_stdout_pipe_closed`] stays a reliable
+/// "the reader hung up" signal and cannot be tripped by a registry EPIPE.
+#[allow(dead_code)]
+pub fn tag_stdout_pipe(err: io::Error) -> anyhow::Error {
+    if err.kind() == io::ErrorKind::BrokenPipe {
+        anyhow::Error::new(StdoutPipeClosed)
+    } else {
+        anyhow::Error::new(err)
+    }
+}
+
 /// A command result that can render as a plain table or as JSON.
 pub trait Printable {
     /// Renders a human-readable aligned table.
@@ -256,6 +283,26 @@ mod tests {
         let value = serde_json::json!({ "name": "grim" });
         let out = render_json(&value, true).unwrap();
         assert!(out.contains("\x1b["), "colored render must carry ANSI: {out:?}");
+    }
+
+    #[test]
+    fn tag_stdout_pipe_maps_broken_pipe_to_sentinel() {
+        let err = tag_stdout_pipe(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(
+            err.downcast_ref::<StdoutPipeClosed>().is_some(),
+            "BrokenPipe must be tagged with the sentinel"
+        );
+    }
+
+    #[test]
+    fn tag_stdout_pipe_passes_other_kinds_through() {
+        let err = tag_stdout_pipe(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(
+            err.downcast_ref::<StdoutPipeClosed>().is_none(),
+            "a non-BrokenPipe error must not be tagged"
+        );
+        let io = err.downcast_ref::<io::Error>().expect("passes through as io::Error");
+        assert_eq!(io.kind(), io::ErrorKind::PermissionDenied, "original kind is preserved");
     }
 
     #[test]

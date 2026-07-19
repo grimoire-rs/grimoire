@@ -14,6 +14,7 @@ use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
 use crate::catalog::index_announce::AnnounceError;
 use crate::cli::exit_code::ExitCode;
+use crate::cli::printer::StdoutPipeClosed;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::install::install_error::{InstallError, InstallErrorKind};
@@ -208,6 +209,22 @@ pub fn classify(err: &anyhow::Error) -> Classification {
 /// need no changes.
 pub fn classify_error(err: &anyhow::Error) -> ExitCode {
     classify(err).exit
+}
+
+/// Whether the error chain carries the [`StdoutPipeClosed`] sentinel — grim's
+/// own stdout was closed by a downstream reader (`grim … | head`). `main.rs`
+/// short-circuits to a silent exit 0 when this is true.
+///
+/// Walks the chain (not just the outermost error) so a `.context(...)` layer
+/// cannot hide the sentinel. Deliberately does **not** match a bare
+/// `io::Error` of kind `BrokenPipe`: a registry TCP or file EPIPE must stay a
+/// loud failure, so only the sentinel tagged at grim's stdout write sites
+/// ([`crate::cli::printer::tag_stdout_pipe`]) qualifies.
+// Called from the main.rs error arm in the next commit; the `dead_code`
+// allow is removed there once wired.
+#[allow(dead_code)]
+pub fn is_stdout_pipe_closed(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.downcast_ref::<StdoutPipeClosed>().is_some())
 }
 
 /// Map a config-tier error to a classification. `NotDiscovered` (no
@@ -854,6 +871,44 @@ mod tests {
         let inner = DigestError::Invalid("nope".to_string());
         let err = anyhow::Error::from(Error::from(inner)).context("while resolving lock");
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn is_stdout_pipe_closed_detects_sentinel_bare_and_wrapped() {
+        let bare: anyhow::Error = anyhow::Error::new(StdoutPipeClosed);
+        assert!(is_stdout_pipe_closed(&bare), "bare sentinel must match");
+
+        let wrapped = anyhow::Error::new(StdoutPipeClosed).context("while rendering the report");
+        assert!(
+            is_stdout_pipe_closed(&wrapped),
+            "sentinel behind a .context(...) layer must still match"
+        );
+    }
+
+    #[test]
+    fn is_stdout_pipe_closed_false_for_bare_broken_pipe_io_error() {
+        // Regression lock for the network-EPIPE false-positive design
+        // decision: a bare io::Error of kind BrokenPipe (a registry TCP write
+        // or file EPIPE) must NOT be treated as grim's own stdout closing.
+        // Only the sentinel tagged at grim's stdout write sites qualifies, so
+        // a mid-push connection reset still fails loudly instead of
+        // masquerading as a graceful exit 0.
+        let io = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        let err: anyhow::Error = io.into();
+        assert!(
+            !is_stdout_pipe_closed(&err),
+            "a bare BrokenPipe io::Error must not match"
+        );
+    }
+
+    #[test]
+    fn is_stdout_pipe_closed_false_for_other_and_unrelated_errors() {
+        let other: anyhow::Error = std::io::Error::from(std::io::ErrorKind::PermissionDenied).into();
+        assert!(!is_stdout_pipe_closed(&other), "another io kind must not match");
+        assert!(
+            !is_stdout_pipe_closed(&anyhow::anyhow!("unrelated")),
+            "an unrelated error must not match"
+        );
     }
 
     #[test]
