@@ -5,13 +5,15 @@
 //!
 //! These flags are shared by every subcommand. Resolution-affecting flags
 //! (`--offline`, `--config`, `--registry`) influence which artifacts are
-//! looked up; presentation flags (`--format`, `--log-level`) only affect
-//! rendering. By default Grimoire resolves floating tags fresh from the
+//! looked up; presentation flags (`--format`, `--color`, `--log-level`) only
+//! affect rendering. By default Grimoire resolves floating tags fresh from the
 //! registry (online); `--offline` restricts it to the cache.
 
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
+
+use crate::cli::color::ColorMode;
 
 /// Output rendering format for structured command results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -59,6 +61,10 @@ pub struct GlobalOptions {
     /// Output format for structured results.
     #[arg(long, value_enum, default_value_t = OutputFormat::Plain, global = true)]
     pub format: OutputFormat,
+
+    /// When to colorize output: `auto` (tty-gated), `always`, or `never`.
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto, global = true)]
+    pub color: ColorMode,
 
     /// Progress rendering for long-running passes (experimental):
     /// `auto` = tty-gated stderr bar, `json` = NDJSON events on stderr,

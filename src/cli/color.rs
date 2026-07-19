@@ -25,12 +25,6 @@
 //! `TERM=dumb` → off, else follow stdout's TTY state. `--color always` /
 //! `never` short-circuit the whole chain (an explicit flag beats the env).
 
-// The resolution entry points land ahead of their call sites: `json_colored`
-// is wired into the JSON sink in the following commit, and `mode_from_args` /
-// `init` / `choice` / `clap_styles` into `main`/`app` in the commit after.
-// Until then they are unreachable in the bin build. Removed once wired.
-#![allow(dead_code)]
-
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 

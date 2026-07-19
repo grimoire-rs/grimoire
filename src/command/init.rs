@@ -177,6 +177,7 @@ mod tests {
         // The global `--registry` flag is snapshotted when `init` has none.
         let opts = crate::cli::options::GlobalOptions {
             format: crate::cli::options::OutputFormat::Plain,
+            color: crate::cli::color::ColorMode::Auto,
             progress: crate::cli::options::ProgressMode::Auto,
             offline: false,
             log_level: None,

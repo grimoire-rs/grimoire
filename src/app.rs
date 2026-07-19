@@ -31,7 +31,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         // Bare `grim` prints help and exits successfully so backend
         // callers get a stable, zero-exit discovery path.
         use clap::CommandFactory;
-        let mut cmd = Cli::command();
+        // Style this help identically to the `--help` path; without it the
+        // bare-`grim` help would fall back to clap's default theme.
+        let mut cmd = Cli::command()
+            .color(crate::cli::color::choice())
+            .styles(crate::cli::color::clap_styles());
         cmd.print_help()?;
         println!();
         return Ok(ExitCode::Success);

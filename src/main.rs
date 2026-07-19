@@ -37,8 +37,9 @@ mod tls;
 mod tui;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
+use crate::cli::color::{self, ColorMode};
 use crate::cli::exit_code::ExitCode;
 use crate::cli::options::{GlobalOptions, OutputFormat};
 use crate::command::add::AddArgs;
@@ -130,12 +131,16 @@ pub enum Command {
 fn main() -> std::process::ExitCode {
     init_tracing();
 
-    let cli = match Cli::try_parse() {
+    // Pre-scan argv for `--color` before parse: clap renders `--help` and
+    // usage errors *during* parse, so the choice must be known up front.
+    let color_mode = color::mode_from_args();
+    let cli = match parse_cli(color_mode) {
         Ok(cli) => cli,
         Err(err) => {
             // Help/version are a successful, intentional invocation; every
             // other parse failure is a usage error → EX_USAGE (64), not
-            // clap's default 2.
+            // clap's default 2. `err.print()` colorizes through the styles
+            // clap embedded in the error during parse.
             let _ = err.print();
             return match err.kind() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => ExitCode::Success.into(),
@@ -143,6 +148,10 @@ fn main() -> std::process::ExitCode {
             };
         }
     };
+
+    // Store the resolved color decision once, before any output (the JSON
+    // error paths below run after this) or the runtime is built.
+    color::init(cli.global.color);
 
     // Captured before `cli` moves into `app::run` so both Err arms can
     // decide whether to emit the JSON error document (OutputFormat: Copy).
@@ -174,6 +183,23 @@ fn main() -> std::process::ExitCode {
             classification.exit.into()
         }
     }
+}
+
+/// Parse argv into a [`Cli`], applying the resolved color choice and the
+/// Grimoire help/error theme to clap's own rendering.
+///
+/// This is the exact expansion of the derived `Cli::try_parse()`
+/// (`try_get_matches` + `from_arg_matches_mut` — the `_mut` form is required
+/// for correct subcommand extraction) with `.color(..)` and `.styles(..)`
+/// inserted on the command builder. Global flags, the help/version
+/// `ErrorKind`s, and unknown-subcommand errors all surface identically to
+/// the derive path.
+fn parse_cli(color: ColorMode) -> Result<Cli, clap::Error> {
+    let mut matches = Cli::command()
+        .color(color.into())
+        .styles(color::clap_styles())
+        .try_get_matches()?;
+    Cli::from_arg_matches_mut(&mut matches)
 }
 
 /// Under `--format json`, print the structured error document to stdout:
