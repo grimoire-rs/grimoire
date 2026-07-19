@@ -147,6 +147,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         }
     }
 
@@ -388,6 +394,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
 
         let lk = lock_with("acme/x", 'a');

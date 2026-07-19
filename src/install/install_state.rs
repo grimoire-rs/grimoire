@@ -718,6 +718,12 @@ impl InstallState {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let convert = (ConfigScope::Project, &roots);
 
@@ -1910,6 +1916,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
 
         let st = InstallState::load_global(&global_path, &roots).unwrap();
@@ -1969,6 +1981,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: Some(PathBuf::from("/home/u/.codex")),
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
 
         // Must not panic (the historical bug: `unreachable!()` in
@@ -2501,6 +2519,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let out = ClientOutput {
             client: client.to_string(),

@@ -29,10 +29,16 @@ pub mod target;
 pub mod toml_splice;
 pub mod uninstall;
 pub mod vendor;
+pub mod vendor_amp;
 pub mod vendor_claude;
 pub mod vendor_codex;
 pub mod vendor_copilot;
+pub mod vendor_cursor;
+pub mod vendor_gemini;
+pub mod vendor_junie;
+pub mod vendor_kiro;
 pub mod vendor_opencode;
+pub mod vendor_zed;
 
 #[allow(unused_imports)]
 pub use client_target::{ClientTarget, MaterializedFile};

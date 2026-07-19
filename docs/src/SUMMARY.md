@@ -5,6 +5,7 @@
 - [Installation](./installation.md)
 - [Quick Start](./quickstart.md)
 - [Concepts](./concepts.md)
+- [Client Compatibility](./clients.md)
 - [Command Reference](./commands.md)
 - [Configuration](./configuration.md)
 - [Authentication](./authentication.md)

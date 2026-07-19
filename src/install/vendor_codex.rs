@@ -19,7 +19,7 @@
 //! directory-granular with no path-glob / `applyTo` scoping anywhere
 //! (upstream hooks now accept `additionalContext` — openai/codex#20692 —
 //! but that still cannot express path-glob-scoped rules).
-//! So [`CodexVendor::supports_kind`] declines [`ArtifactKind::Rule`] and the
+//! So [`CodexVendor::kind_support`] declines [`ArtifactKind::Rule`] and the
 //! installer warns + skips rather than writing an inert file.
 //!
 //! MCP registration writes into `config.toml` under [`Self::mcp_config_path`]
@@ -46,7 +46,9 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, McpConfigFormat, Vendor, env_dir, home_dir, toml_provenance};
+use super::vendor::{
+    FieldType, KindSupport, KnownField, McpConfigFormat, Vendor, env_dir, global_skills_root, home_dir, toml_provenance,
+};
 
 /// OpenAI Codex CLI.
 pub struct CodexVendor;
@@ -99,11 +101,14 @@ impl Vendor for CodexVendor {
         ".codex"
     }
 
-    fn supports_kind(&self, kind: ArtifactKind) -> bool {
+    fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         // Codex has no path-scoped instruction mechanism (no globs/applyTo
         // anywhere; hooks cannot supply file-aware context). Rules are
-        // skipped rather than materialized as inert files.
-        !matches!(kind, ArtifactKind::Rule)
+        // declined — skipped rather than materialized as inert files.
+        match kind {
+            ArtifactKind::Rule => KindSupport::Declined,
+            _ => KindSupport::Native,
+        }
     }
 
     // Skill registry empty: Codex skills are agentskills-universal.
@@ -138,7 +143,7 @@ impl Vendor for CodexVendor {
     }
 
     fn rule_path(&self, workspace: &Path, _scope: ConfigScope, name: &str) -> PathBuf {
-        // Dead path: [`Self::supports_kind`] declines `Rule`, so the
+        // Dead path: [`Self::kind_support`] declines `Rule`, so the
         // installer skips Codex before `path_for` ever calls this. Returns a
         // defensive in-workspace location so the trait stays total.
         workspace.join(".codex").join("rules").join(format!("{name}.md"))
@@ -252,7 +257,7 @@ impl Vendor for CodexVendor {
     }
 
     fn rule_index(&self, _parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Never called: rules are skipped at the installer's `supports_kind`
+        // Never called: rules are skipped at the installer's `kind_support`
         // gate. Defensive `None` (would install verbatim) keeps the trait total.
         Ok(None)
     }
@@ -386,17 +391,10 @@ fn classify_codex_headers(
 /// set, else `~/.codex` (developers.openai.com/codex/config). Hosts the
 /// `agents/` subdir; the [`PathAnchor`](super::path_anchor) `CodexRoot`
 /// anchor is rooted here. Note: this does **not** relocate Codex skills —
-/// those follow `$HOME/.agents/skills` (see [`global_skills_root`]).
+/// those follow `$HOME/.agents/skills` (see
+/// [`global_skills_root`](super::vendor::global_skills_root)).
 pub(crate) fn codex_root(codex_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     codex_home.or_else(|| home.map(|h| h.join(".codex")))
-}
-
-/// Codex's user-level skills dir: the cross-vendor open standard
-/// `$HOME/.agents/skills`. Keyed on `$HOME` only — `$CODEX_HOME` does NOT
-/// move it. The [`PathAnchor`](super::path_anchor) `AgentsSkills` anchor is
-/// rooted here.
-pub(crate) fn global_skills_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|h| h.join(".agents").join("skills"))
 }
 
 #[cfg(test)]
@@ -405,11 +403,12 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn supports_kind_declines_only_rule() {
-        assert!(CodexVendor.supports_kind(ArtifactKind::Skill));
-        assert!(CodexVendor.supports_kind(ArtifactKind::Agent));
-        assert!(
-            !CodexVendor.supports_kind(ArtifactKind::Rule),
+    fn kind_support_declines_only_rule() {
+        assert_eq!(CodexVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
+        assert_eq!(CodexVendor.kind_support(ArtifactKind::Agent), KindSupport::Native);
+        assert_eq!(
+            CodexVendor.kind_support(ArtifactKind::Rule),
+            KindSupport::Declined,
             "Codex has no rule target"
         );
     }
@@ -466,15 +465,6 @@ mod tests {
 
         // Neither CODEX_HOME nor $HOME resolvable ⇒ no root at all.
         assert_eq!(codex_root(None, None), None);
-    }
-
-    #[test]
-    fn global_skills_root_is_home_agents_skills_not_codex_home() {
-        assert_eq!(
-            global_skills_root(Some(PathBuf::from("/home/u"))),
-            Some(PathBuf::from("/home/u/.agents/skills"))
-        );
-        assert_eq!(global_skills_root(None), None);
     }
 
     #[test]

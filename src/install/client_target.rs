@@ -31,10 +31,16 @@ use crate::skill::{AgentFrontmatter, RuleFrontmatter};
 use super::install_error::{InstallError, InstallErrorKind};
 
 use super::vendor::Vendor;
+use super::vendor_amp::AmpVendor;
 use super::vendor_claude::ClaudeVendor;
 use super::vendor_codex::CodexVendor;
 use super::vendor_copilot::CopilotVendor;
+use super::vendor_cursor::CursorVendor;
+use super::vendor_gemini::GeminiVendor;
+use super::vendor_junie::JunieVendor;
+use super::vendor_kiro::KiroVendor;
 use super::vendor_opencode::OpenCodeVendor;
+use super::vendor_zed::ZedVendor;
 
 /// A supported client target.
 ///
@@ -52,6 +58,24 @@ pub enum ClientTarget {
     /// OpenAI Codex — `.agents/skills` + `.codex/agents/<name>.toml`
     /// (skills + agents only; rules unsupported).
     Codex,
+    /// Cursor — `.cursor/{skills,rules,agents,mcp.json}` (all four kinds
+    /// native; rules render to `.mdc`).
+    Cursor,
+    /// Kiro (AWS) — `.kiro/{skills,steering,settings/mcp.json}` (skills,
+    /// rules, MCP; agents declined — CLI/IDE schema collision).
+    Kiro,
+    /// JetBrains Junie — `.junie/{skills,mcp/mcp.json}` (skills + MCP;
+    /// rules and agents declined — no ownable per-file surface / EAP-only).
+    Junie,
+    /// Gemini CLI — shared `.agents/skills` + `.gemini/{agents,settings.json}`
+    /// (skills, agents, MCP; rules declined — GEMINI.md hierarchy only).
+    Gemini,
+    /// Zed — shared `.agents/skills` + `.zed/settings.json` (skills + MCP;
+    /// rules and agents declined — no scoping / ACP-only agents).
+    Zed,
+    /// Amp — shared `.agents/skills` + `.amp/settings.json` (skills + MCP;
+    /// rules and agents declined — AGENTS.md only / runtime subagents).
+    Amp,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -63,6 +87,12 @@ impl std::str::FromStr for ClientTarget {
             "opencode" => Ok(Self::OpenCode),
             "copilot" => Ok(Self::Copilot),
             "codex" => Ok(Self::Codex),
+            "cursor" => Ok(Self::Cursor),
+            "kiro" => Ok(Self::Kiro),
+            "junie" => Ok(Self::Junie),
+            "gemini" => Ok(Self::Gemini),
+            "zed" => Ok(Self::Zed),
+            "amp" => Ok(Self::Amp),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -88,6 +118,12 @@ impl ClientTarget {
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Kiro => "kiro",
+            Self::Junie => "junie",
+            Self::Gemini => "gemini",
+            Self::Zed => "zed",
+            Self::Amp => "amp",
         }
     }
 
@@ -100,6 +136,12 @@ impl ClientTarget {
         Self::OpenCode.as_str(),
         Self::Copilot.as_str(),
         Self::Codex.as_str(),
+        Self::Cursor.as_str(),
+        Self::Kiro.as_str(),
+        Self::Junie.as_str(),
+        Self::Gemini.as_str(),
+        Self::Zed.as_str(),
+        Self::Amp.as_str(),
     ];
 }
 
@@ -116,7 +158,18 @@ pub struct MaterializedFile {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 4] = [Self::Claude, Self::OpenCode, Self::Copilot, Self::Codex];
+    pub const ALL: [ClientTarget; 10] = [
+        Self::Claude,
+        Self::OpenCode,
+        Self::Copilot,
+        Self::Codex,
+        Self::Cursor,
+        Self::Kiro,
+        Self::Junie,
+        Self::Gemini,
+        Self::Zed,
+        Self::Amp,
+    ];
 
     /// The per-vendor materialization strategy behind this identity.
     pub fn vendor(self) -> &'static dyn Vendor {
@@ -125,6 +178,12 @@ impl ClientTarget {
             Self::OpenCode => &OpenCodeVendor,
             Self::Copilot => &CopilotVendor,
             Self::Codex => &CodexVendor,
+            Self::Cursor => &CursorVendor,
+            Self::Kiro => &KiroVendor,
+            Self::Junie => &JunieVendor,
+            Self::Gemini => &GeminiVendor,
+            Self::Zed => &ZedVendor,
+            Self::Amp => &AmpVendor,
         }
     }
 
@@ -412,6 +471,35 @@ mod tests {
         for (name, target) in ClientTarget::VALUE_NAMES.iter().zip(ClientTarget::ALL) {
             assert_eq!(ClientTarget::from_str(name).unwrap(), target);
         }
+    }
+
+    // ── G4 parity-test shells (adr_client_compat_matrix) — bodies filled in
+    // the Specify phase; they fail with `unimplemented` against the stubs ──
+
+    /// Table-parity: reads `docs/src/clients.md` at compile time, parses the
+    /// first markdown table, and asserts for every `(client, kind)` in
+    /// `ClientTarget::ALL × [Skill, Rule, Agent, Mcp]` that a documented `✗`
+    /// ⇔ `kind_support(kind) == Declined` (MCP: `mcp_config_path` is `None`),
+    /// a `◐` ⇔ `Degraded` for the Rule column, and `✓`/`◐` ⇔ supported.
+    /// Row set must equal `ClientTarget::ALL` exactly.
+    #[test]
+    fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
+        todo!("Specify phase: parse docs/src/clients.md matrix and assert against kind_support / mcp_config_path")
+    }
+
+    /// Emit-matrix row-presence: every `ClientTarget` name appears in the
+    /// `docs/src/agents.md` emit-matrix table (catches "added a vendor,
+    /// forgot the emit matrix" without over-constraining prose).
+    #[test]
+    fn agents_emit_matrix_lists_every_client() {
+        todo!("Specify phase: assert every ClientTarget name appears in docs/src/agents.md emit matrix")
+    }
+
+    /// Emit-matrix row-presence for `docs/src/mcp-servers.md` — same
+    /// invariant as [`agents_emit_matrix_lists_every_client`].
+    #[test]
+    fn mcp_servers_emit_matrix_lists_every_client() {
+        todo!("Specify phase: assert every ClientTarget name appears in docs/src/mcp-servers.md emit matrix")
     }
 
     #[test]

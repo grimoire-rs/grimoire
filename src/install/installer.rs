@@ -505,7 +505,9 @@ async fn install_one<M: ArtifactMaterializer>(
     // rule installed into a default set that merely *includes* Codex stays
     // quiet on stderr.
     materialize_set.retain(|client| {
-        let supported = client.vendor().supports_kind(kind);
+        // A `Declined` kind has no native target; `Degraded`/`Native` both host
+        // it (Degraded materializes with a fidelity-loss warning at render).
+        let supported = client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined;
         if !supported {
             tracing::debug!("{client} has no native target for {kind} '{}'; skipping", artifact.name);
         }
@@ -740,9 +742,9 @@ async fn install_one<M: ArtifactMaterializer>(
 /// Kind-aware "can `client` host `kind` at all" predicate (plan C3.4). MCP
 /// is judged by [`crate::install::vendor::Vendor::mcp_config_path`] (a
 /// vendor may materialize other kinds but carry no MCP config surface at
-/// this scope — `supports_kind` alone can't see that); every other kind
-/// stays judged by
-/// [`supports_kind`](crate::install::vendor::Vendor::supports_kind).
+/// this scope — `kind_support` alone can't see that); every other kind is
+/// hosted unless [`kind_support`](crate::install::vendor::Vendor::kind_support)
+/// returns [`KindSupport::Declined`](crate::install::vendor::KindSupport::Declined).
 fn client_supports_kind(
     client: crate::install::client_target::ClientTarget,
     kind: ArtifactKind,
@@ -753,7 +755,7 @@ fn client_supports_kind(
             .vendor()
             .mcp_config_path(target.workspace(), target.scope())
             .is_some(),
-        kind => client.vendor().supports_kind(kind),
+        kind => client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined,
     }
 }
 
@@ -1481,6 +1483,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         }
     }
 

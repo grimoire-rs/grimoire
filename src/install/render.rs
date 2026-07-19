@@ -26,6 +26,7 @@
 //! integrity-hashed like any generated file.
 
 use std::fmt::Write as _;
+use std::sync::LazyLock;
 
 use serde_yaml::Value;
 
@@ -38,7 +39,13 @@ use super::vendor::{FieldType, KnownField, Vendor};
 
 /// The known tool namespaces a `metadata` key may carry. Keys prefixed
 /// with anything else (`vendor.x`) are plain metadata, not tool keys.
-const KNOWN_NAMESPACES: &[&str] = &["claude", "opencode", "copilot", "codex"];
+///
+/// Derived from [`ClientTarget::ALL`] so a new vendor reserves its namespace
+/// automatically — the one non-compile-forced per-vendor edit the old literal
+/// required (`adr_vendor_wave_expansion.md` §4). A `dyn` trait call is not
+/// const-evaluable, so this is a [`LazyLock`] rather than a `const`.
+static KNOWN_NAMESPACES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| ClientTarget::ALL.iter().map(|c| c.vendor().name()).collect());
 
 /// A projection failure: a known namespaced key carries a literal that
 /// cannot convert to the field's native type. Hard error — publish fails

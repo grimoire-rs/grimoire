@@ -14,13 +14,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::oci::ArtifactKind;
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::install_state::InstallState;
 use super::opencode_config;
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, Vendor, env_dir, provenance, xdg_config_dir};
+use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, provenance, xdg_config_dir};
 
 /// OpenCode.
 pub struct OpenCodeVendor;
@@ -93,6 +94,16 @@ impl Vendor for OpenCodeVendor {
     }
 
     // Skill/rule registries empty: OpenCode reads only universal fields.
+
+    fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
+        // OpenCode has a per-file rules surface but no path scoping — a rule
+        // installs with `paths:` dropped and a warning (adr_vendor_wave_expansion §2:
+        // Degraded, formalizing the pre-existing de-facto behavior).
+        match kind {
+            ArtifactKind::Rule => KindSupport::Degraded,
+            _ => KindSupport::Native,
+        }
+    }
 
     fn agent_fields(&self) -> &'static [KnownField] {
         OPENCODE_AGENT_FIELDS
@@ -308,6 +319,17 @@ mod tests {
     use super::*;
     use crate::skill::RuleFrontmatter;
     use std::path::Path;
+
+    /// G4 parity-test shell (adr_client_compat_matrix §3 — the missing fourth
+    /// `docs_reference_matches_<vendor>_registry` test). Body filled in the
+    /// Specify phase: assert `docs/src/vendor-metadata.md` documents exactly
+    /// the `opencode.*` keys the registry knows (`OPENCODE_AGENT_FIELDS`; the
+    /// skill/rule registries are empty), mirroring
+    /// `vendor_claude::docs_reference_matches_claude_registry`.
+    #[test]
+    fn docs_reference_matches_opencode_registry() {
+        todo!("Specify phase: assert vendor-metadata.md documents exactly the opencode.* registry fields")
+    }
 
     #[test]
     fn rule_index_strips_frontmatter_and_adds_provenance() {

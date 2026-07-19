@@ -487,6 +487,45 @@ pub fn reap_dropped_clients(
     Ok(acted)
 }
 
+/// Whether `reaping`'s on-disk footprint is still referenced by a **surviving**
+/// sibling output — the `.agents/skills` refcount guard
+/// (`adr_vendor_wave_expansion.md` §3, shared-anchor semantics).
+///
+/// Skills installed for several shared-pool members (Codex/Gemini/Zed/Amp)
+/// converge on one `$HOME/.agents/skills/<name>` directory: within a single
+/// [`InstallRecord`] each member's [`ClientOutput`] resolves to the SAME path.
+/// When a reap drops some of those members, deleting the directory would
+/// clobber a sibling member's still-recorded skill.
+///
+/// # Contract (encoded precisely so the implementation cannot drift)
+///
+/// The caller MUST pass the **whole record's** output set (`record_outputs`)
+/// and the **complete set of clients being dropped this pass**
+/// (`dropping_clients`) — NOT `state` minus `reaping`. Given `state` minus one
+/// output, two pool members dropping together would each still see the other
+/// as "surviving" and the shared dir would leak forever; passing the drop set
+/// explicitly closes that.
+///
+/// Returns `true` iff some output in `record_outputs` that is (a) NOT `reaping`
+/// and (b) NOT in `dropping_clients` resolves (against `roots`) to the same
+/// target **and** support dir as `reaping`. `true` ⇒ the caller drops only the
+/// record entry and leaves the shared path; `false` ⇒ the footprint is
+/// unreferenced and safe to delete. An output that fails to resolve is treated
+/// as non-sharing (it cannot pin a live path).
+///
+/// NOT yet wired into [`delete_output`] — the implementation phase gates the
+/// file/dir deletion on this predicate.
+#[allow(dead_code)]
+fn shared_by_surviving_sibling(
+    reaping: &ClientOutput,
+    record_outputs: &[ClientOutput],
+    dropping_clients: &[String],
+    roots: &AnchorRoots,
+) -> bool {
+    let _ = (reaping, record_outputs, dropping_clients, roots);
+    unimplemented!("wave-1 `.agents/skills` refcount guard — wired into the delete path in the implementation phase")
+}
+
 /// Delete one dropped-client output's on-disk footprint: an entry output's
 /// managed member is spliced out of its shared config file (never the file
 /// itself); a file/dir output's target and, for a multi-file rule, its sibling
@@ -554,6 +593,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         }
     }
 

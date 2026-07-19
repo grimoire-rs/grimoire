@@ -22,8 +22,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::vendor::{env_dir, home_dir, xdg_config_dir};
-use crate::install::{vendor_claude, vendor_codex, vendor_copilot, vendor_opencode};
+use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir, xdg_config_dir};
+use crate::install::{
+    vendor_amp, vendor_claude, vendor_codex, vendor_copilot, vendor_cursor, vendor_gemini, vendor_junie, vendor_kiro,
+    vendor_opencode, vendor_zed,
+};
 use crate::oci::ArtifactKind;
 
 /// A logical root an install target is stored relative to.
@@ -64,6 +67,23 @@ pub enum PathAnchor {
     /// `agents/` dir, so a global Codex agent lands at
     /// `<codex-root>/agents/<name>.toml`.
     CodexRoot,
+    /// Global Cursor config root `~/.cursor` (skills, rules `.mdc`, agents,
+    /// `mcp.json`). `CURSOR_CONFIG_DIR` not honored in wave 1.
+    CursorRoot,
+    /// Global Kiro config root `~/.kiro` (skills, `steering/`, `settings/mcp.json`).
+    /// `KIRO_HOME` not honored in wave 1.
+    KiroRoot,
+    /// Global Junie config root `~/.junie` (skills, `mcp/mcp.json`).
+    JunieRoot,
+    /// Global Gemini config root `~/.gemini` (agents, `settings.json`). Gemini
+    /// skills follow the shared [`Self::AgentsSkills`] pool, not this root.
+    GeminiRoot,
+    /// Global Zed config root `$XDG_CONFIG_HOME|~/.config/zed` (`settings.json`).
+    /// Zed skills follow the shared [`Self::AgentsSkills`] pool.
+    ZedRoot,
+    /// Global Amp config root `$XDG_CONFIG_HOME|~/.config/amp` (`settings.json`).
+    /// Amp skills follow the shared [`Self::AgentsSkills`] pool.
+    AmpRoot,
 }
 
 impl std::fmt::Display for PathAnchor {
@@ -78,6 +98,12 @@ impl std::fmt::Display for PathAnchor {
             Self::ClaudeUserDir => "claude-user-dir",
             Self::AgentsSkills => "agents-skills",
             Self::CodexRoot => "codex-root",
+            Self::CursorRoot => "cursor-root",
+            Self::KiroRoot => "kiro-root",
+            Self::JunieRoot => "junie-root",
+            Self::GeminiRoot => "gemini-root",
+            Self::ZedRoot => "zed-root",
+            Self::AmpRoot => "amp-root",
         })
     }
 }
@@ -118,6 +144,18 @@ pub struct AnchorRoots {
     /// The global Codex config root (`$CODEX_HOME` else `~/.codex`), when
     /// resolvable. Hosts the sibling `agents/` dir.
     pub codex_root: Option<PathBuf>,
+    /// The global Cursor config root (`~/.cursor`), when resolvable.
+    pub cursor_root: Option<PathBuf>,
+    /// The global Kiro config root (`~/.kiro`), when resolvable.
+    pub kiro_root: Option<PathBuf>,
+    /// The global Junie config root (`~/.junie`), when resolvable.
+    pub junie_root: Option<PathBuf>,
+    /// The global Gemini config root (`~/.gemini`), when resolvable.
+    pub gemini_root: Option<PathBuf>,
+    /// The global Zed config root (`$XDG_CONFIG_HOME|~/.config/zed`), when resolvable.
+    pub zed_root: Option<PathBuf>,
+    /// The global Amp config root (`$XDG_CONFIG_HOME|~/.config/amp`), when resolvable.
+    pub amp_root: Option<PathBuf>,
 }
 
 impl AnchorRoots {
@@ -132,8 +170,14 @@ impl AnchorRoots {
             copilot_root: vendor_copilot::global_native_root(env_dir("COPILOT_HOME"), home_dir()),
             opencode_skills: vendor_opencode::global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()),
             claude_user_dir: vendor_claude::user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
-            agents_skills: vendor_codex::global_skills_root(home_dir()),
+            agents_skills: global_skills_root(home_dir()),
             codex_root: vendor_codex::codex_root(env_dir("CODEX_HOME"), home_dir()),
+            cursor_root: vendor_cursor::cursor_root(home_dir()),
+            kiro_root: vendor_kiro::kiro_root(home_dir()),
+            junie_root: vendor_junie::junie_root(home_dir()),
+            gemini_root: vendor_gemini::gemini_root(home_dir()),
+            zed_root: vendor_zed::zed_root(xdg_config_dir()),
+            amp_root: vendor_amp::amp_root(xdg_config_dir()),
         }
     }
 }
@@ -159,6 +203,12 @@ impl PathAnchor {
             Self::ClaudeUserDir => roots.claude_user_dir.clone(),
             Self::AgentsSkills => roots.agents_skills.clone(),
             Self::CodexRoot => roots.codex_root.clone(),
+            Self::CursorRoot => roots.cursor_root.clone(),
+            Self::KiroRoot => roots.kiro_root.clone(),
+            Self::JunieRoot => roots.junie_root.clone(),
+            Self::GeminiRoot => roots.gemini_root.clone(),
+            Self::ZedRoot => roots.zed_root.clone(),
+            Self::AmpRoot => roots.amp_root.clone(),
         }
     }
 }
@@ -337,21 +387,20 @@ impl AnchoredPath {
 /// bundles are always expanded into members and never materialized. The
 /// caller tries them longest-root-first so the more specific root wins.
 ///
-/// Global-scope `(Codex, Rule)` is the one declined pair still reachable
-/// with persisted data: a fresh install never reaches `from_target` with
-/// it (the installer's `supports_kind` gate skips it first), but a V1-era
-/// state record predating that gate — or a hand-edited state file — can
-/// still reach [`convert_v1_records`](super::install_state) directly. That
-/// pair returns an empty candidate set rather than panicking, so the
-/// "no root matched" fallthrough below yields the existing
-/// [`AnchorError::UnknownAnchor`] (already handled by every caller) instead
-/// of an `unreachable!()` reachable from persisted state. Project scope is
+/// Globally-declined `(client, kind)` pairs (see [`is_declined_global_pair`])
+/// have no anchor remainder: a fresh install never reaches `from_target` with
+/// one (the installer's `kind_support` gate skips it first), but a hand-edited
+/// state file could still reach [`convert_v1_records`](super::install_state)
+/// directly. Such a pair returns an empty candidate set rather than panicking,
+/// so the "no root matched" fallthrough below yields the existing
+/// [`AnchorError::UnknownAnchor`] (already handled by every caller) instead of
+/// an `unreachable!()` reachable from persisted state. Project scope is
 /// untouched by this guard — it is unconditionally `[Workspace]` for every
 /// `(client, kind)` pair, so it was never at panic risk here.
 fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
     match scope {
         ConfigScope::Project => vec![PathAnchor::Workspace],
-        ConfigScope::Global if (client, kind) == (ClientTarget::Codex, ArtifactKind::Rule) => Vec::new(),
+        ConfigScope::Global if is_declined_global_pair(client, kind) => Vec::new(),
         ConfigScope::Global => {
             let primary = match (client, kind) {
                 // Claude: all three materializable kinds live under the Claude root.
@@ -389,18 +438,67 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // config root ($CODEX_HOME|~/.codex).
                 (ClientTarget::Codex, ArtifactKind::Agent) => PathAnchor::CodexRoot,
 
-                // Codex: rules have no native target — handled by the
-                // dedicated match guard above (empty candidate set), never
-                // reached here.
-                (ClientTarget::Codex, ArtifactKind::Rule) => {
-                    unreachable!("Codex declined rules are handled by the match guard above")
+                // ── Wave-1 vendors (adr_vendor_wave_expansion mapping table) ──
+                // Cursor: all four kinds native under `~/.cursor`.
+                (ClientTarget::Cursor, ArtifactKind::Skill)
+                | (ClientTarget::Cursor, ArtifactKind::Rule)
+                | (ClientTarget::Cursor, ArtifactKind::Agent)
+                | (ClientTarget::Cursor, ArtifactKind::Mcp) => PathAnchor::CursorRoot,
+
+                // Kiro: skills, steering rules, MCP under `~/.kiro` (agents
+                // declined — handled by the guard above).
+                (ClientTarget::Kiro, ArtifactKind::Skill)
+                | (ClientTarget::Kiro, ArtifactKind::Rule)
+                | (ClientTarget::Kiro, ArtifactKind::Mcp) => PathAnchor::KiroRoot,
+
+                // Junie: skills + MCP under `~/.junie` (rules + agents declined).
+                (ClientTarget::Junie, ArtifactKind::Skill) | (ClientTarget::Junie, ArtifactKind::Mcp) => {
+                    PathAnchor::JunieRoot
+                }
+
+                // Gemini: skills via the shared `.agents/skills` pool; agents +
+                // MCP under `~/.gemini` (rules declined).
+                (ClientTarget::Gemini, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+                (ClientTarget::Gemini, ArtifactKind::Agent) | (ClientTarget::Gemini, ArtifactKind::Mcp) => {
+                    PathAnchor::GeminiRoot
+                }
+
+                // Zed: skills via the shared pool; MCP under `~/.config/zed`
+                // (rules + agents declined).
+                (ClientTarget::Zed, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+                (ClientTarget::Zed, ArtifactKind::Mcp) => PathAnchor::ZedRoot,
+
+                // Amp: skills via the shared pool; MCP under `~/.config/amp`
+                // (rules + agents declined).
+                (ClientTarget::Amp, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+                (ClientTarget::Amp, ArtifactKind::Mcp) => PathAnchor::AmpRoot,
+
+                // Declined (client, kind) pairs — handled by the guard above,
+                // so unreachable here. Kept as explicit arms so a new vendor's
+                // kind gap must be classified rather than silently anchoring.
+                (ClientTarget::Codex, ArtifactKind::Rule)
+                | (ClientTarget::Kiro, ArtifactKind::Agent)
+                | (ClientTarget::Junie, ArtifactKind::Rule)
+                | (ClientTarget::Junie, ArtifactKind::Agent)
+                | (ClientTarget::Gemini, ArtifactKind::Rule)
+                | (ClientTarget::Zed, ArtifactKind::Rule)
+                | (ClientTarget::Zed, ArtifactKind::Agent)
+                | (ClientTarget::Amp, ArtifactKind::Rule)
+                | (ClientTarget::Amp, ArtifactKind::Agent) => {
+                    unreachable!("declined (client, kind) pairs are handled by the match guard above")
                 }
 
                 // Bundles are never materialized; they expand into members.
                 (ClientTarget::Claude, ArtifactKind::Bundle)
                 | (ClientTarget::Copilot, ArtifactKind::Bundle)
                 | (ClientTarget::OpenCode, ArtifactKind::Bundle)
-                | (ClientTarget::Codex, ArtifactKind::Bundle) => {
+                | (ClientTarget::Codex, ArtifactKind::Bundle)
+                | (ClientTarget::Cursor, ArtifactKind::Bundle)
+                | (ClientTarget::Kiro, ArtifactKind::Bundle)
+                | (ClientTarget::Junie, ArtifactKind::Bundle)
+                | (ClientTarget::Gemini, ArtifactKind::Bundle)
+                | (ClientTarget::Zed, ArtifactKind::Bundle)
+                | (ClientTarget::Amp, ArtifactKind::Bundle) => {
                     unreachable!("bundles are never materialized; they expand into members")
                 }
 
@@ -423,6 +521,17 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
             }
         }
     }
+}
+
+/// Whether `(client, kind)` is a globally-declined pair — the vendor's
+/// [`kind_support`](crate::install::vendor::Vendor::kind_support) returns
+/// [`KindSupport::Declined`], so it has no anchor remainder.
+/// [`candidate_anchors`] returns an empty set for these instead of anchoring
+/// (matching the Codex-rule precedent). Delegating straight to the vendor
+/// keeps this in lockstep with every `kind_support` override — no separate
+/// list to drift.
+fn is_declined_global_pair(client: ClientTarget, kind: ArtifactKind) -> bool {
+    client.vendor().kind_support(kind) == KindSupport::Declined
 }
 
 /// Lexically subtract `root` from `abs` and return the forward-slash,
@@ -597,6 +706,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: Some(PathBuf::from("/agents/skills")),
             codex_root: Some(PathBuf::from("/codex")),
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         }
     }
 
@@ -654,6 +769,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         assert!(PathAnchor::ClaudeRoot.root(&roots).is_none());
         assert!(PathAnchor::CopilotRoot.root(&roots).is_none());
@@ -674,6 +795,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         assert!(
             PathAnchor::OpenCodeRoot.root(&roots).is_none(),
@@ -787,6 +914,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::ClaudeRoot,
@@ -1120,6 +1253,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let abs = PathBuf::from("/a/skills/my-skill");
         let ap = AnchoredPath::from_target(
@@ -1194,6 +1333,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         // When there is no opencode_skills root, the vendor falls back to
         // the workspace layout under grim_home.
@@ -1243,6 +1388,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1284,6 +1435,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1317,6 +1474,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         let abs = PathBuf::from("/definitely/not/on/disk/ws/.claude/rules/gone.md");
         let ap = AnchoredPath::from_target(
@@ -1347,6 +1510,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         // abs uses a different case for the "Users"/"Alice"/"ws" segments —
         // on macOS (case-insensitive FS) this is the same path.
@@ -1382,6 +1551,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         // Build /ws/<non-utf8> by appending a non-UTF-8 component.
         let mut abs = PathBuf::from("/ws");
@@ -1414,6 +1589,12 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
             codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
         // abs equals the workspace root exactly.
         let abs = PathBuf::from("/ws");
@@ -1574,6 +1755,11 @@ mod tests {
             // MCP descriptors register into client configs, not files —
             // their entry anchors land with the vendor MCP writers.
             (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
+            // ponytail: the wave-1 vendor (Cursor/Kiro/Junie/Gemini/Zed/Amp)
+            // anchor-table arms + the `combo_count` assertion are Specify's to
+            // author. Stubbed to compile only — this test currently panics for
+            // the new vendors, by design (re-stub gate is `cargo check`, not run).
+            _ => todo!("Specify: fill the wave-1 vendor anchor table + update combo_count"),
         }
     }
 
@@ -1609,6 +1795,12 @@ mod tests {
             // /agents/skills is the Codex skills root; /codex its config root.
             agents_skills: Some(PathBuf::from("/agents/skills")),
             codex_root: Some(PathBuf::from("/codex")),
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
         };
 
         let name = "test-artifact";
@@ -1623,9 +1815,9 @@ mod tests {
             for client in clients {
                 for kind in kinds {
                     // A vendor that declines a kind never reaches `from_target`
-                    // (the installer skips it at the `supports_kind` gate), so
+                    // (the installer skips it at the `kind_support` gate), so
                     // it has no anchor-remainder entry — Codex rules here.
-                    if !client.vendor().supports_kind(kind) {
+                    if client.vendor().kind_support(kind) == crate::install::vendor::KindSupport::Declined {
                         continue;
                     }
                     combo_count += 1;
