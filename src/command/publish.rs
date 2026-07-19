@@ -20,6 +20,7 @@
 //! skip-existing / `--force` rule as everything else.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -916,7 +917,11 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                 // format as main.rs, plus an "error:" prefix here because
                 // this path returns Ok(partial report) — main.rs never sees
                 // the error, so the prefix marks the line for log scanners.
-                eprintln!("error: {err:#}");
+                // Best-effort (here and at every stderr site in this batch):
+                // a stderr that closes mid-batch must never abort a half-done
+                // publish — the registry is already mutated — mirroring the
+                // progress.rs sink.
+                let _ = writeln!(io::stderr(), "error: {err:#}");
                 let failed_entry = PublishEntry {
                     reference: planned.reference.clone(),
                     kind: planned.kind,
@@ -953,7 +958,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         }
         match push_one_description(ctx, pd, push.as_ref()).await {
             Ok(digest) => {
-                eprintln!("description: published {reference}");
+                let _ = writeln!(io::stderr(), "description: published {reference}");
                 description_items.push(crate::api::publish_report::PublishDescription {
                     reference,
                     repository: pd.repository.clone(),
@@ -964,7 +969,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             Err(err) => {
                 // The entries are live; surface the companion failure and keep
                 // the report (with whatever companions already pushed).
-                eprintln!("error: description companion push failed: {err:#}");
+                let _ = writeln!(io::stderr(), "error: description companion push failed: {err:#}");
                 let report = PublishReport::new(report_entries).with_descriptions(description_items);
                 return Ok((report, classify_error(&err)));
             }
@@ -977,7 +982,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     let mut announce_section = None;
     if args.announce {
         if args.dry_run {
-            eprintln!("announce: skipped (dry run)");
+            let _ = writeln!(io::stderr(), "announce: skipped (dry run)");
         } else {
             match run_announce(ctx, args, &manifest, &entries, push.as_ref()).await {
                 Ok(section) => announce_section = Some(section),
@@ -986,7 +991,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     // announce failure on stderr, and classify honestly: git/API
                     // failures exit Unavailable (69), announce misconfiguration
                     // (missing host/namespace/owner id) exits usage (64).
-                    eprintln!("error: announce failed: {err:#}");
+                    let _ = writeln!(io::stderr(), "error: announce failed: {err:#}");
                     return Ok((
                         PublishReport::new(report_entries).with_descriptions(description_items),
                         classify_error(&err),
@@ -1156,7 +1161,7 @@ async fn run_announce(
     };
     let section = match super::grim(announce(&request).await)? {
         AnnounceOutcome::PullRequest { url, branch } => {
-            eprintln!("announced: {url}");
+            let _ = writeln!(io::stderr(), "announced: {url}");
             PublishAnnounce {
                 outcome: AnnounceStatus::PullRequest,
                 branch,
@@ -1164,7 +1169,8 @@ async fn run_announce(
             }
         }
         AnnounceOutcome::BranchPushed { branch } => {
-            eprintln!(
+            let _ = writeln!(
+                io::stderr(),
                 "announced: pushed branch '{branch}' to {} — open the merge request to publish the pointers",
                 request.repo_url
             );
@@ -1175,7 +1181,7 @@ async fn run_announce(
             }
         }
         AnnounceOutcome::UpToDate { branch } => {
-            eprintln!("announce: index already up to date");
+            let _ = writeln!(io::stderr(), "announce: index already up to date");
             PublishAnnounce {
                 outcome: AnnounceStatus::UpToDate,
                 branch,

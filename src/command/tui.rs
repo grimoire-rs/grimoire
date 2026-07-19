@@ -20,7 +20,7 @@
 //! so plain Enter accepts — and persists as a `[[registries]]` entry with
 //! `default = true`. Cancelling closes the TUI cleanly with exit 0.
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 
 use clap::Args;
 
@@ -66,7 +66,11 @@ pub struct TuiArgs {
 pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     if !std::io::stdout().is_terminal() {
         // Non-interactive: do not touch raw mode. Clear, zero-exit.
-        println!("grim tui requires an interactive terminal (stdout is not a TTY)");
+        // Best-effort: a closed stdout on this cold guard must not panic.
+        let _ = writeln!(
+            io::stdout(),
+            "grim tui requires an interactive terminal (stdout is not a TTY)"
+        );
         return Ok(ExitCode::Success);
     }
 
@@ -196,7 +200,12 @@ fn config_missing(ctx: &Context) -> bool {
 /// config racing into existence maps to the usual exit-64 error).
 async fn prompt_init(ctx: &Context) -> anyhow::Result<InitPrompt> {
     if !std::io::stdin().is_terminal() {
-        eprintln!("no grimoire.toml found and stdin is not a terminal; run `grim init` first");
+        // Best-effort (both cold guards on this pre-session path): a closed
+        // std stream must not panic before the session even starts.
+        let _ = writeln!(
+            io::stderr(),
+            "no grimoire.toml found and stdin is not a terminal; run `grim init` first"
+        );
         return Ok(InitPrompt::Cancelled);
     }
 
@@ -241,7 +250,7 @@ async fn prompt_init(ctx: &Context) -> anyhow::Result<InitPrompt> {
         registry: snapshot_choice(registry),
     };
     let (report, _) = crate::command::init::run(ctx, &init_args).await?;
-    eprintln!("initialized {}", report.path.display());
+    let _ = writeln!(io::stderr(), "initialized {}", report.path.display());
     Ok(InitPrompt::Ready)
 }
 
