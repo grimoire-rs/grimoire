@@ -18,7 +18,12 @@ its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
 all clients. The four recognized namespaces are `claude`, `opencode`, `copilot`, and
 `codex`; any other prefix (e.g. `vendor.x`) is plain metadata and passes
-through untouched. Note that Codex supports skills, agents, and MCP servers —
+through untouched. `codex` is a **reserved namespace**, not just a prefix
+convention: a `codex.*` key authored before Codex client support landed
+was plain passthrough metadata; today it is a tool-namespaced key subject
+to the same known/unknown handling as the other three (an unrecognized
+`codex.foo` now warns and drops instead of surviving untouched). Note
+that Codex supports skills, agents, and MCP servers —
 rules are unsupported and grim warns and skips them. Codex skills use the
 universal agentskills shape (no `codex.*` skill namespace exists) and MCP
 entries derive from the descriptor, so only agents carry `codex.*` metadata.

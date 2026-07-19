@@ -9,9 +9,10 @@ to install, maintain, and publish AI-agent configuration (skills, rules,
 prompts) distributed through standard OCI registries. The binary is named
 `grim`; the Rust crate/package is `grimoire`.
 
-> **Status: pre-1.0** (shipping since 0.x). Surfaces may still move before
-> 1.0, but the CLI, OCI pipeline, and catalog publishing are real, released
-> behavior — treat docs as contracts, flag drift when you find it.
+> **Status: stabilizing — preparing 1.0.0.** Released surfaces (CLI, JSON
+> output, schemas, layouts, OCI pipeline, catalog publishing) are frozen
+> contracts: **breaking changes are prohibited** — evolution is additive-only
+> (Principle 9). Treat docs as contracts, flag drift when you find it.
 
 ## Current State
 
@@ -147,7 +148,8 @@ should persist as an AI config update (rules, skills, agents).
 
 ### 9. Preserve Compatibility
 
-The era of breaking existing configurations is over — treat every schema, layout, and renderer change with high caution.
+Stabilization freeze on the road to 1.0.0: breaking changes are prohibited — do not propose, implement, or merge one.
+Treat every schema, layout, and renderer change with high caution.
 Schema evolution is additive-only (new fields optional + default; enum literals added, never removed).
 Layout moves ship automatic state migration, an old-path reaper, and an upgrade fixture; renderer changes prove self-heal (re-materialize leaves `status` not-modified). Contract: `docs/src/stability.md`, `adr_render_layout_stability.md`.
 

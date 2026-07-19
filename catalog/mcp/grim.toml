@@ -1,13 +1,14 @@
 # grim's own MCP server: `grim mcp` exposes the catalog (grim_search),
-# install state (grim_status), and artifact content (grim_fetch — canonical
-# or per-vendor projections, no install needed) to AI agents over stdio;
+# install state (grim_status), artifact content (grim_fetch — canonical
+# or per-vendor projections, no install needed), and artifact metadata
+# (grim_describe — no content download) to AI agents over stdio;
 # grim_render (write files to a directory) is gated behind --allow-writes.
 # Scope is chosen per tool call (global / config / workspace arguments), so
 # this one descriptor serves every consumer and scope — the v1 launch-scope
 # question is resolved by adr_mcp_percall_scope_fetch_render.md.
-description = "Grimoire catalog, install status, and artifact content over the Model Context Protocol."
-summary = "grim as an MCP server (search, status, fetch; render behind --allow-writes)"
-keywords = "grimoire,mcp,catalog,search,status,fetch,render"
+description = "Grimoire catalog, install status, artifact content, and artifact metadata over the Model Context Protocol."
+summary = "grim as an MCP server (search, status, fetch, describe; render behind --allow-writes)"
+keywords = "grimoire,mcp,catalog,search,status,fetch,describe,render"
 license = "Apache-2.0"
 repository = "https://github.com/grimoire-rs/grimoire"
 

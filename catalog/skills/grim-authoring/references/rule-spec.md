@@ -76,7 +76,7 @@ The same published rule lands differently per client:
 |---|---|
 | Claude Code | ~Verbatim — `paths:` is native frontmatter; re-rendered only when `metadata` carries vendor keys |
 | OpenCode | Frontmatter **stripped**; body written with a provenance comment; loading registered as a managed glob in `opencode.json` |
-| Copilot | Written to `.github/instructions/<name>.instructions.md`; `paths` comma-joined into a single `applyTo:` string; `copilot.exclude-agent` → `excludeAgent` |
+| Copilot | Written to `.github/instructions/<name>.instructions.md` at project scope (global scope lands in native `~/.copilot/instructions/`); `paths` comma-joined into a single `applyTo:` string; `copilot.exclude-agent` → `excludeAgent` |
 
 OpenCode never sees rule frontmatter at all — anything that must reach
 OpenCode belongs in the body. Full mapping: [rule keys][rule-keys].

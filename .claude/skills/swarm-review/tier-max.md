@@ -17,7 +17,7 @@ Read diff against resolved baseline. Parse file list, map paths to subsystems �
 
 **Gate**: Diff fetched, full context loaded, product-context read.
 
-## Phase 2: Stage 1 — Correctness (parallel, 2 workers)
+## Phase 2: Stage 1 — Correctness (parallel, 3 workers)
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier uses resolved `--reviewer` overlay value (tier=max default `sonnet`; escalated to `opus` when `--breadth=adversarial` fires). See `overlays.md` reviewer axis.
 
@@ -25,10 +25,11 @@ Same as tier-high — launch **in single message with multiple Agent tool calls*
 
 - **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) — reviews **Implement**-phase output against Grimoire anchors
 - **1** `worker-reviewer` (focus: `quality`, lens: test-coverage) — checks **Specify**-phase tests cover edge cases, boundary conditions, concurrent access, failure modes
+- **1** `worker-reviewer` (focus: `compatibility`) — breaking-change gate: diff must not break released surfaces (CLI, JSON output, schemas, layouts, exit codes). Any breaking change = Block-tier — prohibited during the 1.0.0 stabilization freeze. Contract: `docs/src/stability.md`. Max-tier diffs carry `breaking-change` labels or protocol signals most often — this reviewer never skipped.
 
 At max tier, **Stub** / **Specify** / **Implement** lifecycle traceability extra important — reviewer notes any implementation behavior with no corresponding test or design-record anchor.
 
-**Gate**: Both reviewers complete.
+**Gate**: All three reviewers complete.
 
 ## Phase 3: Stage 2 — Adversarial breadth (parallel, up to 6 workers)
 
@@ -41,7 +42,7 @@ Launch **in single message with multiple Agent tool calls** so they run concurre
 - `worker-architect` — SOLID, subsystem boundary respect, dependency direction, trade-off honesty; check diff against any ADR covering area
 - `worker-researcher` — SOTA gap: how do leading tools (Cargo, npm, pip/uv, Go modules, Helm) solve same problem? Algorithm choice current? Known pitfalls unaddressed?
 
-Stage 1 (2) + Stage 2 (6) = 8 total workers. At 8 concurrent worker ceiling — no more without dropping one. If diff clearly doesn't need `worker-researcher` (e.g., pure refactor, no algorithmic change), skip it, stay at 7.
+Stage 1 (3) and Stage 2 (6) run as separately gated batches — each batch under the 8 concurrent worker ceiling. If diff clearly doesn't need `worker-researcher` (e.g., pure refactor, no algorithmic change), skip it, stay at 5 in Stage 2.
 
 Each reviewer classifies findings as actionable / deferred / suggest.
 
@@ -90,6 +91,7 @@ Produce review report using shared skeleton from `SKILL.md`:
 ### Stage 1 — Correctness
 #### Spec-compliance (post-Implement traceability)
 #### Test Coverage (Specify-phase adequacy)
+#### Compatibility (breaking-change gate)
 ### Stage 2 — Adversarial panel
 #### Quality
 #### Security
@@ -104,7 +106,7 @@ Produce review report using shared skeleton from `SKILL.md`:
 ```
 
 **Verdict rules**:
-- **Request Changes** if any Block-tier finding unresolved; any security vulnerability; any architect-flagged boundary violation; breaking changes lack migration plan; tests absent for new behavior; systemic cause affecting ≥3 findings
+- **Request Changes** if any Block-tier finding unresolved; any security vulnerability; any architect-flagged boundary violation; any breaking change (prohibited during the 1.0.0 stabilization freeze); tests absent for new behavior; systemic cause affecting ≥3 findings
 - **Needs Work** if Warn-tier findings exist or Cross-model pass surfaced actionable findings not yet addressed
 - **Approve** otherwise
 

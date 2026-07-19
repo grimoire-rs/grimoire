@@ -100,7 +100,9 @@ sources — no registry round-trip:
   `grimoire.lock` stay untouched). The record is marked `dev` in
   `grim status`, refreshed by `grim update`, removed by `grim uninstall`.
 - `grim add <path>` — declares the local path in the config and pins it
-  by content hash, like any other source.
+  by content hash, like any other source. Re-adding over an output you
+  hand-edited in a client is refused as modified; `grim add <path>
+  --force` is the sanctioned overwrite.
 
 A path is anything starting `./` or `../`, or absolute. Both commands
 cover **skills, rules, and agents** only; kind is inferred from the
@@ -146,7 +148,7 @@ trust the tool. Treat this skill as the map, not the territory.
 
 ---
 
-Verified against grim 0.9.0.
+Verified against grim 0.10.0.
 
 [artifacts]: https://grimoire.rs/artifacts.html
 [vendor]: https://grimoire.rs/vendor-metadata.html

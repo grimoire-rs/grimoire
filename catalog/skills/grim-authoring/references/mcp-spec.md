@@ -50,6 +50,34 @@ Same location rule as bundles — top level, not nested:
 
 `env` keys must match `[A-Za-z_][A-Za-z0-9_]*`.
 
+`timeout`, `always_load`, `headers_helper`, and `cwd` are additive
+refinement fields — omitting them serializes identically to a descriptor
+that never adopted them (an older grim reads a newer descriptor without
+them unchanged). Each projects to a **subset** of clients; every other
+client drops it silently, nothing auth-critical lost:
+
+| Field | Projects for | Notes |
+|---|---|---|
+| `timeout` | Claude (`timeout`), OpenCode (`timeout`) | Startup/tool-fetch timeout, milliseconds |
+| `always_load` | Claude (`alwaysLoad`) only | Load the server eagerly at client startup |
+| `headers_helper` | Claude (`headersHelper`) only | Executable that produces fresh auth headers |
+| `cwd` | OpenCode (`cwd`) only | Working directory for the launched process (stdio only) |
+
+### The `server.oauth` block
+
+`http`/`sse` only, every field optional — a structured OAuth client
+config, projected for **Claude only**:
+
+| Field | Type | Notes |
+|---|---|---|
+| `client_id` | string | May reference `${VAR}` |
+| `scopes` | string list | Values may reference `${VAR}` |
+| `callback_port` | integer | Fixed localhost callback port for the auth redirect |
+| `auth_server_metadata_url` | string | RFC 8414 metadata URL; https-only; may reference `${VAR}` |
+
+Deliberately **no `client_secret` field** — same rationale as `${VAR}`
+env references: a secret has no safe home in a published artifact.
+
 ## Env References
 
 Values may reference host environment variables with the canonical

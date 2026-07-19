@@ -18,6 +18,10 @@ Launch **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-implement
 
 - Grimoire pattern compliance (error model, symlink safety, CLI/API contract)
 - Quality (naming, style, tests present, duplication)
+- Compatibility freeze — no breaking change to released surfaces (CLI,
+  JSON output, schemas, layouts, exit codes); any found = Block-tier,
+  prohibited during 1.0.0 stabilization. Checklist: `compatibility` focus
+  mode in `worker-reviewer.md`; contract: `docs/src/stability.md`
 
 Spec-compliance phase anchors cover Stub / Specify / Implement lifecycle positions without reviewer needing look at stubs or specification tests separately — this tier whole review collapse to one pass.
 

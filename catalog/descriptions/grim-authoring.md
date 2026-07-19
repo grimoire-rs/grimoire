@@ -6,8 +6,9 @@ bundle TOMLs.
 
 The skill carries the per-kind packaging specs — required frontmatter,
 catalog metadata, vendor-namespaced keys (`claude.*`, `opencode.*`,
-`copilot.*`), name rules — plus the release checklist that takes an
-artifact from `grim build` validation to a published, announced package.
+`copilot.*`, `codex.*`), name rules — plus the release checklist that
+takes an artifact from `grim build` validation to a published, announced
+package.
 
 ## Install
 

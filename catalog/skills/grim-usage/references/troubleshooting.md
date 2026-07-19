@@ -33,10 +33,15 @@ Under `--format json`, a failure emits a `{"error": {code, exit,
 message}}` document on stdout; some failures add a machine-readable
 `reason` field: `stale-lock` (exit 65 — a partial `grim update <name>`
 was refused; retry with a full `grim update`), `modified` (exit 65 — an
-install refused a locally modified artifact; retry with `--force`), and
+install refused a locally modified artifact; retry with `--force`),
 `untracked-destination` (exit 65 — an install refused to clobber an
-unrecorded pre-existing destination; retry with `--force`). New reasons
-are additive — treat an unknown one as absent. Full list: the
+unrecorded pre-existing destination; retry with `--force`), `no-config`
+(exit 79 — a project-scope command found no `grimoire.toml` walking up
+from the working directory), and `locked` (exit 75 — another grim
+process holds the config-file lock). New reasons are additive — treat an
+unknown one as absent. A reason also carries an optional `retryable: true`
+sibling field when a plain re-run is expected to succeed once the
+transient condition clears — today only `locked` sets it. Full list: the
 [JSON interface][json-interface] docs page.
 
 ## Exit 65: Data Errors

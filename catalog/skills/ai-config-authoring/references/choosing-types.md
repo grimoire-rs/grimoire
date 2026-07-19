@@ -43,10 +43,10 @@ Reality — support and failure modes:
 
 | Type | Vendor support | Failure modes |
 |---|---|---|
-| Always-on instruction file | All three. Claude Code: CLAUDE.md hierarchy + imports. OpenCode: AGENTS.md (CLAUDE.md fallback) + `instructions` globs. Copilot: copilot-instructions.md + AGENTS.md/CLAUDE.md | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
+| Always-on instruction file | All four. Claude Code: CLAUDE.md hierarchy + imports. OpenCode: AGENTS.md (CLAUDE.md fallback) + `instructions` globs. Copilot: copilot-instructions.md + AGENTS.md/CLAUDE.md. Codex: AGENTS.md only, directory-granular, no glob mechanism | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
 | Glob-scoped rule | Claude Code: `.claude/rules/` with `paths:` (lazy, on read). Copilot: `.instructions.md` with `applyTo:`. OpenCode: none — globs resolve at startup and load always-on | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning |
-| On-demand skill | All three natively, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify); all scan `.claude/skills/` | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
-| Subagent | Three incompatible formats: `.claude/agents/*.md`, `.opencode/agents/*.md`, `.github/agents/*.agent.md` (30k-char body cap, as of 2026) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism |
+| On-demand skill | All four natively, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify); Claude Code, OpenCode, and Copilot also scan `.claude/skills/`, Codex reads only the cross-vendor `.agents/skills/` | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
+| Subagent | Four incompatible formats: `.claude/agents/*.md`, `.opencode/agents/*.md`, `.github/agents/*.agent.md` (30k-char body cap, as of 2026), `.codex/agents/*.toml` (TOML, not Markdown) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism |
 | Hook | Claude Code: shell commands + exit-code protocol. OpenCode: JS/TS plugins (can throw to cancel a tool call). Copilot: declarative JSON in `.github/hooks/` | Not a security boundary: condition filters fail open, blocked tools get routed around, and some headless/pipe modes skip hooks entirely (as of 2026) |
 
 ## Decision Heuristics
@@ -132,6 +132,8 @@ parallelism is demonstrably needed.
 - [Copilot: custom-instructions support matrix][cop-matrix] /
   [agent skills][cop-skills] / [hooks reference][cop-hooks] — which
   mechanism works on which surface.
+- [Codex: skills][cx-skills] / [subagents][cx-agents] — the AGENTS.md-only
+  always-on surface, `.agents/skills/` discovery, TOML subagents.
 - [Agent Skills specification][spec] — the open standard and its token
   tiers.
 - [Effective context engineering for AI agents][ctx] — why deferred
@@ -153,6 +155,8 @@ parallelism is demonstrably needed.
 [cop-matrix]: https://docs.github.com/en/copilot/reference/custom-instructions-support
 [cop-skills]: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills
 [cop-hooks]: https://docs.github.com/en/copilot/reference/hooks-reference
+[cx-skills]: https://developers.openai.com/codex/skills
+[cx-agents]: https://developers.openai.com/codex/subagents
 [spec]: https://agentskills.io/specification
 [ctx]: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
 [boucle]: https://blog.boucle.sh/posts/what-claude-code-hooks-can-and-cannot-enforce

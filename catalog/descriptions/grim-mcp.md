@@ -12,6 +12,7 @@ The server exposes the grim catalog and install state to AI agents:
 | `grim_search` | Search the configured registries' catalogs |
 | `grim_status` | Report declared artifacts and their install state |
 | `grim_fetch` | Return artifact content in-context (canonical or per-vendor projection) |
+| `grim_describe` | Report manifest-level metadata — kind, curated annotations, tags — without downloading content |
 | `grim_render` | Write vendor-native files to a directory (requires `--allow-writes`) |
 
 Scope (`global` / `config` / `workspace`) is chosen per tool call, so one

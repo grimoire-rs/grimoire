@@ -9,7 +9,7 @@ Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
 [Removing](#removing) · [Bundles](#bundles)
 
-Flags shown here are grim 0.9.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.10.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## The Loop
@@ -218,7 +218,14 @@ fresh per-artifact tag re-resolution, `update_available` — "is a newer
 version out there right now" versus status's normal offline read. The
 top-level `checked` field says whether the check actually ran online;
 `checked == false` means all three of those item fields are `null`.
-Confirm the current flag set with `grim status --help`.
+When scripting against it, treat `update_available: null` as "could not
+determine", never as "up to date": it is `null` (not `false`) for a
+bundle-member row, a row with no lock pin (declared bundle, dev-install,
+path source), or a row whose own re-resolution failed. And even under
+`checked == true`, one registry's catalog refresh failing degrades just
+that registry's rows' `deprecated`/`replaced_by` to `null` — partial
+data, not a failed check. Confirm the current flag set with
+`grim status --help`.
 
 Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`, `publish`)

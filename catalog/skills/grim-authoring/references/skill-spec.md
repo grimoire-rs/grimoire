@@ -38,6 +38,15 @@ round-trip, never rejected.
 All `metadata` values are strings — quote anything that YAML would
 otherwise type (`"true"`, `"0.2"`).
 
+The top-level `allowed-tools` is the common field every client sees
+verbatim. Claude additionally recognizes `claude.allowed-tools` /
+`claude.disallowed-tools` inside `metadata` (`disallowed-tools` has no
+common top-level field at all — vendor-only). Unlike the agent
+`model`/`tools` override, this is **not** a silent escape hatch: setting
+both the top-level `allowed-tools` and `claude.allowed-tools` warns on the
+collision (metadata wins) — author only the vendor key for a Claude-only
+value, skip the top-level field to avoid the redundant warning.
+
 ## Catalog Metadata
 
 Skills author catalog metadata **inside the `metadata` map** (unlike

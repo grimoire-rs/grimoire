@@ -12,7 +12,7 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Description Companion](#description-companion) ·
 [Authentication](#authentication)
 
-Flags shown here are grim 0.9.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.10.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## Build, Then Release
@@ -97,12 +97,12 @@ example:
 
 ```toml
 registry = "ghcr.io"
-version = "0.9.0"    # optional catalog-wide version
+version = "0.10.0"   # optional catalog-wide version
 
 [skills.code-review]
 version = "1.2.0"    # explicit per-entry version wins
 
-[rules.style]         # no version → inherits 0.9.0 (or `version = "${version}"`)
+[rules.style]         # no version → inherits 0.10.0 (or `version = "${version}"`)
 
 [bundles.dev-stack]
 version = "0.3.0"
@@ -240,9 +240,10 @@ falls to manual maintainer review. Full spec: [The Package Index][package-index]
 
 ## Editor schema support {#editor-schema}
 
-`grim schema --kind config|publish|lock` prints a JSON Schema for
-`grimoire.toml`, `publish.toml`, or `grimoire.lock` (generated from grim's
-own parser, so it accepts exactly what grim accepts). The same schemas are published to the docs site; adding a
+`grim schema --kind config|publish|lock|mcp` prints a JSON Schema for
+`grimoire.toml`, `publish.toml`, `grimoire.lock`, or the MCP server
+descriptor (`mcp/<name>.toml`) — generated from grim's own parser, so it
+accepts exactly what grim accepts. The same schemas are published to the docs site; adding a
 `#:schema` directive on the first line of a TOML file gives a supporting editor
 (Taplo, Even Better TOML) autocomplete and typo-flagging. Confirm the flags
 with `grim schema --help`; see the [Editor schema support][editor-schema] docs

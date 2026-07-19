@@ -122,6 +122,7 @@ prompt body vendor-neutral and generate the per-client envelopes; only
   schema, tool aliases, body cap.
 - [VS Code: custom agents][vsc-agents] — the chatmode-to-agent migration
   and the `.claude/agents/` cross-read.
+- [Codex: subagents][cx-agents] — the `.codex/agents/*.toml` format.
 - [How a multi-agent research system was built][mars] — orchestrator-worker
   pattern, delegation prompt anatomy, the 15x token figure, when
   multi-agent is wrong.
@@ -134,6 +135,7 @@ prompt body vendor-neutral and generate the per-client envelopes; only
 [oc-agents]: https://opencode.ai/docs/agents/
 [cop-agents]: https://docs.github.com/en/copilot/reference/custom-agents-configuration
 [vsc-agents]: https://code.visualstudio.com/docs/agent-customization/custom-agents
+[cx-agents]: https://developers.openai.com/codex/subagents
 [mars]: https://www.anthropic.com/engineering/multi-agent-research-system
 [ctx]: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
 [tools]: https://www.anthropic.com/engineering/writing-tools-for-agents

@@ -132,6 +132,7 @@ focus modes. Tier files select subset of these perspectives.
 | Perspective | Worker / focus | Tier use |
 |---|---|---|
 | Spec-compliance | `worker-reviewer` (spec-compliance, phase: `post-implementation`) | all |
+| Compatibility (breaking-change gate) | `worker-reviewer` (compatibility) | all — dedicated Stage 1 reviewer at high/max; anchor set folded into the single reviewer at low |
 | Test coverage | `worker-reviewer` (quality, lens: test-coverage) | high, max |
 | Quality | `worker-reviewer` (quality) | all |
 | Security | `worker-reviewer` (security) | high (security paths), max |
@@ -168,7 +169,8 @@ breadth they run. Every tier produces:
 
 **Verdict**: Approve (Block/High resolved or deferred with reasoning),
 Needs Work (Warn-tier present), Request Changes (unresolved Block-tier /
-security / breaking changes / missing tests / arch violations).
+security / any breaking change — prohibited during the 1.0.0
+stabilization freeze / missing tests / arch violations).
 
 ## Constraints
 

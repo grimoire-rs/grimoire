@@ -20,7 +20,7 @@ languages.
 
 **Gate**: Diff fetched, subsystems + language rules loaded.
 
-## Phase 2: Stage 1 — Correctness (parallel, 2 workers)
+## Phase 2: Stage 1 — Correctness (parallel, 3 workers)
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier use resolved `--reviewer` overlay value (tier=high default `sonnet`). See `overlays.md` reviewer axis.
 
@@ -36,13 +36,18 @@ Launch **in single message with multiple Agent tool calls** so run concurrently:
 - **1** `worker-reviewer` (focus: `quality`, lens: test-coverage) —
   check **Specify** phase produced adequate tests: new code
   has tests, bug fixes have regression tests, edge cases covered.
+- **1** `worker-reviewer` (focus: `compatibility`) — breaking-change
+  gate: diff must not break released surfaces (CLI, JSON output,
+  schemas, layouts, exit codes). Any breaking change = Block-tier —
+  prohibited during the 1.0.0 stabilization freeze. Contract:
+  `docs/src/stability.md`.
 
 If Stage 1 has actionable findings, surface prominently — polishing
 code that not meet spec or lacks tests waste downstream effort.
 Review findings in Stage 2 still produced (parallel), not gated,
 but Stage 1 actionable findings dominate verdict.
 
-**Gate**: Both reviewers complete; findings classified.
+**Gate**: All three reviewers complete; findings classified.
 
 ## Phase 3: Stage 2 — Quality / Security / Performance / Docs (parallel)
 
@@ -66,8 +71,8 @@ Each reviewer classifies findings:
 - **Deferred** — needs human judgment; reason stated
 - **Suggest** — optional; goes direct to deferred summary
 
-Max concurrent: 4 Stage 2 reviewers + 2 Stage 1 reviewers (already
-done) ≤ 6 parallel workers. Under 8 concurrent worker ceiling.
+Max concurrent: 4 Stage 2 reviewers + 3 Stage 1 reviewers (already
+done) ≤ 7 parallel workers. Under 8 concurrent worker ceiling.
 
 **Gate**: All applicable Stage 2 perspectives complete.
 
@@ -128,6 +133,7 @@ Produce review report using shared skeleton from `SKILL.md`:
 ### Stage 1 — Correctness
 #### Spec-compliance
 #### Test Coverage
+#### Compatibility (breaking-change gate)
 ### Stage 2 — Quality / Security / Performance / Docs
 #### Quality
 #### Security             # if fired
@@ -140,8 +146,8 @@ Produce review report using shared skeleton from `SKILL.md`:
 
 **Verdict rules**:
 - **Request Changes** if any Block-tier finding unresolved, or
-  security vulns exist, or breaking changes lack migration,
-  or tests absent for new code
+  security vulns exist, or any breaking change present (prohibited
+  during the 1.0.0 stabilization freeze), or tests absent for new code
 - **Needs Work** if Warn-tier findings exist but no Block-tier
 - **Approve** otherwise
 

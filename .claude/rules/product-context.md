@@ -20,10 +20,11 @@ paths:
 
 > An OCI-backed package manager for AI skills and rules.
 
-> **Status: active.** De-provisionalized on the road to 1.0.0 (see
-> `adr_render_layout_stability.md` and `docs/src/stability.md` for the
-> stability contract). Statements below are maintained positioning —
-> flag drift via the Update Protocol at the bottom of this file.
+> **Status: stabilizing — preparing 1.0.0.** Released surfaces are frozen;
+> breaking changes are prohibited (stability contract:
+> `adr_render_layout_stability.md`, `docs/src/stability.md`). Statements
+> below are maintained positioning — flag drift via the Update Protocol
+> at the bottom of this file.
 
 Grimoire (binary: `grim`) is a CLI for installing, maintaining, and
 publishing AI-agent configuration — skills, rules, prompts, and related

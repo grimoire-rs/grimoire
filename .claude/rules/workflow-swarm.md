@@ -59,6 +59,7 @@ Orchestrators specialize workers via focus mode in prompt.
 - `security`: OWASP Top 10 scan, hardcoded secrets, auth/authz flows, input validation. Reference CWE IDs. See `quality-security.md`
 - `performance`: N+1 queries, blocking I/O, allocations, pagination, caching. See `quality-core.md`
 - `spec-compliance`: Phase-aware design record consistency review. Orchestrator specifies phase: `post-stub` (stubs ↔ design), `post-specification` (tests ↔ design), `post-implementation` (full traceability). Knows early phases have no implementation yet.
+- `compatibility`: Breaking-change gate for the 1.0.0 stabilization freeze — released surfaces (CLI, JSON output, schemas, layouts, exit codes) evolve additive-only; any breaking change = Block-tier, prohibited. Contract: `docs/src/stability.md`, CLAUDE.md Principle 9. Full checklist in `worker-reviewer.md`.
 
 **worker-doc-reviewer**: No focus modes — always runs full trigger matrix audit (CLI, env vars, metadata, user guide, installation, changelog).
 

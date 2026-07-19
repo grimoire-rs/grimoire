@@ -26,7 +26,7 @@ is specified.)
 
 Before composing any non-trivial grim command:
 
-1. Run `grim --version`. This guide is written against grim 0.9.x; on a
+1. Run `grim --version`. This guide is written against grim 0.10.x; on a
    different minor, treat every flag mentioned here as a hypothesis.
 2. Run `grim <command> --help` before using flags you have not verified
    this session — it is the authoritative, always-current flag list.
@@ -57,7 +57,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
-| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` | [publish](references/publish.md) |
+| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor | [publish](references/publish.md) |
 
 > **Deprecation:** a publisher can retire a package without
 > unpublishing it; `add` and `status` flag it as deprecated (an `add` of a
@@ -130,4 +130,4 @@ multi-registry browse behavior in
 
 ---
 
-Verified against grim 0.9.0.
+Verified against grim 0.10.0.

@@ -5,126 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-07-19
 
 ### Added
 
-- `grim update` reaps the outputs of a client that dropped out of the
-  configured client set (`[options].clients`): when a client leaves the
-  set, its now-untargeted files are removed and the client is dropped from
-  the install record. Integrity-gated exactly like the orphan prune — a
-  clean, unmodified output is deleted (listed under the update row's new
-  `reaped_clients` array), while a locally-modified output is **preserved**
-  (file kept, client kept in state, listed under `kept_modified_clients`
-  with a stderr warning) so an accidental config edit never silently
-  discards your work. `grim update --force` deletes even a modified
-  dropped-client output. Widening the set is symmetric — a newly-configured
-  client materializes on the next `update`. The two update-item fields are
-  always-present sorted arrays (`[]` when no client left the set on that
-  row); the plain table is unchanged (issue #43) *(update)*
-- `grim status --check` populates `update_available` on every
-  directly-declared, registry-locked item via a fresh per-artifact tag
-  re-resolution (bounded concurrency): grim re-discovers each repo's
-  current representative tag on the registry and compares its digest to
-  the lock pin — the same "is a newer version available?" decision the
-  TUI's `↑ outdated` badge uses (issues #43, #21), independent of the
-  cached catalog tag, so a newer semver release surfaces even when the
-  cache is stale. `true` when the registry's latest digest differs from
-  the lock pin, `false` when it matches (or the tag vanished); `null` for
-  a row with no lock pin (declared-bundle, dev-install, path source), a
-  bundle-member row (it updates via its bundle, not its own tag), or an
-  artifact whose re-resolution failed — a completed re-resolve never
-  reports `null`, and a failed one never lies as `false`. Exit code is
-  unaffected (`status` still always exits `0`) *(status)*
-- `grim status --check` runs one coordinated catalog load against the
-  scope's configured registries and populates `deprecated` /
-  `replaced_by` on every registry-sourced item, matched by
-  `(registry, repository)` — the same fields `grim search` already
-  reports. The report gains a top-level `checked` field (sibling of
-  `items`) and each item gains `deprecated`, `replaced_by`, and
-  `update_available`. `checked` is `true` only when `--check` ran online;
-  combined with `--offline` (or `GRIM_OFFLINE`) the check is skipped
-  with one stderr warning, `checked` stays `false`, and the three new
-  fields stay `null` — exit code is unaffected (`status` still always
-  exits `0`). A single registry's catalog refresh failing degrades only
-  that registry's rows to `null`; `checked` still reports `true` since
-  the check did run online *(status)*
-- `grim_status` MCP tool gains an optional `check` argument (default
-  `false`) that forwards to `command::status::run`'s live catalog
-  re-check — same semantics as CLI `grim status --check` (issue #43): the
-  report's top-level `checked` and per-item `deprecated` / `replaced_by`
-  / `update_available` fields populate the same way over MCP as over the
-  CLI. A read tool regardless — network reads only, no `--allow-writes`
-  gate (precedent: `grim_search`'s catalog browse) *(mcp)*
-- `grim status` items gain two always-present, always-empty-when-clean
-  arrays, `clients_missing` and `clients_extra`: the project's configured
-  client target (`[options].clients`, the same seam `grim context`
-  reports) diffed against the artifact's recorded install-state clients —
-  entirely local, no network. `clients_missing` is desired-but-not-yet-
-  installed-here; `clients_extra` is installed-here-but-dropped-from-
-  config. Both sorted for deterministic JSON. A declared-bundle row
-  (never installs itself) and a dev-install row (materialized out-of-band
-  via `grim install <path>`, independent of `[options].clients`) always
-  report `[]` for both — diffing them against the project's desired set
-  doesn't answer a meaningful question for either *(status)*
-- `grim config list` items gain an always-present `constraints` field:
-  `null` for most keys, `{item_pattern, item_width}` for a list-valued key
-  whose items carry a shape rule beyond closed-set membership —
-  `options.tui.tree_separators` is the first (`item_pattern` is an
-  advisory regex, `item_width` the display-width rule the pattern cannot
-  express; `grim`'s own validation stays authoritative) *(config)*
-- `grim config registry fields` lists the 3 addressable per-registry field
-  names (`oci`, `index`, `default`) and their static type/title/description
-  metadata; unlike every other `config` subcommand it reads no config and
-  resolves no scope, so it works in a directory with no `grimoire.toml`.
-  JSON rows are keyed by the short field name (`"oci"`), not the dotted
-  `registry.<alias>.oci` key `config list` uses *(config)*
-- The JSON error document gains two new `reason` subtypes: `no-config`
-  (a project-scope command found no `grimoire.toml` walking up from the
-  working directory — exit 79, distinct from an explicit `--config <path>`
-  that does not exist, which stays reason-less) and `locked` (a config-file
-  write lost the advisory-lock race — exit 75). `locked` also sets the new,
-  additive `retryable: true` field, so a consumer knows to retry the same
-  command unchanged without scraping `message` *(error)*
-- `grim config set --dry-run` validates and reports the write confirmation
-  without acquiring the write lock or touching `grimoire.toml`; the report
-  gains an always-present `dry_run` field (`false` for every other write
-  verb, which has no dry-run flag) *(config)*
-- OpenAI Codex CLI is now a supported install target: `--client codex` on the
-  CLI and `clients = ["codex"]` in `[options]`, alongside Claude, Copilot, and
-  OpenCode *(install)*
-- Codex skills install to the cross-vendor open standard
-  `.agents/skills/<name>/` — project-scope under `<workspace>/.agents/skills`,
-  global-scope under `$HOME/.agents/skills` (independent of `$CODEX_HOME`)
-  *(install)*
-- Codex agents render to TOML at `.codex/agents/<name>.toml`, supporting
-  `name`, `description`, `developer_instructions`, and optional `model`; Codex-
-  specific knobs (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
-  are also honored; `tools` entries are dropped with a warning *(install)*.
-  `codex.reasoning-effort` accepts the upstream-native set `ultra`, `max`,
-  `high`, `medium`, `low`, `minimal`, `none` — the Claude-only `xhigh` value is
-  not accepted (authoring note for anyone porting a Claude agent)
-- Codex rules are unsupported (Codex has no path-scoped instruction mechanism);
-  grim warns on stderr and skips (install still succeeds) *(install)*
-- Codex MCP servers register into `config.toml` under `[mcp_servers.<name>]`
-  (project `<workspace>/.codex/config.toml`, global `$CODEX_HOME`/`~/.codex`)
-  via a span-preserving TOML splice, mirroring the JSON splice every other
-  client already gets *(install)*
-- New `CODEX_HOME` env var relocates the Codex agent directory **and** the MCP
-  `config.toml` (skills are unaffected — they follow the cross-vendor
-  `$HOME/.agents/skills` standard) *(install)*
+- Emit license annotation for rules, agents, bundles, and mcp *(oci)*
+- Allow periods in artifact names *(skill)*
+- Verify credentials against the registry by default *(login)*
+- Recover modified state with --force *(add)*
+- Support a push registry distinct from the pull registry *(publish)*
+- Add Codex (OpenAI Codex CLI) as a client vendor *(install)*
+- Accept "manual" permission-mode *(vendor-claude)*
+- Project claude.allowed-tools skill key *(vendor-claude)*
+- Project agent model into frontmatter *(vendor-copilot)*
+- Warn when dropping agent tools *(vendor-opencode)*
+- Map remote MCP headers to http_headers/env_http_headers *(vendor-codex)*
+- Additive refinement fields on the descriptor *(mcp)*
+- Project refinement fields per vendor *(mcp)*
+- Reap moved outputs on re-install (layout-migration migrator) *(install)*
+- Route global rules to native ~/.copilot instructions *(vendor-copilot)*
+- Ws transport variant *(mcp)*
+- Structured oauth block *(mcp)*
+- Grim schema --kind mcp *(cli)*
+- Add --dry-run to grim config set *(config)*
+- No-config and locked reasons, retryable envelope field *(error)*
+- Grim config registry fields *(config)*
+- Machine-readable constraints on config list entries *(config)*
+- Report client-set drift, network-free *(status)*
+- Add --check surfacing deprecated and replaced_by *(status)*
+- Add update_available via fresh re-resolution under --check *(status)*
+- Forward check to grim_status *(mcp)*
+- Reap dropped-client outputs on update *(update)*
+
+### Changed
+
+- Rename used param _scope to scope *(vendor-opencode)*
+- Extract classify_codex_headers *(vendor-codex)*
+- Extract shared tree-separator predicate *(config)*
+- Extract update-availability seam from tui *(catalog)*
+- Fold autodetect gate into client_drift *(status)*
+
+### Documentation
+
+- Ws + oauth reference, emit matrix, forward-incompat note *(mcp)*
+- Correct copilot model row, add allowed-tools, note unknown-fields stance
+- Add contributor style rule for config key copy *(config)*
+- Document grim status --check, client drift, and update reaping
+- Note codex namespace reservation and upgrade impact *(vendor-metadata)*
+- Qualify reap/drift as explicit-[options].clients-only
+- Autodetect carve-out on report contracts + reap no-op test
 
 ### Fixed
 
-- `grim update` no longer prunes still-declared **agent** and **mcp** install
-  records: the orphan-detection set omitted those two kinds, so every declared
-  agent/mcp record looked orphaned and was reaped (its files deleted) on every
-  update *(install)*
-- Harden the generated-file provenance header against comment-breakout
-  injection: a registry ref / digest carrying a literal `-->` or `<…>` can no
-  longer close the `<!-- ... -->` comment early and inject live content into a
-  rendered OpenCode/Copilot rule or agent file (CWE-116) — `<`/`>` are escaped
-  and control characters collapse to a space *(install)*
+- Accept leading ./ in description paths *(publish)*
+- Browse the built-in index on the no-scope fallback path *(search)*
+- Restore "xhigh" reasoning-effort literal *(vendor-codex)*
+- Remove stale MCP entry on pin-change decline *(install)*
+- Reaper resolved-identity guard + support-dir reap tests *(install)*
+- Decline case-insensitive duplicate header names *(vendor-codex)*
+- Validate oauth.auth_server_metadata_url env refs *(mcp)*
+- Path-identity hardening for reaper and decline splice *(install)*
+- Rewrite key descriptions for plain, user-facing copy *(config)*
+- Resolve commit verification state from the target worktree *(hooks)*
+- Reap dropped clients only on explicit [options].clients *(update)*
+- Gate client drift on explicit [options].clients *(status)*
+- Skip fcntl lock test on Windows via skipif decorator *(test)*
+- Update stale org in grim-usage search term *(catalog)*
 
 ## [0.9.1] - 2026-07-12
 
@@ -563,6 +509,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.10.0]: https://github.com/grimoire-rs/grimoire/compare/v0.9.1..v0.10.0
 [0.9.1]: https://github.com/grimoire-rs/grimoire/compare/v0.9.0..v0.9.1
 [0.9.0]: https://github.com/grimoire-rs/grimoire/compare/v0.8.4..v0.9.0
 [0.8.4]: https://github.com/grimoire-rs/grimoire/compare/v0.8.3..v0.8.4

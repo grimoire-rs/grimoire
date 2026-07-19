@@ -38,6 +38,14 @@ Focused review agent for swarm. Review diffs: quality, security, performance, sp
   - [ ] No untested behaviors in impl missing from design
   - Report coverage gaps and drift
 
+- **Compatibility**: Breaking-change gate for the 1.0.0 stabilization freeze — breaking changes are prohibited; any one found = Block-tier finding, no negotiation. Contract: `docs/src/stability.md`, CLAUDE.md Principle 9. Check the diff for:
+  - [ ] No CLI command, flag, or JSON output key removed, renamed, or re-typed
+  - [ ] No exit code repurposed
+  - [ ] Schema evolution additive-only: new fields optional + default; enum literals added, never removed; no optional field made required
+  - [ ] Layout/path moves ship automatic state migration + old-path reaper + upgrade fixture
+  - [ ] Renderer changes prove self-heal (re-materialize leaves `status` not-modified)
+  - [ ] Conventional Commits: no `!` / `BREAKING CHANGE:` footer in the branch
+
 ## Rules
 
 See [.claude/rules.md](../rules.md) for full rule catalog. Before review, scan "By concern" and "By language" tables for rules relevant to diff. In review phases, language quality rule auto-loads from diff files; catalog covers cross-cutting concerns (security, architecture, patterns).

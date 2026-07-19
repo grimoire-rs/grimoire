@@ -96,6 +96,10 @@ with a tree: always-on root → catalog/index file → scoped leaf rules.
   AGENTS.md is the closest thing to a portable always-on baseline.
 - Porting scoped rules to OpenCode converts them into always-on cost;
   consider converting procedural rules into skills there instead.
+- Codex has no rule mechanism at all, scoped or otherwise — a rule
+  installed with `--client codex` is declined with a warning and writes
+  no file. Codex's only always-on surface is its directory-granular
+  AGENTS.md; route content there instead.
 - Write for the worst consumer: most-critical content first, short
   imperative bullets, and never rely on the client fetching external URLs
   as normative content.
@@ -121,6 +125,8 @@ session and merely lives in another file.
   `instructions` array.
 - [Copilot: custom instructions][cop-ci] — file types and precedence
   across surfaces.
+- [Codex: skills][cx-skills] — the client with no rule mechanism at all;
+  AGENTS.md is its only always-on surface.
 - [VS Code: custom instructions][vsc-ci] — `applyTo:` mechanics and the
   documented mismatch failure mode.
 - [Copilot code review instructions deep-dive][gh-blog] — the 4,000-char
@@ -135,6 +141,7 @@ session and merely lives in another file.
 [cc-bp]: https://code.claude.com/docs/en/best-practices
 [oc-rules]: https://opencode.ai/docs/rules/
 [cop-ci]: https://docs.github.com/en/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot
+[cx-skills]: https://developers.openai.com/codex/skills
 [vsc-ci]: https://code.visualstudio.com/docs/agent-customization/custom-instructions
 [gh-blog]: https://github.blog/ai-and-ml/github-copilot/unlocking-the-full-power-of-copilot-code-review-master-your-instructions-files/
 [humanlayer]: https://humanlayer.dev/blog/writing-a-good-claude-md
