@@ -191,6 +191,12 @@ topic branch, then opens the pull/merge request via the forge REST API
 A GitLab host without an API token gets the MR via git push options; a
 plain git host gets the pushed branch and its URL printed.
 
+With an API-capable credential, `--announce` auto-forks: when you lack
+push access to the configured index, grim forks it for you and opens the
+cross-repo pull/merge request against the upstream automatically —
+`[announce] fork = false` opts back out to the manual-fork workflow.
+Confirm the current behavior with `grim publish --help`.
+
 Configure the target and ownership in an optional `[announce]` table in
 `publish.toml`:
 
@@ -404,6 +410,8 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
   hosting your own.
 - [Authentication][auth] — credential resolution, storage tiers, CI.
 - [Command reference: build, release, login, logout][commands].
+- [Publishing from CI][ci] — wiring publish/announce into GitHub or
+  GitLab CI.
 
 [publishing]: https://grimoire.rs/publishing.html
 [package-index]: https://grimoire.rs/package-index.html
@@ -413,3 +421,4 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 [auth]: https://grimoire.rs/authentication.html
 [commands]: https://grimoire.rs/commands.html#build
 [artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets
+[ci]: https://grimoire.rs/ci.html
