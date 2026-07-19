@@ -44,6 +44,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::cli::options::{GlobalOptions, OutputFormat};
 use crate::command::add::AddArgs;
 use crate::command::build::BuildArgs;
+use crate::command::completions::CompletionsArgs;
 use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
 use crate::command::describe::DescribeArgs;
@@ -118,6 +119,8 @@ pub enum Command {
     Describe(DescribeArgs),
     /// Print the JSON Schema for grimoire.toml, publish.toml, or grimoire.lock.
     Schema(SchemaArgs),
+    /// Print a shell completion script (bash, zsh, fish, elvish, powershell).
+    Completions(CompletionsArgs),
     /// Browse the registry catalog in an interactive TUI.
     Tui(TuiArgs),
     /// Run a local STDIO Model Context Protocol server.

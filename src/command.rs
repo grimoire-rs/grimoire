@@ -11,6 +11,7 @@
 pub mod add;
 pub mod build;
 pub mod command_error;
+pub mod completions;
 pub mod config;
 pub mod config_keys;
 pub mod context;

@@ -127,6 +127,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         // `schema` prints a JSON Schema document, not a `Printable` report,
         // so it is wired directly like `tui` (subsystem-cli-api.md exemption).
         Command::Schema(args) => crate::command::schema::run(&args)?,
+        // `completions` prints a shell completion script, not a `Printable`
+        // report, so it is wired directly like `schema`.
+        Command::Completions(args) => crate::command::completions::run(&args)?,
         Command::Login(args) => {
             let (r, c) = crate::command::login::run(&ctx, &args).await?;
             render(&r, format)?;
