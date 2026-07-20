@@ -756,8 +756,7 @@ mod tests {
 
     // ── `.agents/skills` refcount guard (adr_vendor_wave_expansion §3) ──
     //
-    // Contract tests for `shared_by_surviving_sibling` (currently
-    // `unimplemented!()` — these fail by panic until the implementation phase).
+    // Contract tests for `shared_by_surviving_sibling`.
     // Shared-pool members (Codex/Gemini/Zed/Amp) converge on one
     // `$HOME/.agents/skills/<name>` dir; each member's `ClientOutput` in a
     // single record resolves to the SAME path. The guard decides whether

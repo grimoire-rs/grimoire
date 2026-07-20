@@ -303,7 +303,7 @@ unknown keys.
 Those other clients split into two groups by whether they carry *any*
 vendor namespace at all:
 
-- **Agent-only namespaces** — [Codex][codex-subagents-docs],
+- **Non-skill namespaces** — [Codex][codex-subagents-docs],
   [Cursor][cursor-subagents-docs], [Gemini][gemini-subagents-docs],
   [OpenCode][opencode-agents-docs], and [GitHub Copilot][copilot-agents-docs]
   each project *agent* frontmatter through their own `<vendor>.*` agent
