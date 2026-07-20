@@ -9,10 +9,10 @@
 //! - **Skills**: `.kiro/skills/<name>/` (project), `~/.kiro/skills/`
 //!   (global). Universal agentskills shape.
 //! - **Rules**: `.kiro/steering/<name>.md`; `paths` → `inclusion: fileMatch`
-//!   + `fileMatchPattern` (array); unscoped → `inclusion: always`. Native at
-//!   both scopes — global scoped output is correct but **inert until upstream
-//!   #9176 closes** (render-layer warning + Known-gaps row, never a new
-//!   installer special case).
+//!   with `fileMatchPattern` (array); unscoped → `inclusion: always`. Native
+//!   at both scopes — global scoped output is correct but **inert until
+//!   upstream #9176 closes** (render-layer warning + Known-gaps row, never a
+//!   new installer special case).
 //! - **Agents**: **declined**. A native IDE format exists (`.kiro/agents/`),
 //!   but the Kiro CLI expects an incompatible JSON schema in the SAME dir
 //!   (open bug kirodotdev/Kiro#8040) — writing IDE-format files could break
@@ -32,7 +32,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir};
+use super::vendor::{KindSupport, Vendor, home_dir, provenance};
 
 /// Kiro (AWS).
 pub struct KiroVendor;
@@ -83,13 +83,56 @@ impl Vendor for KiroVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `mcpServers` container; env refs passthrough `${VARIABLE_NAME}`;
-        // oauth skipped (shape ≠ grim block).
-        unimplemented!("V3 Kiro: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // Kiro's `mcp.json` reads `${VARIABLE_NAME}` natively — passthrough,
+        // no translation (the same Claude/Gemini env-ref shape). A structured
+        // oauth block is auth-critical and has no home in Kiro's `mcpServers`
+        // schema (its oauth shape ≠ grim's `McpOAuth`), so the whole
+        // descriptor is skipped with a warning rather than writing an entry
+        // that silently drops the auth.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for kiro ({scope}): mcp.json has no oauth surface");
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            // stdio → `command` (+`args`, +`env`). Kiro's local schema has no
+            // `type` key (unlike Cursor); a `${VAR}` in `env` is a native OS
+            // reference the launched subprocess resolves — passed through.
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            // WebSocket transport has no Kiro `mcpServers` mapping — skip with
+            // a warning (the installer records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for kiro ({scope}): mcp.json has no ws transport");
+                return None;
+            }
+            // Remote (streamable http / sse) → a single `url` key (+`headers`);
+            // Kiro uses `url` for both, no httpUrl split.
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // Refinement fields (`timeout`, `always_load`, `headers_helper`) have
+        // no Kiro `mcpServers` equivalent — dropped (pure refinements, nothing
+        // auth-critical), the sibling drop convention.
+        Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -99,13 +142,54 @@ impl Vendor for KiroVendor {
 
     fn rule_index(
         &self,
-        _parsed: &ParsedRule,
-        _scope: ConfigScope,
-        _pinned: &str,
+        parsed: &ParsedRule,
+        scope: ConfigScope,
+        pinned: &str,
     ) -> Result<Option<RenderedDoc>, RenderError> {
-        // Steering transform: `fileMatch`/`fileMatchPattern` or `always`, plus
-        // the global-scope inert-until-#9176 render-layer warning.
-        unimplemented!("V3 Kiro: rule_index filled in the implementation phase")
+        // Kiro has no rule registry — project only to strip any stray
+        // metadata and surface a typo warning for an own-namespace `kiro.*`
+        // rule key (foreign keys drop silently; empty registry ⇒ nothing
+        // lifts). The steering frontmatter itself is grim-authored below.
+        let projection = render::project_rule(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        // `paths` → `inclusion: fileMatch` + `fileMatchPattern` as a YAML
+        // ARRAY (never a comma-joined string); unscoped → `inclusion: always`
+        // (Kiro's default — `auto`/`manual` are never emitted). Built through
+        // the shared frontmatter-block serializer so glob quoting is handled
+        // deterministically; `projection.lifted` is empty (no kiro registry).
+        let natives: Vec<(&'static str, serde_yaml::Value)> = if parsed.frontmatter.paths.is_empty() {
+            vec![("inclusion", serde_yaml::Value::String("always".to_string()))]
+        } else {
+            let patterns = parsed
+                .frontmatter
+                .paths
+                .iter()
+                .map(|p| serde_yaml::Value::String(p.clone()))
+                .collect();
+            vec![
+                ("inclusion", serde_yaml::Value::String("fileMatch".to_string())),
+                ("fileMatchPattern", serde_yaml::Value::Sequence(patterns)),
+            ]
+        };
+
+        let mut document = render::agent_frontmatter_block(natives, projection.lifted, self.name(), &[], &mut warnings);
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+
+        // A scoped rule at global scope writes correct `fileMatch` steering
+        // that is **inert upstream until #9176 closes** (Kiro ignores global
+        // `fileMatch`). Surface the gap as a render-layer warning; the file is
+        // written correctly and self-heals when the upstream fix ships.
+        if scope == ConfigScope::Global && !parsed.frontmatter.paths.is_empty() {
+            warnings.push(
+                "global fileMatch steering is currently inert upstream (kirodotdev/Kiro#9176); \
+                 the file is written correctly and will activate when the upstream fix ships"
+                    .to_string(),
+            );
+        }
+
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 
     fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
