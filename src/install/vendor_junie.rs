@@ -78,13 +78,62 @@ impl Vendor for JunieVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `mcpServers` container; env refs undocumented → skip ref-bearing
-        // descriptors.
-        unimplemented!("V4 Junie: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // A structured oauth block is auth-critical and has no home in
+        // Junie's `mcpServers` schema (its shape ≠ grim's `McpOAuth`) — skip
+        // the whole descriptor with a warning rather than write an entry that
+        // silently drops the auth.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for junie ({scope}): mcp.json has no oauth surface");
+            return None;
+        }
+        // Junie's `${VAR}` substitution is undocumented upstream — a
+        // ref-bearing value would be written as a broken literal, so any
+        // descriptor carrying one is skipped rather than inlined (Copilot-CLI
+        // global precedent; grim never writes a secret literal).
+        if descriptor.has_env_refs() {
+            tracing::warn!(
+                "mcp server '{name}' skipped for junie ({scope}): mcp.json env-ref substitution is undocumented and \
+                 grim never inlines a literal ${{VAR}}"
+            );
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            // stdio → `command` (+`args`, +`env`). Junie's local schema (like
+            // Kiro) carries no `type` key.
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            // WebSocket transport has no Junie `mcpServers` mapping — skip with
+            // a warning (the installer records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for junie ({scope}): mcp.json has no ws transport");
+                return None;
+            }
+            // Remote (streamable http / sse) → a single `url` key (+`headers`).
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // Refinement fields (`timeout`, `always_load`, `headers_helper`) have
+        // no Junie `mcpServers` equivalent — dropped (sibling drop convention).
+        Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
