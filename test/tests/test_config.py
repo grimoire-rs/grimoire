@@ -64,7 +64,18 @@ _ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list", "string
 
 # The canonical ClientTarget::ALL order — every ``options.clients`` "values"
 # JSON field pins this order regardless of the order the user supplied.
-CLIENT_VALUE_NAMES = ["claude", "opencode", "copilot", "codex"]
+CLIENT_VALUE_NAMES = [
+    "claude",
+    "opencode",
+    "copilot",
+    "codex",
+    "cursor",
+    "kiro",
+    "junie",
+    "gemini",
+    "zed",
+    "amp",
+]
 
 
 def _minimal_global_config(grim_home: Path) -> None:
@@ -1063,7 +1074,7 @@ def test_list_json_entry_clients_is_string_set_with_canonical_values(
 ) -> None:
     """The ``config list`` JSON entry for ``options.clients`` carries
     ``type: "string-set"`` and ``values`` in the canonical
-    ``ClientTarget::ALL`` order (``["claude","opencode","copilot","codex"]``) —
+    ``ClientTarget::ALL`` order (all ten clients) —
     regardless of the order the user supplied to ``set``, and whether the
     key is unset or set. ``default`` stays ``null`` (no fixed default).
 
