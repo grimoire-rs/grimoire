@@ -86,12 +86,58 @@ impl Vendor for AmpVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `"amp.mcpServers"` literal dotted key; env refs passthrough `${VAR_NAME}`.
-        unimplemented!("V6 Amp: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // Amp's `settings.json` reads `${VAR_NAME}` natively — identical to
+        // grim's canonical `${VAR}`, so every string value passes through
+        // verbatim. A structured oauth block is auth-critical and has no
+        // `amp.mcpServers` target (its shape ≠ grim's `McpOAuth`), so the
+        // whole descriptor is skipped with a warning rather than writing an
+        // entry that silently drops the auth.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for amp ({scope}): amp.mcpServers has no oauth surface");
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            // stdio → `command` (+`args`, +`env`). A `${VAR}` in `env` is a
+            // native OS environment reference the launched subprocess
+            // resolves — passed through verbatim.
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            // WebSocket transport has no `amp.mcpServers` mapping — skip with
+            // a warning (the installer records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for amp ({scope}): amp.mcpServers has no ws transport");
+                return None;
+            }
+            // Both remote transports use a single `url` key (no sse/http
+            // split); `headers` carry through with native `${VAR_NAME}` refs.
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // Refinements (`timeout`/`always_load`/`headers_helper`/`cwd`) are
+        // dropped — pure refinements with nothing auth-critical, per the
+        // sibling shared-pool conventions. The container is the literal
+        // single dotted key `amp.mcpServers` (a `.` is not a JSON Pointer
+        // separator, so this is one key, not a nested `amp` → `mcpServers`).
+        Some((format!("/amp.mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
