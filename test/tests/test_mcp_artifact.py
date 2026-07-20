@@ -14,6 +14,8 @@ import json
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
+import pytest
+
 from src.helpers import write_config
 from src.registry import fetch_blob, fetch_manifest, retag
 
@@ -742,6 +744,56 @@ def test_project_repeat_install_is_byte_stable_for_every_json_client(
         assert list(doc[container].keys()).count("grim-mcp") == 1, (
             f"{cfg}: exactly one grim-mcp entry expected, got {doc[container]!r}"
         )
+
+
+# client, project MCP config path, container key (single top-level key —
+# Amp's is a literal dotted key, not a nested `amp` -> `mcpServers` object).
+_WAVE1_MCP_CLIENTS = [
+    ("cursor", ".cursor/mcp.json", "mcpServers"),
+    ("kiro", ".kiro/settings/mcp.json", "mcpServers"),
+    ("junie", ".junie/mcp/mcp.json", "mcpServers"),
+    ("gemini", ".gemini/settings.json", "mcpServers"),
+    ("zed", ".zed/settings.json", "context_servers"),
+    ("amp", ".amp/settings.json", "amp.mcpServers"),
+]
+
+
+@pytest.mark.parametrize("client, config_rel, container_key", _WAVE1_MCP_CLIENTS)
+def test_project_repeat_install_is_byte_stable_for_wave1_mcp_clients(
+    grim_at,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+    client: str,
+    config_rel: str,
+    container_key: str,
+) -> None:
+    """C2 idempotency, extended to the six wave-1 MCP splice targets: a
+    second `grim install` with an unchanged pin writes exactly one entry,
+    byte-identical to the first install's output — proving self-heal
+    (Principle 9) end-to-end for every new splice target, including Zed's
+    JSONC-tolerant path and Amp's literal dotted `amp.mcpServers` key.
+    Mirrors `test_project_repeat_install_is_byte_stable_for_every_json_client`
+    (the three pre-existing JSON-spliced clients)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    first = runner.json("install", "--client", client)["items"]
+    assert first[0]["status"] == "installed", first
+
+    cfg = project_dir / config_rel
+    before = cfg.read_text()
+
+    second = runner.json("install", "--client", client)["items"]
+    assert second[0]["status"] == "unchanged", second
+
+    assert cfg.read_text() == before, f"{client} config must be byte-stable on repeat install"
+    doc = json.loads(before)
+    assert list(doc[container_key].keys()).count("grim-mcp") == 1, (
+        f"{client}: exactly one grim-mcp entry expected in {cfg}, got {doc[container_key]!r}"
+    )
 
 
 def test_global_codex_registers_entry_in_config_toml_idempotent(

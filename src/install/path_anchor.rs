@@ -1858,7 +1858,23 @@ mod tests {
     /// For every materializable (scope, client, kind) triple:
     ///
     /// 1. Derive the expected (anchor, relative) from the §1.1 table.
-    /// 2. Build `dest = expected_anchor.root(&roots).join(expected_relative)`.
+    /// 2. Build `dest`. **Project scope**: from
+    ///    `client.path_for(&roots.workspace, …)` — the vendor trait itself
+    ///    (every vendor's project-scope layout is a pure function of
+    ///    `workspace`, no ambient env), so a divergence between
+    ///    `vendor_x::{skills_root,rule_path,agent_path}` and this table's
+    ///    hand-written `relative` string fails right here — ties copy 1
+    ///    (the trait) to copy 2 (this table). **Global scope**: every
+    ///    vendor's global root resolution reads live `$HOME` / vendor env
+    ///    overrides directly inside `path_for`, not through `AnchorRoots` —
+    ///    tying it into this hermetic fixture would make pass/fail depend
+    ///    on the running machine's real environment instead of the table,
+    ///    so `dest` still builds from
+    ///    `expected_anchor.root(&roots).join(expected_relative)` as before.
+    ///    Global-scope `path_for`/anchor-table parity is covered separately
+    ///    by `path_for_global_scope_uses_vendor_native_roots` in
+    ///    `client_target.rs` (guarded on the real `home_dir()`/env, the
+    ///    established pattern for that half of the surface).
     /// 3. Assert `AnchoredPath::from_target(&dest, …)` classifies to the
     ///    expected (anchor, relative).
     /// 4. Assert `ap.resolve(&roots)` round-trips back to `dest`.
@@ -1867,10 +1883,10 @@ mod tests {
     /// is a test failure.  The counter assertion at the end guarantees that
     /// adding a new client or kind without updating the table also fails.
     ///
-    /// This locks `from_target` / `candidate_anchors` / `resolve` coherence.
-    /// In particular, dropping `ClaudeRoot` from
-    /// `candidate_anchors(Global, Claude, Skill)` would cause assertion (3)
-    /// to return `GrimHome` instead, failing this test.
+    /// This locks `from_target` / `candidate_anchors` / `resolve` coherence,
+    /// and — for project scope — `path_for` too. In particular, dropping
+    /// `ClaudeRoot` from `candidate_anchors(Global, Claude, Skill)` would
+    /// cause assertion (3) to return `GrimHome` instead, failing this test.
     #[test]
     fn arch2_from_target_and_resolve_are_coherent_for_all_scope_client_kind_triples() {
         // Hermetic roots: all fields set to fixed, non-overlapping paths so
@@ -1918,18 +1934,26 @@ mod tests {
                     // Step 1: expected anchor + relative from the §1.1 table.
                     let (expected_anchor, expected_relative) = expected_anchor_and_relative(scope, client, kind, name);
 
-                    // Step 2: build the absolute dest from the hermetic roots.
-                    // The anchor root must resolve (all roots are Some in this
-                    // fixture) — an unwrap failure here means the table entry
-                    // references an anchor whose root is absent, which is a bug
-                    // in the test table itself.
+                    // Step 2: build the absolute dest. The anchor root must
+                    // resolve (all roots are Some in this fixture) — an
+                    // unwrap failure here means the table entry references
+                    // an anchor whose root is absent, which is a bug in the
+                    // test table itself.
                     let anchor_root = expected_anchor.root(&roots).unwrap_or_else(|| {
                         panic!(
                             "anchor {expected_anchor:?} has no root in hermetic fixture \
                              for ({scope:?}, {client:?}, {kind:?})"
                         )
                     });
-                    let dest = anchor_root.join(&expected_relative);
+                    // Project scope: drive `dest` from the vendor trait
+                    // directly (see the function doc) — ties `path_for` to
+                    // the `expected_anchor_and_relative` table. Global
+                    // scope: `path_for`'s vendor roots read live env, so
+                    // stay on the hermetic anchor-root composition.
+                    let dest = match scope {
+                        ConfigScope::Project => client.path_for(&roots.workspace, scope, kind, name),
+                        ConfigScope::Global => anchor_root.join(&expected_relative),
+                    };
 
                     // Step 3: from_target must classify to the expected pair —
                     // NO silent skip on UnknownAnchor; every combo must match.

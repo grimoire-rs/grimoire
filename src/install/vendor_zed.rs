@@ -227,6 +227,55 @@ mod tests {
         );
     }
 
+    // ── detect: project scope follows `.zed`; global scope follows zed_root ──
+
+    #[test]
+    fn detect_project_scope_follows_dot_zed_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(!ZedVendor.detect(w, ConfigScope::Project), "absent .zed ⇒ not detected");
+        std::fs::create_dir_all(w.join(".zed")).unwrap();
+        assert!(ZedVendor.detect(w, ConfigScope::Project), "present .zed ⇒ detected");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_global_scope_existence_permutations_via_zed_root() {
+        // `ZedVendor::detect`'s Global arm is exactly
+        // `zed_root(xdg_config_dir()).is_some_and(|p| p.exists())`. Fabricating
+        // `XDG_CONFIG_HOME`/`HOME` permutations in-process is not possible
+        // here: Rust 2024 makes `std::env::set_var` `unsafe`, and this crate
+        // `forbid`s `unsafe_code` crate-wide (see `vendor_codex.rs`'s
+        // `detect_global_scope_existence_permutations_via_codex_root` for the
+        // same precedent). This proves the piece `zed_root_is_xdg_zed_on_unix`
+        // above does not: the trailing `.exists()` dir-presence check, across
+        // both an XDG_CONFIG_HOME-unset (`~/.config` fallback value) and an
+        // XDG_CONFIG_HOME-set (custom dir) resolved value — the most
+        // error-prone root among the wave-1 vendors.
+        let tmp = tempfile::tempdir().unwrap();
+        let fallback = tmp.path().join("home").join(".config"); // unset ⇒ ~/.config fallback
+        let custom = tmp.path().join("custom-xdg"); // set ⇒ a custom XDG_CONFIG_HOME
+
+        // Unset: fallback root absent ⇒ not detected yet.
+        let root = zed_root(Some(fallback.clone())).unwrap();
+        assert!(!root.exists(), "absent ~/.config/zed must not exist yet: {root:?}");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(root.exists(), "present ~/.config/zed now exists");
+
+        // Set: a custom XDG_CONFIG_HOME root absent ⇒ not detected yet,
+        // independent of the fallback resolved above.
+        let overridden = zed_root(Some(custom.clone())).unwrap();
+        assert!(
+            !overridden.exists(),
+            "absent custom XDG_CONFIG_HOME/zed must not exist yet: {overridden:?}"
+        );
+        std::fs::create_dir_all(&overridden).unwrap();
+        assert!(overridden.exists());
+
+        // Neither XDG_CONFIG_HOME nor $HOME resolvable ⇒ no root at all.
+        assert_eq!(zed_root(None), None);
+    }
+
     // ── mcp_entry: `context_servers` container, FLAT entry shape ──
 
     #[test]
@@ -284,6 +333,20 @@ mod tests {
             ZedVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_drops_refinement_fields() {
+        // Refinement fields have no documented `context_servers` target —
+        // dropped. Mirrors vendor_copilot.rs::mcp_entry_drops_refinement_fields.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = ZedVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headersHelper"] {
+            assert!(value.get(key).is_none(), "no Zed target for '{key}': {value}");
+        }
     }
 
     #[test]

@@ -30,8 +30,10 @@ and refused on the next install; ``--force`` overwrites.
 
 Publish-time gate: ``grim release`` (or ``grim build``) fails with exit
 code 65 for a skill with a bad bool/enum value in a known namespaced
-metadata key, or for a rule with a bad ``copilot.exclude-agent`` value.
-An unknown key (e.g. typo) only warns (stderr) and succeeds.
+metadata key, or for a rule with a bad ``copilot.exclude-agent`` value, or
+for an agent with a bad typed value in its ``cursor.*``/``gemini.*``
+registry field (e.g. ``cursor.readonly`` bool, ``gemini.temperature``
+float). An unknown key (e.g. typo) only warns (stderr) and succeeds.
 """
 from __future__ import annotations
 
@@ -718,6 +720,90 @@ def test_release_fails_with_bad_exclude_agent_in_rule(
     )
 
 
+def test_release_fails_with_bad_cursor_readonly_bool_in_agent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``cursor.readonly: "maybe"`` is an invalid bool for the typed
+    ``cursor.*`` agent registry; ``grim release --kind agent`` exits 65."""
+    agent_file = project_dir / "bad-agent.md"
+    _write(
+        agent_file,
+        '---\nname: bad-agent\ndescription: d\nmetadata:\n  cursor.readonly: "maybe"\n---\nbody\n',
+    )
+    repo = f"{registry}/{unique_repo}/bad-agent"
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0", check=False
+    )
+    assert result.returncode == 65, (
+        f"bad cursor.readonly bool must exit 65, got {result.returncode}; "
+        f"{result.stderr}"
+    )
+
+
+def test_release_fails_with_bad_cursor_is_background_bool_in_agent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``cursor.is-background: "maybe"`` is an invalid bool for the typed
+    ``cursor.*`` agent registry; ``grim release --kind agent`` exits 65."""
+    agent_file = project_dir / "bad-agent.md"
+    _write(
+        agent_file,
+        '---\nname: bad-agent\ndescription: d\nmetadata:\n  cursor.is-background: "maybe"\n---\nbody\n',
+    )
+    repo = f"{registry}/{unique_repo}/bad-agent"
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0", check=False
+    )
+    assert result.returncode == 65, (
+        f"bad cursor.is-background bool must exit 65, got {result.returncode}; "
+        f"{result.stderr}"
+    )
+
+
+def test_release_fails_with_bad_gemini_temperature_float_in_agent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``gemini.temperature: "warm"`` is an invalid float for the typed
+    ``gemini.*`` agent registry; ``grim release --kind agent`` exits 65."""
+    agent_file = project_dir / "bad-agent.md"
+    _write(
+        agent_file,
+        '---\nname: bad-agent\ndescription: d\nmetadata:\n  gemini.temperature: "warm"\n---\nbody\n',
+    )
+    repo = f"{registry}/{unique_repo}/bad-agent"
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0", check=False
+    )
+    assert result.returncode == 65, (
+        f"bad gemini.temperature float must exit 65, got {result.returncode}; "
+        f"{result.stderr}"
+    )
+
+
+def test_release_fails_with_bad_gemini_max_turns_int_in_agent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``gemini.max-turns: "ten"`` is an invalid int for the typed
+    ``gemini.*`` agent registry; ``grim release --kind agent`` exits 65."""
+    agent_file = project_dir / "bad-agent.md"
+    _write(
+        agent_file,
+        '---\nname: bad-agent\ndescription: d\nmetadata:\n  gemini.max-turns: "ten"\n---\nbody\n',
+    )
+    repo = f"{registry}/{unique_repo}/bad-agent"
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0", check=False
+    )
+    assert result.returncode == 65, (
+        f"bad gemini.max-turns int must exit 65, got {result.returncode}; "
+        f"{result.stderr}"
+    )
+
+
 def test_release_warns_but_succeeds_for_unknown_namespaced_key(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -1008,8 +1094,11 @@ def test_kiro_unscoped_rule_sets_inclusion_always(
     steering = project_dir / ".kiro/steering/always-rule.md"
     assert steering.is_file(), "Kiro rule must materialize at .kiro/steering/<name>.md"
     text = steering.read_text()
-    # Either inclusion: always is emitted, or frontmatter is omitted entirely
-    # (always is Kiro's default) — but never a fileMatch.
+    # Positive assertion: `inclusion: always` must actually be present, not
+    # merely the absence of `fileMatch` — a regression that emitted
+    # `inclusion: manual` (under which the rule never loads) would still
+    # pass a `fileMatch not in text`-only check.
+    assert "inclusion: always" in text, f"unscoped Kiro rule must set inclusion: always:\n{text}"
     assert "fileMatch" not in text, f"unscoped Kiro rule must not carry fileMatch:\n{text}"
     assert "Applies everywhere." in text
     # Project scope: the global inert-#9176 warning must NOT fire.

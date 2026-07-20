@@ -248,6 +248,20 @@ mod tests {
         );
     }
 
+    // ── detect: project scope follows the `.kiro` dot-dir ──
+
+    #[test]
+    fn detect_project_scope_follows_dot_kiro_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(
+            !KiroVendor.detect(w, ConfigScope::Project),
+            "absent .kiro ⇒ not detected"
+        );
+        std::fs::create_dir_all(w.join(".kiro")).unwrap();
+        assert!(KiroVendor.detect(w, ConfigScope::Project), "present .kiro ⇒ detected");
+    }
+
     // ── steering render: scoped → fileMatch + fileMatchPattern ARRAY ──
 
     #[test]
@@ -407,6 +421,21 @@ mod tests {
             KiroVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_drops_refinement_fields() {
+        // Refinement fields have no `mcpServers` target — dropped (pure
+        // refinements, nothing auth-critical is lost). Mirrors
+        // vendor_copilot.rs::mcp_entry_drops_refinement_fields.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = KiroVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headersHelper"] {
+            assert!(value.get(key).is_none(), "no Kiro target for '{key}': {value}");
+        }
     }
 
     #[test]

@@ -305,6 +305,55 @@ mod tests {
         );
     }
 
+    // ── detect: project scope follows the `.gemini` dot-dir ──
+
+    #[test]
+    fn detect_project_scope_follows_dot_gemini_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(
+            !GeminiVendor.detect(w, ConfigScope::Project),
+            "absent .gemini ⇒ not detected"
+        );
+        // The shared `.agents/skills` dir alone must NOT mark Gemini present
+        // (weak cross-vendor marker, like Codex).
+        std::fs::create_dir_all(w.join(".agents").join("skills")).unwrap();
+        assert!(
+            !GeminiVendor.detect(w, ConfigScope::Project),
+            ".agents/skills is a weak cross-vendor marker, not a Gemini signal"
+        );
+        std::fs::create_dir_all(w.join(".gemini")).unwrap();
+        assert!(GeminiVendor.detect(w, ConfigScope::Project));
+    }
+
+    // ── docs/registry parity (mirrors vendor_claude.rs) ──
+
+    #[test]
+    fn docs_reference_matches_gemini_registry() {
+        // Doc/registry parity: `docs/src/vendor-metadata.md` must document
+        // exactly the `gemini.*` keys the registry knows (GEMINI_AGENT_FIELDS
+        // — the skill/rule registries are empty), so the reference page
+        // cannot silently drift from the renderer. Mirrors
+        // vendor_claude.rs::docs_reference_matches_claude_registry.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path).expect("docs/src/vendor-metadata.md exists (doc/registry parity)");
+        let mut documented = std::collections::BTreeSet::new();
+        for token in doc.split('`').skip(1).step_by(2) {
+            if let Some(field) = token.strip_prefix("gemini.")
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            {
+                documented.insert(field.to_string());
+            }
+        }
+        let registry: std::collections::BTreeSet<String> =
+            GEMINI_AGENT_FIELDS.iter().map(|f| f.field.to_string()).collect();
+        assert_eq!(
+            documented, registry,
+            "vendor-metadata.md must document exactly the gemini.* registry fields"
+        );
+    }
+
     // ── native agent render: name+description required, gemini.* 5-field lift ──
 
     #[test]
@@ -417,6 +466,22 @@ mod tests {
             value["env"]["TOKEN"], "${GITHUB_TOKEN}",
             "`${{VAR}}` native passthrough: {value}"
         );
+    }
+
+    #[test]
+    fn mcp_entry_projects_timeout_and_cwd_for_stdio() {
+        // Gemini is the only wave-1 vendor that projects BOTH `timeout`
+        // (native for every transport) and `cwd` (native, stdio-only) —
+        // every sibling vendor drops these as pure refinements.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\n",
+        )
+        .unwrap();
+        let (_, value) = GeminiVendor
+            .mcp_entry(ConfigScope::Project, "grim", &d)
+            .expect("stdio registers");
+        assert_eq!(value["timeout"], 7000, "timeout projects natively: {value}");
+        assert_eq!(value["cwd"], "./srv", "cwd projects natively (stdio-only): {value}");
     }
 
     #[test]

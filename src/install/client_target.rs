@@ -645,10 +645,13 @@ mod tests {
         }
     }
 
-    /// Scope `md` to the `{#emit-matrix}` section (heading to the next `## `),
-    /// falling back to the whole document if the anchor is absent.
-    fn emit_matrix_section(md: &str) -> &str {
-        let Some(start) = md.find("{#emit-matrix}") else {
+    /// Scope `md` to the section starting at the `## …{anchor}` heading
+    /// (heading to the next `## `), falling back to the whole document if
+    /// the anchor is absent. Shared by every row-presence test below —
+    /// each scopes a different doc's client-enumerating section with its
+    /// own anchor.
+    fn heading_section<'a>(md: &'a str, anchor: &str) -> &'a str {
+        let Some(start) = md.find(anchor) else {
             return md;
         };
         let rest = &md[start..];
@@ -665,7 +668,7 @@ mod tests {
     fn agents_emit_matrix_lists_every_client() {
         let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/agents.md"))
             .expect("docs/src/agents.md exists");
-        let section = emit_matrix_section(&md).to_ascii_lowercase();
+        let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
                 section.contains(client.as_str()),
@@ -680,11 +683,102 @@ mod tests {
     fn mcp_servers_emit_matrix_lists_every_client() {
         let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/mcp-servers.md"))
             .expect("docs/src/mcp-servers.md exists");
-        let section = emit_matrix_section(&md).to_ascii_lowercase();
+        let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
                 section.contains(client.as_str()),
                 "mcp-servers.md emit matrix must list every client — missing '{client}'"
+            );
+        }
+    }
+
+    /// Row-presence for `docs/src/vendor-metadata.md`'s
+    /// `{#discovery-locations}` section (both the project- and
+    /// global-scope tables): every `ClientTarget` must appear — skill
+    /// discovery is `Native` for all ten, so there is no subset to carve
+    /// out (contrast the two tests below, which are Rule/Agent-scoped).
+    #[test]
+    fn vendor_metadata_discovery_locations_lists_every_client() {
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md"))
+            .expect("docs/src/vendor-metadata.md exists");
+        let section = heading_section(&md, "{#discovery-locations}").to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            assert!(
+                section.contains(client.as_str()),
+                "vendor-metadata.md discovery-locations section must list every client — missing '{client}'"
+            );
+        }
+    }
+
+    /// Row-presence for `docs/src/vendor-metadata.md`'s `{#rule-keys}`
+    /// section, scoped to clients that do **not** decline the Rule kind.
+    /// The table documents per-client rule-frontmatter field mapping (or,
+    /// for Codex, an explicit unsupported note) — the remaining declined
+    /// clients (Junie, Gemini, Zed, Amp) have no rule surface to map and
+    /// are not required here; their decline is already machine-checked by
+    /// [`kind_support_grid_matches_adr_mapping_table`] and the
+    /// `clients.md` compat matrix.
+    #[test]
+    fn vendor_metadata_rule_keys_lists_every_rule_capable_client() {
+        use crate::install::vendor::KindSupport;
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md"))
+            .expect("docs/src/vendor-metadata.md exists");
+        let section = heading_section(&md, "{#rule-keys}").to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            if client.vendor().kind_support(ArtifactKind::Rule) == KindSupport::Declined {
+                continue;
+            }
+            assert!(
+                section.contains(client.as_str()),
+                "vendor-metadata.md rule-keys section must list every rule-capable client — missing '{client}'"
+            );
+        }
+    }
+
+    /// Row-presence for `docs/src/agents.md`'s `{#locations}` section,
+    /// scoped to clients that do **not** decline the Agent kind — mirrors
+    /// [`vendor_metadata_rule_keys_lists_every_rule_capable_client`]: the
+    /// four declined clients (Kiro, Junie, Zed, Amp) have no install path
+    /// to list, and are already covered by the `{#emit-matrix}` row-
+    /// presence test above.
+    #[test]
+    fn agents_locations_lists_every_agent_capable_client() {
+        use crate::install::vendor::KindSupport;
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/agents.md"))
+            .expect("docs/src/agents.md exists");
+        let section = heading_section(&md, "{#locations}").to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            if client.vendor().kind_support(ArtifactKind::Agent) == KindSupport::Declined {
+                continue;
+            }
+            assert!(
+                section.contains(client.as_str()),
+                "agents.md locations section must list every agent-capable client — missing '{client}'"
+            );
+        }
+    }
+
+    /// Row-presence for `docs/src/json-interface.md`'s `options.clients`
+    /// `string-set` values list — the literal JSON array of client names
+    /// in its `config list` shape description must list every
+    /// `ClientTarget`. The paragraph carries no `{#anchor}` heading, so it
+    /// is scoped by its own marker text to the next blank line (paragraph
+    /// boundary) instead of [`heading_section`]'s `## ` boundary.
+    #[test]
+    fn json_interface_options_clients_values_lists_every_client() {
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/json-interface.md"))
+            .expect("docs/src/json-interface.md exists");
+        let marker = "`options.clients` is the one `string-set` key";
+        let start = md
+            .find(marker)
+            .expect("json-interface.md must describe options.clients as a string-set key");
+        let rest = &md[start..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        let section = rest[..end].to_ascii_lowercase();
+        for client in ClientTarget::ALL {
+            assert!(
+                section.contains(client.as_str()),
+                "json-interface.md options.clients values list must list every client — missing '{client}'"
             );
         }
     }
@@ -710,63 +804,110 @@ mod tests {
         assert_eq!(ClientTarget::default(), ClientTarget::Claude);
     }
 
+    /// Every client's project-scope layout, read from each vendor's
+    /// `skills_root`/`rule_path`/`agent_path` source (`None` marks a kind
+    /// the client declines — `kind_support == Declined` — so no on-disk
+    /// output is ever written for it; the vendor still implements the
+    /// trait method defensively, but that "dead path" is not asserted
+    /// here). Iterates [`ClientTarget::ALL`] so a new vendor (#11) fails
+    /// this test until its row is added — the array-length assert and the
+    /// `kind_support` cross-check both make an incomplete table a build
+    /// failure, not a silent gap.
     #[test]
     fn path_for_matches_each_client_layout() {
+        use crate::install::vendor::KindSupport;
+
         let w = Path::new("/w");
-        assert_eq!(
-            ClientTarget::Claude.path_for(
-                w,
-                crate::config::scope::ConfigScope::Project,
-                ArtifactKind::Skill,
-                "code-review"
+        let project = crate::config::scope::ConfigScope::Project;
+
+        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 10] = [
+            (
+                ClientTarget::Claude,
+                ".claude/skills/x",
+                Some(".claude/rules/x.md"),
+                Some(".claude/agents/x.md"),
             ),
-            PathBuf::from("/w/.claude/skills/code-review")
-        );
-        assert_eq!(
-            ClientTarget::Claude.path_for(
-                w,
-                crate::config::scope::ConfigScope::Project,
-                ArtifactKind::Rule,
-                "rust-style"
+            (
+                ClientTarget::OpenCode,
+                ".opencode/skills/x",
+                Some(".opencode/rules/x.md"),
+                Some(".opencode/agents/x.md"),
             ),
-            PathBuf::from("/w/.claude/rules/rust-style.md")
-        );
-        assert_eq!(
-            ClientTarget::OpenCode.path_for(w, crate::config::scope::ConfigScope::Project, ArtifactKind::Skill, "x"),
-            PathBuf::from("/w/.opencode/skills/x")
-        );
-        assert_eq!(
-            ClientTarget::OpenCode.path_for(w, crate::config::scope::ConfigScope::Project, ArtifactKind::Rule, "x"),
-            PathBuf::from("/w/.opencode/rules/x.md")
-        );
-        assert_eq!(
-            ClientTarget::Copilot.path_for(w, crate::config::scope::ConfigScope::Project, ArtifactKind::Skill, "x"),
-            PathBuf::from("/w/.github/skills/x")
-        );
-        assert_eq!(
-            ClientTarget::Copilot.path_for(
-                w,
-                crate::config::scope::ConfigScope::Project,
-                ArtifactKind::Rule,
-                "rust-style"
+            (
+                ClientTarget::Copilot,
+                ".github/skills/x",
+                Some(".github/instructions/x.instructions.md"),
+                Some(".github/agents/x.md"),
             ),
-            PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
-        );
-        // Codex: skills land in the cross-vendor `.agents/skills` tree;
-        // agents are TOML under `.codex/agents`.
-        assert_eq!(
-            ClientTarget::Codex.path_for(w, crate::config::scope::ConfigScope::Project, ArtifactKind::Skill, "x"),
-            PathBuf::from("/w/.agents/skills/x")
-        );
-        assert_eq!(
-            ClientTarget::Codex.path_for(
-                w,
-                crate::config::scope::ConfigScope::Project,
-                ArtifactKind::Agent,
-                "rev"
+            // Codex: skills land in the cross-vendor `.agents/skills` tree
+            // (not `.codex/skills`); agents are TOML under `.codex/agents`;
+            // rules are declined.
+            (
+                ClientTarget::Codex,
+                ".agents/skills/x",
+                None,
+                Some(".codex/agents/x.toml"),
             ),
-            PathBuf::from("/w/.codex/agents/rev.toml")
+            (
+                ClientTarget::Cursor,
+                ".cursor/skills/x",
+                Some(".cursor/rules/x.mdc"),
+                Some(".cursor/agents/x.md"),
+            ),
+            // Kiro: rules render as steering docs; agents declined.
+            (ClientTarget::Kiro, ".kiro/skills/x", Some(".kiro/steering/x.md"), None),
+            // Junie: skills only — rules and agents declined.
+            (ClientTarget::Junie, ".junie/skills/x", None, None),
+            // Gemini: skills via the shared pool; agents native; rules declined.
+            (
+                ClientTarget::Gemini,
+                ".agents/skills/x",
+                None,
+                Some(".gemini/agents/x.md"),
+            ),
+            // Zed / Amp: skills via the shared pool only.
+            (ClientTarget::Zed, ".agents/skills/x", None, None),
+            (ClientTarget::Amp, ".agents/skills/x", None, None),
+        ];
+        assert_eq!(
+            table.len(),
+            ClientTarget::ALL.len(),
+            "table must cover every ClientTarget"
         );
+
+        for (client, skill, rule, agent) in table {
+            assert_eq!(
+                client.path_for(w, project, ArtifactKind::Skill, "x"),
+                w.join(skill),
+                "{client} skill path"
+            );
+
+            assert_eq!(
+                rule.is_none(),
+                client.vendor().kind_support(ArtifactKind::Rule) == KindSupport::Declined,
+                "{client} rule table entry must track kind_support"
+            );
+            if let Some(rule) = rule {
+                assert_eq!(
+                    client.path_for(w, project, ArtifactKind::Rule, "x"),
+                    w.join(rule),
+                    "{client} rule path"
+                );
+            }
+
+            assert_eq!(
+                agent.is_none(),
+                client.vendor().kind_support(ArtifactKind::Agent) == KindSupport::Declined,
+                "{client} agent table entry must track kind_support"
+            );
+            if let Some(agent) = agent {
+                assert_eq!(
+                    client.path_for(w, project, ArtifactKind::Agent, "x"),
+                    w.join(agent),
+                    "{client} agent path"
+                );
+            }
+        }
     }
 
     #[test]
@@ -938,12 +1079,11 @@ mod tests {
         std::fs::write(root.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n").unwrap();
         std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
 
-        for client in [
-            ClientTarget::Claude,
-            ClientTarget::OpenCode,
-            ClientTarget::Copilot,
-            ClientTarget::Codex,
-        ] {
+        // Every vendor's `skill_index` delegates to the shared
+        // `render::render_skill_doc`, which returns `None` (verbatim) for a
+        // doc carrying no vendor-namespaced metadata — so this fixture's
+        // fast path is vendor-independent and must hold for all 10.
+        for client in ClientTarget::ALL {
             let dest = tmp.path().join(format!("out-{client}/code-review"));
             let files = client
                 .materialize(MaterializeRequest {

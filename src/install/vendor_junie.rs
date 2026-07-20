@@ -200,6 +200,20 @@ mod tests {
         );
     }
 
+    // ── detect: project scope follows the `.junie` dot-dir ──
+
+    #[test]
+    fn detect_project_scope_follows_dot_junie_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(
+            !JunieVendor.detect(w, ConfigScope::Project),
+            "absent .junie ⇒ not detected"
+        );
+        std::fs::create_dir_all(w.join(".junie")).unwrap();
+        assert!(JunieVendor.detect(w, ConfigScope::Project), "present .junie ⇒ detected");
+    }
+
     // ── mcp_entry: `mcpServers`, but env refs undocumented → skip ref-bearing ──
 
     #[test]
@@ -247,6 +261,21 @@ mod tests {
             JunieVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_drops_refinement_fields() {
+        // Refinement fields have no `mcpServers` target — dropped (pure
+        // refinements, nothing auth-critical is lost). Mirrors
+        // vendor_copilot.rs::mcp_entry_drops_refinement_fields.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = JunieVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headersHelper"] {
+            assert!(value.get(key).is_none(), "no Junie target for '{key}': {value}");
+        }
     }
 
     #[test]

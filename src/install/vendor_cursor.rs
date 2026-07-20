@@ -303,6 +303,51 @@ mod tests {
         }
     }
 
+    // ── detect: project scope follows the `.cursor` dot-dir ──
+
+    #[test]
+    fn detect_project_scope_follows_dot_cursor_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(
+            !CursorVendor.detect(w, ConfigScope::Project),
+            "absent .cursor ⇒ not detected"
+        );
+        std::fs::create_dir_all(w.join(".cursor")).unwrap();
+        assert!(
+            CursorVendor.detect(w, ConfigScope::Project),
+            "present .cursor ⇒ detected"
+        );
+    }
+
+    // ── docs/registry parity (mirrors vendor_claude.rs) ──
+
+    #[test]
+    fn docs_reference_matches_cursor_registry() {
+        // Doc/registry parity: `docs/src/vendor-metadata.md` must document
+        // exactly the `cursor.*` keys the registry knows (CURSOR_AGENT_FIELDS
+        // — the skill/rule registries are empty), so the reference page
+        // cannot silently drift from the renderer. Mirrors
+        // vendor_claude.rs::docs_reference_matches_claude_registry.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path).expect("docs/src/vendor-metadata.md exists (doc/registry parity)");
+        let mut documented = std::collections::BTreeSet::new();
+        for token in doc.split('`').skip(1).step_by(2) {
+            if let Some(field) = token.strip_prefix("cursor.")
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            {
+                documented.insert(field.to_string());
+            }
+        }
+        let registry: std::collections::BTreeSet<String> =
+            CURSOR_AGENT_FIELDS.iter().map(|f| f.field.to_string()).collect();
+        assert_eq!(
+            documented, registry,
+            "vendor-metadata.md must document exactly the cursor.* registry fields"
+        );
+    }
+
     // ── .mdc rule render: paths → comma-joined `globs` string + `alwaysApply` ──
 
     #[test]
@@ -624,6 +669,21 @@ mod tests {
             CursorVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_drops_refinement_fields() {
+        // Refinement fields have no `mcp.json` target — dropped (pure
+        // refinements, nothing auth-critical is lost). Mirrors
+        // vendor_copilot.rs::mcp_entry_drops_refinement_fields.
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
+        )
+        .unwrap();
+        let (_, value) = CursorVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headersHelper"] {
+            assert!(value.get(key).is_none(), "no Cursor target for '{key}': {value}");
+        }
     }
 
     #[test]
