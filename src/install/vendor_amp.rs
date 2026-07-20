@@ -81,7 +81,19 @@ impl Vendor for AmpVendor {
     }
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
-        Some(amp_scope_root(workspace, scope).join("settings.json"))
+        // Amp reads both `settings.json` and `settings.jsonc`
+        // (`research_vendor_verification_zed_amp.md:43`). Edit an existing
+        // `.jsonc` in place rather than writing a competing sibling; when both
+        // spellings exist the comment-bearing `.jsonc` wins (documented
+        // policy). A fresh install with neither present defaults to
+        // `settings.json`. Mirrors OpenCode's `opencode.jsonc`-preference.
+        let root = amp_scope_root(workspace, scope);
+        let jsonc = root.join("settings.jsonc");
+        if jsonc.is_file() {
+            Some(jsonc)
+        } else {
+            Some(root.join("settings.json"))
+        }
     }
 
     fn mcp_entry(
@@ -272,5 +284,64 @@ mod tests {
         let a = AmpVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         let b = AmpVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    // ── mcp_config_path: existing settings.jsonc is honored ──
+    //
+    // Amp reads both `.amp/settings.json` and `.amp/settings.jsonc`
+    // (`research_vendor_verification_zed_amp.md:43`). Hardcoding `settings.json`
+    // writes a competing sibling beside a user's `.jsonc`; the path must select
+    // an existing `.jsonc` (preferring it when both exist), else `settings.json`.
+
+    #[test]
+    fn mcp_config_path_defaults_to_settings_json_for_fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = AmpVendor
+            .mcp_config_path(dir.path(), ConfigScope::Project)
+            .expect("amp always has an mcp config path");
+        assert_eq!(
+            got,
+            dir.path().join(".amp").join("settings.json"),
+            "with neither file present, a fresh install lands settings.json"
+        );
+    }
+
+    #[test]
+    fn mcp_config_path_selects_existing_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        let amp = dir.path().join(".amp");
+        std::fs::create_dir_all(&amp).unwrap();
+        std::fs::write(amp.join("settings.jsonc"), "{\n  // user comment\n}\n").unwrap();
+        let got = AmpVendor.mcp_config_path(dir.path(), ConfigScope::Project).unwrap();
+        assert_eq!(
+            got,
+            amp.join("settings.jsonc"),
+            "an existing settings.jsonc is edited in place, not shadowed by a settings.json sibling"
+        );
+    }
+
+    #[test]
+    fn mcp_config_path_uses_json_when_only_json_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let amp = dir.path().join(".amp");
+        std::fs::create_dir_all(&amp).unwrap();
+        std::fs::write(amp.join("settings.json"), "{}\n").unwrap();
+        let got = AmpVendor.mcp_config_path(dir.path(), ConfigScope::Project).unwrap();
+        assert_eq!(got, amp.join("settings.json"));
+    }
+
+    #[test]
+    fn mcp_config_path_prefers_jsonc_when_both_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let amp = dir.path().join(".amp");
+        std::fs::create_dir_all(&amp).unwrap();
+        std::fs::write(amp.join("settings.json"), "{}\n").unwrap();
+        std::fs::write(amp.join("settings.jsonc"), "{\n  // comment\n}\n").unwrap();
+        let got = AmpVendor.mcp_config_path(dir.path(), ConfigScope::Project).unwrap();
+        assert_eq!(
+            got,
+            amp.join("settings.jsonc"),
+            "when both spellings exist the comment-bearing .jsonc wins (documented policy)"
+        );
     }
 }

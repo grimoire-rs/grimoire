@@ -175,11 +175,28 @@ fn zed_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     }
 }
 
-/// Zed's user-level config root `$XDG_CONFIG_HOME|~/.config/zed`. No config-dir
-/// env override upstream. The [`PathAnchor`](super::path_anchor) `ZedRoot`
-/// anchor is rooted here. Skills follow the shared `$HOME/.agents/skills`.
+/// Zed's user-level config root. On Unix `$XDG_CONFIG_HOME|~/.config/zed`; on
+/// Windows `%APPDATA%\Zed` (`research_vendor_verification_zed_amp.md:33` — Zed
+/// stores its `settings.json` there, never under an XDG-style path). No
+/// config-dir env override upstream. The [`PathAnchor`](super::path_anchor)
+/// `ZedRoot` anchor is rooted here. Skills follow the shared
+/// `$HOME/.agents/skills`.
+///
+/// `zed_root` is only ever called from env-touching entry points
+/// (`AnchorRoots::resolve`, `detect`, `zed_scope_root`), so the Windows arm's
+/// `%APPDATA%` read is consistent with resolving XDG for the Unix arm — the
+/// pure `PathAnchor::root` lookup never calls this.
+#[cfg(not(windows))]
 pub(crate) fn zed_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     xdg_config.map(|c| c.join("zed"))
+}
+
+/// Windows variant: resolve from `%APPDATA%\Zed`, where Zed keeps its user
+/// `settings.json`. The XDG argument is ignored (no XDG layout on Windows) so
+/// the signature — and every call site — stays identical across platforms.
+#[cfg(windows)]
+pub(crate) fn zed_root(_xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+    super::vendor::env_dir("APPDATA").map(|c| c.join("Zed"))
 }
 
 #[cfg(test)]
@@ -275,5 +292,35 @@ mod tests {
         let a = ZedVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         let b = ZedVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    // ── zed_root: native settings dir per platform ──
+    //
+    // With `XDG_CONFIG_HOME` unset the resolved config dir is `~/.config`, so
+    // the Unix root is `~/.config/zed`. On Windows Zed lives at `%APPDATA%\Zed`
+    // regardless of any XDG-style value
+    // (`research_vendor_verification_zed_amp.md:33`).
+
+    #[cfg(not(windows))]
+    #[test]
+    fn zed_root_is_xdg_zed_on_unix() {
+        // `Some("~/.config")` models `xdg_config_dir()` with XDG_CONFIG_HOME
+        // unset (it falls back to `$HOME/.config`); the root appends `/zed`.
+        let got = zed_root(Some(PathBuf::from("/home/u/.config")));
+        assert_eq!(got, Some(PathBuf::from("/home/u/.config/zed")));
+        // No resolvable config dir → no root.
+        assert_eq!(zed_root(None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zed_root_is_appdata_zed_on_windows() {
+        // SAFETY: single-threaded test setting an env var it exclusively owns.
+        unsafe {
+            std::env::set_var("APPDATA", r"C:\Users\u\AppData\Roaming");
+        }
+        // The XDG argument is ignored on Windows — %APPDATA%\Zed drives it.
+        let got = zed_root(Some(PathBuf::from(r"C:\ignored")));
+        assert_eq!(got, Some(PathBuf::from(r"C:\Users\u\AppData\Roaming\Zed")));
     }
 }

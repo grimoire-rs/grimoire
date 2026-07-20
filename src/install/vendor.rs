@@ -108,7 +108,8 @@ pub struct KnownField {
 /// A supported AI client's materialization strategy.
 pub trait Vendor {
     /// The vendor name — the `metadata` namespace prefix and the
-    /// `--client` identifier (`claude`, `opencode`, `copilot`, `codex`).
+    /// `--client` identifier (`claude`, `opencode`, `copilot`, `codex`,
+    /// `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`).
     fn name(&self) -> &'static str;
 
     /// The client root directory under a project workspace (`.claude`, …).

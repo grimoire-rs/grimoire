@@ -2003,6 +2003,66 @@ mod tests {
         );
     }
 
+    // ── C3.2b: V1 global state carrying a BUNDLE record ──────────────────────
+
+    /// A V1-era (or hand-edited) `global.json` can carry a `(client, bundle)`
+    /// record. `ArtifactKind::Bundle` is declined by NO vendor, so the
+    /// `is_declined_global_pair` guard never fires for it — before the fix the
+    /// bundle arm of `candidate_anchors` was `unreachable!()`, so this record
+    /// PANICKED the whole `load_global`. A bundle never materializes (it
+    /// expands into members), so it has no anchor: the conversion must degrade
+    /// gracefully — warn, drop the unanchorable record, mark the migration
+    /// lossy — never panic. Sibling of
+    /// [`c3_2_v1_global_codex_rule_record_is_dropped_lossy_no_panic`].
+    #[test]
+    fn c3_2b_v1_global_bundle_record_is_dropped_lossy_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let grim_home = dir.path().join("grim");
+        let state_dir = grim_home.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let global_path = InstallState::global_path(&state_dir);
+        let hash = "c".repeat(64);
+        // A global bundle record — never producible by a fresh install (bundles
+        // expand into members), but representable in a legacy/hand-edited file.
+        let v1_json = format!(
+            r#"{{"version":1,"records":[{{"kind":"bundle","name":"legacy-bundle","pinned":"localhost:5000/legacy-bundle@sha256:{sha}","target":"/home/u/.claude/bundles/legacy-bundle","content_hash":"sha256:{hash}","clients":[{{"client":"claude","target":"/home/u/.claude/bundles/legacy-bundle","content_hash":"sha256:{hash}","support_dir":null}}]}}]}}"#,
+            sha = "d".repeat(64),
+            hash = hash,
+        );
+        std::fs::write(&global_path, v1_json).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: PathBuf::from("/unused"),
+            grim_home: grim_home.clone(),
+            claude_root: Some(PathBuf::from("/home/u/.claude")),
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
+        };
+
+        // Must not panic (the historical bug: `unreachable!("bundles are never
+        // materialized")` in `candidate_anchors` for a global bundle pair).
+        let st = InstallState::load_global(&global_path, &roots).expect("load_global must not error, let alone panic");
+
+        assert!(
+            st.get(ArtifactKind::Bundle, "legacy-bundle").is_none(),
+            "the unanchorable bundle record must be dropped, not kept with a bogus anchor"
+        );
+        assert!(
+            st.legacy_migration_lossy(),
+            "dropping a record must flag the migration lossy so the legacy file is not reaped"
+        );
+    }
+
     // ── F02: bare load() of a V1 file returns Err(InvalidData) ──────────────
 
     /// Bare `load()` on a V1 file rejects with `InvalidData` because no

@@ -1208,6 +1208,59 @@ def test_amp_mcp_entry_lands_in_amp_settings_dotted_key(
     assert entry["command"] == "grim"
 
 
+def test_amp_mcp_lifecycle_uses_existing_settings_jsonc_and_preserves_comments(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Amp reads both ``settings.json`` and ``settings.jsonc``. When a user
+    already has a ``.amp/settings.jsonc``, the full install → status → uninstall
+    lifecycle must target THAT file (never a competing ``settings.json``
+    sibling), and the span-preserving splice must leave the user's ``//``
+    comment and sibling entry untouched across the round-trip."""
+    amp_dir = project_dir / ".amp"
+    amp_dir.mkdir(parents=True, exist_ok=True)
+    settings_jsonc = amp_dir / "settings.jsonc"
+    settings_json = amp_dir / "settings.json"
+    settings_jsonc.write_text(
+        "{\n"
+        "  // user's Amp settings\n"
+        '  "amp.mcpServers": {\n'
+        '    "my-server": { "command": "my-tool" }\n'
+        "  }\n"
+        "}\n"
+    )
+
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+
+    # install → the entry lands in the existing .jsonc, not a new .json sibling.
+    rows = runner.json("install", "--client", "amp")["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert not settings_json.exists(), (
+        "install must edit the existing settings.jsonc, never write a competing settings.json"
+    )
+    text = settings_jsonc.read_text()
+    assert "// user's Amp settings" in text, f"user comment must survive install: {text}"
+    doc = _loads_jsonc(text)
+    assert doc["amp.mcpServers"]["grim-mcp"]["command"] == "grim", f"grim entry added to .jsonc: {doc}"
+    assert doc["amp.mcpServers"]["my-server"]["command"] == "my-tool", "sibling entry survives install"
+
+    # status → the artifact reports installed (no drift, correct file targeted).
+    status = runner.json("status")["items"]
+    mcp_row = next(r for r in status if r["name"] == "grim-mcp")
+    assert mcp_row["state"] == "installed", mcp_row
+
+    # uninstall → grim's member is spliced out of the SAME .jsonc; the user's
+    # comment, sibling entry, and the file itself all survive.
+    runner.json("uninstall", "mcp", "grim-mcp")
+    assert settings_jsonc.is_file(), "uninstall must keep the shared config file"
+    assert not settings_json.exists(), "uninstall must not create a settings.json sibling"
+    text = settings_jsonc.read_text()
+    assert "// user's Amp settings" in text, f"user comment must survive uninstall: {text}"
+    doc = _loads_jsonc(text)
+    assert "grim-mcp" not in doc["amp.mcpServers"], f"grim entry spliced out on uninstall: {doc}"
+    assert doc["amp.mcpServers"]["my-server"]["command"] == "my-tool", "sibling entry survives uninstall"
+
+
 # ---------------------------------------------------------------------------
 # Modified-output refusal is unchanged for a new-vendor render surface
 # (plan Acceptance table: "modified-output refusal unchanged")

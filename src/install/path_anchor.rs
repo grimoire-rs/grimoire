@@ -78,7 +78,8 @@ pub enum PathAnchor {
     /// Global Gemini config root `~/.gemini` (agents, `settings.json`). Gemini
     /// skills follow the shared [`Self::AgentsSkills`] pool, not this root.
     GeminiRoot,
-    /// Global Zed config root `$XDG_CONFIG_HOME|~/.config/zed` (`settings.json`).
+    /// Global Zed config root `$XDG_CONFIG_HOME|~/.config/zed` on unix,
+    /// `%APPDATA%\Zed` on Windows (`settings.json`).
     /// Zed skills follow the shared [`Self::AgentsSkills`] pool.
     ZedRoot,
     /// Global Amp config root `$XDG_CONFIG_HOME|~/.config/amp` (`settings.json`).
@@ -152,7 +153,8 @@ pub struct AnchorRoots {
     pub junie_root: Option<PathBuf>,
     /// The global Gemini config root (`~/.gemini`), when resolvable.
     pub gemini_root: Option<PathBuf>,
-    /// The global Zed config root (`$XDG_CONFIG_HOME|~/.config/zed`), when resolvable.
+    /// The global Zed config root (`$XDG_CONFIG_HOME|~/.config/zed` on unix,
+    /// `%APPDATA%\Zed` on Windows), when resolvable.
     pub zed_root: Option<PathBuf>,
     /// The global Amp config root (`$XDG_CONFIG_HOME|~/.config/amp`), when resolvable.
     pub amp_root: Option<PathBuf>,
@@ -381,36 +383,47 @@ impl AnchoredPath {
 /// Project scope is always `[Workspace]` — a project target that does not
 /// fall under the workspace is an [`AnchorError::UnknownAnchor`], never a
 /// silently absolute path. Global scope uses an explicit match over every
-/// `(client, kind)` combination so that a future new `ClientTarget` or
-/// `ArtifactKind` variant fails to compile here rather than silently
-/// anchoring to `GrimHome`. `Bundle` arms are `unreachable!()` because
-/// bundles are always expanded into members and never materialized. The
-/// caller tries them longest-root-first so the more specific root wins.
+/// materializable `(client, kind)` combination so that a future new
+/// `ClientTarget` or `ArtifactKind` variant fails to compile here rather than
+/// silently anchoring to `GrimHome`. The caller tries the returned anchors
+/// longest-root-first so the more specific root wins.
 ///
-/// Globally-declined `(client, kind)` pairs (see [`is_declined_global_pair`])
-/// have no anchor remainder: a fresh install never reaches `from_target` with
-/// one (the installer's `kind_support` gate skips it first), but a hand-edited
-/// state file could still reach [`convert_v1_records`](super::install_state)
-/// directly. Such a pair returns an empty candidate set rather than panicking,
-/// so the "no root matched" fallthrough below yields the existing
-/// [`AnchorError::UnknownAnchor`] (already handled by every caller) instead of
-/// an `unreachable!()` reachable from persisted state. Project scope is
-/// untouched by this guard — it is unconditionally `[Workspace]` for every
-/// `(client, kind)` pair, so it was never at panic risk here.
+/// Pairs that have **no materialization anchor** map to `None`, which the
+/// caller turns into an empty candidate set:
+///
+/// - **Globally-declined pairs** (see [`is_declined_global_pair`]): a fresh
+///   install never reaches `from_target` with one (the installer's
+///   `kind_support` gate skips it first), and the `is_declined_global_pair`
+///   guard short-circuits them here too. The explicit `None` arms are the
+///   belt-and-suspenders fallback: if a future ADR flips a declined kind to
+///   supported and the vendor's `kind_support` starts returning
+///   [`KindSupport::Native`] before this table is updated, the guard stops
+///   firing but the arm still degrades to `None` → [`AnchorError::UnknownAnchor`]
+///   instead of the old `unreachable!()` panic.
+/// - **Bundles**: a bundle is never materialized (it expands into members), so
+///   no `(client, Bundle)` pair has an anchor. A fresh install never anchors a
+///   bundle, but a hand-edited or legacy V1 state file can carry one and reach
+///   [`convert_v1_records`](super::install_state) directly — that historically
+///   hit an `unreachable!()` and panicked the whole load. It now degrades to
+///   the already-handled [`AnchorError::UnknownAnchor`] (a lossy drop).
+///
+/// Every caller handles `UnknownAnchor`, so an unanchorable persisted record is
+/// a graceful lossy drop, never a panic. Project scope is untouched — it is
+/// unconditionally `[Workspace]` for every `(client, kind)` pair.
 fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
     match scope {
         ConfigScope::Project => vec![PathAnchor::Workspace],
         ConfigScope::Global if is_declined_global_pair(client, kind) => Vec::new(),
         ConfigScope::Global => {
-            let primary = match (client, kind) {
+            let primary: Option<PathAnchor> = match (client, kind) {
                 // Claude: all three materializable kinds live under the Claude root.
                 (ClientTarget::Claude, ArtifactKind::Skill)
                 | (ClientTarget::Claude, ArtifactKind::Rule)
-                | (ClientTarget::Claude, ArtifactKind::Agent) => PathAnchor::ClaudeRoot,
+                | (ClientTarget::Claude, ArtifactKind::Agent) => Some(PathAnchor::ClaudeRoot),
 
                 // Copilot: skills and agents live under the native $COPILOT_HOME root.
                 (ClientTarget::Copilot, ArtifactKind::Skill) | (ClientTarget::Copilot, ArtifactKind::Agent) => {
-                    PathAnchor::CopilotRoot
+                    Some(PathAnchor::CopilotRoot)
                 }
 
                 // Copilot: rules live under the native $COPILOT_HOME root
@@ -418,64 +431,76 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // pre-move records (workspace layout under $GRIM_HOME) still
                 // classify — the layout-migration reaper collects them on the
                 // next re-install.
-                (ClientTarget::Copilot, ArtifactKind::Rule) => PathAnchor::CopilotRoot,
+                (ClientTarget::Copilot, ArtifactKind::Rule) => Some(PathAnchor::CopilotRoot),
 
                 // OpenCode: skills live under the OpenCode skills root.
-                (ClientTarget::OpenCode, ArtifactKind::Skill) => PathAnchor::OpenCodeSkills,
+                (ClientTarget::OpenCode, ArtifactKind::Skill) => Some(PathAnchor::OpenCodeSkills),
 
                 // OpenCode: agents live in the sibling `agents/` dir under the OpenCode
                 // config root (parent of the skills root).
-                (ClientTarget::OpenCode, ArtifactKind::Agent) => PathAnchor::OpenCodeRoot,
+                (ClientTarget::OpenCode, ArtifactKind::Agent) => Some(PathAnchor::OpenCodeRoot),
 
                 // OpenCode: rules live under $GRIM_HOME (loaded via the managed glob
                 // in opencode.json — no native rules directory).
-                (ClientTarget::OpenCode, ArtifactKind::Rule) => PathAnchor::GrimHome,
+                (ClientTarget::OpenCode, ArtifactKind::Rule) => Some(PathAnchor::GrimHome),
 
                 // Codex: skills live under the cross-vendor $HOME/.agents/skills.
-                (ClientTarget::Codex, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+                (ClientTarget::Codex, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
 
                 // Codex: agents live in the sibling `agents/` dir under the Codex
                 // config root ($CODEX_HOME|~/.codex).
-                (ClientTarget::Codex, ArtifactKind::Agent) => PathAnchor::CodexRoot,
+                (ClientTarget::Codex, ArtifactKind::Agent) => Some(PathAnchor::CodexRoot),
 
                 // ── Wave-1 vendors (adr_vendor_wave_expansion mapping table) ──
                 // Cursor: all four kinds native under `~/.cursor`.
                 (ClientTarget::Cursor, ArtifactKind::Skill)
                 | (ClientTarget::Cursor, ArtifactKind::Rule)
                 | (ClientTarget::Cursor, ArtifactKind::Agent)
-                | (ClientTarget::Cursor, ArtifactKind::Mcp) => PathAnchor::CursorRoot,
+                | (ClientTarget::Cursor, ArtifactKind::Mcp) => Some(PathAnchor::CursorRoot),
 
                 // Kiro: skills, steering rules, MCP under `~/.kiro` (agents
                 // declined — handled by the guard above).
                 (ClientTarget::Kiro, ArtifactKind::Skill)
                 | (ClientTarget::Kiro, ArtifactKind::Rule)
-                | (ClientTarget::Kiro, ArtifactKind::Mcp) => PathAnchor::KiroRoot,
+                | (ClientTarget::Kiro, ArtifactKind::Mcp) => Some(PathAnchor::KiroRoot),
 
                 // Junie: skills + MCP under `~/.junie` (rules + agents declined).
                 (ClientTarget::Junie, ArtifactKind::Skill) | (ClientTarget::Junie, ArtifactKind::Mcp) => {
-                    PathAnchor::JunieRoot
+                    Some(PathAnchor::JunieRoot)
                 }
 
                 // Gemini: skills via the shared `.agents/skills` pool; agents +
                 // MCP under `~/.gemini` (rules declined).
-                (ClientTarget::Gemini, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
+                (ClientTarget::Gemini, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
                 (ClientTarget::Gemini, ArtifactKind::Agent) | (ClientTarget::Gemini, ArtifactKind::Mcp) => {
-                    PathAnchor::GeminiRoot
+                    Some(PathAnchor::GeminiRoot)
                 }
 
                 // Zed: skills via the shared pool; MCP under `~/.config/zed`
                 // (rules + agents declined).
-                (ClientTarget::Zed, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
-                (ClientTarget::Zed, ArtifactKind::Mcp) => PathAnchor::ZedRoot,
+                (ClientTarget::Zed, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
+                (ClientTarget::Zed, ArtifactKind::Mcp) => Some(PathAnchor::ZedRoot),
 
                 // Amp: skills via the shared pool; MCP under `~/.config/amp`
                 // (rules + agents declined).
-                (ClientTarget::Amp, ArtifactKind::Skill) => PathAnchor::AgentsSkills,
-                (ClientTarget::Amp, ArtifactKind::Mcp) => PathAnchor::AmpRoot,
+                (ClientTarget::Amp, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
+                (ClientTarget::Amp, ArtifactKind::Mcp) => Some(PathAnchor::AmpRoot),
 
-                // Declined (client, kind) pairs — handled by the guard above,
-                // so unreachable here. Kept as explicit arms so a new vendor's
-                // kind gap must be classified rather than silently anchoring.
+                // MCP config-entry anchors: Claude's user config file dir
+                // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
+                // config dir (`opencode.json`), Copilot's native root
+                // (`mcp-config.json`), Codex's config root (`config.toml`,
+                // alongside the `agents/` dir — same root as the agent anchor).
+                (ClientTarget::Claude, ArtifactKind::Mcp) => Some(PathAnchor::ClaudeUserDir),
+                (ClientTarget::OpenCode, ArtifactKind::Mcp) => Some(PathAnchor::OpenCodeRoot),
+                (ClientTarget::Copilot, ArtifactKind::Mcp) => Some(PathAnchor::CopilotRoot),
+                (ClientTarget::Codex, ArtifactKind::Mcp) => Some(PathAnchor::CodexRoot),
+
+                // Declined (client, kind) pairs — normally short-circuited by
+                // the `is_declined_global_pair` guard above; kept as explicit
+                // arms so a future `kind_support` flip degrades to
+                // `UnknownAnchor` (empty set) rather than panicking, and so a
+                // new vendor's kind gap must still be classified here.
                 (ClientTarget::Codex, ArtifactKind::Rule)
                 | (ClientTarget::Kiro, ArtifactKind::Agent)
                 | (ClientTarget::Junie, ArtifactKind::Rule)
@@ -484,40 +509,20 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Zed, ArtifactKind::Rule)
                 | (ClientTarget::Zed, ArtifactKind::Agent)
                 | (ClientTarget::Amp, ArtifactKind::Rule)
-                | (ClientTarget::Amp, ArtifactKind::Agent) => {
-                    unreachable!("declined (client, kind) pairs are handled by the match guard above")
-                }
+                | (ClientTarget::Amp, ArtifactKind::Agent) => None,
 
-                // Bundles are never materialized; they expand into members.
-                (ClientTarget::Claude, ArtifactKind::Bundle)
-                | (ClientTarget::Copilot, ArtifactKind::Bundle)
-                | (ClientTarget::OpenCode, ArtifactKind::Bundle)
-                | (ClientTarget::Codex, ArtifactKind::Bundle)
-                | (ClientTarget::Cursor, ArtifactKind::Bundle)
-                | (ClientTarget::Kiro, ArtifactKind::Bundle)
-                | (ClientTarget::Junie, ArtifactKind::Bundle)
-                | (ClientTarget::Gemini, ArtifactKind::Bundle)
-                | (ClientTarget::Zed, ArtifactKind::Bundle)
-                | (ClientTarget::Amp, ArtifactKind::Bundle) => {
-                    unreachable!("bundles are never materialized; they expand into members")
-                }
-
-                // MCP config-entry anchors: Claude's user config file dir
-                // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
-                // config dir (`opencode.json`), Copilot's native root
-                // (`mcp-config.json`), Codex's config root (`config.toml`,
-                // alongside the `agents/` dir — same root as the agent anchor).
-                (ClientTarget::Claude, ArtifactKind::Mcp) => PathAnchor::ClaudeUserDir,
-                (ClientTarget::OpenCode, ArtifactKind::Mcp) => PathAnchor::OpenCodeRoot,
-                (ClientTarget::Copilot, ArtifactKind::Mcp) => PathAnchor::CopilotRoot,
-                (ClientTarget::Codex, ArtifactKind::Mcp) => PathAnchor::CodexRoot,
+                // Bundles are never materialized; they expand into members, so
+                // no (client, Bundle) pair has an anchor. A legacy/hand-edited
+                // state record carrying one degrades to `UnknownAnchor`.
+                (_, ArtifactKind::Bundle) => None,
             };
             // `GrimHome` is the universal fallback; deduplicate when the
-            // primary already is `GrimHome`.
-            if primary == PathAnchor::GrimHome {
-                vec![PathAnchor::GrimHome]
-            } else {
-                vec![primary, PathAnchor::GrimHome]
+            // primary already is `GrimHome`. An anchorless pair (declined /
+            // bundle) yields the empty set → `UnknownAnchor` at the caller.
+            match primary {
+                None => Vec::new(),
+                Some(PathAnchor::GrimHome) => vec![PathAnchor::GrimHome],
+                Some(anchor) => vec![anchor, PathAnchor::GrimHome],
             }
         }
     }

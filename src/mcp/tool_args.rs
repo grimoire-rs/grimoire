@@ -82,7 +82,8 @@ pub struct FetchToolArgs {
     #[serde(rename = "ref")]
     pub reference: String,
 
-    /// Return this client's projection (`claude` / `opencode` / `copilot`)
+    /// Return this client's projection (`claude` / `opencode` / `copilot` /
+    /// `codex` / `cursor` / `kiro` / `junie` / `gemini` / `zed` / `amp`)
     /// instead of the canonical as-authored document.
     #[serde(default)]
     pub vendor: Option<String>,

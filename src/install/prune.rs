@@ -73,15 +73,24 @@ pub enum PruneError {
 /// propagate (→ `DataError(65)`) and are NEVER reaped.
 ///
 /// `AnchorRootAbsent` (the anchor root is unresolvable on this machine) and
-/// plain I/O are *resolution-absence*, not tampering: such a record is an
-/// unresolvable orphan, safe to reap. `AnchorError` is `#[non_exhaustive]`;
-/// an unknown future variant is treated as non-fatal/absorb (matching the
-/// read-only leniency), so only the two named security variants are fatal.
+/// plain `Io` are *resolution-absence*, not tampering: such a record is an
+/// unresolvable orphan, safe to absorb (reap the record). `UnknownAnchor` is a
+/// store-time classification error that cannot arise on this read/resolve path;
+/// it stays non-fatal to preserve the prior behavior.
+///
+/// The exhaustive match (no `_` arm) is deliberate: `AnchorError` is defined in
+/// this crate, so gaining a variant fails THIS build until the new variant is
+/// classified here — the code **fails closed**. The prior
+/// `matches!(err, TraversalAttempt | EscapedAnchor)` failed *open*: over the
+/// `#[non_exhaustive]` enum a future security variant would have silently
+/// defaulted non-fatal and been reaped. Per `quality-rust-exit_codes.md`,
+/// prefer an exhaustive match that compile-errors on a new variant over a
+/// wildcard that silently classifies it.
 fn is_security_class(err: &AnchorError) -> bool {
-    matches!(
-        err,
-        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. }
-    )
+    match err {
+        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. } => true,
+        AnchorError::UnknownAnchor { .. } | AnchorError::AnchorRootAbsent { .. } | AnchorError::Io { .. } => false,
+    }
 }
 
 /// What [`prune_orphans`] did to one orphaned artifact.
