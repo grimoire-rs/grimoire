@@ -1,7 +1,8 @@
 # Vendor Metadata
 
 You loaded this file because you are adding `claude.*`, `opencode.*`,
-`copilot.*`, or `codex.*` keys to an artifact, or a publish failed on a vendor literal.
+`copilot.*`, `codex.*`, `cursor.*`, or `gemini.*` keys to an artifact, or a
+publish failed on a vendor literal.
 
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
 [Literal Discipline](#literal-discipline) ·
@@ -16,17 +17,23 @@ artifact's `metadata` map. At install time grim looks each key up in the
 target vendor's registry and **projects** it — converts the string to
 its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
-all clients. The four recognized namespaces are `claude`, `opencode`, `copilot`, and
-`codex`; any other prefix (e.g. `vendor.x`) is plain metadata and passes
-through untouched. `codex` is a **reserved namespace**, not just a prefix
-convention: a `codex.*` key authored before Codex client support landed
-was plain passthrough metadata; today it is a tool-namespaced key subject
-to the same known/unknown handling as the other three (an unrecognized
-`codex.foo` now warns and drops instead of surviving untouched). Note
-that Codex supports skills, agents, and MCP servers —
-rules are unsupported and grim warns and skips them. Codex skills use the
-universal agentskills shape (no `codex.*` skill namespace exists) and MCP
-entries derive from the descriptor, so only agents carry `codex.*` metadata.
+all clients. The six recognized namespaces are `claude`, `opencode`,
+`copilot`, `codex`, `cursor`, and `gemini`; any other prefix (e.g.
+`vendor.x`) is plain metadata and passes through untouched. The four other
+supported clients — Kiro, Junie, Zed, and Amp — have **no** vendor
+namespace in wave 1: they install the universal agentskills shape, so any
+`kiro.*`/`junie.*`/`zed.*`/`amp.*` key is plain passthrough metadata.
+`codex` is a **reserved namespace**, not just a prefix convention: a
+`codex.*` key authored before Codex client support landed was plain
+passthrough metadata; today it is a tool-namespaced key subject to the same
+known/unknown handling as the others (an unrecognized `codex.foo` now warns
+and drops instead of surviving untouched). Codex, Cursor, and Gemini expose
+**agent-only** registries (`cursor.*` / `gemini.*` project to native
+subagent frontmatter); their skills use the universal shape and their MCP
+entries derive from the descriptor, so only agents carry those keys. Note
+that not every client hosts every kind — Codex, Junie, Gemini, Zed, and Amp
+decline rules; Kiro, Junie, Zed, and Amp decline agents — and grim warns
+and skips a kind a client cannot host.
 
 ## Outcome Classes
 
@@ -40,12 +47,13 @@ they explain every vendor-metadata surprise:
 | Unknown key in your **own** namespace (typo: `claude.efort`) | Warning + dropped — the typo guard; silent data loss if the warning is ignored |
 | Key in a **foreign** namespace (e.g. `opencode.*` rendering for Claude) | Dropped silently — by design, that is multi-client serving |
 
-Two corollaries: the OpenCode, Copilot, and Codex *skill* registries are
-empty (no vendor namespace exists for skills in those clients), so any
-`opencode.*`/`copilot.*`/`codex.*` key on a skill is always unknown →
-warn + drop. And when a namespaced key collides with a same-named top-level
-field, the namespaced key wins — with a warning in the legacy-migration
-case, silently for the agent `model`/`tools` override escape hatch.
+Two corollaries: the OpenCode, Copilot, Codex, Cursor, and Gemini *skill*
+registries are empty (those namespaces exist only for agents), so any
+`opencode.*`/`copilot.*`/`codex.*`/`cursor.*`/`gemini.*` key on a skill is
+always unknown → warn + drop. And when a namespaced key collides with a
+same-named top-level field, the namespaced key wins — with a warning in the
+legacy-migration case, silently for the agent `model`/`tools` override
+escape hatch.
 
 ## Literal Discipline
 
@@ -73,8 +81,10 @@ grow over time. The authoritative tables:
 - [`opencode.*` agent registry][opencode-agent-reg]
 - [`copilot.*` agent registry][copilot-agent-reg]
 - [`codex.*` agent registry][codex-agent-reg] (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
+- [`cursor.*` agent registry][cursor-agent-reg] (`cursor.model`, `cursor.readonly`, `cursor.is-background`)
+- [`gemini.*` agent registry][gemini-agent-reg] (`gemini.model`, `gemini.temperature`, `gemini.max-turns`, `gemini.timeout-mins`, `gemini.kind`)
 - [Rule-level keys][rule-keys] (today: `copilot.exclude-agent` only)
-- [Empty skill registries][empty-reg] (OpenCode, Copilot, Codex)
+- [Empty skill registries][empty-reg] (OpenCode, Copilot, Codex, Cursor, Gemini — those namespaces are agent-only)
 
 ## Worked Example
 
@@ -115,6 +125,8 @@ to silence the nudge and gain type conversion ([migration][migration]).
 [opencode-agent-reg]: https://grimoire.rs/vendor-metadata.html#opencode-agent-registry
 [copilot-agent-reg]: https://grimoire.rs/vendor-metadata.html#copilot-agent-registry
 [codex-agent-reg]: https://grimoire.rs/vendor-metadata.html#codex-agent-registry
+[cursor-agent-reg]: https://grimoire.rs/vendor-metadata.html#cursor-agent-registry
+[gemini-agent-reg]: https://grimoire.rs/vendor-metadata.html#gemini-agent-registry
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
 [empty-reg]: https://grimoire.rs/vendor-metadata.html#empty-registries
 [publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation

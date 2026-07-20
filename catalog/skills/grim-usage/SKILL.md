@@ -14,13 +14,20 @@ metadata:
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
 It distributes five artifact kinds — **skills**, **rules**, **agents**,
 **MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
-Docker Hub, a private Distribution), with lockfile-pinned installs into AI
-clients such as Claude Code, OpenCode, GitHub Copilot, and Codex. An MCP
+Docker Hub, a private Distribution), with lockfile-pinned installs into ten
+AI clients (grim 0.10): Claude Code, OpenCode, GitHub Copilot, Codex,
+Cursor, Kiro, JetBrains Junie, Gemini CLI, Zed, and Amp. An MCP
 server artifact installs by registering an entry in each client's native MCP
 config file (never as a file of its own); uninstall removes only that
-entry, never the file. (Codex supports skills, agents, and MCP servers;
-rules are not supported and grim warns and skips them when `--client codex`
-is specified.)
+entry, never the file.
+
+Not every client can host every kind: a skill and an MCP server install
+everywhere, but a rule needs a per-file scoping surface and an agent needs
+a shipped file format that some clients lack. Where a client cannot
+faithfully host a kind, grim warns and skips it (e.g. Codex, Junie, Gemini,
+Zed, and Amp decline rules; Kiro, Junie, Zed, and Amp decline agents). The
+authoritative per-client support matrix is the [Client Compatibility][clients]
+docs page — trust it over this summary.
 
 ## Verify Before Acting
 
@@ -127,6 +134,7 @@ multi-registry browse behavior in
 [config]: https://grimoire.rs/configuration.html
 [publishing]: https://grimoire.rs/publishing.html
 [auth]: https://grimoire.rs/authentication.html
+[clients]: https://grimoire.rs/clients.html
 
 ---
 

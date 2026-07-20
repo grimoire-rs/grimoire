@@ -45,10 +45,12 @@ relative links resolve. The two on-disk roots (index file + sibling dir)
 are one footprint: the integrity hash folds both, and uninstall removes
 both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
 
-**Codex declines rules entirely** (`Vendor::supports_kind(Rule) == false`):
-it has no path-scoped instruction mechanism. The installer warns + skips,
-writes no file, and records no output for Codex — see `arch-principles.md`
-ADR index → `adr_codex_vendor.md`.
+**Several clients decline rules** (`Vendor::kind_support(Rule) == Declined`):
+Codex, Junie, Gemini, Zed, and Amp have no ownable path-scoped instruction
+surface (AGENTS.md / GEMINI.md hierarchies only). The installer warns +
+skips, writes no file, and records no output — see `arch-principles.md`
+ADR index → `adr_codex_vendor.md` and the compat matrix in
+`docs/src/clients.md`.
 
 Per-client rule transforms:
 
@@ -71,10 +73,17 @@ Per-client rule transforms:
   and the optional `copilot.exclude-agent` key (authored in rule `metadata`)
   → `excludeAgent` (enum: `code-review` or `cloud-agent`). A rule with
   neither produces no frontmatter block at all. Marked `generated: true`.
+- **Cursor**: written to `.cursor/rules/<name>.mdc` (native `.mdc`,
+  `~/.cursor/rules/` at global). Frontmatter always present: `paths`
+  comma-joins into the single `globs` STRING plus `alwaysApply: false`;
+  unscoped → no `globs` and `alwaysApply: true`. Marked `generated: true`.
+- **Kiro**: written to `.kiro/steering/<name>.md` (`~/.kiro/steering/` at
+  global). Global steering ships inert (no per-file `fileMatch` scoping yet
+  — watchlisted #9176) + warn. Marked `generated: true`.
 
-Support directory files are copied verbatim for all three rule-supporting
-clients (Claude, OpenCode, Copilot — Codex declines rules). Only the index
-is ever transformed.
+Support directory files are copied verbatim for every rule-supporting
+client (Claude, OpenCode, Copilot, Cursor, Kiro). Only the index is ever
+transformed.
 
 ### MCP servers {#install-layout-mcp}
 
@@ -97,17 +106,30 @@ config files:
 | **OpenCode** | `<workspace>/opencode.json`/`.jsonc` (`mcp`) | `$OPENCODE_CONFIG` else XDG `opencode.json` (`mcp`) |
 | **Copilot** | `<workspace>/.vscode/mcp.json` (`servers`) | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); env-ref descriptors are skipped (no substitution support) |
 | **Codex** | `<workspace>/.codex/config.toml` (`mcp_servers`); only honored by Codex for **trusted** projects — grim writes it regardless, an untrusted project simply won't have it read | `$CODEX_HOME`\|`~/.codex`/`config.toml` (`mcp_servers`); HTTP/SSE headers map to `http_headers`/`env_http_headers`/`bearer_token_env_var`; a header embedding an env ref in text is unrepresentable → descriptor skipped |
+| **Cursor** | `<workspace>/.cursor/mcp.json` (`mcpServers`); stdio needs `type: "stdio"`, env refs `${env:VAR}` | `~/.cursor/mcp.json` (`mcpServers`) |
+| **Kiro** | `<workspace>/.kiro/settings/mcp.json` (`mcpServers`); `${VAR}` env refs native | `~/.kiro/settings/mcp.json` (`mcpServers`) |
+| **Junie** | `<workspace>/.junie/mcp/mcp.json` (`mcpServers`); env-ref descriptors skipped (interpolation undocumented) | `~/.junie/mcp/mcp.json` (`mcpServers`) |
+| **Gemini** | `<workspace>/.gemini/settings.json` (`mcpServers`); sse → `url`, http → `httpUrl`, `${VAR}` native | `~/.gemini/settings.json` (`mcpServers`) |
+| **Zed** | `<workspace>/.zed/settings.json` (`context_servers`, flat shape); env-ref descriptors skipped (no upstream support) | `$XDG_CONFIG_HOME`\|`~/.config/zed`/`settings.json` (`context_servers`, JSONC) |
+| **Amp** | `<workspace>/.amp/settings.json` (`amp.mcpServers`, literal dotted key); `${VAR}` refs | `$XDG_CONFIG_HOME`\|`~/.config/amp`/`settings.json` (`amp.mcpServers`) |
+
+Every non-Claude client declines the `ws` transport and the structured
+`oauth` block (skip + warn) — see `docs/src/clients.md` "Known gaps".
 
 ### Agents {#install-layout-agents}
 
 An **agent** materializes as a single file in the client's agents
-directory (no support directory). For Claude/OpenCode/Copilot it is a
-Markdown file (Claude installs a plain agent verbatim; OpenCode and Copilot
-project the frontmatter). For **Codex** it is a **TOML** file
-(`<name>.toml`) — Codex is the only TOML-emitting vendor: the canonical
-`name`/`description` plus the agent body (as `developer_instructions`) and
-an optional `model` are serialized to TOML; the `tools` field has no Codex
-equivalent and is dropped with a warning.
+directory (no support directory). For Claude/OpenCode/Copilot/Cursor/Gemini
+it is a Markdown file (Claude installs a plain agent verbatim; the others
+project the frontmatter, each lifting its own `<vendor>.*` field registry —
+e.g. `cursor.readonly`, `gemini.temperature`). For **Codex** it is a
+**TOML** file (`<name>.toml`) — Codex is the only TOML-emitting vendor: the
+canonical `name`/`description` plus the agent body (as
+`developer_instructions`) and an optional `model` are serialized to TOML;
+the `tools` field has no Codex equivalent and is dropped with a warning.
+**Kiro, Junie, Zed, and Amp decline agents** (`kind_support == Declined`):
+CLI/IDE schema collision, EAP-only, or ACP/runtime-only — installer warns +
+skips, records no output.
 
 Per-client agent paths:
 
@@ -117,6 +139,9 @@ Per-client agent paths:
 | **Copilot** | `<copilot_root>/agents/<name>.md` |
 | **OpenCode** | `<opencode_root>/agents/<name>.md` |
 | **Codex** | `<codex_root>/agents/<name>.toml` |
+| **Cursor** | `~/.cursor/agents/<name>.md` (project `.cursor/agents/`) |
+| **Gemini** | `~/.gemini/agents/<name>.md` (project `.gemini/agents/`) |
+| **Kiro / Junie / Zed / Amp** | declined — no agent surface |
 
 `opencode_root` is the parent of the OpenCode skills directory (i.e. the
 directory one level above the `skills/` subdir resolved from
@@ -136,8 +161,22 @@ client's **native** user-level discovery directory rather than under
 | **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) | `$XDG_CONFIG_HOME/opencode/agents/<name>.md` |
 | **Copilot** | `~/.copilot/skills/<name>/` | `~/.copilot/instructions/<name>.instructions.md` (native; workspace-layout fallback + warn only when no root resolves) | `~/.copilot/agents/<name>.md` |
 | **Codex** | `$HOME/.agents/skills/<name>/` (cross-vendor standard; independent of `$CODEX_HOME`) | **unsupported** — Codex has no path-scoped rule mechanism; grim warns + skips, writes no file | `$CODEX_HOME`\|`~/.codex/agents/<name>.toml` (TOML) |
+| **Cursor** | `~/.cursor/skills/<name>/` | `~/.cursor/rules/<name>.mdc` | `~/.cursor/agents/<name>.md` |
+| **Kiro** | `~/.kiro/skills/<name>/` | `~/.kiro/steering/<name>.md` | declined |
+| **Junie** | `~/.junie/skills/<name>/` | declined | declined |
+| **Gemini** | `$HOME/.agents/skills/<name>/` (shared pool) | declined | `~/.gemini/agents/<name>.md` |
+| **Zed** | `$HOME/.agents/skills/<name>/` (shared pool) | declined | declined |
+| **Amp** | `$HOME/.agents/skills/<name>/` (shared pool) | declined | declined |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
+
+**Wave-1 vendor config-dir env vars are not honored** (paths hardcode the
+documented native root): `CURSOR_CONFIG_DIR` (possibly CLI-only),
+`KIRO_HOME` (#9148, IDE ignores it), the `JUNIE_*_LOCATIONS` family, and
+`$AMP_SETTINGS_FILE` / `GEMINI_CONFIG_DIR` (neither exists upstream). Zed
+and Amp *do* resolve their global settings root through `$XDG_CONFIG_HOME`
+(falling back to `~/.config`). All are watchlisted for re-verification —
+see `vendor-capability-watchlist.md`.
 
 **Vendor env overrides** (each client's own variable; the four directory
 variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
@@ -231,8 +270,14 @@ devcontainer portability). Every stored path carries an `anchor` tag and a
 | `OpenCodeRoot` | Parent of the `OpenCodeSkills` root (the directory one level above `skills/`) |
 | `GrimHome` | `$GRIM_HOME` |
 | `ClaudeUserDir` | `$CLAUDE_CONFIG_DIR` else `$HOME` — the dir holding Claude's user config file `.claude.json` (not derivable from `ClaudeRoot`: with the override set the file lives *inside* it, without it the file is a *sibling* of `~/.claude`) |
-| `AgentsSkills` | `$HOME/.agents/skills` (Codex skills; cross-vendor standard, **not** under `$CODEX_HOME`) |
+| `AgentsSkills` | `$HOME/.agents/skills` (shared skills pool for Codex, Gemini, Zed, Amp; cross-vendor standard, **not** under any vendor `*_HOME`) |
 | `CodexRoot` | `$CODEX_HOME` else `~/.codex` (hosts Codex `agents/` **and** the MCP `config.toml`) |
+| `CursorRoot` | `~/.cursor` (`CURSOR_CONFIG_DIR` not honored; hosts skills, `.mdc` rules, agents, `mcp.json`) |
+| `KiroRoot` | `~/.kiro` (`KIRO_HOME` not honored; hosts skills, `steering/` rules, `settings/mcp.json`) |
+| `JunieRoot` | `~/.junie` (hosts skills, `mcp/mcp.json`) |
+| `GeminiRoot` | `~/.gemini` (hosts `agents/`, `settings.json` MCP; skills use `AgentsSkills`) |
+| `ZedRoot` | `$XDG_CONFIG_HOME` else `~/.config`, then `/zed` (hosts `settings.json` MCP; skills use `AgentsSkills`) |
+| `AmpRoot` | `$XDG_CONFIG_HOME` else `~/.config`, then `/amp` (hosts `settings.json` MCP; skills use `AgentsSkills`) |
 
 All roots are resolved once at scope-resolution time and passed as an
 `AnchorRoots` struct so every downstream operation is a pure table-lookup
@@ -257,11 +302,21 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 | global · codex · skill | `AgentsSkills` | `<name>` (root already ends `/skills`) |
 | global · codex · agent | `CodexRoot` | `agents/<name>.toml` |
 | · codex · rule | — | **not classified** — declined at the `supports_kind` gate before anchoring; no output recorded |
-| project · any · mcp | `Workspace` | `.mcp.json` / `opencode.json` / `.vscode/mcp.json` (entry-typed output: `entry` carries the managed member's JSON pointer) |
+| project · any · mcp | `Workspace` | client-specific config path from the [MCP table](#install-layout-mcp) (`.mcp.json`, `.cursor/mcp.json`, `.kiro/settings/mcp.json`, …); entry-typed output — `entry` carries the managed member's JSON pointer |
 | global · claude · mcp | `ClaudeUserDir` | `.claude.json` |
 | global · opencode · mcp | `OpenCodeRoot` | `opencode.json` |
 | global · copilot · mcp | `CopilotRoot` | `mcp-config.json` |
 | global · codex · mcp | `CodexRoot` | `config.toml` (same root as the agent anchor — TOML splice, see [install-layout-mcp](#install-layout-mcp)) |
+
+**Wave-1 vendors** follow the same `(scope, client, kind)` →
+`(anchor, relative)` shape. Global anchors are `CursorRoot` / `KiroRoot` /
+`JunieRoot` / `GeminiRoot` / `ZedRoot` / `AmpRoot` (Gemini/Zed/Amp skills
+use the shared `AgentsSkills`); the `relative` remainders are exactly the
+per-client paths in the Install Layout and
+[Global-scope](#global-scope-paths) tables above (e.g. global · cursor ·
+rule → `CursorRoot` + `rules/<name>.mdc`; global · kiro · mcp → `KiroRoot` +
+`settings/mcp.json`). Declined `(client, kind)` pairs are never classified —
+skipped at the `kind_support` gate before anchoring.
 
 ### Path containment guard {#path-containment-guard}
 
@@ -298,6 +353,12 @@ for the active scope:
 | **OpenCode** | `<workspace>/.opencode` **or** the resolved project `opencode.json`/`.jsonc` exists (the same file grim manages for both rules and MCP entries) | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
 | **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` — **or** `<workspace>/.vscode/mcp.json` exists | native skills root (`$COPILOT_HOME/skills` or `~/.copilot/skills`) exists — the `skills/` subdir, not the bare `~/.copilot` parent — **or** the global `mcp-config.json` exists |
 | **Codex** | `<workspace>/.codex` — **not** the shared `.agents/skills` dir (a weak cross-vendor marker, like Copilot's bare `.github` caveat) | native config root (`$CODEX_HOME` or `~/.codex`) exists |
+| **Cursor** | `<workspace>/.cursor` exists | `~/.cursor` exists |
+| **Kiro** | `<workspace>/.kiro` exists | `~/.kiro` exists |
+| **Junie** | `<workspace>/.junie` exists | `~/.junie` exists |
+| **Gemini** | `<workspace>/.gemini` exists — **not** the shared `.agents/skills` dir (weak cross-vendor marker, like Codex) | `~/.gemini` exists |
+| **Zed** | `<workspace>/.zed` exists | `$XDG_CONFIG_HOME`\|`~/.config`/`zed` exists |
+| **Amp** | `<workspace>/.amp` exists | `$XDG_CONFIG_HOME`\|`~/.config`/`amp` exists |
 
 A client whose only footprint on a machine/workspace is a grim-installed
 MCP entry still counts as detected — its config file lives outside the

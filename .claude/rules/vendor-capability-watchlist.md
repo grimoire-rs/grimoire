@@ -43,6 +43,32 @@ All rows `verified 2026-07-17` unless noted.
 | `ws` MCP transport projection | OpenCode, Copilot, Codex | decline + warn (Claude projects) | not documented for these vendors | fold into remote arm per vendor |
 | MCP `oauth` block projection | OpenCode, Copilot, Codex | decline + warn (Claude projects) | OpenCode/Copilot: no native oauth config surface documented. Codex: has a native `auth` enum (`oauth` default \| `chatgpt`, triggers `codex mcp login`'s stored-credential flow) — not zero-surface, just not grim's structured `McpOAuth` block | project per vendor schema (Codex: map onto the `auth` enum, not the full block) |
 
+## Wave-1 vendor watchlist
+
+All rows `verified 2026-07-19/20` (Cursor, Kiro, Junie, Gemini, Zed, Amp
+landed in the vendor-wave expansion). Sources: `research_vendor_verification_*.md`.
+
+| Capability | Vendor | Current grim behavior | Upstream status | Action when shipped |
+|---|---|---|---|---|
+| `CURSOR_CONFIG_DIR` override | Cursor | not honored (hardcodes `~/.cursor`) | possibly CLI-only, unverified against the IDE; SpaceX-acquisition watch (config surface may reshape); `/migrate-to-skills` leaves grim's `.mdc` rule shapes untouched | honor once IDE-honored is confirmed |
+| Agent kind | Kiro | declined | CLI/IDE agent-format collision (#8040) — same `.kiro/agents/` dir, incompatible JSON schemas | enable Agent when the schema is unified |
+| Global rule `fileMatch` scoping | Kiro | global steering ships inert (no fileMatch) + warn | per-file `fileMatch` scoping open (#9176) | scoped global render when shipped |
+| `KIRO_HOME` override | Kiro | not honored | CLI-only; the IDE ignores it (#9148) | honor once IDE-honored |
+| MCP `disabledTools` / remote oauth | Kiro | not emitted | docs added `disabledTools` + remote `oauth`/`oauthScopes` | projection candidates |
+| Agent kind | Junie | declined | `.junie/agents/*.md` is EAP-only, not GA | enable Agent at GA |
+| MCP env interpolation | Junie | ref-bearing descriptors skipped | env interpolation undocumented (JUNIE-2173) | drop the skip when documented |
+| `JUNIE_*_LOCATIONS` overrides | Junie | not honored | per-kind override family untested | honor once verified |
+| Legacy `guidelines/` folder | Junie | not written | folder semantics undocumented | watch — no action yet |
+| Rules (Antigravity) | Gemini | declined (GEMINI.md hierarchy only) | individual-tier Gemini CLI sunset 2026-06-18 → Antigravity CLI | follow-up vendor candidate once the Antigravity surface is verified |
+| `experimental.enableAgents` | Gemini | emits agents (flag default true) | default `true` pinned via `settingsSchema.ts` + revert PR #23672 | re-check on release-pin bumps |
+| MCP oauth block | Gemini | skipped | `{enabled}`/`authProviderType` shape ≠ grim's `McpOAuth` | project when the shapes align |
+| Agent inline `mcpServers` | Gemini | not emitted | agent frontmatter now allows inline `mcpServers` | projection candidate |
+| Rules | Zed | declined | 9-file instruction precedence (`.rules` first … AGENTS.md 7th), no scoping | wave-2 injection must handle shadowing |
+| MCP env refs | Zed | ref-bearing descriptors skipped | env-ref / keychain support tracked (#56881) | drop the skip when shipped |
+| `$AMP_SETTINGS_FILE` | Amp | not honored (no such var exists) | only `--settings-file` / `--mcp-config` CLI flags exist | none — no env surface to honor |
+| Skills-scan precedence | Amp | installs to the shared `.agents/skills` pool | scan precedence list includes `.claude/skills` back-compat | watch — a precedence shift could reshadow |
+| Live MCP handshake validation | all | config shapes only, never validates the wire protocol | MCP spec breaking release 2026-07-28 (wire-protocol only; config shapes unaffected) | re-check only if grim ever validates live handshakes |
+
 ## Fragility note
 
 Overlap detection in `test_path_overlaps_declared_or_absent` compares

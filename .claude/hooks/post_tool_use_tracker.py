@@ -94,6 +94,24 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the publishing docs — review catalog skills for drift",
     ),
     (
+        "src/install/vendor_*.rs",
+        (
+            "- docs/src/clients.md (support matrix — code-mirrored; the table-parity test in client_target.rs fails on drift)\n"
+            "- docs/src/agents.md + docs/src/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
+            "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching)"
+        ),
+        "a vendor renderer — its kind-support / MCP surface is mirrored in code-checked docs",
+    ),
+    (
+        "src/install/client_target.rs",
+        (
+            "- docs/src/clients.md (support matrix — code-mirrored; the table-parity test here fails on drift)\n"
+            "- docs/src/agents.md + docs/src/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
+            "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching)"
+        ),
+        "the client-target seam — the vendor set feeds the code-checked docs matrices",
+    ),
+    (
         "Cargo.toml",
         "- CLAUDE.md (Architecture section, if the crate structure changed)",
         "Cargo.toml",
