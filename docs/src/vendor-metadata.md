@@ -116,16 +116,29 @@ at both install time and publish-time validation.
 | Plain metadata key (non-tool prefix, e.g. `vendor.x`) | Passes through unchanged |
 | No tool-namespaced keys at all | Fast path: verbatim install, byte-identical to canonical |
 
-The four recognized tool namespaces are `claude`, `opencode`, `copilot`,
-and `codex`. Any key whose prefix is not one of these four is plain
-metadata and is never treated as a tool key.
+The ten recognized tool namespaces are `claude`, `opencode`, `copilot`,
+`codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, and `amp`. Any key
+whose prefix is not one of these ten is plain metadata and is never
+treated as a tool key.
 
-`codex` joined the reserved set when Codex client support landed (this
-release). A `codex.*` metadata key that was plain data under earlier
-grim versions is now a tool-namespaced key: consumed by Codex when
-Codex is a target (unknown fields warn and are dropped, the typo
-guard), and dropped for other vendors per the projection table above.
-`grim build`/`grim publish` surface an affected key through the same
+`codex` joined the reserved set when Codex client support landed. A
+`codex.*` metadata key that was plain data under earlier grim versions
+is now a tool-namespaced key: consumed by Codex when Codex is a target
+(unknown fields warn and are dropped, the typo guard), and dropped for
+other vendors per the projection table above. `grim build`/`grim
+publish` surface an affected key through the same unknown-key warning.
+
+`cursor`, `kiro`, `junie`, `gemini`, `zed`, and `amp` joined the
+reserved set together when wave-1 vendor support landed. A `<vendor>.*`
+metadata key using one of these six prefixes that was plain data under
+earlier grim versions is now a tool-namespaced key: consumed by
+[Cursor][cursor-subagents-docs] or [Gemini][gemini-subagents-docs]
+against their agent registries when one is a target (unknown fields
+warn and are dropped); for skills, all six carry an empty registry, so
+every skill key using one of these prefixes warns and drops regardless
+of vendor (see [Empty skill registries](#empty-registries)) — and
+dropped for other vendors per the projection table above. `grim
+build`/`grim publish` surface an affected key through the same
 unknown-key warning.
 
 When a namespaced key collides with a top-level key of the same name,
@@ -330,14 +343,17 @@ authors.
 grim installs skills into the directories each client scans for
 `SKILL.md` files.
 
-**Project scope** (per-workspace, discovered by all four clients):
+**Project scope** (per-workspace, discovered by all ten clients):
 
 | Client | Directory |
 |---|---|
 | [Claude Code][claude-code-docs] | `.claude/skills/<name>/` |
 | [GitHub Copilot][copilot-skills-docs] | `.github/skills/<name>/`, `.claude/skills/<name>/`, `.agents/skills/<name>/` |
 | [OpenCode][opencode-skills-docs] | `.opencode/skills/<name>/`, `.claude/skills/<name>/`, `.agents/skills/<name>/` |
-| [Codex][codex-skills-docs] | `.agents/skills/<name>/` |
+| [Cursor][cursor-subagents-docs] | `.cursor/skills/<name>/` |
+| [Kiro][kiro-docs] | `.kiro/skills/<name>/` |
+| [Junie][junie-docs] | `.junie/skills/<name>/` |
+| [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs] | `.agents/skills/<name>/` (shared pool) |
 
 **Global scope** (user-level; grim installs directly into each client's
 native discovery directory, honoring the client's own directory-override
@@ -348,7 +364,13 @@ environment variable):
 | [Claude Code][claude-code-docs] | `~/.claude/skills/<name>/` | `$CLAUDE_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.claude` tree ([claude-directory reference][claude-dir-docs]) |
 | [GitHub Copilot][copilot-skills-docs] | `~/.copilot/skills/<name>/` | `$COPILOT_HOME/skills/<name>/` — the variable replaces the entire `~/.copilot` path ([Copilot CLI config-dir reference][copilot-config-dir-docs]) |
 | [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
-| [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
+| [Cursor][cursor-subagents-docs] | `~/.cursor/skills/<name>/` | None — `CURSOR_CONFIG_DIR` is not honored (possibly CLI-only; watchlisted) |
+| [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | None — `KIRO_HOME` is not honored (CLI-only; the IDE ignores it) |
+| [Junie][junie-docs] | `~/.junie/skills/<name>/` | None — the per-kind `JUNIE_*_LOCATIONS` family is not honored |
+| [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
+| [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no `GEMINI_CONFIG_DIR` exists upstream; skills always key on `$HOME` |
+| [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's `$XDG_CONFIG_HOME`-rooted settings root |
+| [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no such env var exists upstream; skills always key on `$HOME` |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
 environments), grim falls back to the workspace layout under `$GRIM_HOME`
@@ -382,6 +404,8 @@ The mapping table for rules:
 | [Claude Code][claude-memory-docs] | `paths` | top-level | `paths` | Verbatim — no transform; Claude reads it directly |
 | [GitHub Copilot][copilot-instructions-docs] | `paths` | top-level | `applyTo` | Comma-joined into a single string (Copilot does not accept a list) |
 | [GitHub Copilot][copilot-instructions-docs] | `copilot.exclude-agent` | `metadata` | `excludeAgent` | Enum: `code-review` or `cloud-agent` (registry in `src/install/vendor_copilot.rs`) |
+| [Cursor][cursor-subagents-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `alwaysApply: false`; unscoped (no `paths`) emits no `globs` and `alwaysApply: true` instead (`src/install/vendor_cursor.rs`) |
+| [Kiro][kiro-docs] | `paths` | top-level | `fileMatchPattern` | YAML array (not comma-joined), plus a computed `inclusion: fileMatch`; unscoped emits `inclusion: always` instead, no `fileMatchPattern` (`src/install/vendor_kiro.rs`) |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
 | [Codex][codex-subagents-docs] | — | — | — | **Rules are unsupported.** Codex uses an always-on, directory-granular `AGENTS.md` with no path-glob or `applyTo` mechanism. Installing a rule with `--client codex` emits a warning and writes no file. |
 
@@ -512,6 +536,10 @@ claude namespace to silence it and gain proper type conversion.
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
 [cursor-subagents-docs]: https://cursor.com/docs/context/subagents
 [gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
+[kiro-docs]: https://kiro.dev
+[junie-docs]: https://www.jetbrains.com/junie/
+[zed-docs]: https://zed.dev
+[amp-docs]: https://ampcode.com
 [xdg-spec]: https://specifications.freedesktop.org/basedir-spec/latest/
 
 <!-- internal -->

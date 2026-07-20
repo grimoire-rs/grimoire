@@ -17,12 +17,15 @@ artifact's `metadata` map. At install time grim looks each key up in the
 target vendor's registry and **projects** it — converts the string to
 its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
-all clients. The six recognized namespaces are `claude`, `opencode`,
-`copilot`, `codex`, `cursor`, and `gemini`; any other prefix (e.g.
-`vendor.x`) is plain metadata and passes through untouched. The four other
-supported clients — Kiro, Junie, Zed, and Amp — have **no** vendor
-namespace in wave 1: they install the universal agentskills shape, so any
-`kiro.*`/`junie.*`/`zed.*`/`amp.*` key is plain passthrough metadata.
+all clients. The ten recognized namespaces are `claude`, `opencode`,
+`copilot`, `codex`, `cursor`, `gemini`, `kiro`, `junie`, `zed`, and `amp`
+(derived from every registered `ClientTarget`); any other prefix (e.g.
+`vendor.x`) is plain metadata and passes through untouched. Kiro, Junie,
+Zed, and Amp have **no populated field registries** in wave 1 — they
+install the universal agentskills shape — but their namespace is still
+recognized: any `kiro.*`/`junie.*`/`zed.*`/`amp.*` key hits the empty
+registry and is **warned + dropped**, the same typo-guard outcome as an
+unknown key in any other tool namespace, never a silent passthrough.
 `codex` is a **reserved namespace**, not just a prefix convention: a
 `codex.*` key authored before Codex client support landed was plain
 passthrough metadata; today it is a tool-namespaced key subject to the same

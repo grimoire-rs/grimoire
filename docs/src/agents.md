@@ -97,10 +97,10 @@ are the least uniform kind — only six clients have a file format grim can own.
 | [Codex][codex-subagents-docs] | **TOML** (`<name>.toml`) | body → `developer_instructions`, `tools` dropped with a warning, `codex.*` lifted; `#` provenance |
 | [Cursor][cursor-subagents-docs] | `.md` + YAML frontmatter | `cursor.*` lifted (`model`, `readonly`, `is_background`), `tools` dropped with a warning; provenance comment |
 | [Gemini CLI][gemini-subagents-docs] | `.md` + YAML frontmatter | `gemini.*` lifted (`model`, `temperature`, `max_turns`, `timeout_mins`, `kind`); loaded only when `experimental.enableAgents` is on (the default) |
-| **Kiro** | not supported | agents declined — the Kiro CLI expects an incompatible schema in the same directory ([kiro #8040]) |
-| **Junie** | not supported | agents declined — the `.junie/agents/` format is early-access-preview only |
-| **Zed** | not supported | agents declined — external agents run over ACP with no installable file |
-| **Amp** | not supported | agents declined — subagents are spawned at runtime with no file format |
+| [Kiro][kiro-docs] | not supported | agents declined — the Kiro CLI expects an incompatible schema in the same directory ([kiro #8040]) |
+| [Junie][junie-docs] | not supported | agents declined — the `.junie/agents/` format is early-access-preview only |
+| [Zed][zed-docs] | not supported | agents declined — external agents run over ACP with no installable file |
+| [Amp][amp-docs] | not supported | agents declined — subagents are spawned at runtime with no file format |
 
 The canonical format **is** Claude Code's native subagent format, so a plain
 agent — one with no `<vendor>.<field>` metadata keys — installs for Claude
@@ -124,6 +124,8 @@ layout may change in any minor release (see [stability][stability-unstable]).
 | [OpenCode][opencode-agents-docs] | `.opencode/agents/<name>.md` |
 | [Copilot CLI][copilot-agents-docs] | `.github/agents/<name>.md` |
 | [Codex][codex-subagents-docs] | `.codex/agents/<name>.toml` |
+| [Cursor][cursor-subagents-docs] | `.cursor/agents/<name>.md` |
+| [Gemini CLI][gemini-subagents-docs] | `.gemini/agents/<name>.md` |
 
 **Global scope** (native user-level discovery directories, honoring each
 client's directory-override variable — the same resolution as
@@ -135,6 +137,8 @@ client's directory-override variable — the same resolution as
 | [OpenCode][opencode-agents-docs] | `~/.config/opencode/agents/<name>.md` (XDG) | `$OPENCODE_CONFIG_DIR/agents/` |
 | [Copilot CLI][copilot-agents-docs] | `~/.copilot/agents/<name>.md` | `$COPILOT_HOME/agents/` |
 | [Codex][codex-subagents-docs] | `~/.codex/agents/<name>.toml` | `$CODEX_HOME/agents/` |
+| [Cursor][cursor-subagents-docs] | `~/.cursor/agents/<name>.md` | None — `CURSOR_CONFIG_DIR` is not honored |
+| [Gemini CLI][gemini-subagents-docs] | `~/.gemini/agents/<name>.md` | None — no `GEMINI_CONFIG_DIR` exists upstream |
 
 Unlike global rules, Copilot agents have a real user-level home — no
 inert-install warning applies.
@@ -213,6 +217,10 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
 [cursor-subagents-docs]: https://cursor.com/docs/context/subagents
 [gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
+[kiro-docs]: https://kiro.dev
+[junie-docs]: https://www.jetbrains.com/junie/
+[zed-docs]: https://zed.dev
+[amp-docs]: https://ampcode.com
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
 
 <!-- internal -->

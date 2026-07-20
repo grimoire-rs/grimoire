@@ -32,7 +32,7 @@ All rows `verified 2026-07-17` unless noted.
 | Capability | Vendor | Current grim behavior | Upstream status | Action when shipped |
 |---|---|---|---|---|
 | Global MCP env substitution | Copilot | skip + warn on env refs in global MCP | not documented in the local-CLI doc (literal values only) ([copilot cli docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers)); `${VAR}` substitution shipped in v0.0.406, then regressed in v0.0.407 ([github/copilot-cli#1403](https://github.com/github/copilot-cli/issues/1403)) — re-verify against a fixed release before trusting either state | project env refs, drop warn |
-| Glob-scoped rules | Codex | `supports_kind` = false for Rule (AGENTS.md directory-granular only) | no path-glob scoping ([codex docs](https://github.com/openai/codex/blob/main/docs/config.md)) | enable Rule kind + scoped render |
+| Glob-scoped rules | Codex | `kind_support` = false for Rule (AGENTS.md directory-granular only) | no path-glob scoping ([codex docs](https://github.com/openai/codex/blob/main/docs/config.md)) | enable Rule kind + scoped render |
 | Vendor-specific skill frontmatter | OpenCode, Copilot | empty skill field registries | no vendor skill keys documented ([opencode](https://opencode.ai/docs/skills/), [copilot](https://docs.github.com/en/copilot)) | populate registries + parity docs |
 | `openai.yaml` skill sidecar | Codex | not emitted | sidecar format not stabilized ([codex repo](https://github.com/openai/codex)) | emit sidecar from skill metadata |
 | Agent `permission` map | OpenCode | dropped (scalar-only metadata) | shipped upstream ([opencode agents](https://opencode.ai/docs/agents/)) | gated on `adr_structured_vendor_metadata.md` acceptance (FieldType::Json) |
@@ -52,8 +52,8 @@ landed in the vendor-wave expansion). Sources: `research_vendor_verification_*.m
 |---|---|---|---|---|
 | `CURSOR_CONFIG_DIR` override | Cursor | not honored (hardcodes `~/.cursor`) | possibly CLI-only, unverified against the IDE; SpaceX-acquisition watch (config surface may reshape); `/migrate-to-skills` leaves grim's `.mdc` rule shapes untouched | honor once IDE-honored is confirmed |
 | Agent kind | Kiro | declined | CLI/IDE agent-format collision (#8040) — same `.kiro/agents/` dir, incompatible JSON schemas | enable Agent when the schema is unified |
-| Global rule `fileMatch` scoping | Kiro | global steering ships inert (no fileMatch) + warn | per-file `fileMatch` scoping open (#9176) | scoped global render when shipped |
-| `KIRO_HOME` override | Kiro | not honored | CLI-only; the IDE ignores it (#9148) | honor once IDE-honored |
+| Global rule `fileMatch` scoping | Kiro | writes correct `fileMatch` steering + warns it is upstream-inert (#9176) | per-file `fileMatch` scoping open (#9176) | drop the warning when #9176 closes (self-heal, no render change) |
+| `KIRO_HOME` override | Kiro | not honored | CLI-only; the IDE ignores it (#9148) — #9148 closed by bot mis-triage as dup of #6401 (unrelated/symlinks); gap confirmed open via changelog absence, not issue state | honor once IDE-honored |
 | MCP `disabledTools` / remote oauth | Kiro | not emitted | docs added `disabledTools` + remote `oauth`/`oauthScopes` | projection candidates |
 | Agent kind | Junie | declined | `.junie/agents/*.md` is EAP-only, not GA | enable Agent at GA |
 | MCP env interpolation | Junie | ref-bearing descriptors skipped | env interpolation undocumented (JUNIE-2173) | drop the skip when documented |

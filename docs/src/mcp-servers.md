@@ -80,10 +80,10 @@ validation error, not a silent merge:
 | `url` | `http`/`sse`/`ws` | `http://` or `https://` for `http`/`sse`; `ws://` or `wss://` for `ws` |
 | `headers` | `http`/`sse`/`ws`, optional | String→string map, same `${VAR}` referencing as `env` |
 | `oauth` | `http`/`sse`, optional | OAuth client block, see [below](#server-oauth) — not valid for `ws` ([Claude documents no OAuth over WebSocket][claude-code-mcp-docs]) or `stdio` |
-| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`) and [OpenCode][opencode-mcp-docs] (`timeout`); dropped for clients without a native key |
+| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`), [OpenCode][opencode-mcp-docs] (`timeout`), and [Gemini CLI][gemini-docs] (`timeout`); dropped for clients without a native key |
 | `always_load` | any transport, optional | Load the server eagerly at client startup — projected for [Claude Code][claude-code-mcp-docs] (`alwaysLoad`) only |
 | `headers_helper` | `http`/`sse`/`ws`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
-| `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`) only |
+| `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`) and [Gemini CLI][gemini-docs] (`cwd`) |
 
 ### Example — a remote server {#server-example-remote}
 
@@ -182,12 +182,12 @@ minor release (see [stability][stability-unstable]).
 | [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
 | [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
-| **Cursor** | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
-| **Kiro** | project / global | `.kiro/settings/mcp.json` / `~/.kiro/settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
-| **Junie** | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; oauth skipped | undocumented — ref-bearing descriptors skipped |
-| **Gemini CLI** | project / global | `.gemini/settings.json` (both scopes) | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
-| **Zed** | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
-| **Amp** | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
+| [Cursor][cursor-docs] | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
+| [Kiro][kiro-docs] | project / global | `.kiro/settings/mcp.json` / `~/.kiro/settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
+| [Junie][junie-docs] | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; oauth skipped | undocumented — ref-bearing descriptors skipped |
+| [Gemini CLI][gemini-docs] | project / global | `.gemini/settings.json` (both scopes) | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
+| [Zed][zed-docs] | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
+| [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 
 Codex is the one **TOML** target — every other client above writes
 JSON/JSONC — so its splice runs through a separate span-preserving
@@ -418,6 +418,12 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [vscode-mcp-docs]: https://code.visualstudio.com/docs/copilot/chat/mcp-servers
 [copilot-mcp-docs]: https://docs.github.com/en/copilot/concepts/about-model-context-protocol-mcp
 [codex-mcp-docs]: https://developers.openai.com/codex/mcp
+[cursor-docs]: https://cursor.com
+[kiro-docs]: https://kiro.dev
+[junie-docs]: https://www.jetbrains.com/junie/
+[gemini-docs]: https://geminicli.com
+[zed-docs]: https://zed.dev
+[amp-docs]: https://ampcode.com
 [ansible-blockinfile]: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
 [catalog-mcp-grim]: https://github.com/grimoire-rs/grimoire/blob/main/catalog/mcp/grim.toml
 [toml-edit-crate]: https://docs.rs/toml_edit/latest/toml_edit/

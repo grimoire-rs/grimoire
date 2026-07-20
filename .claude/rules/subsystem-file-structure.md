@@ -110,7 +110,7 @@ config files:
 | **Kiro** | `<workspace>/.kiro/settings/mcp.json` (`mcpServers`); `${VAR}` env refs native | `~/.kiro/settings/mcp.json` (`mcpServers`) |
 | **Junie** | `<workspace>/.junie/mcp/mcp.json` (`mcpServers`); env-ref descriptors skipped (interpolation undocumented) | `~/.junie/mcp/mcp.json` (`mcpServers`) |
 | **Gemini** | `<workspace>/.gemini/settings.json` (`mcpServers`); sse → `url`, http → `httpUrl`, `${VAR}` native | `~/.gemini/settings.json` (`mcpServers`) |
-| **Zed** | `<workspace>/.zed/settings.json` (`context_servers`, flat shape); env-ref descriptors skipped (no upstream support) | `$XDG_CONFIG_HOME`\|`~/.config/zed`/`settings.json` (`context_servers`, JSONC) |
+| **Zed** | `<workspace>/.zed/settings.json` (`context_servers`, flat shape); env-ref descriptors skipped (no upstream support) | `$XDG_CONFIG_HOME`\|`~/.config/zed` (unix) or `%APPDATA%\Zed` (Windows) `/settings.json` (`context_servers`, JSONC) |
 | **Amp** | `<workspace>/.amp/settings.json` (`amp.mcpServers`, literal dotted key); `${VAR}` refs | `$XDG_CONFIG_HOME`\|`~/.config/amp`/`settings.json` (`amp.mcpServers`) |
 
 Every non-Claude client declines the `ws` transport and the structured
@@ -276,7 +276,7 @@ devcontainer portability). Every stored path carries an `anchor` tag and a
 | `KiroRoot` | `~/.kiro` (`KIRO_HOME` not honored; hosts skills, `steering/` rules, `settings/mcp.json`) |
 | `JunieRoot` | `~/.junie` (hosts skills, `mcp/mcp.json`) |
 | `GeminiRoot` | `~/.gemini` (hosts `agents/`, `settings.json` MCP; skills use `AgentsSkills`) |
-| `ZedRoot` | `$XDG_CONFIG_HOME` else `~/.config`, then `/zed` (hosts `settings.json` MCP; skills use `AgentsSkills`) |
+| `ZedRoot` | unix: `$XDG_CONFIG_HOME` else `~/.config`, then `/zed`; Windows: `%APPDATA%\Zed` (hosts `settings.json` MCP; skills use `AgentsSkills`) |
 | `AmpRoot` | `$XDG_CONFIG_HOME` else `~/.config`, then `/amp` (hosts `settings.json` MCP; skills use `AgentsSkills`) |
 
 All roots are resolved once at scope-resolution time and passed as an
@@ -301,7 +301,7 @@ Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)
 | global · copilot · rule | `CopilotRoot` | `instructions/<name>.instructions.md` (GrimHome fallback classifies pre-move records for the layout-migration reaper) |
 | global · codex · skill | `AgentsSkills` | `<name>` (root already ends `/skills`) |
 | global · codex · agent | `CodexRoot` | `agents/<name>.toml` |
-| · codex · rule | — | **not classified** — declined at the `supports_kind` gate before anchoring; no output recorded |
+| · codex · rule | — | **not classified** — declined at the `kind_support` gate before anchoring; no output recorded |
 | project · any · mcp | `Workspace` | client-specific config path from the [MCP table](#install-layout-mcp) (`.mcp.json`, `.cursor/mcp.json`, `.kiro/settings/mcp.json`, …); entry-typed output — `entry` carries the managed member's JSON pointer |
 | global · claude · mcp | `ClaudeUserDir` | `.claude.json` |
 | global · opencode · mcp | `OpenCodeRoot` | `opencode.json` |

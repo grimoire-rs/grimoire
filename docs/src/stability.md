@@ -62,10 +62,12 @@ major version bump:
 
 - **Vendor render layout.** The exact files and paths grim writes under
   `~/.claude`, `.claude/`, `~/.copilot`, the OpenCode config directories,
-  and where an MCP entry lands inside a client's own config file are not a
-  contract. They are an implementation detail of the [vendor projection
-  layer][vendor-metadata], free to move between minors as clients change
-  their own conventions.
+  `~/.cursor`, `~/.kiro`, `~/.junie`, `~/.gemini`, the Zed and Amp
+  settings directories, the shared `$HOME/.agents/skills` pool (Codex,
+  Gemini, Zed, Amp), and where an MCP entry lands inside a client's own
+  config file are not a contract. They are an implementation detail of
+  the [vendor projection layer][vendor-metadata], free to move between
+  minors as clients change their own conventions.
 - **Everything else that is not exit codes or JSON.** State-file contents
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
