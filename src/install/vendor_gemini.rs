@@ -33,7 +33,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, global_skills_root, home_dir};
+use super::vendor::{FieldType, KindSupport, KnownField, Vendor, global_skills_root, home_dir, provenance};
 
 /// Gemini CLI.
 pub struct GeminiVendor;
@@ -69,6 +69,12 @@ pub const GEMINI_AGENT_FIELDS: &[KnownField] = &[
         ty: FieldType::String,
     },
 ];
+
+/// The common agent field a lifted `gemini.*` key may silently override
+/// (only `model` is a projected common field; `temperature` / `max_turns` /
+/// `timeout_mins` / `kind` are Gemini-native and never collide with an
+/// emitted common key).
+const GEMINI_AGENT_OVERRIDES: &[&str] = &["model"];
 
 impl Vendor for GeminiVendor {
     fn name(&self) -> &'static str {
@@ -129,13 +135,67 @@ impl Vendor for GeminiVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `mcpServers` container; sse → `url`, http → `httpUrl`, stdio →
-        // `command`; `${VAR}` native; oauth skipped (shape ≠ grim block).
-        unimplemented!("V2 Gemini: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // Gemini's `settings.json` env refs are native POSIX `${VAR}` — no
+        // translation, the same passthrough Claude gives it. A structured
+        // oauth block is auth-critical and has no Gemini `mcpServers` target
+        // (its shape ≠ grim's `McpOAuth`), so the whole descriptor is
+        // skipped with a warning rather than writing an entry that silently
+        // drops the auth.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for gemini ({scope}): settings.json has no oauth surface");
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            // stdio → `command` (+`args`, +`env`, +`cwd`). A `${VAR}` in
+            // `env` is a native OS environment reference the launched
+            // subprocess resolves — passed through verbatim.
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+                // Native stdio-only key (geminicli.com → tools/mcp-server).
+                if let Some(cwd) = &s.cwd {
+                    entry.insert("cwd".into(), serde_json::json!(cwd));
+                }
+            }
+            // WebSocket transport has no Gemini `mcpServers` mapping — skip
+            // with a warning (the installer records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for gemini ({scope}): settings.json has no ws transport");
+                return None;
+            }
+            // The url/httpUrl split is load-bearing — a wrong key is a dead
+            // server entry: sse → `url`, http (streamable) → `httpUrl`.
+            McpTransport::Http | McpTransport::Sse => {
+                let url_key = match s.transport {
+                    McpTransport::Http => "httpUrl",
+                    _ => "url",
+                };
+                entry.insert(url_key.into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // `timeout` is native for every transport (Claude/OpenCode
+        // precedent); `always_load`/`headers_helper` have no Gemini
+        // equivalent — dropped (pure refinements, nothing auth-critical).
+        if let Some(timeout) = s.timeout {
+            entry.insert("timeout".into(), serde_json::json!(timeout));
+        }
+        Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -154,9 +214,42 @@ impl Vendor for GeminiVendor {
         Ok(None)
     }
 
-    fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Native markdown agent + `gemini.*` registry lift.
-        unimplemented!("V2 Gemini: agent_index filled in the implementation phase")
+    fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+        // Gemini agents are always a transform: `name` + `description` are
+        // required (upstream), the common `tools` comma string becomes the
+        // YAML sequence Gemini reads (Copilot pattern), and the `gemini.*`
+        // registry lifts typed native keys — temperature (float),
+        // max_turns / timeout_mins (int, native underscore keys), model +
+        // kind (string). A `gemini.model` key overrides the projected common
+        // `model` silently — the escape hatch. Emit order is deterministic:
+        // name, description, model, tools, then the lifted registry keys.
+        let projection = render::project_agent(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![
+            ("name", serde_yaml::Value::String(projection.cleaned.name.to_string())),
+            (
+                "description",
+                serde_yaml::Value::String(projection.cleaned.description.to_string()),
+            ),
+        ];
+        if let Some(model) = &projection.cleaned.model {
+            natives.push(("model", serde_yaml::Value::String(model.to_string())));
+        }
+        if let Some(tools) = &projection.cleaned.tools {
+            natives.push(("tools", render::comma_list_value(tools)));
+        }
+
+        let mut document = render::agent_frontmatter_block(
+            natives,
+            projection.lifted,
+            self.name(),
+            GEMINI_AGENT_OVERRIDES,
+            &mut warnings,
+        );
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 }
 

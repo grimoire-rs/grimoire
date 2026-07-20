@@ -106,6 +106,12 @@ per-file target, so rules are declined. Gemini agents are native and are
 installed, but Gemini only loads them when `experimental.enableAgents` is set —
 which defaults on, so they work out of the box for most users.
 
+The individual-tier Gemini CLI (free/Pro/Ultra) stopped being served on
+2026-06-18, [transitioning to the Antigravity CLI][gemini-antigravity] (which
+reportedly carries Agent Skills and subagents forward — unverified). Enterprise
+Gemini Code Assist licenses remain fully supported; grim's Gemini support
+targets that surface, verified against the still-served enterprise docs.
+
 ### Shared skills pool visibility {#gap-shared-pool}
 
 Codex, Gemini, Zed, and Amp all read the cross-vendor `.agents/skills`
@@ -142,3 +148,4 @@ where.
 <!-- external -->
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
+[gemini-antigravity]: https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/
