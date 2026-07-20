@@ -661,6 +661,19 @@ mod tests {
         }
     }
 
+    /// Whether `word` occurs in `haystack` delimited by non-alphanumeric
+    /// boundaries — so a client name like `zed`/`amp` matches its own table
+    /// cell or `[zed]` link but not a substring of prose (`materialized`,
+    /// `example`). Both args are already lowercased by the callers. Without
+    /// this the row-presence guards below could silently go vacuous the day
+    /// a section gains such a word.
+    fn contains_word(haystack: &str, word: &str) -> bool {
+        let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_ascii_alphanumeric());
+        haystack.match_indices(word).any(|(i, _)| {
+            boundary(haystack[..i].chars().next_back()) && boundary(haystack[i + word.len()..].chars().next())
+        })
+    }
+
     /// Emit-matrix row-presence: every `ClientTarget` name appears in the
     /// `docs/src/agents.md` emit-matrix section (catches "added a vendor,
     /// forgot the emit matrix" without over-constraining prose).
@@ -671,7 +684,7 @@ mod tests {
         let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "agents.md emit matrix must list every client — missing '{client}'"
             );
         }
@@ -686,7 +699,7 @@ mod tests {
         let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "mcp-servers.md emit matrix must list every client — missing '{client}'"
             );
         }
@@ -704,7 +717,7 @@ mod tests {
         let section = heading_section(&md, "{#discovery-locations}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "vendor-metadata.md discovery-locations section must list every client — missing '{client}'"
             );
         }
@@ -729,7 +742,7 @@ mod tests {
                 continue;
             }
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "vendor-metadata.md rule-keys section must list every rule-capable client — missing '{client}'"
             );
         }
@@ -752,7 +765,7 @@ mod tests {
                 continue;
             }
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "agents.md locations section must list every agent-capable client — missing '{client}'"
             );
         }
@@ -777,7 +790,7 @@ mod tests {
         let section = rest[..end].to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
-                section.contains(client.as_str()),
+                contains_word(&section, client.as_str()),
                 "json-interface.md options.clients values list must list every client — missing '{client}'"
             );
         }
@@ -1079,10 +1092,11 @@ mod tests {
         std::fs::write(root.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n").unwrap();
         std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
 
-        // Every vendor's `skill_index` delegates to the shared
-        // `render::render_skill_doc`, which returns `None` (verbatim) for a
-        // doc carrying no vendor-namespaced metadata — so this fixture's
-        // fast path is vendor-independent and must hold for all 10.
+        // Every vendor's `skill_index` returns `None` (verbatim install) for
+        // a doc carrying no vendor-namespaced metadata — the six vendor-aware
+        // vendors via `render::render_skill_doc`, the four shared-pool vendors
+        // via `render::render_universal_skill_doc` — so this fixture's fast
+        // path is vendor-independent and must hold for all 10.
         for client in ClientTarget::ALL {
             let dest = tmp.path().join(format!("out-{client}/code-review"));
             let files = client

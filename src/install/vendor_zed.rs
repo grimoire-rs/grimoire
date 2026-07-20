@@ -188,17 +188,25 @@ fn zed_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// (`AnchorRoots::resolve`, `detect`, `zed_scope_root`), so the Windows arm's
 /// `%APPDATA%` read is consistent with resolving XDG for the Unix arm — the
 /// pure `PathAnchor::root` lookup never calls this.
-#[cfg(not(windows))]
 pub(crate) fn zed_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
-    xdg_config.map(|c| c.join("zed"))
+    zed_root_from(xdg_config, super::vendor::env_dir("APPDATA"))
 }
 
-/// Windows variant: resolve from `%APPDATA%\Zed`, where Zed keeps its user
-/// `settings.json`. The XDG argument is ignored (no XDG layout on Windows) so
-/// the signature — and every call site — stays identical across platforms.
-#[cfg(windows)]
-pub(crate) fn zed_root(_xdg_config: Option<PathBuf>) -> Option<PathBuf> {
-    super::vendor::env_dir("APPDATA").map(|c| c.join("Zed"))
+/// Pure per-platform join with both directory inputs injected, so it is
+/// testable on any target without mutating process env. Unix appends `zed` to
+/// the XDG dir; Windows appends `Zed` to `%APPDATA%` and ignores the XDG arg
+/// (no XDG layout there). The env read lives only in [`zed_root`].
+fn zed_root_from(xdg_config: Option<PathBuf>, appdata: Option<PathBuf>) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        let _ = appdata;
+        xdg_config.map(|c| c.join("zed"))
+    }
+    #[cfg(windows)]
+    {
+        let _ = xdg_config;
+        appdata.map(|c| c.join("Zed"))
+    }
 }
 
 #[cfg(test)]
@@ -380,12 +388,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn zed_root_is_appdata_zed_on_windows() {
-        // SAFETY: single-threaded test setting an env var it exclusively owns.
-        unsafe {
-            std::env::set_var("APPDATA", r"C:\Users\u\AppData\Roaming");
-        }
-        // The XDG argument is ignored on Windows — %APPDATA%\Zed drives it.
-        let got = zed_root(Some(PathBuf::from(r"C:\ignored")));
+        // The XDG argument is ignored on Windows — the injected `%APPDATA%`
+        // drives the root. Exercising the pure `zed_root_from` keeps this
+        // hermetic without mutating process env: `std::env::set_var` now
+        // requires `unsafe` under edition 2024, and this crate forbids it.
+        let got = zed_root_from(
+            Some(PathBuf::from(r"C:\ignored")),
+            Some(PathBuf::from(r"C:\Users\u\AppData\Roaming")),
+        );
         assert_eq!(got, Some(PathBuf::from(r"C:\Users\u\AppData\Roaming\Zed")));
+        // No resolvable APPDATA → no root.
+        assert_eq!(zed_root_from(Some(PathBuf::from(r"C:\ignored")), None), None);
     }
 }
