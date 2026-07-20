@@ -86,13 +86,61 @@ impl Vendor for ZedVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `context_servers` container, flat entry shape; no env-ref support
-        // upstream → skip ref-bearing descriptors.
-        unimplemented!("V5 Zed: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // Zed's `context_servers` schema has no OAuth surface — a structured
+        // oauth block is auth-critical, so the whole descriptor is skipped
+        // with a warning rather than written lossy.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for zed ({scope}): no oauth surface in context_servers");
+            return None;
+        }
+        // Zed performs no env-var expansion in settings.json (open upstream
+        // discussions #26043/#18630/#56881/#53780) — a descriptor that needs
+        // `${VAR}` is skipped rather than writing a broken literal or a
+        // secret value to disk.
+        if descriptor.has_env_refs() {
+            tracing::warn!(
+                "mcp server '{name}' skipped for zed ({scope}): context_servers supports no ${{VAR}} substitution \
+                 and grim never inlines secret values"
+            );
+            return None;
+        }
+
+        // Flat entry shape: stdio → top-level command/args/env; remote →
+        // url/headers (the nested `command:{path,...}` shape is
+        // stale-blog-only). Refinement fields have no documented
+        // context_servers target — dropped.
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            McpTransport::Stdio => {
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            // WebSocket has no context_servers schema mapping — skip with a
+            // warning.
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for zed ({scope}): no ws transport in context_servers");
+                return None;
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        Some((format!("/context_servers/{name}"), serde_json::Value::Object(entry)))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
