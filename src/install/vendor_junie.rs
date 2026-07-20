@@ -131,7 +131,7 @@ impl Vendor for JunieVendor {
                 }
             }
         }
-        // Refinement fields (`timeout`, `always_load`, `headers_helper`) have
+        // Refinement fields (`timeout`, `always_load`, `headers_helper`, `cwd`) have
         // no Junie `mcpServers` equivalent — dropped (sibling drop convention).
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }

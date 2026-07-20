@@ -583,8 +583,22 @@ async fn install_one<M: ArtifactMaterializer>(
     }
 
     // Materialize into every client in the effective set, replacing any prior
-    // output, and hash each client output for the integrity record.
+    // output, and record one output per client for the integrity record.
+    //
+    // Several shared-pool clients (Codex/Gemini/Zed/Amp skills) resolve to ONE
+    // `.agents/skills/<name>` directory. The universal skill renderer (D1a)
+    // guarantees they render byte-identical, so copying + fsyncing + hashing
+    // that directory once per client would be 4× pure waste (s2-perf). Dedup by
+    // resolved destination: the first client to reach a distinct dest does the
+    // copy + fsync + footprint hash; a sibling landing on the same dest reuses
+    // that hash. Every client still gets its own `ClientOutput`, so the record
+    // keeps the several-outputs-one-path shape the prune refcount guard
+    // (`prune::shared_by_surviving_sibling`) relies on. A non-shared dest
+    // (1 client → 1 dest) takes the exact path it always did (cache miss).
     let mut client_records: Vec<ClientOutput> = Vec::with_capacity(materialize_set.len());
+    // Small association list (dest → footprint hash); `materialize_set` holds at
+    // most one entry per vendor, so a linear scan beats a map's overhead.
+    let mut materialized: Vec<(PathBuf, Digest)> = Vec::new();
     for client in &materialize_set {
         let dest = target.path_for(*client, kind, &artifact.name);
         // A global Copilot rule normally routes to the native
@@ -616,43 +630,53 @@ async fn install_one<M: ArtifactMaterializer>(
         };
         let support_dest = staged_support.as_ref().and(cleanup.clone());
 
-        if dest.exists() {
-            remove_path(&dest).map_err(|e| target_io(&dest, e))?;
-        }
-        if let Some(sd) = &cleanup
-            && sd.exists()
-        {
-            remove_path(sd).map_err(|e| target_io(sd, e))?;
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
-        }
-        client
-            .materialize(crate::install::client_target::MaterializeRequest {
-                kind,
-                name: &artifact.name,
-                artifact_root: &canonical,
-                dest: &dest,
-                scope: target.scope(),
-                pinned: &pinned_str,
-                support_dir: staged_support.as_deref(),
-            })
-            .map_err(crate::error::Error::from)?;
-        fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
-        if let Some(sd) = &support_dest {
-            fsync_tree(sd).map_err(|e| target_io(sd, e))?;
-        }
-        #[cfg(unix)]
-        if let Some(parent) = dest.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::File::open(parent)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| target_io(parent, e))?;
-        }
-        let installed_hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
+        // Reuse a sibling pool client's footprint hash when this exact dest was
+        // already materialized this pass; otherwise do the copy + fsync + hash.
+        let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
+            hash.clone()
+        } else {
+            if dest.exists() {
+                remove_path(&dest).map_err(|e| target_io(&dest, e))?;
+            }
+            if let Some(sd) = &cleanup
+                && sd.exists()
+            {
+                remove_path(sd).map_err(|e| target_io(sd, e))?;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+            }
+            client
+                .materialize(crate::install::client_target::MaterializeRequest {
+                    kind,
+                    name: &artifact.name,
+                    artifact_root: &canonical,
+                    dest: &dest,
+                    scope: target.scope(),
+                    pinned: &pinned_str,
+                    support_dir: staged_support.as_deref(),
+                })
+                .map_err(crate::error::Error::from)?;
+            fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
+            if let Some(sd) = &support_dest {
+                fsync_tree(sd).map_err(|e| target_io(sd, e))?;
+            }
+            #[cfg(unix)]
+            if let Some(parent) = dest.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::File::open(parent)
+                    .and_then(|f| f.sync_all())
+                    .map_err(|e| target_io(parent, e))?;
+            }
+            let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
+            materialized.push((dest.clone(), hash.clone()));
+            hash
+        };
         // `dest` / `support_dest` are the non-canonicalized (pre-symlink)
-        // forms — the `from_target` caller invariant (§1.5).
+        // forms — the `from_target` caller invariant (§1.5). Computed per
+        // client so pool siblings resolving to one path each record their own
+        // (identical) output — the several-outputs-one-path refcount shape.
         let anchored_target =
             crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
         let anchored_support = match &support_dest {
@@ -1794,6 +1818,32 @@ mod tests {
         }
     }
 
+    /// A skill tar keyed by the canonical `<name>/SKILL.md` layout.
+    fn skill_tar(name: &str, doc: &[u8]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(doc.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, format!("{name}/SKILL.md"), doc).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    fn locked_skill(name: &str, blob: &[u8]) -> LockedArtifact {
+        locked_of(name, blob, ArtifactKind::Skill)
+    }
+
+    fn lock_of_skills(skills: Vec<LockedArtifact>) -> GrimoireLock {
+        GrimoireLock {
+            metadata: test_lock_metadata(),
+            skills,
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        }
+    }
+
     fn arc(m: impl OciAccess + 'static) -> Arc<dyn OciAccess> {
         Arc::new(m)
     }
@@ -1849,6 +1899,65 @@ mod tests {
         )
         .await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+    }
+
+    #[tokio::test]
+    async fn shared_pool_skill_dedups_to_one_dest_and_self_heals() {
+        // The four shared-pool vendors (Codex/Gemini/Zed/Amp) resolve a skill
+        // to ONE `.agents/skills/<name>` dir (D1b dedup). A fresh install
+        // records one output per client, all pinning that single path with the
+        // SAME footprint hash — the several-outputs-one-path shape the prune
+        // refcount guard relies on. A second install re-hashes that dir and
+        // short-circuits to AlreadyInstalled (self-heal — re-materialize is
+        // idempotent, Principle 9).
+        let dir = tempfile::tempdir().unwrap();
+        let blob = skill_tar("s", b"---\nname: s\ndescription: d\n---\n# body\n");
+        let lock = lock_of_skills(vec![locked_skill("s", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let clients = vec![
+            ClientTarget::Codex,
+            ClientTarget::Gemini,
+            ClientTarget::Zed,
+            ClientTarget::Amp,
+        ];
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, clients);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), false).await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        assert!(
+            dir.path().join(".agents/skills/s/SKILL.md").is_file(),
+            "the shared pool dir is materialized"
+        );
+
+        // One output per pool client, all resolving to the ONE shared path
+        // with the SAME footprint hash — the shared-pool refcount shape.
+        let rec = state.get(ArtifactKind::Skill, "s").unwrap();
+        assert_eq!(rec.outputs.len(), 4, "one output per pool client");
+        let want = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".agents/skills/s".to_string(),
+        };
+        assert!(
+            rec.outputs.iter().all(|o| o.target == want),
+            "every output pins the shared `.agents/skills/s` dir: {:?}",
+            rec.outputs
+        );
+        let h0 = &rec.outputs[0].content_hash;
+        assert!(
+            rec.outputs.iter().all(|o| &o.content_hash == h0),
+            "every output carries the same shared footprint hash"
+        );
+
+        // Second install over the intact shared dir ⇒ self-heal to unchanged.
+        let r2 = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), false).await;
+        assert_eq!(
+            *r2[0].result.as_ref().unwrap(),
+            InstallOutcome::AlreadyInstalled,
+            "a second install of the same pool skill self-heals to unchanged"
+        );
     }
 
     #[tokio::test]

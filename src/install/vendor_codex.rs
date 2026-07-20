@@ -251,9 +251,10 @@ impl Vendor for CodexVendor {
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Empty registries ⇒ universal-shape render (verbatim fast path for a
-        // plain skill), identical to OpenCode/Copilot.
-        render::render_skill_doc(doc, self)
+        // Shared-pool skills (`.agents/skills`, with Gemini/Zed/Amp) are
+        // vendor-independent: route through the vendor-less universal renderer
+        // so no per-vendor field can ever leak into the shared file (D1a).
+        Ok(render::render_universal_skill_doc(doc))
     }
 
     fn rule_index(

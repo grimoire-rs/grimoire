@@ -129,7 +129,7 @@ impl Vendor for KiroVendor {
                 }
             }
         }
-        // Refinement fields (`timeout`, `always_load`, `headers_helper`) have
+        // Refinement fields (`timeout`, `always_load`, `headers_helper`, `cwd`) have
         // no Kiro `mcpServers` equivalent — dropped (pure refinements, nothing
         // auth-critical), the sibling drop convention.
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))

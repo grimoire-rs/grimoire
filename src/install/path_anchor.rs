@@ -123,6 +123,7 @@ impl std::fmt::Display for PathAnchor {
 /// New anchors whose root is derivable from an existing field (e.g. a
 /// parent or sibling of a stored path) should follow this pattern rather
 /// than adding a new `Option<PathBuf>` field to this struct.
+#[derive(Default)]
 pub struct AnchorRoots {
     /// The workspace root project-scope targets are rooted at.
     pub workspace: PathBuf,

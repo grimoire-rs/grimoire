@@ -153,8 +153,10 @@ impl Vendor for AmpVendor {
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Universal-shape render (shared pool with Codex/Gemini/Zed).
-        render::render_skill_doc(doc, self)
+        // Shared-pool skills (`.agents/skills`, with Codex/Gemini/Zed) are
+        // vendor-independent: route through the vendor-less universal renderer
+        // so no per-vendor field can ever leak into the shared file (D1a).
+        Ok(render::render_universal_skill_doc(doc))
     }
 
     fn rule_index(

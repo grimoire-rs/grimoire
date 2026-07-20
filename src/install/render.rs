@@ -455,6 +455,57 @@ pub fn render_skill_doc(doc: &str, vendor: &dyn Vendor) -> Result<Option<Rendere
     }))
 }
 
+/// Render a full `SKILL.md` document in the **universal** Agent-Skills shape:
+/// every tool-namespaced metadata key (of any known vendor) is dropped,
+/// nothing is lifted, and plain metadata / body survive unchanged. `None`
+/// when the canonical bytes install verbatim (no tool-namespaced metadata, or
+/// the document does not parse as a skill).
+///
+/// Vendor-independent **by construction**. The four shared-pool vendors
+/// (Codex, Gemini, Zed, Amp) install a skill to the ONE
+/// `$HOME/.agents/skills/<name>` directory, so its `SKILL.md` must not carry
+/// any single vendor's projected fields. Routing their `skill_index` through
+/// this vendor-less renderer makes divergent pool bytes structurally
+/// impossible: even a `skill_fields()` entry mistakenly added to a pool vendor
+/// cannot leak in, because no vendor field registry is consulted here. The
+/// output is byte-identical to what an empty-registry vendor emits through
+/// [`render_skill_doc`] today — only the per-vendor typo warnings are absent
+/// (the publish gate in [`validate_namespaced_metadata`] still catches those).
+///
+/// Infallible: with no vendor context and no field registry, no metadata
+/// value is ever converted, so there is no [`RenderError`] path — the result
+/// is a plain [`Option`].
+pub fn render_universal_skill_doc(doc: &str) -> Option<RenderedDoc> {
+    let path = std::path::Path::new("SKILL.md");
+    let (fm_yaml, body) = SkillFrontmatter::split(doc, path).ok()?;
+    let fm = SkillFrontmatter::from_yaml(&fm_yaml, path).ok()?;
+    if !has_tool_namespaced_metadata(&fm) {
+        return None;
+    }
+    // Drop every tool-namespaced key (nothing is lifted), keep plain metadata.
+    // `split_namespaced` is the single source of truth for "is this a known
+    // tool key" — the same predicate the vendor-aware partition uses — so the
+    // output stays byte-identical to what an empty-registry vendor emits.
+    let mut plain = fm.clone();
+    plain.metadata = fm
+        .metadata
+        .iter()
+        .filter(|(k, _)| split_namespaced(k).is_none())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let frontmatter_yaml = serialize_mapping(&to_mapping(&plain));
+    let mut document = String::with_capacity(frontmatter_yaml.len() + body.len() + 8);
+    document.push_str("---\n");
+    document.push_str(&frontmatter_yaml);
+    document.push_str("---\n");
+    document.push_str(&body);
+    Some(RenderedDoc {
+        document,
+        warnings: Vec::new(),
+    })
+}
+
 /// Rewrite the frontmatter `name` of a skill document to `binding`, or
 /// `None` when nothing needs rewriting: the names already agree, or the
 /// document does not parse as a skill at all (a foreign artifact is
@@ -791,6 +842,94 @@ metadata:
         let plain = fm("---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n  vendor.x: y\n---\n");
         // `vendor.` is not a known tool namespace ⇒ plain metadata.
         assert!(!has_tool_namespaced_metadata(&plain));
+    }
+
+    // ── D1a: universal skill renderer / shared-pool invariant ─────────────
+
+    #[test]
+    fn pool_vendors_declare_no_skill_fields() {
+        // Codex/Gemini/Zed/Amp resolve every skill to the ONE shared
+        // `$HOME/.agents/skills/<name>` pool, so the pooled SKILL.md must stay
+        // vendor-independent. Their `skill_index` routes through the vendor-less
+        // `render_universal_skill_doc`, which lifts NOTHING — so a `skill_fields()`
+        // entry added to a pool vendor would be silently ignored at render. This
+        // asserts the registry stays empty, failing loudly the day someone adds a
+        // pool-vendor skill field (the render layer would otherwise hide it).
+        use crate::config::scope::ConfigScope;
+        let ws = Path::new("/w");
+        let pool = Path::new(".agents/skills");
+        let mut checked = 0;
+        for target in ClientTarget::ALL {
+            let vendor = target.vendor();
+            if vendor.skills_root(ws, ConfigScope::Project).ends_with(pool) {
+                assert!(
+                    vendor.skill_fields().is_empty(),
+                    "pool vendor '{}' shares `.agents/skills` — it must declare no skill_fields (the shared SKILL.md is vendor-independent)",
+                    vendor.name()
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 4,
+            "expected exactly the 4 shared-pool vendors (Codex/Gemini/Zed/Amp) to resolve into .agents/skills"
+        );
+    }
+
+    #[test]
+    fn pool_vendors_render_byte_identical_skill_bytes() {
+        // The four shared-pool vendors write to ONE `.agents/skills/<name>`
+        // file, so their `skill_index` must emit byte-identical bytes for the
+        // same source. Proven on a fixture carrying own- and foreign-namespace
+        // vendor keys (which forces the render path off the verbatim fast path).
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n  claude.model: opus\n  codex.reasoning-effort: high\n---\n# body\n";
+        let pool = [
+            ClientTarget::Codex,
+            ClientTarget::Gemini,
+            ClientTarget::Zed,
+            ClientTarget::Amp,
+        ];
+        let rendered: Vec<String> = pool
+            .iter()
+            .map(|c| {
+                c.vendor()
+                    .skill_index(doc)
+                    .expect("render")
+                    .expect("namespaced metadata ⇒ rendered")
+                    .document
+            })
+            .collect();
+        for w in rendered.windows(2) {
+            assert_eq!(w[0], w[1], "pool vendors must emit byte-identical skill bytes");
+        }
+        // The vendor-less universal renderer agrees with every pool vendor.
+        let universal = render_universal_skill_doc(doc)
+            .expect("namespaced metadata ⇒ rendered")
+            .document;
+        assert_eq!(
+            rendered[0], universal,
+            "pool skill_index must equal the universal render"
+        );
+        // Every tool-namespaced key is stripped; plain metadata survives.
+        assert!(
+            !universal.contains("claude.") && !universal.contains("codex."),
+            "no tool-namespaced key survives: {universal}"
+        );
+        assert!(universal.contains("keywords: a,b"), "plain metadata kept: {universal}");
+    }
+
+    #[test]
+    fn universal_render_is_none_for_a_plain_or_foreign_skill() {
+        // No tool-namespaced metadata ⇒ verbatim install (None), like the
+        // vendor-aware path. A `vendor.x` key is plain (unknown namespace).
+        assert!(
+            render_universal_skill_doc(
+                "---\nname: s\ndescription: d\nmetadata:\n  keywords: a\n  vendor.x: y\n---\nbody\n"
+            )
+            .is_none()
+        );
+        // Not a skill at all ⇒ copied untouched.
+        assert!(render_universal_skill_doc("# plain markdown\n").is_none());
     }
 
     #[test]

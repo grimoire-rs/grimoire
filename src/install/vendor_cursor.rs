@@ -23,7 +23,6 @@
 //! `CURSOR_CONFIG_DIR` is **not** honored in wave 1 (possibly CLI-only —
 //! watchlisted); paths hardcode the documented `~/.cursor` default.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
@@ -144,6 +143,9 @@ impl Vendor for CursorVendor {
                 }
             }
         }
+        // Refinement fields (`timeout`/`always_load`/`headers_helper`/`cwd`)
+        // have no `mcp.json` target — dropped (pure refinements, nothing
+        // auth-critical is lost), the sibling shared-pool convention.
         // Cursor's env-ref syntax is `${env:VAR}` — translate the canonical
         // `${VAR}` in every string leaf (Copilot-project helper reuse).
         let mut value = serde_json::Value::Object(entry);
@@ -182,23 +184,23 @@ impl Vendor for CursorVendor {
             );
         }
 
-        // `.mdc` always carries frontmatter: `paths` comma-join into the
-        // single `globs` STRING Cursor reads plus `alwaysApply: false` when
-        // scoped; no `globs` and `alwaysApply: true` when unscoped.
-        let mut document = String::from("---\n");
+        // `.mdc` always carries frontmatter: `paths` comma-join into the single
+        // `globs` STRING Cursor reads plus `alwaysApply: false` when scoped; no
+        // `globs` and `alwaysApply: true` when unscoped. Built through the shared
+        // frontmatter-block serializer (serde_yaml) so glob quoting is handled
+        // deterministically — the same path Kiro uses; `projection.lifted` is
+        // empty (Cursor has no rule registry).
         let globs = parsed.frontmatter.paths.join(",");
-        if globs.is_empty() {
-            document.push_str("alwaysApply: true\n");
+        let natives: Vec<(&'static str, serde_yaml::Value)> = if globs.is_empty() {
+            vec![("alwaysApply", serde_yaml::Value::Bool(true))]
         } else {
-            // Double-quoted so a glob's leading `*` cannot read as a YAML
-            // alias indicator (Copilot `applyTo` precedent). Full
-            // double-quoted escaping — backslash, quote, newline, control
-            // characters — keeps every glob safe, not just the quote; a
-            // plain glob passes through unchanged (common-case byte-identical).
-            let _ = writeln!(document, "globs: \"{}\"", escape_yaml_double_quoted(&globs));
-            document.push_str("alwaysApply: false\n");
-        }
-        document.push_str("---\n");
+            vec![
+                ("globs", serde_yaml::Value::String(globs)),
+                ("alwaysApply", serde_yaml::Value::Bool(false)),
+            ]
+        };
+
+        let mut document = render::agent_frontmatter_block(natives, projection.lifted, self.name(), &[], &mut warnings);
         document.push_str(&provenance(pinned));
         document.push_str(&parsed.body);
         Ok(Some(RenderedDoc { document, warnings }))
@@ -261,30 +263,6 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// [`PathAnchor`](super::path_anchor) `CursorRoot` anchor is rooted here.
 pub(crate) fn cursor_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".cursor"))
-}
-
-/// Escape a string for a YAML double-quoted scalar. Cursor's `.mdc` `globs`
-/// value is emitted double-quoted (an unquoted leading `*` reads as a YAML
-/// alias indicator), so every backslash, quote, newline, or control
-/// character in a path pattern must be escaped or the frontmatter block
-/// would fail to parse. A plain glob (no special characters) passes through
-/// unchanged, keeping the common-case output byte-identical.
-fn escape_yaml_double_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\x{:02X}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -381,14 +359,21 @@ mod tests {
     #[test]
     fn rule_index_leading_star_glob_is_quoted() {
         // A leading `*` would read as a YAML alias indicator unquoted — the
-        // comma-string must be quoted (Copilot `applyTo` precedent).
+        // shared serializer (serde_yaml) quotes it so it survives. serde_yaml
+        // emits SINGLE quotes, so assert the glob parses back to the pattern
+        // rather than a literal quote style (mirrors
+        // `rule_index_embedded_quote_glob_round_trips`).
         let out = CursorVendor
             .rule_index(&rule("---\npaths: [\"*.rs\"]\n---\nbody\n"), ConfigScope::Project, "p")
             .unwrap()
             .unwrap();
-        assert!(
-            out.document.contains("globs: \"*.rs\""),
-            "leading-* glob survives as a quoted string: {}",
+        let inner = out.document.strip_prefix("---\n").expect("leading fence");
+        let end = inner.find("---\n").expect("closing fence");
+        let fm: serde_yaml::Value = serde_yaml::from_str(&inner[..end]).expect("frontmatter parses");
+        assert_eq!(
+            fm["globs"],
+            serde_yaml::Value::String("*.rs".to_string()),
+            "leading-* glob survives quoted and parses back: {}",
             out.document
         );
     }
