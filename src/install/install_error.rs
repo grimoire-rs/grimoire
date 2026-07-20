@@ -106,7 +106,7 @@ pub enum InstallErrorKind {
     UntrackedDestination { client: String, path: PathBuf },
 
     /// The configured client target is not supported by this build.
-    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot', 'codex'")]
+    #[error("unsupported client target '{0}'; supported clients are {list}", list = supported_clients_list())]
     UnsupportedClient(String),
 
     /// A local path source failed to pack at install time: it is missing,
@@ -129,6 +129,18 @@ pub enum InstallErrorKind {
         locked: Digest,
         actual: Digest,
     },
+}
+
+/// The supported client names, single-quoted and comma-joined, for the
+/// [`InstallErrorKind::UnsupportedClient`] message. Derived from
+/// [`super::client_target::ClientTarget::VALUE_NAMES`] so the message can
+/// never drift from the actual supported set.
+fn supported_clients_list() -> String {
+    super::client_target::ClientTarget::VALUE_NAMES
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -159,6 +171,17 @@ mod tests {
         assert!(!err.to_string().starts_with(':'));
         assert!(!err.to_string().starts_with(' '));
         assert!(err.to_string().contains("vscode"));
+    }
+
+    #[test]
+    fn unsupported_client_names_every_supported_client() {
+        // The message lists the supported set from `ClientTarget::VALUE_NAMES`
+        // so it cannot drift as vendors are added.
+        let msg = InstallErrorKind::UnsupportedClient("vscode".to_string()).to_string();
+        for name in crate::install::client_target::ClientTarget::VALUE_NAMES {
+            assert!(msg.contains(&format!("'{name}'")), "message must name '{name}': {msg}");
+        }
+        assert!(msg.contains("vscode"), "message names the offending target: {msg}");
     }
 
     #[test]

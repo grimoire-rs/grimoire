@@ -276,9 +276,7 @@ pub(crate) fn gemini_root(home: Option<PathBuf>) -> Option<PathBuf> {
 mod tests {
     //! Specification tests for Gemini CLI — from the design record
     //! (`adr_vendor_wave_expansion.md` +
-    //! `research_vendor_verification_junie_gemini.md`). `agent_index` / `mcp_entry`
-    //! are `unimplemented!()` stubs, so those tests fail by panic until
-    //! implementation.
+    //! `research_vendor_verification_junie_gemini.md`).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
     use crate::skill::AgentFrontmatter;
@@ -437,5 +435,15 @@ mod tests {
             GeminiVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_is_deterministic() {
+        let d =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"")
+                .unwrap();
+        let a = GeminiVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        let b = GeminiVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
     }
 }

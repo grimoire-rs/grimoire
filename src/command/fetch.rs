@@ -34,8 +34,10 @@ pub struct FetchArgs {
     /// when no tag/digest is given.
     pub reference: String,
 
-    /// Print this client's projection (`claude` / `opencode` / `copilot`)
-    /// instead of the canonical as-authored document.
+    /// Print one client's projection instead of the canonical as-authored
+    /// document. Accepts any supported client name (round-trips through
+    /// [`crate::install::client_target::ClientTarget`]): `claude`, `opencode`,
+    /// `copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, or `amp`.
     #[arg(long)]
     pub vendor: Option<String>,
 

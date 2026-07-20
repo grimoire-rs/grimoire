@@ -291,27 +291,39 @@ projectable, mapped from `GEMINI_AGENT_FIELDS` in
 | `gemini.timeout-mins` | `timeout_mins` | integer | The native key uses an underscore |
 | `gemini.kind` | `kind` | string | Subagent kind selector |
 
-## Empty registries for OpenCode, Copilot, and Codex skills {#empty-registries}
+## Empty skill registries for every non-Claude client {#empty-registries}
 
-The skill registries for [OpenCode][opencode-skills-docs], [GitHub
-Copilot][copilot-instructions-docs], and [Codex][codex-skills-docs] are
-intentionally empty. All three non-Claude clients (OpenCode, Copilot, and
-Codex) read only the universal agentskills fields from a `SKILL.md`; none
-has client-specific skill capabilities that need projection.
+Only [Claude Code][claude-code-docs] carries a client-specific *skill*
+registry. Every other client reads only the universal agentskills fields from
+a `SKILL.md`, so their skill registries are intentionally empty — a skill grim
+installs for Claude is discovered byte-identically by all of them (the
+*unified universal render*), with the lifted `claude.*` fields ignored as
+unknown keys.
 
-Any key prefixed with `opencode.`, `copilot.`, or `codex.` in the `metadata`
-map of a skill is therefore always unknown. grim emits a warning and drops
-it when it encounters one. This behavior is the typo guard: if you
-accidentally write an unknown `opencode.*` key, you get a warning at
-publish time rather than silent data loss.
+Those other clients split into two groups by whether they carry *any*
+vendor namespace at all:
 
-Because all three non-Claude registries are empty, [OpenCode][opencode-skills-docs],
-[GitHub Copilot][copilot-instructions-docs], and [Codex][codex-skills-docs]
-produce byte-identical rendered skill files — the *unified universal render*.
-A skill installed by grim for [Claude Code][claude-code-docs] is also
-discovered by those three non-Claude clients, which ignore the lifted Claude
-fields as unknown keys. This means installing for Claude effectively covers
-all four clients for skill discovery, with no extra work for authors.
+- **Agent-only namespaces** — [Codex][codex-subagents-docs],
+  [Cursor][cursor-subagents-docs], [Gemini][gemini-subagents-docs],
+  [OpenCode][opencode-agents-docs], and [GitHub Copilot][copilot-agents-docs]
+  each project *agent* frontmatter through their own `<vendor>.*` agent
+  registry (the agent-registry sections above), but define no skill
+  namespace.
+- **No namespace at all** — Kiro, Junie, Zed, and Amp carry no vendor
+  registry for any kind; they read the universal fields only.
+
+Any key prefixed with a client namespace (e.g. `opencode.`, `copilot.`, or
+`codex.`) in the `metadata` map of a **skill** is therefore always unknown.
+grim emits a warning and drops it when it encounters one. This behavior is
+the typo guard: an accidental unknown `<vendor>.*` skill key surfaces at
+publish time rather than as silent data loss.
+
+Because every non-Claude skill registry is empty, all of those clients
+produce byte-identical rendered skill files. A skill installed by grim for
+[Claude Code][claude-code-docs] is discovered by all of them, which ignore
+the lifted Claude fields as unknown keys — so installing for Claude
+effectively covers every client for skill discovery, with no extra work for
+authors.
 
 ## Skill discovery locations {#discovery-locations}
 

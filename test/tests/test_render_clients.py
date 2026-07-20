@@ -36,9 +36,17 @@ An unknown key (e.g. typo) only warns (stderr) and succeeds.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from src.helpers import make_artifact, write_config
+
+
+def _loads_jsonc(text: str) -> dict:
+    """Parse JSONC by stripping ``//``-to-end-of-line comments before
+    ``json.loads``. Test fixtures keep comments on their own lines (never
+    inside a string), so a plain substitution is safe here."""
+    return json.loads(re.sub(r"//[^\n]*", "", text))
 
 
 # ---------------------------------------------------------------------------
@@ -1134,6 +1142,41 @@ def test_zed_mcp_entry_lands_in_zed_settings_context_servers(
     entry = doc["context_servers"]["grim-mcp"]
     # Flat shape — command sits directly on the entry, not nested under command:{path}.
     assert entry["command"] == "grim", f"Zed entry must be flat with top-level command: {entry}"
+
+
+def test_zed_mcp_install_preserves_existing_settings_comment_and_sibling(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Installing a Zed MCP entry into a PRE-EXISTING ``.zed/settings.json``
+    (JSONC) preserves a user ``//`` comment and a sibling ``context_servers``
+    entry — the span-preserving splice touches only grim's own member."""
+    zed_dir = project_dir / ".zed"
+    zed_dir.mkdir(parents=True, exist_ok=True)
+    settings = zed_dir / "settings.json"
+    settings.write_text(
+        "{\n"
+        "  // user's Zed settings\n"
+        '  "theme": "One Dark",\n'
+        '  "context_servers": {\n'
+        '    "my-server": { "command": "my-tool" }\n'
+        "  }\n"
+        "}\n"
+    )
+
+    runner = grim_at(project_dir)
+    _add_mcp(runner, project_dir, registry, unique_repo)
+    rows = runner.json("install", "--client", "zed")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    text = settings.read_text()
+    # The user's JSONC comment and their sibling server survive verbatim.
+    assert "// user's Zed settings" in text, f"user comment must survive: {text}"
+    assert '"my-server"' in text, f"user's sibling context server must survive: {text}"
+    # grim's entry lands alongside, under the same container key.
+    doc = _loads_jsonc(text)
+    assert doc["context_servers"]["grim-mcp"]["command"] == "grim", f"grim entry added: {doc}"
+    assert doc["context_servers"]["my-server"]["command"] == "my-tool", "sibling still readable"
+    assert doc["theme"] == "One Dark", "unrelated user key survives"
 
 
 # ---------------------------------------------------------------------------

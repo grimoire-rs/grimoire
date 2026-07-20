@@ -220,9 +220,7 @@ pub(crate) fn kiro_root(home: Option<PathBuf>) -> Option<PathBuf> {
 mod tests {
     //! Specification tests for Kiro — from the design record
     //! (`adr_vendor_wave_expansion.md` mapping table +
-    //! `research_vendor_verification_cursor_kiro.md`). `rule_index` / `mcp_entry`
-    //! are `unimplemented!()` stubs, so those tests fail by panic until
-    //! implementation.
+    //! `research_vendor_verification_cursor_kiro.md`).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
     use crate::skill::RuleFrontmatter;
@@ -337,6 +335,26 @@ mod tests {
         assert_eq!(a.document, b.document, "regeneration must be byte-identical");
     }
 
+    #[test]
+    fn rule_index_leading_star_glob_survives_in_pattern_array() {
+        // A leading-`*` glob would read as a YAML alias indicator unquoted;
+        // the shared frontmatter serializer quotes it, so it survives in the
+        // `fileMatchPattern` array and the block parses back to the glob.
+        let out = KiroVendor
+            .rule_index(&rule("---\npaths: [\"*.rs\"]\n---\nbody\n"), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
+        let inner = out.document.strip_prefix("---\n").expect("leading fence");
+        let end = inner.find("---\n").expect("closing fence");
+        let fm: serde_yaml::Value = serde_yaml::from_str(&inner[..end]).expect("frontmatter parses");
+        assert_eq!(
+            fm["fileMatchPattern"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("*.rs".to_string())]),
+            "leading-* glob survives quoted in the pattern array: {}",
+            out.document
+        );
+    }
+
     // ── mcp_entry: `mcpServers`, no `type`, `${VAR}` passthrough ──
 
     #[test]
@@ -389,5 +407,15 @@ mod tests {
             KiroVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_is_deterministic() {
+        let d =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"")
+                .unwrap();
+        let a = KiroVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        let b = KiroVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
     }
 }

@@ -185,8 +185,7 @@ pub(crate) fn amp_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
 mod tests {
     //! Specification tests for Amp — skills + MCP only; rules and agents
     //! declined (`adr_vendor_wave_expansion.md` +
-    //! `research_vendor_verification_zed_amp.md`). `mcp_entry` is an
-    //! `unimplemented!()` stub, so those tests fail by panic until implementation.
+    //! `research_vendor_verification_zed_amp.md`).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
 
@@ -263,5 +262,15 @@ mod tests {
             AmpVendor.mcp_entry(ConfigScope::Project, "m", &ws).is_none(),
             "ws skipped"
         );
+    }
+
+    #[test]
+    fn mcp_entry_is_deterministic() {
+        let d =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"")
+                .unwrap();
+        let a = AmpVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        let b = AmpVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
     }
 }

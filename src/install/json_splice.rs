@@ -545,9 +545,31 @@ mod tests {
     fn split_pointer_accepts_exactly_two_levels() {
         assert_eq!(split_pointer("/mcpServers/grim"), Some(("mcpServers", "grim")));
         assert_eq!(split_pointer("/mcp/my-server"), Some(("mcp", "my-server")));
+        // Amp's literal dotted container key is ONE segment (a `.` is not a
+        // JSON Pointer separator), not a nested `/amp/mcpServers/` pointer.
+        assert_eq!(split_pointer("/amp.mcpServers/grim"), Some(("amp.mcpServers", "grim")));
         for bad in ["mcpServers/grim", "/mcpServers", "/a/b/c", "//x", "/a/", ""] {
             assert_eq!(split_pointer(bad), None, "input: {bad}");
         }
+    }
+
+    #[test]
+    fn upsert_into_amp_dotted_container_preserves_sibling_and_comment() {
+        // Amp's container is the literal dotted key `"amp.mcpServers"` (a `.`
+        // is not a JSON Pointer separator, so this is ONE key, not a nested
+        // `amp` → `mcpServers`). A user's existing sibling server and a JSONC
+        // comment both survive the splice; the grim entry lands under the
+        // dotted key.
+        let text = "{\n  // user config\n  \"amp.mcpServers\": {\n    \"other\": {\"command\": \"x\"}\n  }\n}\n";
+        let out = changed(upsert_member(text, "amp.mcpServers", "grim", &json!({"command": "grim"})).unwrap());
+        assert!(out.contains("// user config"), "comment preserved: {out}");
+        assert!(
+            out.contains("\"other\": {\"command\": \"x\"}"),
+            "sibling server preserved: {out}"
+        );
+        let doc: serde_json::Value = serde_json::from_str(&crate::install::json_config::sanitize_jsonc(&out)).unwrap();
+        assert_eq!(doc["amp.mcpServers"]["grim"]["command"], "grim");
+        assert_eq!(doc["amp.mcpServers"]["other"]["command"], "x", "sibling still readable");
     }
 
     #[test]

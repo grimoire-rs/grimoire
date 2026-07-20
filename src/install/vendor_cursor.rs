@@ -167,6 +167,20 @@ impl Vendor for CursorVendor {
         // metadata and surface a typo warning for an own-namespace `cursor.*`
         // rule key (foreign keys drop silently). Nothing is lifted.
         let projection = render::project_rule(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        // Cursor splits the single `globs:` string on EVERY comma — including
+        // a comma inside a `{a,b}` brace alternation (forum.cursor.com/t/76648).
+        // A glob carrying a literal comma is therefore silently read as
+        // multiple patterns; grim renders the comma-joined string unchanged
+        // but flags the hazard so the author can split the rule.
+        if parsed.frontmatter.paths.iter().any(|p| p.contains(',')) {
+            warnings.push(
+                "a glob contains a comma: Cursor splits `globs:` on every comma (including inside `{a,b}` \
+                 braces), so the pattern will be read as multiple globs (forum.cursor.com/t/76648)"
+                    .to_string(),
+            );
+        }
 
         // `.mdc` always carries frontmatter: `paths` comma-join into the
         // single `globs` STRING Cursor reads plus `alwaysApply: false` when
@@ -176,18 +190,18 @@ impl Vendor for CursorVendor {
         if globs.is_empty() {
             document.push_str("alwaysApply: true\n");
         } else {
-            // Quoted: a glob's leading `*` would otherwise read as a YAML
-            // alias indicator (Copilot `applyTo` precedent).
-            let _ = writeln!(document, "globs: \"{}\"", globs.replace('"', "\\\""));
+            // Double-quoted so a glob's leading `*` cannot read as a YAML
+            // alias indicator (Copilot `applyTo` precedent). Full
+            // double-quoted escaping — backslash, quote, newline, control
+            // characters — keeps every glob safe, not just the quote; a
+            // plain glob passes through unchanged (common-case byte-identical).
+            let _ = writeln!(document, "globs: \"{}\"", escape_yaml_double_quoted(&globs));
             document.push_str("alwaysApply: false\n");
         }
         document.push_str("---\n");
         document.push_str(&provenance(pinned));
         document.push_str(&parsed.body);
-        Ok(Some(RenderedDoc {
-            document,
-            warnings: projection.warnings,
-        }))
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 
     fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -249,14 +263,35 @@ pub(crate) fn cursor_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".cursor"))
 }
 
+/// Escape a string for a YAML double-quoted scalar. Cursor's `.mdc` `globs`
+/// value is emitted double-quoted (an unquoted leading `*` reads as a YAML
+/// alias indicator), so every backslash, quote, newline, or control
+/// character in a path pattern must be escaped or the frontmatter block
+/// would fail to parse. A plain glob (no special characters) passes through
+/// unchanged, keeping the common-case output byte-identical.
+fn escape_yaml_double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\x{:02X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! Specification tests (contract-first TDD) for Cursor — authored from the
     //! design record (`adr_vendor_wave_expansion.md` mapping table +
-    //! `research_vendor_verification_cursor_kiro.md`), NOT the stub bodies. The
-    //! `rule_index` / `agent_index` / `mcp_entry` transforms are `unimplemented!()`
-    //! stubs, so those tests fail by panic until the implementation phase; the
-    //! `kind_support` and universal-skill tests exercise already-wired behavior.
+    //! `research_vendor_verification_cursor_kiro.md`).
     use super::*;
     use crate::install::vendor::KindSupport;
     use crate::oci::ArtifactKind;
@@ -370,6 +405,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(a.document, b.document, "regeneration must be byte-identical");
+    }
+
+    #[test]
+    fn rule_index_embedded_quote_glob_round_trips() {
+        // A glob carrying a double quote must be escaped so the emitted `.mdc`
+        // frontmatter still parses back to the original pattern — the fix does
+        // full double-quoted YAML escaping, not naive quote-doubling.
+        let out = CursorVendor
+            .rule_index(
+                &rule("---\npaths: ['weird\"name/**']\n---\nbody\n"),
+                ConfigScope::Project,
+                "p",
+            )
+            .unwrap()
+            .unwrap();
+        // Parse the frontmatter block back and confirm the glob round-trips.
+        let inner = out.document.strip_prefix("---\n").expect("leading fence");
+        let end = inner.find("---\n").expect("closing fence");
+        let fm: serde_yaml::Value = serde_yaml::from_str(&inner[..end]).expect("frontmatter parses");
+        assert_eq!(
+            fm["globs"],
+            serde_yaml::Value::String("weird\"name/**".to_string()),
+            "escaped glob round-trips: {}",
+            out.document
+        );
+    }
+
+    #[test]
+    fn rule_index_comma_in_glob_warns_but_renders_unchanged() {
+        // Cursor splits `globs:` on every comma, including inside `{a,b}`
+        // braces — a comma-bearing glob is flagged; the render is unchanged.
+        let out = CursorVendor
+            .rule_index(
+                &rule("---\npaths: [\"src/**/*.{rs,toml}\"]\n---\nbody\n"),
+                ConfigScope::Project,
+                "p",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.warnings.len(), 1, "one comma warning: {:?}", out.warnings);
+        assert!(out.warnings[0].contains("comma"), "{:?}", out.warnings);
+        assert!(
+            out.document.contains("src/**/*.{rs,toml}"),
+            "render is unchanged — the comma-joined string still carries the glob: {}",
+            out.document
+        );
     }
 
     // ── native agent render: emit order + cursor.* registry + tools drop ──

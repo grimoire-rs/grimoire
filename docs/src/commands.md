@@ -107,7 +107,7 @@ The supported dotted keys are:
 
 | Key | Value type | Notes |
 |-----|------------|-------|
-| `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from `claude`, `opencode`, `copilot` — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
+| `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from the ten supported clients (see the [client compatibility matrix](./clients.md#matrix)) — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
 | `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
 | `options.show_deprecated` | `true` or `false` | `false` is the default (deprecated artifacts are hidden from `grim search` and the TUI unless installed); setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). Seeds the initial state for both `grim search` and `grim tui`; the search `--show-deprecated` flag and the TUI `h` key override it per run. |
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
@@ -307,8 +307,9 @@ already locks what it declares.
 ## grim install {#install}
 
 Materializes every locked artifact into your AI clients' configuration
-directories. `--client <list>` selects AI clients (`claude`, `opencode`,
-`copilot`, `codex`, comma-separated), overriding the config `clients` option. When
+directories. `--client <list>` selects AI clients (comma-separated; any of the
+ten supported clients — see the [client compatibility matrix](./clients.md#matrix)),
+overriding the config `clients` option. When
 neither selects a client, the **detected** clients for the scope are
 targeted — every client whose vendor directory or marker is present —
 falling back to all clients when none are detected. `--force` overwrites a
@@ -627,7 +628,8 @@ grim search --refresh --registry ghcr.io/acme
 `grim fetch <ref>` resolves an artifact and prints its content — **use ≠
 install**: nothing is materialized, no state is touched. It is the CLI
 port of the MCP [`grim_fetch` tool](#mcp): canonical (as-authored) content
-by default, a `--vendor <claude|opencode|copilot>` projection, or one
+by default, a `--vendor <client>` projection (any of the ten supported
+clients — see the [client compatibility matrix](./clients.md#matrix)), or one
 `--path <tree-path>` support file. Two more flags switch the report to a
 different shape entirely instead of fetching the artifact:
 [`--description`](#fetch-description) fetches the repository's description

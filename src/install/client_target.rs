@@ -578,7 +578,14 @@ mod tests {
             if cells.len() < 5 {
                 continue;
             }
-            let name = cells[0].to_ascii_lowercase();
+            // The client cell may be a hyperlink (`[Claude]`, `[Claude][claude]`,
+            // or `[Claude](url)`) — reduce it to the link text before matching.
+            let raw = cells[0];
+            let name = raw
+                .strip_prefix('[')
+                .and_then(|r| r.split_once(']'))
+                .map_or(raw, |(text, _)| text)
+                .to_ascii_lowercase();
             let cell = |c: &str| {
                 if c.contains('✓') {
                     Some(Cell::Yes)

@@ -981,6 +981,24 @@ metadata:
         assert!(warnings[0].contains("author it inside 'metadata'"));
     }
 
+    #[test]
+    fn validate_agent_metadata_rejects_bad_wave1_literals() {
+        // The publish gate projects against EVERY target, so a bad literal in
+        // any wave-1 vendor's typed registry fails the gate — not just Claude:
+        // cursor.readonly is a bool, gemini.temperature a float, gemini.max-turns
+        // an int.
+        for doc in [
+            "---\nname: rev\ndescription: d\nmetadata:\n  cursor.readonly: \"maybe\"\n---\nbody\n",
+            "---\nname: rev\ndescription: d\nmetadata:\n  gemini.temperature: \"warm\"\n---\nbody\n",
+            "---\nname: rev\ndescription: d\nmetadata:\n  gemini.max-turns: \"many\"\n---\nbody\n",
+        ] {
+            assert!(
+                validate_agent_metadata(&agent(doc).frontmatter).is_err(),
+                "bad literal must fail the publish gate: {doc}"
+            );
+        }
+    }
+
     // ── Rule projection ──────────────────────────────────────────────────
 
     #[test]

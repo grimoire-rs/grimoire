@@ -28,16 +28,16 @@ Legend:
 
 | Client | Skill | Rule | Agent | MCP |
 |--------|-------|------|-------|-----|
-| Claude | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ◐ | ✓ | ◐ |
-| Copilot | ✓ | ✓ | ✓ | ◐ |
-| Codex | ✓ | ✗ | ✓ | ◐ |
-| Cursor | ✓ | ✓ | ✓ | ◐ |
-| Kiro | ✓ | ✓ | ✗ | ◐ |
-| Junie | ✓ | ✗ | ✗ | ◐ |
-| Gemini | ✓ | ✗ | ✓ | ◐ |
-| Zed | ✓ | ✗ | ✗ | ◐ |
-| Amp | ✓ | ✗ | ✗ | ◐ |
+| [Claude] | ✓ | ✓ | ✓ | ✓ |
+| [OpenCode] | ✓ | ◐ | ✓ | ◐ |
+| [Copilot] | ✓ | ✓ | ✓ | ◐ |
+| [Codex] | ✓ | ✗ | ✓ | ◐ |
+| [Cursor] | ✓ | ✓ | ✓ | ◐ |
+| [Kiro] | ✓ | ✓ | ✗ | ◐ |
+| [Junie] | ✓ | ✗ | ✗ | ◐ |
+| [Gemini] | ✓ | ✗ | ✓ | ◐ |
+| [Zed] | ✓ | ✗ | ✗ | ◐ |
+| [Amp] | ✓ | ✗ | ✗ | ◐ |
 
 Bundles decompose into their member kinds and are not a column.
 
@@ -46,75 +46,91 @@ Bundles decompose into their member kinds and are not a column.
 Every ◐ and ✗ above traces to a specific, verified upstream limitation. The
 internal working list is the vendor capability watchlist; the entries below are
 its user-facing projection — the rationale and the upstream tracking pointer
-for each.
+for each, plus a couple of authoring caveats (like [Cursor]'s comma-in-glob
+split) worth calling out even where the surface is otherwise fully supported.
 
 ### MCP: ws and oauth are Claude-only {#gap-mcp-ws-oauth}
 
-Every MCP cell except Claude is ◐ because grim declines two descriptor shapes
-for every non-Claude client: the WebSocket (`ws`) transport and the structured
-`oauth` block. No surveyed non-Claude client documents a native config surface
-for either, so grim skips a ws- or oauth-bearing server for that client with a
-warning rather than writing an entry the client cannot honor. Every other
-transport (stdio, sse, http) registers normally.
+Every MCP cell except [Claude] is ◐ because grim declines two descriptor shapes
+for every client other than [Claude]: the WebSocket (`ws`) transport and the
+structured `oauth` block. No surveyed client other than [Claude] documents a
+native config surface for either, so grim skips a ws- or oauth-bearing server
+for that client with a warning rather than writing an entry the client cannot
+honor. Every other transport (stdio, sse, http) registers normally.
 
 ### Copilot: global MCP environment references {#gap-copilot-env}
 
-At global scope, the GitHub Copilot CLI does not substitute `${VAR}`
+At global scope, the [GitHub Copilot][copilot] CLI does not substitute `${VAR}`
 environment references in its MCP config, so grim skips a descriptor that
 carries one (project scope is unaffected). Upstream shipped substitution in
 v0.0.406 and regressed it in v0.0.407 — grim will drop the skip once a fixed
 release is confirmed.
 
+### Cursor: a comma inside a glob splits the pattern {#gap-cursor-globs}
+
+[Cursor] rules are fully supported (a `.mdc` file with a comma-joined `globs`
+string), but Cursor splits that string on **every** comma — including a comma
+inside a `{a,b}` brace alternation ([cursor forum #76648][cursor-glob-split]).
+A single glob such as `src/**/*.{rs,toml}` is therefore read as two separate
+patterns. grim writes the glob unchanged and emits a warning at install time so
+you can split the rule into one pattern per glob.
+
 ### OpenCode: rules install without path scoping {#gap-opencode-rules}
 
-OpenCode has a per-file rules surface but no `paths:` scoping. A rule installs
+[OpenCode] has a per-file rules surface but no `paths:` scoping. A rule installs
 as body-plus-provenance with its `paths` dropped and a warning — Degraded, not
 declined, because the instruction content still installs and loads.
 
 ### Codex: rules declined {#gap-codex-rules}
 
-Codex has no path-scoped instruction mechanism — its `AGENTS.md` is always-on
+[Codex] has no path-scoped instruction mechanism — its `AGENTS.md` is always-on
 and directory-granular, with no `paths`/`applyTo` equivalent. grim declines a
-rule for Codex: warn, skip, and write no file.
+rule for [Codex]: warn, skip, and write no file.
 
 ### Kiro: global rules are inert until #9176 {#gap-kiro-rules}
 
-Kiro steering rules are native at both scopes, but a global-scope scoped rule
-is written correctly yet ignored by Kiro until upstream bug [kiro #9176] is
+[Kiro] steering rules are native at both scopes, but a global-scope scoped rule
+is written correctly yet ignored by [Kiro] until upstream bug [kiro #9176] is
 fixed. grim writes the correct `fileMatch` steering and emits a warning citing
 the issue; the file self-heals (becomes active) when the bug closes, with no
 grim change.
 
+A manual workaround exists today: switching the steering block to
+`inclusion: auto` makes [Kiro] load it heuristically at the global scope. grim
+deliberately does not emit `auto` — it ships the deterministic, path-scoped
+`fileMatch` the rule actually describes, which activates exactly where intended
+once the upstream fix lands, instead of a fuzzy always-on heuristic.
+
 ### Kiro: agents declined {#gap-kiro-agents}
 
-A native Kiro IDE agent format exists, but the Kiro CLI expects an incompatible
-JSON schema in the same `.kiro/agents/` directory (open bug [kiro #8040]).
-Writing IDE-format files could break CLI users, so grim declines Kiro agents
-pending a resolution.
+A native [Kiro] IDE agent format exists, but the [Kiro] CLI expects an
+incompatible JSON schema in the same `.kiro/agents/` directory (open bug
+[kiro #8040]). Writing IDE-format files could break CLI users, so grim declines
+[Kiro] agents pending a resolution.
 
 ### Junie: rules and agents declined {#gap-junie}
 
-Junie has no grim-ownable per-file rules surface — its mechanism is a single
-`.junie/AGENTS.md`, not a per-rule directory — so rules are declined. Junie's
+[Junie] has no grim-ownable per-file rules surface — its mechanism is a single
+`.junie/AGENTS.md`, not a per-rule directory — so rules are declined. [Junie]'s
 `.junie/agents/` format exists but is early-access-preview only, not generally
 available; agents are declined until it ships.
 
 ### Gemini: rules declined, agents gated by a setting {#gap-gemini}
 
-Gemini's only rules surface is the `GEMINI.md` hierarchy, with no ownable
-per-file target, so rules are declined. Gemini agents are native and are
-installed, but Gemini only loads them when `experimental.enableAgents` is set —
+[Gemini]'s only rules surface is the `GEMINI.md` hierarchy, with no ownable
+per-file target, so rules are declined. [Gemini] agents are native and are
+installed, but [Gemini] only loads them when `experimental.enableAgents` is set —
 which defaults on, so they work out of the box for most users.
 
-The individual-tier Gemini CLI (free/Pro/Ultra) stopped being served on
+The individual-tier [Gemini] CLI (free/Pro/Ultra) stopped being served on
 2026-06-18, [transitioning to the Antigravity CLI][gemini-antigravity] (which
 reportedly carries Agent Skills and subagents forward — unverified). Enterprise
-Gemini Code Assist licenses remain fully supported; grim's Gemini support
+[Gemini] Code Assist licenses remain fully supported; grim's [Gemini] support
 targets that surface, verified against the still-served enterprise docs.
 
 ### Shared skills pool visibility {#gap-shared-pool}
 
-Codex, Gemini, Zed, and Amp all read the cross-vendor `.agents/skills`
+[Codex], [Gemini], [Zed], and [Amp] all read the cross-vendor `.agents/skills`
 directory. A skill installed for any one of them is physically the same file
 every other pool member reads, so it is discoverable by all four even when only
 one was selected. This is upstream scan behavior, not a grim choice; grim
@@ -123,16 +139,16 @@ another client still records.
 
 ### Zed: rules and agents declined, MCP env references {#gap-zed}
 
-Zed has no rule scoping — instruction files follow a nine-name first-match
-precedence with no per-file ownership — so rules are declined. Zed agents run
-over ACP with no installable file format and are declined too. Zed's MCP config
+[Zed] has no rule scoping — instruction files follow a nine-name first-match
+precedence with no per-file ownership — so rules are declined. [Zed] agents run
+over ACP with no installable file format and are declined too. [Zed]'s MCP config
 has no environment-reference substitution, so grim skips a `${VAR}`-bearing
 server with a warning.
 
 ### Amp: rules and agents declined {#gap-amp}
 
-Amp's only instruction surface is `AGENTS.md` (falling back to `AGENT.md`, then
-`CLAUDE.md`) with no per-file scoping, so rules are declined. Amp subagents are
+[Amp]'s only instruction surface is `AGENTS.md` (falling back to `AGENT.md`, then
+`CLAUDE.md`) with no per-file scoping, so rules are declined. [Amp] subagents are
 spawned at runtime with no installable file format, so agents are declined.
 
 ## The `compatibility:` frontmatter field {#compatibility-disclaimer}
@@ -140,12 +156,23 @@ spawned at runtime with no installable file format, so agents are declined.
 An artifact may carry a free-text `compatibility:` frontmatter field. It is an
 editor and runtime *hint* only — a note for humans and tools that read the
 source. It has **zero effect** on how grim renders or gates an artifact per
-client. A `compatibility: codex` line does not make a rule install for Codex,
+client. A `compatibility: codex` line does not make a rule install for [Codex],
 and it never overrides the matrix above. This matrix — enforced by the
 build-time parity test — is the authoritative statement of what grim installs
 where.
 
 <!-- external -->
+[claude]: https://code.claude.com
+[opencode]: https://opencode.ai
+[copilot]: https://github.com/features/copilot
+[codex]: https://developers.openai.com/codex
+[cursor]: https://cursor.com
+[kiro]: https://kiro.dev
+[junie]: https://www.jetbrains.com/junie/
+[gemini]: https://geminicli.com
+[zed]: https://zed.dev
+[amp]: https://ampcode.com
+[cursor-glob-split]: https://forum.cursor.com/t/76648
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
 [gemini-antigravity]: https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/
