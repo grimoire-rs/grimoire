@@ -99,10 +99,13 @@ honored in wave 1** — `CURSOR_CONFIG_DIR` (possibly CLI-only), `KIRO_HOME`
 (CLI-only, IDE ignores it — bug #9148), and Junie's per-kind
 `JUNIE_*_LOCATIONS` family are all watchlisted instead.
 
-New vendor `KnownField` registries start **empty** (universal renders);
-`cursor.*`/`kiro.*`/`junie.*`/`gemini.*`/`zed.*`/`amp.*` namespaces are
-reserved in `KNOWN_NAMESPACES` regardless, so foreign-key stripping and
-typo-guard behavior stay uniform. Each vendor lands as its own conventional
+New vendor **skill and rule** `KnownField` registries start **empty**
+(universal renders). Cursor and Gemini ship **typed agent registries**
+(`CURSOR_AGENT_FIELDS`, `GEMINI_AGENT_FIELDS`) — the per-vendor mapping table
+above is authoritative; the remaining four (kiro/junie/zed/amp) start empty
+across every kind. The `cursor.*`/`kiro.*`/`junie.*`/`gemini.*`/`zed.*`/`amp.*`
+namespaces are reserved in `KNOWN_NAMESPACES` regardless, so foreign-key
+stripping and typo-guard behavior stay uniform. Each vendor lands as its own conventional
 commit (potentially its own minor release) with its compat-matrix row and
 docs entries in the same commit
 ([adr_client_compat_matrix.md](./adr_client_compat_matrix.md) test enforces).
@@ -234,9 +237,15 @@ mitigation: per-vendor live re-verification gate before landing (watchlist
 procedure), ⚠ markers above are the checklist. Client rebrand volatility
 (Windsurf precedent) — mitigated by deferring volatile vendors entirely.
 
-**Compatibility:** additive minors throughout. `--client` value set,
-detection, TUI, publish validation extend generically (12 generic
-`ALL`/`VALUE_NAMES` consumers need zero edits). JSON report shapes:
+**Compatibility:** additive minors throughout, with **one deliberate input
+narrowing**: the typed `cursor.*`/`gemini.*` agent registries make a
+malformed literal (e.g. `gemini.temperature: "warm"`) a hard publish-gate
+failure (exit 65) where the pre-wave build passed it through as plain
+metadata. Blast radius is the eight typed keys only — `kiro.*`/`junie.*`/
+`zed.*`/`amp.*` keys still warn+drop. Reserved by design, not accidental
+breakage. `--client` value set, detection, TUI, publish validation extend
+generically (12 generic `ALL`/`VALUE_NAMES` consumers need zero edits). JSON
+report shapes:
 client names inside already-frozen shapes — additive per stability.md.
 `kind_support` rename is internal-only. State schema: untouched (existing
 `ClientOutput` fields suffice for wave 1).
