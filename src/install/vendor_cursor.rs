@@ -23,6 +23,7 @@
 //! `CURSOR_CONFIG_DIR` is **not** honored in wave 1 (possibly CLI-only —
 //! watchlisted); paths hardcode the documented `~/.cursor` default.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
@@ -30,7 +31,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, Vendor, home_dir};
+use super::vendor::{FieldType, KnownField, Vendor, home_dir, provenance};
 
 /// Cursor.
 pub struct CursorVendor;
@@ -56,6 +57,11 @@ pub const CURSOR_AGENT_FIELDS: &[KnownField] = &[
         ty: FieldType::Bool,
     },
 ];
+
+/// The common agent field a lifted `cursor.*` key may silently override
+/// (only `model` is a projected common field; `readonly`/`is_background`
+/// are Cursor-native and never collide with an emitted common key).
+const CURSOR_AGENT_OVERRIDES: &[&str] = &["model"];
 
 impl Vendor for CursorVendor {
     fn name(&self) -> &'static str {
@@ -97,13 +103,52 @@ impl Vendor for CursorVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
-        _name: &str,
-        _descriptor: &crate::oci::mcp::McpDescriptor,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        // `mcpServers` container; stdio needs `type: "stdio"`; env refs
-        // translate `${VAR}` → `${env:VAR}`; oauth skipped (shape ≠ grim block).
-        unimplemented!("V1 Cursor: mcp_entry filled in the implementation phase")
+        use crate::oci::mcp::McpTransport;
+
+        // A structured oauth block is auth-critical and has no Cursor target
+        // (its shape ≠ grim's `McpOAuth`) — skip the whole descriptor with a
+        // warning rather than write an entry that silently drops the auth.
+        let s = &descriptor.server;
+        if s.oauth.is_some() {
+            tracing::warn!("mcp server '{name}' skipped for cursor ({scope}): no oauth surface in mcp.json");
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            McpTransport::Stdio => {
+                // Cursor stdio entries carry an explicit `type: "stdio"`.
+                entry.insert("type".into(), serde_json::json!("stdio"));
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            // WebSocket transport has no Cursor `mcp.json` mapping — skip with
+            // a warning (the installer records zero outputs for a `None`).
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for cursor ({scope}): no ws transport in mcp.json");
+                return None;
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // Cursor's env-ref syntax is `${env:VAR}` — translate the canonical
+        // `${VAR}` in every string leaf (Copilot-project helper reuse).
+        let mut value = serde_json::Value::Object(entry);
+        super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
+        Some((format!("/mcpServers/{name}"), value))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -114,17 +159,76 @@ impl Vendor for CursorVendor {
 
     fn rule_index(
         &self,
-        _parsed: &ParsedRule,
+        parsed: &ParsedRule,
         _scope: ConfigScope,
-        _pinned: &str,
+        pinned: &str,
     ) -> Result<Option<RenderedDoc>, RenderError> {
-        // `.mdc` transform: `paths` → comma-joined `globs` + `alwaysApply`.
-        unimplemented!("V1 Cursor: rule_index filled in the implementation phase")
+        // Cursor has no rule registry — project only to strip any stray
+        // metadata and surface a typo warning for an own-namespace `cursor.*`
+        // rule key (foreign keys drop silently). Nothing is lifted.
+        let projection = render::project_rule(&parsed.frontmatter, self)?;
+
+        // `.mdc` always carries frontmatter: `paths` comma-join into the
+        // single `globs` STRING Cursor reads plus `alwaysApply: false` when
+        // scoped; no `globs` and `alwaysApply: true` when unscoped.
+        let mut document = String::from("---\n");
+        let globs = parsed.frontmatter.paths.join(",");
+        if globs.is_empty() {
+            document.push_str("alwaysApply: true\n");
+        } else {
+            // Quoted: a glob's leading `*` would otherwise read as a YAML
+            // alias indicator (Copilot `applyTo` precedent).
+            let _ = writeln!(document, "globs: \"{}\"", globs.replace('"', "\\\""));
+            document.push_str("alwaysApply: false\n");
+        }
+        document.push_str("---\n");
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc {
+            document,
+            warnings: projection.warnings,
+        }))
     }
 
-    fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Native markdown agent + `cursor.*` registry lift.
-        unimplemented!("V1 Cursor: agent_index filled in the implementation phase")
+    fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+        // Cursor agents are always a transform: `name` + `description` +
+        // `model` emit natively (a `cursor.model` key overrides the projected
+        // common `model` silently — the escape hatch), and the `cursor.*`
+        // registry lifts `readonly` / `is_background` as native bools. Emit
+        // order is deterministic: name, description, model, then the lifted
+        // registry keys (registry order). `tools` has no Cursor equivalent —
+        // dropped with a warning.
+        let projection = render::project_agent(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        if projection.cleaned.tools.is_some() {
+            warnings.push(format!(
+                "agent field 'tools' has no Cursor equivalent; dropped for agent '{}'",
+                projection.cleaned.name
+            ));
+        }
+
+        let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![
+            ("name", serde_yaml::Value::String(projection.cleaned.name.to_string())),
+            (
+                "description",
+                serde_yaml::Value::String(projection.cleaned.description.to_string()),
+            ),
+        ];
+        if let Some(model) = &projection.cleaned.model {
+            natives.push(("model", serde_yaml::Value::String(model.to_string())));
+        }
+
+        let mut document = render::agent_frontmatter_block(
+            natives,
+            projection.lifted,
+            self.name(),
+            CURSOR_AGENT_OVERRIDES,
+            &mut warnings,
+        );
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 }
 
