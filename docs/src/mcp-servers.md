@@ -168,7 +168,9 @@ itself expands (a shell-style default, say) is safe to author.
 
 On `grim install`, each detected client renders the descriptor into its
 own schema and splices the result into whichever MCP config file that
-client already reads — never a new file:
+client already reads — never a new file. The concrete file paths below are
+**not** part of the stability contract — vendor render layout may change in any
+minor release (see [stability][stability-unstable]).
 
 | Client | Scope | File | Container key | Entry shape | Env-ref syntax |
 |---|---|---|---|---|---|
@@ -180,6 +182,12 @@ client already reads — never a new file:
 | [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
 | [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
+| **Cursor** | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
+| **Kiro** | project / global | `.kiro/settings/mcp.json` / `~/.kiro/settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
+| **Junie** | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; oauth skipped | undocumented — ref-bearing descriptors skipped |
+| **Gemini CLI** | project / global | `.gemini/settings.json` (both scopes) | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
+| **Zed** | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
+| **Amp** | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 
 Codex is the one **TOML** target — every other client above writes
 JSON/JSONC — so its splice runs through a separate span-preserving
@@ -401,6 +409,7 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 
 <!-- internal -->
 [stability-forward]: ./stability.md#limitations-forward-compat
+[stability-unstable]: ./stability.md#unstable
 
 <!-- external -->
 [mcp-spec]: https://spec.modelcontextprotocol.io/

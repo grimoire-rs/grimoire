@@ -144,7 +144,12 @@ impl Vendor for GeminiVendor {
         render::render_skill_doc(doc, self)
     }
 
-    fn rule_index(&self, _parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+    fn rule_index(
+        &self,
+        _parsed: &ParsedRule,
+        _scope: ConfigScope,
+        _pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
         // Never called: rules are skipped at the `kind_support` gate.
         Ok(None)
     }

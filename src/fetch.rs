@@ -928,7 +928,9 @@ fn project_index(
                 crate::skill::rule_frontmatter::RuleFrontmatter::parse_doc(doc, std::path::Path::new("rule.md"))
                     .map_err(|e| anyhow!("rule parse failed: {e}"))?;
             vendor
-                .rule_index(&parsed, &pinned_str)
+                // A fetch is a use-not-install preview (content returned, no
+                // install location), so the neutral project-scope render applies.
+                .rule_index(&parsed, crate::config::scope::ConfigScope::Project, &pinned_str)
                 .map_err(|e| anyhow!("rule projection failed: {e}"))?
         }
         ArtifactKind::Agent => {

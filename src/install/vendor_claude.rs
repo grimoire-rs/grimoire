@@ -304,7 +304,12 @@ impl Vendor for ClaudeVendor {
         render::render_skill_doc(doc, self)
     }
 
-    fn rule_index(&self, parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+    fn rule_index(
+        &self,
+        parsed: &ParsedRule,
+        _scope: ConfigScope,
+        _pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
         // A plain rule installs verbatim (`paths:` is native). Only a rule
         // carrying tool-namespaced metadata is re-rendered: own-namespace
         // keys lift (none known today — unknown ones warn), foreign vendor

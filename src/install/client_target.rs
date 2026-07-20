@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter};
 
@@ -242,12 +243,13 @@ impl ClientTarget {
         name: &str,
         artifact_root: &Path,
         dest: &Path,
+        scope: ConfigScope,
         pinned: &str,
         support_dir: Option<&Path>,
     ) -> Result<Vec<MaterializedFile>, InstallError> {
         match kind {
             ArtifactKind::Skill => self.materialize_skill(name, artifact_root, dest),
-            ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned, support_dir),
+            ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, scope, pinned, support_dir),
             ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
@@ -324,6 +326,7 @@ impl ClientTarget {
         name: &str,
         artifact_root: &Path,
         dest: &Path,
+        scope: ConfigScope,
         pinned: &str,
         support_dir: Option<&Path>,
     ) -> Result<Vec<MaterializedFile>, InstallError> {
@@ -336,7 +339,7 @@ impl ClientTarget {
         let parsed = RuleFrontmatter::parse_doc(&doc, artifact_root).map_err(|e| materialize_failed(e.to_string()))?;
         let rendered = self
             .vendor()
-            .rule_index(&parsed, pinned)
+            .rule_index(&parsed, scope, pinned)
             .map_err(|e| materialize_failed(e.to_string()))?;
 
         let mut out = match rendered {
@@ -463,6 +466,7 @@ fn target_io(path: &Path, source: std::io::Error) -> InstallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::scope::ConfigScope;
     use std::str::FromStr;
 
     #[test]
@@ -801,7 +805,15 @@ mod tests {
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\n").unwrap();
         let dest = tmp.path().join(".claude/rules/rust-style.md");
         let files = ClientTarget::Claude
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "p", None)
+            .materialize(
+                ArtifactKind::Rule,
+                "rust-style",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "p",
+                None,
+            )
             .unwrap();
         assert_eq!(files.len(), 1);
         assert!(!files[0].generated);
@@ -818,7 +830,15 @@ mod tests {
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\nbody\n").unwrap();
         let dest = tmp.path().join(".github/instructions/rust-style.instructions.md");
         let files = ClientTarget::Copilot
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "pin", None)
+            .materialize(
+                ArtifactKind::Rule,
+                "rust-style",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "pin",
+                None,
+            )
             .unwrap();
         assert!(files[0].generated);
         let body = std::fs::read_to_string(&dest).unwrap();
@@ -833,7 +853,15 @@ mod tests {
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\nbody\n").unwrap();
         let dest = tmp.path().join(".opencode/rules/rust-style.md");
         let files = ClientTarget::OpenCode
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "pin", None)
+            .materialize(
+                ArtifactKind::Rule,
+                "rust-style",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "pin",
+                None,
+            )
             .unwrap();
         assert!(files[0].generated);
         let body = std::fs::read_to_string(&dest).unwrap();
@@ -855,7 +883,15 @@ mod tests {
         .unwrap();
         let dest = tmp.path().join(".claude/rules/rust-style.md");
         let files = ClientTarget::Claude
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "p", None)
+            .materialize(
+                ArtifactKind::Rule,
+                "rust-style",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "p",
+                None,
+            )
             .unwrap();
         assert!(files[0].generated, "cleaned render is a generated file");
         let body = std::fs::read_to_string(&dest).unwrap();
@@ -881,7 +917,15 @@ mod tests {
         ] {
             let dest = tmp.path().join(format!("out-{client}/code-review"));
             let files = client
-                .materialize(ArtifactKind::Skill, "code-review", &root, &dest, "p", None)
+                .materialize(
+                    ArtifactKind::Skill,
+                    "code-review",
+                    &root,
+                    &dest,
+                    ConfigScope::Project,
+                    "p",
+                    None,
+                )
                 .unwrap();
             assert_eq!(files.len(), 2);
             assert!(files.iter().all(|f| !f.generated));
@@ -910,7 +954,15 @@ mod tests {
 
         let dest = tmp.path().join(".claude/rules/my-rule.md");
         let files = ClientTarget::Claude
-            .materialize(ArtifactKind::Rule, "my-rule", &src, &dest, "p", Some(support.as_path()))
+            .materialize(
+                ArtifactKind::Rule,
+                "my-rule",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "p",
+                Some(support.as_path()),
+            )
             .unwrap();
 
         assert!(files.iter().all(|f| !f.generated), "verbatim copies are not generated");
@@ -942,7 +994,15 @@ mod tests {
 
         let dest = tmp.path().join(".opencode/rules/my-rule.md");
         let files = ClientTarget::OpenCode
-            .materialize(ArtifactKind::Rule, "my-rule", &src, &dest, "p", Some(support.as_path()))
+            .materialize(
+                ArtifactKind::Rule,
+                "my-rule",
+                &src,
+                &dest,
+                ConfigScope::Project,
+                "p",
+                Some(support.as_path()),
+            )
             .unwrap();
 
         assert_eq!(files.iter().filter(|f| f.generated).count(), 1);
@@ -972,7 +1032,15 @@ mod tests {
         ] {
             let dest = tmp.path().join(format!("out-{client}/next"));
             let files = client
-                .materialize(ArtifactKind::Skill, "next", &root, &dest, "p", None)
+                .materialize(
+                    ArtifactKind::Skill,
+                    "next",
+                    &root,
+                    &dest,
+                    ConfigScope::Project,
+                    "p",
+                    None,
+                )
                 .unwrap();
             // The rendered index is generated; the sibling stays verbatim.
             let index = dest.join("SKILL.md");
@@ -1016,7 +1084,15 @@ mod tests {
         ] {
             let dest = tmp.path().join(format!("out-{client}/plain"));
             let files = client
-                .materialize(ArtifactKind::Skill, "plain", &root, &dest, "p", None)
+                .materialize(
+                    ArtifactKind::Skill,
+                    "plain",
+                    &root,
+                    &dest,
+                    ConfigScope::Project,
+                    "p",
+                    None,
+                )
                 .unwrap();
             assert!(files.iter().all(|f| !f.generated), "{client}: verbatim fast path");
             assert_eq!(
@@ -1047,7 +1123,15 @@ mod tests {
         for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
             let dest = tmp.path().join(format!("out-{client}/bar"));
             let files = client
-                .materialize(ArtifactKind::Skill, "bar", &root, &dest, "p", None)
+                .materialize(
+                    ArtifactKind::Skill,
+                    "bar",
+                    &root,
+                    &dest,
+                    ConfigScope::Project,
+                    "p",
+                    None,
+                )
                 .unwrap();
             let index = dest.join("SKILL.md");
             assert!(
@@ -1085,6 +1169,7 @@ mod tests {
                 "my-rule",
                 &src,
                 &dest,
+                ConfigScope::Project,
                 "pin",
                 Some(support.as_path()),
             )

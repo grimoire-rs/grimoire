@@ -256,7 +256,12 @@ impl Vendor for CodexVendor {
         render::render_skill_doc(doc, self)
     }
 
-    fn rule_index(&self, _parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+    fn rule_index(
+        &self,
+        _parsed: &ParsedRule,
+        _scope: ConfigScope,
+        _pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
         // Never called: rules are skipped at the installer's `kind_support`
         // gate. Defensive `None` (would install verbatim) keeps the trait total.
         Ok(None)
@@ -608,7 +613,12 @@ mod tests {
     fn rule_index_is_none_defensive() {
         let parsed =
             crate::skill::RuleFrontmatter::parse_doc("---\npaths: [\"a\"]\n---\nbody\n", Path::new("r.md")).unwrap();
-        assert!(CodexVendor.rule_index(&parsed, "p").unwrap().is_none());
+        assert!(
+            CodexVendor
+                .rule_index(&parsed, ConfigScope::Project, "p")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── C1: CodexVendor::mcp_entry field mapping (plan C1) ────────────────

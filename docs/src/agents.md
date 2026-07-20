@@ -85,27 +85,36 @@ OpenCode needs.
 
 ## What each client receives {#emit-matrix}
 
-On install, grim projects the canonical file per client:
+On install, grim projects the canonical agent file into each client's native
+format, or declines it where the client ships no ownable agent surface. Agents
+are the least uniform kind — only six clients have a file format grim can own.
 
-| Canonical field | [Claude Code][claude-subagents-docs] | [OpenCode][opencode-agents-docs] | [Copilot CLI][copilot-agents-docs] | [Codex][codex-subagents-docs] |
-|---|---|---|---|---|
-| `name` | kept | **dropped** (filename is the identity) | kept | kept (`name` key in TOML) |
-| `description` | kept | kept | kept | kept (`description` key in TOML) |
-| `model` | kept | kept (see [precedence](#override-precedence)) | kept | kept (optional `model` key in TOML) |
-| `tools` | kept (comma string) | **dropped** (deprecated upstream) | emitted as a YAML **list** | **dropped with warning** (no Codex equivalent) |
-| plain `metadata` / unknown keys | kept | dropped | dropped | dropped |
-| body | verbatim | verbatim | verbatim | `developer_instructions` key in TOML |
-| output format | Markdown + YAML frontmatter | Markdown (no frontmatter) | Markdown + YAML frontmatter | **TOML** (`<name>.toml`) |
-| provenance comment | none | yes | yes | yes (TOML `#`) |
+| Client | Output | What grim projects |
+|---|---|---|
+| [Claude Code][claude-subagents-docs] | `.md` + YAML frontmatter | the canonical format verbatim — a plain agent installs byte-identical (`generated: false`), no provenance comment |
+| [OpenCode][opencode-agents-docs] | `.md`, no frontmatter | `name` dropped (the filename is the identity), `tools` dropped (deprecated upstream), `opencode.*` lifted; provenance comment |
+| [Copilot CLI][copilot-agents-docs] | `.md` + YAML frontmatter | `tools` emitted as a YAML **list**, `copilot.*` lifted; provenance comment |
+| [Codex][codex-subagents-docs] | **TOML** (`<name>.toml`) | body → `developer_instructions`, `tools` dropped with a warning, `codex.*` lifted; `#` provenance |
+| [Cursor][cursor-subagents-docs] | `.md` + YAML frontmatter | `cursor.*` lifted (`model`, `readonly`, `is_background`), `tools` dropped with a warning; provenance comment |
+| [Gemini CLI][gemini-subagents-docs] | `.md` + YAML frontmatter | `gemini.*` lifted (`model`, `temperature`, `max_turns`, `timeout_mins`, `kind`); loaded only when `experimental.enableAgents` is on (the default) |
+| **Kiro** | not supported | agents declined — the Kiro CLI expects an incompatible schema in the same directory ([kiro #8040]) |
+| **Junie** | not supported | agents declined — the `.junie/agents/` format is early-access-preview only |
+| **Zed** | not supported | agents declined — external agents run over ACP with no installable file |
+| **Amp** | not supported | agents declined — subagents are spawned at runtime with no file format |
 
-The canonical format **is** Claude Code's native subagent format, so a
-plain agent — one with no `<vendor>.<field>` metadata keys — installs for
-Claude byte-identical to the published file (`generated: false`). The
-OpenCode and Copilot files are always generated transforms and carry a
-provenance comment; editing them by hand is detected as
-[drift][vendor-drift], exactly like any generated file.
+The canonical format **is** Claude Code's native subagent format, so a plain
+agent — one with no `<vendor>.<field>` metadata keys — installs for Claude
+byte-identical to the published file (`generated: false`). Every other output
+is a generated transform carrying a provenance comment; editing one by hand is
+detected as [drift][vendor-drift], exactly like any generated file. See the
+[client compatibility matrix][clients-matrix] for the full support picture and
+the per-vendor [agent registries][vendor-agent-registries] for the lifted
+`<vendor>.*` keys.
 
 ## Install locations {#locations}
+
+These concrete paths are **not** part of the stability contract — vendor render
+layout may change in any minor release (see [stability][stability-unstable]).
 
 **Project scope:**
 
@@ -202,9 +211,14 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [opencode-agents-docs]: https://opencode.ai/docs/agents/
 [copilot-agents-docs]: https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-custom-agents
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
+[cursor-subagents-docs]: https://cursor.com/docs/context/subagents
+[gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
+[kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
 
 <!-- internal -->
 [vendor-metadata]: ./vendor-metadata.md
 [vendor-agent-registries]: ./vendor-metadata.md#claude-agent-registry
 [vendor-discovery]: ./vendor-metadata.md#discovery-locations
 [vendor-drift]: ./vendor-metadata.md#drift
+[clients-matrix]: ./clients.md
+[stability-unstable]: ./stability.md#unstable

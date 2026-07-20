@@ -140,11 +140,15 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     };
 
     let pinned_str = fetched.pinned.strip_advisory().to_string();
+    // `grim_render` projects vendor-native files into an arbitrary `dest_dir`
+    // (a use-not-install preview), so the neutral project-scope render is the
+    // right default — no global-scope inertness semantics apply to a dest dir.
     let written = crate::command::grim(client.materialize(
         kind,
         &fetched.name,
         &canonical,
         &dest,
+        crate::config::scope::ConfigScope::Project,
         &pinned_str,
         staged_support.as_deref(),
     ))?;

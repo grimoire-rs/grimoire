@@ -222,11 +222,23 @@ pub trait Vendor {
     /// written `generated: true` (integrity-anchored on the rendered
     /// bytes) and must be deterministic.
     ///
+    /// `scope` is threaded from the materialize call path so a vendor whose
+    /// rule emission is *content-* rather than *kind-*dependent on the install
+    /// scope can react to it — the only wave-1 reader is Kiro, whose global
+    /// scoped steering is written correctly but is inert until upstream #9176
+    /// closes, surfaced as a [`RenderedDoc`] warning. Every other vendor
+    /// ignores it and stays byte-identical across scopes.
+    ///
     /// # Errors
     ///
     /// [`RenderError`] when a known `<vendor>.<field>` metadata key
     /// carries an unconvertible literal.
-    fn rule_index(&self, parsed: &ParsedRule, pinned: &str) -> Result<Option<RenderedDoc>, RenderError>;
+    fn rule_index(
+        &self,
+        parsed: &ParsedRule,
+        scope: ConfigScope,
+        pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError>;
 
     /// Render the agent document for this vendor, or `None` when the
     /// canonical bytes should install verbatim. Same `generated`/

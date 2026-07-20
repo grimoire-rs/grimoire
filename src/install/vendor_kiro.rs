@@ -97,7 +97,12 @@ impl Vendor for KiroVendor {
         render::render_skill_doc(doc, self)
     }
 
-    fn rule_index(&self, _parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+    fn rule_index(
+        &self,
+        _parsed: &ParsedRule,
+        _scope: ConfigScope,
+        _pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
         // Steering transform: `fileMatch`/`fileMatchPattern` or `always`, plus
         // the global-scope inert-until-#9176 render-layer warning.
         unimplemented!("V3 Kiro: rule_index filled in the implementation phase")
@@ -168,7 +173,10 @@ mod tests {
         // `paths` → `inclusion: fileMatch` + `fileMatchPattern` (array form,
         // NOT a comma-joined string); `always`/`auto` never emitted.
         let doc = "---\npaths:\n  - \"src/**/*.rs\"\n  - \"Cargo.toml\"\n---\n# Rust\nbody\n";
-        let out = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        let out = KiroVendor
+            .rule_index(&rule(doc), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
         assert!(
             out.document.contains("inclusion: fileMatch"),
             "scoped ⇒ fileMatch: {}",
@@ -211,7 +219,7 @@ mod tests {
         // Design choice pinned from the ADR §1 mapping table: unscoped →
         // `inclusion: always` (not fileMatch, never `auto`).
         let out = KiroVendor
-            .rule_index(&rule("# Rule\nguidance\n"), "p")
+            .rule_index(&rule("# Rule\nguidance\n"), ConfigScope::Project, "p")
             .unwrap()
             .unwrap();
         assert!(
@@ -234,8 +242,14 @@ mod tests {
     #[test]
     fn rule_index_is_deterministic() {
         let doc = "---\npaths: [\"a\"]\n---\nbody\n";
-        let a = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
-        let b = KiroVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        let a = KiroVendor
+            .rule_index(&rule(doc), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
+        let b = KiroVendor
+            .rule_index(&rule(doc), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
         assert_eq!(a.document, b.document, "regeneration must be byte-identical");
     }
 

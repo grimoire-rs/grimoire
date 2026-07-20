@@ -563,6 +563,7 @@ async fn install_one<M: ArtifactMaterializer>(
                     &artifact.name,
                     &canonical,
                     &preview_dest,
+                    target.scope(),
                     &pinned_str,
                     staged_support.as_deref(),
                 )
@@ -632,6 +633,7 @@ async fn install_one<M: ArtifactMaterializer>(
                 &artifact.name,
                 &canonical,
                 &dest,
+                target.scope(),
                 &pinned_str,
                 staged_support.as_deref(),
             )

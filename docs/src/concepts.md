@@ -182,15 +182,19 @@ two at runtime.
 ## Clients {#clients}
 
 An installed artifact has to land somewhere the agent reads. Grimoire calls
-that destination a **client target** and ships four: [Claude Code][claude],
-[opencode][opencode], [GitHub Copilot][copilot], and [Codex][codex]. The
-same skill is transformed into each client's native layout on install.
+that destination a **client target** and ships ten: [Claude Code][claude],
+[opencode][opencode], [GitHub Copilot][copilot], [Codex][codex], Cursor, Kiro,
+JetBrains Junie, Gemini CLI, Zed, and Amp. The same skill is transformed into
+each client's native layout on install. Not every client can host every
+artifact kind — the [client compatibility matrix](./clients.md) is the
+authoritative map of what installs where, and why a decline happens.
 
-[Codex][codex] covers skills, agents, and MCP servers. Rules are not
-supported — Codex uses an always-on, directory-granular instruction file
+For example, [Codex][codex] covers skills, agents, and MCP servers but
+declines rules: Codex uses an always-on, directory-granular instruction file
 (`AGENTS.md`) with no path-glob or `applyTo` scoping mechanism, so there is no
 native target for a rule artifact. Installing a rule with `--client codex`
-produces a warning and writes no file.
+produces a warning and writes no file. Other clients decline other kinds for
+their own reasons, each recorded in the matrix.
 
 [`grim install`](./commands.md#install) writes to the targets listed in the
 `clients` option in your config; without one it targets every client it

@@ -387,6 +387,13 @@ pub fn reap_dropped_clients(
     for (kind, name, outputs) in &records {
         let mut reaped = Vec::new();
         let mut kept_modified = Vec::new();
+        // Classify every output before deleting anything: the delete pass needs
+        // the COMPLETE drop set (`reaped`) so the `.agents/skills` refcount
+        // guard can tell a surviving sibling from one dropping in the same pass.
+        // `to_delete` holds the reaped outputs whose on-disk footprint must
+        // actually be removed (present + unmodified-or-forced); an already-gone
+        // output is reaped from the record without a delete.
+        let mut to_delete: Vec<&ClientOutput> = Vec::new();
         for out in outputs {
             // Only a recognized client absent from the desired set is a
             // dropped-client output. An unparseable/legacy client string is
@@ -450,9 +457,23 @@ pub fn reap_dropped_clients(
                 false
             };
             if delete {
-                delete_output(out, roots)?;
+                to_delete.push(out);
             }
             reaped.push(out.client.clone());
+        }
+        // Delete each dropped output's footprint UNLESS a surviving sibling
+        // still records the same target + support dir — the shared-pool
+        // refcount guard (adr_vendor_wave_expansion §3). A guarded output is
+        // still reaped from the record below; only the filesystem delete skips.
+        for out in to_delete {
+            if shared_by_surviving_sibling(out, outputs, &reaped, roots) {
+                tracing::debug!(
+                    "keeping shared footprint of dropped client '{}' of '{name}'; a surviving sibling still references it",
+                    out.client
+                );
+                continue;
+            }
+            delete_output(out, roots)?;
         }
         if !reaped.is_empty() || !kept_modified.is_empty() {
             reaped.sort();
@@ -513,17 +534,38 @@ pub fn reap_dropped_clients(
 /// unreferenced and safe to delete. An output that fails to resolve is treated
 /// as non-sharing (it cannot pin a live path).
 ///
-/// NOT yet wired into [`delete_output`] — the implementation phase gates the
-/// file/dir deletion on this predicate.
-#[allow(dead_code)]
+/// Wired into [`reap_dropped_clients`]'s delete pass: a guarded output still
+/// sheds its record entry, only the filesystem delete is skipped.
 fn shared_by_surviving_sibling(
     reaping: &ClientOutput,
     record_outputs: &[ClientOutput],
     dropping_clients: &[String],
     roots: &AnchorRoots,
 ) -> bool {
-    let _ = (reaping, record_outputs, dropping_clients, roots);
-    unimplemented!("wave-1 `.agents/skills` refcount guard — wired into the delete path in the implementation phase")
+    // The reaping output must pin a concrete path to compare against; if it
+    // cannot resolve, there is nothing to protect — treat it as unshared.
+    let Ok(reap_target) = reaping.resolved_target(roots) else {
+        return false;
+    };
+    // An unresolvable support dir collapses to `None` on both sides, so a
+    // resolution failure can never forge a false match.
+    let reap_support = reaping.resolved_support_dir(roots).ok().flatten();
+
+    record_outputs.iter().any(|out| {
+        // A surviving sibling is neither the output being reaped nor itself
+        // dropped this pass — only a client that STAYS in the record pins the
+        // shared footprint. Both guards matter: passing the whole drop set (not
+        // `state` minus `reaping`) is what stops two pool members dropping
+        // together from each mistaking the other for a survivor.
+        if out.client == reaping.client || dropping_clients.contains(&out.client) {
+            return false;
+        }
+        let Ok(target) = out.resolved_target(roots) else {
+            return false; // cannot pin a live path → non-sharing
+        };
+        let support = out.resolved_support_dir(roots).ok().flatten();
+        target == reap_target && support == reap_support
+    })
 }
 
 /// Delete one dropped-client output's on-disk footprint: an entry output's

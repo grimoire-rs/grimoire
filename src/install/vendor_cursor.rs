@@ -112,7 +112,12 @@ impl Vendor for CursorVendor {
         render::render_skill_doc(doc, self)
     }
 
-    fn rule_index(&self, _parsed: &ParsedRule, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+    fn rule_index(
+        &self,
+        _parsed: &ParsedRule,
+        _scope: ConfigScope,
+        _pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
         // `.mdc` transform: `paths` → comma-joined `globs` + `alwaysApply`.
         unimplemented!("V1 Cursor: rule_index filled in the implementation phase")
     }
@@ -189,7 +194,7 @@ mod tests {
         // `alwaysApply: false`; the canonical `paths:` must not leak.
         let doc = "---\npaths:\n  - \"src/**/*.rs\"\n  - \"Cargo.toml\"\n---\n# Rust Style\nUse 4 spaces.\n";
         let out = CursorVendor
-            .rule_index(&rule(doc), "ghcr.io/acme/rust@sha256:d")
+            .rule_index(&rule(doc), ConfigScope::Project, "ghcr.io/acme/rust@sha256:d")
             .unwrap()
             .unwrap();
         assert!(out.document.contains("globs:"), "globs key present: {}", out.document);
@@ -219,7 +224,7 @@ mod tests {
     fn rule_index_unscoped_emits_always_apply_true_and_no_globs() {
         // No `paths:` → `alwaysApply: true`, no `globs` key at all.
         let out = CursorVendor
-            .rule_index(&rule("# Rule\nguidance\n"), "p")
+            .rule_index(&rule("# Rule\nguidance\n"), ConfigScope::Project, "p")
             .unwrap()
             .unwrap();
         assert!(
@@ -239,7 +244,7 @@ mod tests {
         // A leading `*` would read as a YAML alias indicator unquoted — the
         // comma-string must be quoted (Copilot `applyTo` precedent).
         let out = CursorVendor
-            .rule_index(&rule("---\npaths: [\"*.rs\"]\n---\nbody\n"), "p")
+            .rule_index(&rule("---\npaths: [\"*.rs\"]\n---\nbody\n"), ConfigScope::Project, "p")
             .unwrap()
             .unwrap();
         assert!(
@@ -252,8 +257,14 @@ mod tests {
     #[test]
     fn rule_index_is_deterministic() {
         let doc = "---\npaths: [\"a\"]\n---\nbody\n";
-        let a = CursorVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
-        let b = CursorVendor.rule_index(&rule(doc), "p").unwrap().unwrap();
+        let a = CursorVendor
+            .rule_index(&rule(doc), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
+        let b = CursorVendor
+            .rule_index(&rule(doc), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
         assert_eq!(a.document, b.document, "regeneration must be byte-identical");
     }
 

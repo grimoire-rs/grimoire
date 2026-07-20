@@ -260,6 +260,37 @@ Three vendor keys are projectable, mapped from `CODEX_AGENT_FIELDS` in
 A `codex.model` key overrides the projected common `model` field silently,
 following the same override semantics as `claude.model` and `opencode.model`.
 
+## The cursor.* agent registry {#cursor-agent-registry}
+
+[Cursor][cursor-subagents-docs] subagents render to native
+`.cursor/agents/<name>.md` frontmatter. Three vendor keys are projectable,
+mapped from `CURSOR_AGENT_FIELDS` in `src/install/vendor_cursor.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `cursor.model` | `model` | string | **Overrides** the common `model` field for Cursor |
+| `cursor.readonly` | `readonly` | bool | Restricts the subagent to read-only tools |
+| `cursor.is-background` | `is_background` | bool | The native key uses an underscore |
+
+The common `tools` field has no Cursor equivalent and is dropped with a
+warning.
+
+## The gemini.* agent registry {#gemini-agent-registry}
+
+[Gemini CLI][gemini-subagents-docs] subagents render to native
+`.gemini/agents/<name>.md` frontmatter. Agent loading is gated by the
+`experimental.enableAgents` setting, which defaults on. Five vendor keys are
+projectable, mapped from `GEMINI_AGENT_FIELDS` in
+`src/install/vendor_gemini.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `gemini.model` | `model` | string | **Overrides** the common `model` field for Gemini |
+| `gemini.temperature` | `temperature` | float | |
+| `gemini.max-turns` | `max_turns` | integer | The native key uses an underscore |
+| `gemini.timeout-mins` | `timeout_mins` | integer | The native key uses an underscore |
+| `gemini.kind` | `kind` | string | Subagent kind selector |
+
 ## Empty registries for OpenCode, Copilot, and Codex skills {#empty-registries}
 
 The skill registries for [OpenCode][opencode-skills-docs], [GitHub
@@ -271,8 +302,8 @@ has client-specific skill capabilities that need projection.
 Any key prefixed with `opencode.`, `copilot.`, or `codex.` in the `metadata`
 map of a skill is therefore always unknown. grim emits a warning and drops
 it when it encounters one. This behavior is the typo guard: if you
-accidentally write `opencode.some-key`, you get a warning at publish
-time rather than silent data loss.
+accidentally write an unknown `opencode.*` key, you get a warning at
+publish time rather than silent data loss.
 
 Because all three non-Claude registries are empty, [OpenCode][opencode-skills-docs],
 [GitHub Copilot][copilot-instructions-docs], and [Codex][codex-skills-docs]
@@ -339,7 +370,7 @@ The mapping table for rules:
 | [Claude Code][claude-memory-docs] | `paths` | top-level | `paths` | Verbatim — no transform; Claude reads it directly |
 | [GitHub Copilot][copilot-instructions-docs] | `paths` | top-level | `applyTo` | Comma-joined into a single string (Copilot does not accept a list) |
 | [GitHub Copilot][copilot-instructions-docs] | `copilot.exclude-agent` | `metadata` | `excludeAgent` | Enum: `code-review` or `cloud-agent` (registry in `src/install/vendor_copilot.rs`) |
-| [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via `opencode.json` |
+| [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
 | [Codex][codex-subagents-docs] | — | — | — | **Rules are unsupported.** Codex uses an always-on, directory-granular `AGENTS.md` with no path-glob or `applyTo` mechanism. Installing a rule with `--client codex` emits a warning and writes no file. |
 
 A rule's `paths` list is native [Claude Code][claude-memory-docs]
@@ -356,7 +387,7 @@ time.
 
 [OpenCode][opencode-rules-docs] has no per-file rule frontmatter. grim
 writes the rule body (stripping the frontmatter) with a provenance comment,
-and registers a managed glob in `opencode.json` so OpenCode loads it.
+and registers a managed glob in the OpenCode config file so OpenCode loads it.
 
 A rule with neither `paths` nor `copilot.exclude-agent` gets no frontmatter
 block in its [Copilot][copilot-instructions-docs] transform.
@@ -397,8 +428,8 @@ when the last one uninstalls — together with the then-empty
 left alone). Install, update, uninstall, and the TUI all converge through
 the same sync call.
 
-For a **project-scope** install, grim edits `opencode.jsonc` when it
-exists in the workspace root, otherwise `opencode.json`, and writes the
+For a **project-scope** install, grim edits `<workspace>/opencode.jsonc`
+when it exists, otherwise `<workspace>/opencode.json`, and writes the
 workspace-relative glob `.opencode/rules/*.md`.
 
 For a **global-scope** install, grim edits the file at `$OPENCODE_CONFIG`
@@ -467,6 +498,8 @@ claude namespace to silence it and gain proper type conversion.
 [opencode-config-docs]: https://opencode.ai/docs/config
 [codex-skills-docs]: https://developers.openai.com/codex/skills
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
+[cursor-subagents-docs]: https://cursor.com/docs/context/subagents
+[gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
 [xdg-spec]: https://specifications.freedesktop.org/basedir-spec/latest/
 
 <!-- internal -->
