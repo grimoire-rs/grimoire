@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::context::Context;
 use crate::fetch::{FetchedPayload, fetch_artifact};
-use crate::install::client_target::ClientTarget;
+use crate::install::client_target::{ClientTarget, MaterializeRequest};
 use crate::install::installer::INSTALL_LAYER_SIZE_LIMIT;
 use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer};
 use crate::oci::ArtifactKind;
@@ -143,15 +143,15 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     // `grim_render` projects vendor-native files into an arbitrary `dest_dir`
     // (a use-not-install preview), so the neutral project-scope render is the
     // right default — no global-scope inertness semantics apply to a dest dir.
-    let written = crate::command::grim(client.materialize(
+    let written = crate::command::grim(client.materialize(MaterializeRequest {
         kind,
-        &fetched.name,
-        &canonical,
-        &dest,
-        crate::config::scope::ConfigScope::Project,
-        &pinned_str,
-        staged_support.as_deref(),
-    ))?;
+        name: &fetched.name,
+        artifact_root: &canonical,
+        dest: &dest,
+        scope: crate::config::scope::ConfigScope::Project,
+        pinned: &pinned_str,
+        support_dir: staged_support.as_deref(),
+    }))?;
 
     Ok(RenderReport {
         reference: fetched.identifier.to_string(),

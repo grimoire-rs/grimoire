@@ -558,15 +558,15 @@ async fn install_one<M: ArtifactMaterializer>(
             };
             let preview_dest = preview_root.join(dest_name);
             client
-                .materialize(
+                .materialize(crate::install::client_target::MaterializeRequest {
                     kind,
-                    &artifact.name,
-                    &canonical,
-                    &preview_dest,
-                    target.scope(),
-                    &pinned_str,
-                    staged_support.as_deref(),
-                )
+                    name: &artifact.name,
+                    artifact_root: &canonical,
+                    dest: &preview_dest,
+                    scope: target.scope(),
+                    pinned: &pinned_str,
+                    support_dir: staged_support.as_deref(),
+                })
                 .map_err(crate::error::Error::from)?;
             let preview_support = staged_support.as_ref().map(|_| preview_root.join(&artifact.name));
             let would =
@@ -628,15 +628,15 @@ async fn install_one<M: ArtifactMaterializer>(
             std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
         }
         client
-            .materialize(
+            .materialize(crate::install::client_target::MaterializeRequest {
                 kind,
-                &artifact.name,
-                &canonical,
-                &dest,
-                target.scope(),
-                &pinned_str,
-                staged_support.as_deref(),
-            )
+                name: &artifact.name,
+                artifact_root: &canonical,
+                dest: &dest,
+                scope: target.scope(),
+                pinned: &pinned_str,
+                support_dir: staged_support.as_deref(),
+            })
             .map_err(crate::error::Error::from)?;
         fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
         if let Some(sd) = &support_dest {
