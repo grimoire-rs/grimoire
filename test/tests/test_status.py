@@ -118,10 +118,10 @@ def test_status_item_carries_client_drift_fields(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """Every status item carries the always-present `clients_missing` /
-    `clients_extra` arrays alongside the existing 6-key shape, plus the
-    `--check`-shaped `deprecated` / `replaced_by` / `update_available` — the
-    frozen key set is 11, and every new field defaults to empty/null
-    without `--check`."""
+    `clients_extra` / `clients_unresolved` arrays alongside the existing
+    6-key shape, plus the `--check`-shaped `deprecated` / `replaced_by` /
+    `update_available` — the frozen key set is 12, and every new field
+    defaults to empty/null without `--check`."""
     repo = f"{unique_repo}/s"
     make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
     write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
@@ -138,11 +138,14 @@ def test_status_item_carries_client_drift_fields(
     rows = result["items"]
     assert set(rows[0].keys()) == {
         "kind", "name", "source", "pinned", "state", "outputs",
-        "clients_missing", "clients_extra",
+        "clients_missing", "clients_extra", "clients_unresolved",
         "deprecated", "replaced_by", "update_available",
-    }, f"status item must carry exactly the 11 frozen fields; got: {sorted(rows[0].keys())}"
+    }, f"status item must carry exactly the 12 frozen fields; got: {sorted(rows[0].keys())}"
     assert rows[0]["clients_missing"] == []
     assert rows[0]["clients_extra"] == []
+    # A healthy row resolves every output — the key is a report about a
+    # failure grim tolerated, not an echo of the client set.
+    assert rows[0]["clients_unresolved"] == []
     assert rows[0]["deprecated"] is None
     assert rows[0]["replaced_by"] is None
     assert rows[0]["update_available"] is None

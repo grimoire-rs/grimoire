@@ -392,6 +392,8 @@ fn build_report(
                 action,
                 reaped_clients: drop.map(|d| d.reaped.clone()).unwrap_or_default(),
                 kept_modified_clients: drop.map(|d| d.kept_modified.clone()).unwrap_or_default(),
+                retained: drop.map(|d| d.retained.clone()).unwrap_or_default(),
+                abandoned_entries: drop.map(|d| d.abandoned_entries.clone()).unwrap_or_default(),
             }
         })
         .collect();
@@ -411,6 +413,8 @@ fn build_report(
         },
         reaped_clients: Vec::new(),
         kept_modified_clients: Vec::new(),
+        retained: p.retained.clone(),
+        abandoned_entries: p.abandoned_entries.clone(),
     }));
 
     UpdateReport::new(entries)
@@ -494,6 +498,8 @@ mod tests {
             name: "keep".to_string(),
             reaped: vec!["copilot".to_string()],
             kept_modified: vec!["opencode".to_string()],
+            retained: vec![],
+            abandoned_entries: vec![],
         }];
         let r = build_report(&new, Some(&new), &[], &reaped);
         let v = serde_json::to_value(&r).unwrap();
@@ -519,6 +525,8 @@ mod tests {
                 old: Digest::Sha256("e".repeat(64)),
                 outcome: PruneOutcome::Pruned,
                 removed: vec![],
+                retained: vec![],
+                abandoned_entries: vec![],
                 clients: vec![],
             },
             PrunedArtifact {
@@ -527,6 +535,8 @@ mod tests {
                 old: Digest::Sha256("f".repeat(64)),
                 outcome: PruneOutcome::KeptModified,
                 removed: vec![],
+                retained: vec![],
+                abandoned_entries: vec![],
                 clients: vec![],
             },
         ];

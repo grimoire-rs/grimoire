@@ -107,6 +107,16 @@ pub struct StatusEntry {
     /// there is no such drift, and always `[]` when `[options].clients` is
     /// unset (autodetect — no explicit target to diff against).
     pub clients_extra: Vec<String>,
+    /// Clients whose recorded output could not be resolved at all — the
+    /// anchored target hit an [`AnchorError`](crate::install::AnchorError)
+    /// (an escaped anchor, or an anchor root absent on this machine). Sorted;
+    /// `[]` when every recorded output resolved. `state` still reads
+    /// `missing` and the exit code stays 0 — `status` is a report.
+    ///
+    /// Under the read/destructive containment split this fires only for a
+    /// symlinked **leaf** or an absent anchor root, never for a relocated
+    /// ancestor (which now resolves cleanly).
+    pub clients_unresolved: Vec<String>,
     /// The publisher's deprecation message for a registry-sourced item,
     /// from `--check`'s catalog load. `null` when `checked` is `false`, the
     /// item carries no registry pin, or the catalog carries no notice.
@@ -198,6 +208,7 @@ mod tests {
             outputs: Vec::new(),
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            clients_unresolved: Vec::new(),
             deprecated: None,
             replaced_by: None,
             update_available: None,

@@ -216,6 +216,34 @@ impl PathAnchor {
     }
 }
 
+/// How strictly [`AnchoredPath::resolve`]'s Layer 2 containment guard treats
+/// an escape out of the anchor root (`adr_anchor_escape_recovery.md` §D2).
+///
+/// The parameter is explicit — never defaulted — so every call site is
+/// visited and classified, and a future caller cannot silently inherit the
+/// permissive mode. Same fail-closed discipline as the no-wildcard match in
+/// [`super::prune`]'s `is_security_class`.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Containment {
+    /// Permit an escape whose leaf is not itself a symlink: Layer 1 already
+    /// guarantees a Normal-only remainder, so the escape can only originate
+    /// from a symlinked **ancestor** inside the root — the user's own layout
+    /// (GNU stow, yadm, an iCloud/Dropbox-synced config dir). For read-only
+    /// probes; a symlinked leaf (the CWE-59 shape) stays refused.
+    ///
+    /// **`#[cfg(unix)]` only.** On Windows this variant is a synonym for
+    /// [`Self::Strict`] — every escape is refused — because `is_symlink()`
+    /// does not cover every reparse tag (`LX_SYMLINK`, `APPEXECLINK`, WCI).
+    /// Classify a new call site by intent regardless of platform; do not
+    /// assume the escape is permitted.
+    AllowRelocatedAncestor,
+    /// Refuse every escape. For any caller that deletes or rewrites — a
+    /// blanket relax would hand `remove_dir_all` a path outside the root.
+    Strict,
+}
+
 /// An install target stored as `(anchor, relative)` for portability.
 ///
 /// The `relative` remainder is forward-slash UTF-8 and Normal-only —
@@ -297,6 +325,10 @@ impl AnchoredPath {
     /// [`AnchorError::AnchorRootAbsent`] when `self.anchor.root(roots)` is
     /// `None`.
     ///
+    /// `containment` states the caller's intent (see [`Containment`]) — a
+    /// read-only probe may tolerate an escape through a relocated ancestor,
+    /// a destructive caller never does.
+    ///
     /// # Residual TOCTOU
     ///
     /// Containment is validated at check time and the returned path is the
@@ -312,10 +344,31 @@ impl AnchoredPath {
     /// symlink already present at check time), not a same-uid racing
     /// adversary.
     ///
+    /// [`Containment::AllowRelocatedAncestor`] **narrows** that guard on read
+    /// paths (`adr_anchor_escape_recovery.md` §D2). This is a deliberate
+    /// trade-off, not something the paragraph above already sanctioned: a
+    /// *pre-planted* ancestor symlink is exactly what Layer 2 exists for, and
+    /// the exclusion above covers only a *racing* adversary. What survives the
+    /// narrowing is the invariant worth having — a tampered or stale state
+    /// record can never direct a delete or a rewrite outside the anchor root,
+    /// because every destructive caller passes [`Containment::Strict`].
+    ///
+    /// Two permanent non-goals follow from that:
+    ///
+    /// - **Never cache a validated root or path prefix across `resolve()`
+    ///   calls.** Containment holds only because every call re-canonicalizes
+    ///   fresh. Reusing a prefix is the shape of gitoxide
+    ///   GHSA-f89h-2fjh-2r9q / CVE-2026-44471 (symlink-prefix-reuse worktree
+    ///   escape); the per-artifact loop at `installer.rs:602-699` is the
+    ///   obvious place someone would later "optimize".
+    /// - **grim must not be run elevated.** The threat model above rests on
+    ///   grim holding no more privilege than the owner of the config dirs it
+    ///   manages.
+    ///
     /// # Errors
     ///
     /// See the variant list above.
-    pub fn resolve(&self, roots: &AnchorRoots) -> Result<PathBuf, AnchorError> {
+    pub fn resolve(&self, roots: &AnchorRoots, containment: Containment) -> Result<PathBuf, AnchorError> {
         let root = self
             .anchor
             .root(roots)
@@ -353,7 +406,13 @@ impl AnchoredPath {
         // on Windows) and assert containment component-by-component via
         // `Path::starts_with` — never a string prefix. Return the
         // canonicalized path so callers act on the validated, resolved path.
-        if candidate.exists() || candidate.is_symlink() {
+        //
+        // The leaf stat happens ONCE, here, and is reused by both the branch
+        // condition and the carve-out below. `Path::is_symlink()` is itself a
+        // `symlink_metadata` call, and stat'ing *after* the canonicalize would
+        // widen the TOCTOU window in the exploitable direction.
+        let leaf_is_symlink = std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
+        if candidate.exists() || leaf_is_symlink {
             let canon_root = dunce::canonicalize(&root).map_err(|source| AnchorError::Io {
                 path: root.clone(),
                 source,
@@ -363,6 +422,30 @@ impl AnchoredPath {
                 source,
             })?;
             if !canon_candidate.starts_with(&canon_root) {
+                // Exhaustive match, never `==`: a future third variant must be
+                // classified here or the build breaks — the fail-closed
+                // discipline the `Containment` doc claims.
+                match containment {
+                    // Unix only: the layouts this exists for (GNU stow, yadm,
+                    // an iCloud/Dropbox-synced config dir) are Unix-only, and
+                    // `is_symlink()` does not cover every Windows reparse tag
+                    // (`LX_SYMLINK`, `APPEXECLINK`, WCI) — a security guard
+                    // must not rest on that predicate. On Windows the variant
+                    // is a synonym for `Strict`.
+                    #[cfg(unix)]
+                    Containment::AllowRelocatedAncestor if !leaf_is_symlink => {
+                        // `warn!`, not `debug!`: every destructive caller
+                        // refuses this path, so this is the only signal that
+                        // grim is reading through a relocated ancestor.
+                        tracing::warn!(
+                            anchor = %self.anchor,
+                            path = %canon_candidate.display(),
+                            "resolving through a relocated ancestor outside the anchor root"
+                        );
+                        return Ok(canon_candidate);
+                    }
+                    Containment::AllowRelocatedAncestor | Containment::Strict => {}
+                }
                 return Err(AnchorError::EscapedAnchor {
                     anchor: self.anchor,
                     resolved: canon_candidate,
@@ -647,15 +730,20 @@ pub enum AnchorError {
     /// Layer-2 rejection: the canonicalized join escaped its anchor root
     /// (symlink tampering).
     ///
-    /// The `resolved` field carries the absolute path for debug-level logging;
-    /// it is intentionally not rendered in the `Display` message to avoid
-    /// leaking full filesystem paths to unprivileged users (CWE-209).
+    /// The `resolved` field carries the absolute path. It is withheld from
+    /// `Display` because that message is a one-line refusal shown wherever an
+    /// error surfaces, not because the path is a secret — grim runs as the
+    /// user whose own layout it is describing. Callers that can afford the
+    /// detail surface it deliberately and structurally: `warn!` on every
+    /// tolerance path, and the `retained` / `clients_unresolved` report
+    /// fields, which exist precisely so the user can find what was left
+    /// behind.
     #[error("resolved path escapes its anchor root (anchor: {anchor})")]
     EscapedAnchor {
         /// The anchor whose root was escaped.
         anchor: PathAnchor,
-        /// The resolved path that fell outside the root.
-        /// Not rendered in `Display` — available for debug logging only.
+        /// The resolved path that fell outside the root. Not rendered in
+        /// `Display` — see the variant docs.
         resolved: PathBuf,
     },
 
@@ -696,7 +784,7 @@ mod tests {
     use crate::install::client_target::ClientTarget;
     use crate::oci::ArtifactKind;
 
-    use super::{AnchorError, AnchorRoots, AnchoredPath, PathAnchor};
+    use super::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -825,7 +913,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "skills/foo".to_string(),
         };
-        let result = ap.resolve(&roots);
+        let result = ap.resolve(&roots, Containment::Strict);
         assert_eq!(result.unwrap(), PathBuf::from("/ws/skills/foo"));
     }
 
@@ -838,7 +926,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "../secret".to_string(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(err, AnchorError::TraversalAttempt { .. }),
             "expected TraversalAttempt, got {err:?}"
@@ -853,7 +941,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "/absolute/path".to_string(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(err, AnchorError::TraversalAttempt { .. }),
             "expected TraversalAttempt, got {err:?}"
@@ -869,7 +957,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "./skills/foo".to_string(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(err, AnchorError::TraversalAttempt { .. }),
             "expected TraversalAttempt for CurDir, got {err:?}"
@@ -886,7 +974,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: String::new(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(err, AnchorError::TraversalAttempt { .. }),
             "expected TraversalAttempt for empty relative, got {err:?}"
@@ -903,7 +991,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "nonexistent/deeply/nested".to_string(),
         };
-        let result = ap.resolve(&roots);
+        let result = ap.resolve(&roots, Containment::Strict);
         assert!(result.is_ok(), "absent path should return Ok, got {result:?}");
         assert_eq!(result.unwrap(), PathBuf::from("/ws/nonexistent/deeply/nested"));
     }
@@ -931,7 +1019,7 @@ mod tests {
             anchor: PathAnchor::ClaudeRoot,
             relative: "skills/foo".to_string(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -952,7 +1040,7 @@ mod tests {
             anchor: PathAnchor::ClaudeRoot,
             relative: "skills/my-skill".to_string(),
         };
-        let result = ap.resolve(&roots).unwrap();
+        let result = ap.resolve(&roots, Containment::Strict).unwrap();
         // Must equal the anchor root with each segment appended.
         let expected = PathBuf::from("/claude/skills/my-skill");
         assert_eq!(result, expected);
@@ -1405,7 +1493,7 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "escape".to_string(),
         };
-        let err = ap.resolve(&roots).unwrap_err();
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
         assert!(
             matches!(err, AnchorError::EscapedAnchor { .. }),
             "expected EscapedAnchor for a symlink pointing outside the root, got {err:?}"
@@ -1452,10 +1540,225 @@ mod tests {
             anchor: PathAnchor::Workspace,
             relative: "dangling".to_string(),
         };
-        let result = ap.resolve(&roots);
+        let result = ap.resolve(&roots, Containment::Strict);
         assert!(
             result.is_err(),
             "dangling symlink must trip Layer 2 (canonicalize fails) rather than return Ok, got {result:?}"
+        );
+    }
+
+    // ── A9: the relocated-ancestor carve-out (adr_anchor_escape_recovery §D2) ──
+
+    /// A9(a) — the grimoire#57 regression test. A symlinked *ancestor* inside
+    /// the anchor root with a REAL (non-symlink) leaf is the layout GNU stow,
+    /// yadm and an iCloud/Dropbox-synced config dir produce. Layer 1 already
+    /// guarantees a Normal-only remainder, so such an escape can only originate
+    /// from the user's own directory layout — `AllowRelocatedAncestor` permits
+    /// it and hands the caller the canonicalized outside path, so a read-only
+    /// probe sees the file the user actually has installed.
+    #[cfg(unix)]
+    #[test]
+    fn t3_relocated_ancestor_with_real_leaf_resolves_under_allow() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonical tmp root: macOS's /var -> /private/var symlink would
+        // otherwise make the resolved-path assertion drift.
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        // The anchor root, with `.claude/skills` relocated OUT of it — the
+        // ancestor is the symlink, the leaf is a real directory.
+        let anchor_root = tmp.join("anchor");
+        std::fs::create_dir_all(anchor_root.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/skills");
+        let leaf = store.join("demo-skill");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("SKILL.md"), b"# demo\n").unwrap();
+        symlink(&store, anchor_root.join(".claude/skills")).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: anchor_root.clone(),
+            grim_home: PathBuf::from("/unused"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
+        };
+        let ap = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".claude/skills/demo-skill".to_string(),
+        };
+
+        let resolved = ap
+            .resolve(&roots, Containment::AllowRelocatedAncestor)
+            .expect("a relocated ancestor with a real leaf must resolve for a read-only caller (grimoire#57)");
+        assert_eq!(
+            resolved, leaf,
+            "the caller must receive the canonicalized outside path, not the raw anchor join"
+        );
+    }
+
+    /// A9(b) — the same tree under `Containment::Strict` stays refused. A
+    /// destructive caller acts on a record, and a stored record must never be
+    /// able to direct a delete or rewrite outside the anchor root — that is the
+    /// invariant the read/destructive split preserves.
+    #[cfg(unix)]
+    #[test]
+    fn t3_relocated_ancestor_with_real_leaf_still_escapes_under_strict() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        let anchor_root = tmp.join("anchor");
+        std::fs::create_dir_all(anchor_root.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/skills");
+        let leaf = store.join("demo-skill");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("SKILL.md"), b"# demo\n").unwrap();
+        symlink(&store, anchor_root.join(".claude/skills")).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: anchor_root.clone(),
+            grim_home: PathBuf::from("/unused"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
+        };
+        let ap = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".claude/skills/demo-skill".to_string(),
+        };
+
+        let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
+        assert!(
+            matches!(err, AnchorError::EscapedAnchor { .. }),
+            "Strict must refuse a relocated ancestor so a record can never direct a delete outside the root, got {err:?}"
+        );
+    }
+
+    /// A9(c) — leaf-strictness holds UNDER a relocated ancestor. This is the
+    /// case a naive relax breaks: once the ancestor is symlinked, a symlinked
+    /// LEAF (the CWE-59 shape, and where the installer writes) must still be
+    /// refused even for a read-only caller.
+    #[cfg(unix)]
+    #[test]
+    fn t3_relocated_ancestor_with_symlinked_leaf_escapes_under_allow() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        // Same relocated ancestor as A9(a) …
+        let anchor_root = tmp.join("anchor");
+        std::fs::create_dir_all(anchor_root.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/skills");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, anchor_root.join(".claude/skills")).unwrap();
+
+        // … but the leaf inside it is ITSELF a symlink, pointing at a secret
+        // the anchor root has no claim to.
+        let secret = tmp.join("secret.txt");
+        std::fs::write(&secret, b"top secret\n").unwrap();
+        symlink(&secret, store.join("demo-skill")).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: anchor_root.clone(),
+            grim_home: PathBuf::from("/unused"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
+        };
+        let ap = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".claude/skills/demo-skill".to_string(),
+        };
+
+        let err = ap.resolve(&roots, Containment::AllowRelocatedAncestor).unwrap_err();
+        assert!(
+            matches!(err, AnchorError::EscapedAnchor { .. }),
+            "a symlinked leaf stays refused even under a relocated ancestor, got {err:?}"
+        );
+    }
+
+    /// A9(d) — a relocated ancestor with an ABSENT leaf resolves in both
+    /// containment modes, and yields the raw anchor join. Layer 2 only engages
+    /// for a candidate that exists or is a symlink, so an absent target is
+    /// mode-independent: uninstall's "a missing target is operated on via the
+    /// raw anchor join" contract, and an install into a relocated ancestor
+    /// (which never calls `resolve`) must not start failing here either.
+    #[cfg(unix)]
+    #[test]
+    fn t3_relocated_ancestor_with_absent_leaf_resolves_in_both_modes() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        let anchor_root = tmp.join("anchor");
+        std::fs::create_dir_all(anchor_root.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/skills");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, anchor_root.join(".claude/skills")).unwrap();
+        // No leaf is created: `.claude/skills/demo-skill` does not exist.
+
+        let roots = AnchorRoots {
+            workspace: anchor_root.clone(),
+            grim_home: PathBuf::from("/unused"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+            codex_root: None,
+            cursor_root: None,
+            kiro_root: None,
+            junie_root: None,
+            gemini_root: None,
+            zed_root: None,
+            amp_root: None,
+        };
+        let ap = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".claude/skills/demo-skill".to_string(),
+        };
+        let raw_join = anchor_root.join(".claude/skills/demo-skill");
+
+        assert_eq!(
+            ap.resolve(&roots, Containment::AllowRelocatedAncestor).unwrap(),
+            raw_join,
+            "an absent leaf yields the raw anchor join for a read-only caller"
+        );
+        assert_eq!(
+            ap.resolve(&roots, Containment::Strict).unwrap(),
+            raw_join,
+            "an absent leaf is mode-independent — Strict must not start refusing it"
         );
     }
 
@@ -1877,7 +2180,7 @@ mod tests {
     ///    established pattern for that half of the surface).
     /// 3. Assert `AnchoredPath::from_target(&dest, …)` classifies to the
     ///    expected (anchor, relative).
-    /// 4. Assert `ap.resolve(&roots)` round-trips back to `dest`.
+    /// 4. Assert `ap.resolve(&roots, Containment::Strict)` round-trips back to `dest`.
     ///
     /// No `continue` on `UnknownAnchor`: every combo MUST classify; a miss
     /// is a test failure.  The counter assertion at the end guarantees that
@@ -1980,7 +2283,7 @@ mod tests {
                     // Step 4: resolve must round-trip back to dest (absent
                     // path → Layer 2 skipped → raw join == dest).
                     let resolved = ap
-                        .resolve(&roots)
+                        .resolve(&roots, Containment::Strict)
                         .unwrap_or_else(|e| panic!("resolve failed for ({scope:?}, {client:?}, {kind:?}): {e:?}"));
                     assert_eq!(
                         resolved, dest,

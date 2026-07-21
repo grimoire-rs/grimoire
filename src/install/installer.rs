@@ -30,7 +30,7 @@ use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
-use super::path_anchor::{AnchorError, AnchorRoots};
+use super::path_anchor::{AnchorError, AnchorRoots, Containment};
 use super::progress::{InstallProgress, SilentProgress};
 use super::target::InstallTarget;
 
@@ -532,6 +532,21 @@ async fn install_one<M: ArtifactMaterializer>(
                 continue;
             }
             let dest = target.path_for(*client, kind, &artifact.name);
+            // `exists()` follows symlinks, so a DANGLING leaf symlink at the
+            // destination is invisible to the footprint comparison below and
+            // `materialize` would write THROUGH it — landing the artifact
+            // wherever the stale link points, outside the anchor root. Refuse
+            // with the same forceable `RefusedUntracked` the gate already
+            // emits: the client's existing Overwrite dialog resolves it, and
+            // the forced path unlinks the link (see the widened `remove_path`
+            // condition below). A LIVE symlink needs nothing here — the
+            // footprint hash already sees it.
+            if dest.is_symlink() && !dest.exists() {
+                return Ok(InstallOutcome::RefusedUntracked {
+                    client: client.to_string(),
+                    path: dest,
+                });
+            }
             if !dest.exists() {
                 continue;
             }
@@ -635,11 +650,22 @@ async fn install_one<M: ArtifactMaterializer>(
         let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
             hash.clone()
         } else {
-            if dest.exists() {
+            // `|| is_symlink()`: `exists()` is false for a DANGLING link, and
+            // without this the materialize below would write through it.
+            // `remove_path` unlinks the link itself, never its target. Pairs
+            // with the dangling-leaf refusal in the untracked gate above — the
+            // two must stay together, or `--force` re-emits that same refusal
+            // and the client's Overwrite dialog never terminates.
+            if dest.exists() || dest.is_symlink() {
                 remove_path(&dest).map_err(|e| target_io(&dest, e))?;
             }
+            // Same `|| is_symlink()` reason one level down: `mkdir(2)` does
+            // NOT follow a dangling link, so leaving it makes the support
+            // dir's `create_dir_all` fail `EEXIST` forever — and gating the
+            // removal on `exists()` alone means `--force` cannot clear it
+            // either, which is the non-terminating dialog above.
             if let Some(sd) = &cleanup
-                && sd.exists()
+                && (sd.exists() || sd.is_symlink())
             {
                 remove_path(sd).map_err(|e| target_io(sd, e))?;
             }
@@ -854,13 +880,13 @@ fn integrity_gate(
         // client whose vendor root is unset). Skip it — it can neither be
         // verified nor block the install. A genuine containment failure
         // (traversal / escaped anchor) or an I/O error still surfaces.
-        let present = match out.is_present(roots) {
+        let present = match out.is_present(roots, Containment::AllowRelocatedAncestor) {
             Ok(present) => present,
             Err(AnchorError::AnchorRootAbsent { .. }) => continue,
             Err(e) => return Err(e.into()),
         };
         if present {
-            let actual = out.current_hash(roots)?;
+            let actual = out.current_hash(roots, Containment::AllowRelocatedAncestor)?;
             if actual != out.content_hash {
                 if !force {
                     return Ok(Some(InstallOutcome::Refused {
@@ -961,18 +987,20 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
         }
         // Guard 3: tolerant resolve — absent root / containment failure /
         // already gone ⇒ nothing to reap here.
-        if !matches!(out.is_present(roots), Ok(true)) {
+        if !matches!(out.is_present(roots, Containment::Strict), Ok(true)) {
             continue;
         }
         // Guard 4: preserve anything the user edited.
-        let intact = out.current_hash(roots).is_ok_and(|actual| actual == out.content_hash);
+        let intact = out
+            .current_hash(roots, Containment::Strict)
+            .is_ok_and(|actual| actual == out.content_hash);
         if !intact {
             continue;
         }
-        let Ok(target) = out.target.resolve(roots) else {
+        let Ok(target) = out.target.resolve(roots, Containment::Strict) else {
             continue;
         };
-        let old_support = out.resolved_support_dir(roots).ok().flatten();
+        let old_support = out.resolved_support_dir(roots, Containment::Strict).ok().flatten();
         // Guard 5: resolved-identity across the FULL footprint. A symlink at
         // any old footprint component — the index target OR the support dir —
         // can canonicalize onto a live NEW output's real file or directory
@@ -986,8 +1014,8 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
             .iter()
             .flat_map(|new| {
                 [
-                    new.resolved_target(roots).ok(),
-                    new.resolved_support_dir(roots).ok().flatten(),
+                    new.resolved_target(roots, Containment::Strict).ok(),
+                    new.resolved_support_dir(roots, Containment::Strict).ok().flatten(),
                 ]
             })
             .flatten()
@@ -1226,9 +1254,11 @@ async fn install_mcp(
                 // from the recorded hash (a user edit) or is already gone,
                 // leaves the entry in place — the safe direction (untracked
                 // clobber), reachable again by a reinstall on the original env.
-                match stale.resolved_target(roots) {
+                match stale.resolved_target(roots, Containment::Strict) {
                     Ok(recorded_path) => {
-                        let intact = stale.current_hash(roots).is_ok_and(|h| h == stale.content_hash);
+                        let intact = stale
+                            .current_hash(roots, Containment::Strict)
+                            .is_ok_and(|h| h == stale.content_hash);
                         if intact {
                             crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale.mcp_format())
                                 .map_err(|e| target_io(&recorded_path, e))?;
@@ -3779,6 +3809,139 @@ mod tests {
             crate::install::toml_splice::member_value(&raw_config, "mcp_servers", "srv").is_some(),
             "the recomputed config path grim never recorded must stay untouched: {raw_config}"
         );
+    }
+
+    // ── A5: a DANGLING leaf symlink at the destination ───────────────────
+
+    /// A5, direction 1. `dest.exists()` follows symlinks, so a dangling leaf
+    /// symlink at the destination is invisible to the untracked-clobber gate
+    /// and grim writes THROUGH it — materializing into whatever the link
+    /// points at, outside the anchor root. It must be refused instead, and the
+    /// refusal must be the existing forceable `RefusedUntracked` so the client
+    /// can offer the same Overwrite dialog it already has.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_leaf_symlink_at_dest_is_refused_without_force() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+
+        // A dangling symlink where the rule would land, pointing at a path
+        // outside the workspace whose parent exists (so a write-through would
+        // silently succeed rather than fail on a missing directory).
+        let outside = ws.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.md");
+        let dest = ws.join(".claude/rules/rust-style.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        symlink(&victim, &dest).unwrap();
+
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob });
+        let m = DefaultMaterializer;
+        let roots = roots(ws);
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&ws.join("state.json")).unwrap();
+
+        let r = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), false).await;
+        assert_eq!(r.len(), 1);
+        assert!(
+            matches!(
+                r[0].result.as_ref().unwrap(),
+                InstallOutcome::RefusedUntracked { path, .. } if path == &dest
+            ),
+            "a dangling leaf symlink must trip the untracked gate, got {:?}",
+            r[0].result
+        );
+        assert!(
+            !victim.exists(),
+            "the refusal must happen BEFORE materialize — grim must never write through the stale link"
+        );
+    }
+
+    /// A5, direction 2. `--force` must resolve the refusal exactly once: the
+    /// stale link is unlinked (`remove_path` removes the link, not its target)
+    /// and the artifact lands inside the anchor root. Without this the client's
+    /// Overwrite dialog re-issues `--force`, gets the identical forceable
+    /// refusal back, and the confirm loop never terminates.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_leaf_symlink_at_dest_is_replaced_with_force() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+
+        let outside = ws.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.md");
+        let dest = ws.join(".claude/rules/rust-style.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        symlink(&victim, &dest).unwrap();
+
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let access = arc(BlobMock { blob });
+        let m = DefaultMaterializer;
+        let roots = roots(ws);
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&ws.join("state.json")).unwrap();
+
+        let r = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), true).await;
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "--force must resolve the refusal, or the client's Overwrite dialog loops forever"
+        );
+        assert!(
+            !dest.is_symlink(),
+            "the stale link must be unlinked, not written through"
+        );
+        assert!(dest.is_file(), "the artifact must land inside the anchor root");
+        assert!(
+            !victim.exists(),
+            "the link's target outside the root must never be created"
+        );
+    }
+
+    /// A5, one level down. `mkdir(2)` does not follow a dangling symlink, so a
+    /// stale link where a multi-file rule's support dir goes is not a
+    /// containment hole — it is a permanent `EEXIST`. Gating the removal on a
+    /// bare `exists()` (false for a dangling link) means `--force` cannot
+    /// clear it either, which is the non-terminating Overwrite dialog the leaf
+    /// fix above exists to prevent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_symlink_at_the_support_dir_is_replaced_with_force() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+
+        let support = ws.join(".claude/rules/my-rule");
+        std::fs::create_dir_all(support.parent().unwrap()).unwrap();
+        symlink(ws.join("nowhere"), &support).unwrap();
+
+        let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
+        let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
+        let access = arc(BlobMock { blob });
+        let m = DefaultMaterializer;
+        let roots = roots(ws);
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&ws.join("state.json")).unwrap();
+
+        let r = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), true).await;
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "the stale link must be unlinked, not left to fail create_dir_all with EEXIST"
+        );
+        assert!(!support.is_symlink(), "the link itself is unlinked, never its target");
+        assert_eq!(std::fs::read(support.join("examples.md")).unwrap(), b"# ex\n");
+        assert!(!ws.join("nowhere").exists(), "the link's target must never be created");
     }
 
     #[test]

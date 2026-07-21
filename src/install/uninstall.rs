@@ -17,8 +17,10 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use crate::install::install_state::InstallState;
-use crate::install::path_anchor::{AnchorError, AnchorRoots};
+use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
 use crate::oci::ArtifactKind;
 
 /// What [`uninstall`] did.
@@ -33,6 +35,22 @@ pub enum UninstallOutcome {
     NotInstalled,
 }
 
+/// A managed config-file entry (an MCP server registration) that an
+/// `EscapedAnchor` tolerance arm left in place: the config file itself is
+/// user-owned and was never grim's to delete or rewrite, so it does not go
+/// to [`UninstallResult::retained`] — reporting it there would tell the
+/// user grim "left behind" a file it never owned. `abandoned_entries`
+/// instead names the config file grim can no longer safely reach the
+/// managed member in, since the record naming it was just dropped.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct AbandonedEntry {
+    /// The resolved path of the shared config file the entry lives in.
+    pub path: PathBuf,
+    /// The two-level JSON pointer of the managed member inside `path` (see
+    /// [`ClientOutput::entry`](crate::install::install_state::ClientOutput::entry)).
+    pub pointer: String,
+}
+
 /// The outcome plus the paths actually deleted (for the report / status
 /// line). Empty `removed` with [`UninstallOutcome::Removed`] means the
 /// record existed but its files were already gone.
@@ -42,6 +60,19 @@ pub struct UninstallResult {
     pub outcome: UninstallOutcome,
     /// The on-disk targets actually deleted.
     pub removed: Vec<PathBuf>,
+    /// The on-disk targets deliberately left in place — a footprint the
+    /// containment guard refuses to delete (a relocated ancestor) while the
+    /// record is dropped anyway. Reported so the divergence between state and
+    /// filesystem is visible instead of silent. Sorted and deduplicated
+    /// (multiple outputs can share one escaping target). Empty on every
+    /// normal uninstall. Never carries an `entry` output's config file — see
+    /// [`Self::abandoned_entries`].
+    pub retained: Vec<PathBuf>,
+    /// The managed config-file entries (`entry` outputs) an escaping
+    /// resolve left un-spliced while the record was dropped anyway — the
+    /// `entry` counterpart of `retained`. Sorted and deduplicated. Empty on
+    /// every normal uninstall.
+    pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
 /// A failure during uninstall: either resolving an anchored target failed
@@ -70,12 +101,17 @@ pub enum UninstallError {
 /// A recorded output whose anchor root is absent on this machine (an
 /// out-of-scope client — e.g. a global client whose vendor root is unset) is
 /// tolerated and skipped: uninstall converges on "not installed" from any
-/// state, dropping the record regardless.
+/// state, dropping the record regardless. So is one that resolves *outside*
+/// its anchor root ([`AnchorError::EscapedAnchor`]) — the Strict delete is
+/// skipped, the record still drops, and the untouched footprint is named in
+/// [`UninstallResult::retained`] so the client can report what was left in
+/// place. Reported divergence between state and disk is acceptable; a wedged
+/// record the user cannot remove (grimoire#57) is not.
 ///
 /// # Errors
 ///
 /// A [`UninstallError`] from a genuine containment failure resolving an
-/// anchored target (a tampered `relative` — traversal / escaped anchor), or
+/// anchored target (a tampered `relative` — traversal), or
 /// from deleting a target that *is* present (other than not-found). A present
 /// target is operated on through its resolved (canonicalized) path,
 /// guaranteed contained within its anchor root; a missing target is operated
@@ -91,20 +127,50 @@ pub fn uninstall(
         return Ok(UninstallResult {
             outcome: UninstallOutcome::NotInstalled,
             removed: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
         });
     };
 
     let mut removed = Vec::new();
+    let mut retained = Vec::new();
+    let mut abandoned_entries = Vec::new();
     for out in &record.outputs {
         // Tolerant resolve: a recorded output whose anchor root is absent on
         // this machine names a client out of scope here (e.g. a global client
         // whose vendor root is unset). Skip it — uninstall converges on "not
         // installed" from any state, and we can neither resolve nor delete
-        // what we cannot anchor. A genuine containment failure (traversal /
-        // escaped anchor) or an I/O error still surfaces.
-        let target = match out.resolved_target(roots) {
+        // what we cannot anchor. A tampered `relative` (traversal) or an I/O
+        // error still surfaces.
+        let target = match out.resolved_target(roots, Containment::Strict) {
             Ok(target) => target,
             Err(AnchorError::AnchorRootAbsent { .. }) => continue,
+            // The record resolves outside its anchor root, so the Strict
+            // delete (and the Strict MCP splice — one resolve serves both
+            // arms below) is skipped. Tolerated rather than fatal: otherwise
+            // `state.remove` is never reached and the record is wedged
+            // forever, which is the grimoire#57 deadlock.
+            Err(AnchorError::EscapedAnchor { anchor, resolved }) => {
+                tracing::warn!(
+                    %anchor,
+                    path = %resolved.display(),
+                    "recorded output resolves outside its anchor root; dropping the record without deleting it"
+                );
+                // Only a footprint grim owns is "left in place". An `entry`
+                // output is a member inside a shared, user-owned config file
+                // grim never intended to delete, so naming it here would tell
+                // the user a falsehood — report it as abandoned instead
+                // (**never** splice it here: the resolve that would guard the
+                // splice just failed containment).
+                match &out.entry {
+                    Some(pointer) => abandoned_entries.push(AbandonedEntry {
+                        path: resolved,
+                        pointer: pointer.clone(),
+                    }),
+                    None => retained.push(resolved),
+                }
+                continue;
+            }
             Err(e) => return Err(e.into()),
         };
         // An entry output (an MCP server registered in a shared, user-owned
@@ -124,18 +190,39 @@ pub fn uninstall(
         // The index/target first, then a multi-file rule's sibling support
         // directory (`<parent>/<name>/`) so the whole footprint is reaped.
         remove_output(&target, &mut removed)?;
-        match out.resolved_support_dir(roots) {
+        match out.resolved_support_dir(roots, Containment::Strict) {
             Ok(Some(support_dir)) => remove_output(&support_dir, &mut removed)?,
             Ok(None) => {}
             Err(AnchorError::AnchorRootAbsent { .. }) => {}
+            // Same tolerance as the target arm above — always the non-entry
+            // path, so the skipped directory is grim's own footprint.
+            Err(AnchorError::EscapedAnchor { anchor, resolved }) => {
+                tracing::warn!(
+                    %anchor,
+                    path = %resolved.display(),
+                    "recorded support dir resolves outside its anchor root; leaving it in place"
+                );
+                retained.push(resolved);
+            }
             Err(e) => return Err(e.into()),
         }
     }
 
     state.remove(kind, name);
+    // Several outputs (one per client) can share a single escaping
+    // `AnchoredPath` under the shared-pool dedup (see `installer.rs`), each
+    // pushing the same resolved path above — sort and dedup so `retained`
+    // (and `abandoned_entries`, same shape) names each footprint exactly
+    // once.
+    retained.sort();
+    retained.dedup();
+    abandoned_entries.sort();
+    abandoned_entries.dedup();
     Ok(UninstallResult {
         outcome: UninstallOutcome::Removed,
         removed,
+        retained,
+        abandoned_entries,
     })
 }
 
@@ -144,6 +231,12 @@ pub fn uninstall(
 /// (the OpenCode glob-removal contract): an absent file, an unparseable
 /// file, or a malformed recorded pointer has nothing grim-managed left to
 /// remove. The file itself always survives.
+///
+/// CALLER INVARIANT: `path` MUST originate from a
+/// [`Containment::Strict`] resolve. [`super::path_anchor::AnchoredPath::resolve`] returns a bare
+/// `PathBuf`, so the containment guarantee stops at the resolve boundary and
+/// this function cannot re-check it — a permissively-resolved path here would
+/// let a stored record direct a rewrite of a file outside the anchor root.
 ///
 /// Shared with the installer's pin-change decline path
 /// ([`super::installer::install_mcp`]), which reuses this to reap a stale
@@ -191,6 +284,12 @@ pub fn remove_entry(
 /// `removed` when it was present. An absent path is tolerated (idempotent).
 /// `symlink_metadata` does not traverse links, so a symlinked target is
 /// unlinked as a file, never followed into an unrelated tree.
+///
+/// CALLER INVARIANT: `path` MUST originate from a
+/// [`Containment::Strict`] resolve. [`super::path_anchor::AnchoredPath::resolve`] returns a bare
+/// `PathBuf`, so the containment guarantee stops at the resolve boundary and
+/// this function cannot re-check it — a permissively-resolved path here would
+/// hand `remove_dir_all` a tree outside the anchor root.
 ///
 /// Shared with [`super::prune::reap_dropped_clients`], which reaps a single
 /// dropped-client output through this same seam.
@@ -256,6 +355,17 @@ mod tests {
             content_hash,
             support_dir: None,
             entry: None,
+        }
+    }
+
+    /// Same as [`client_output_at`], but for a named client — used to build
+    /// several outputs of one record that share a single `AnchoredPath` (the
+    /// shared-pool destination, e.g. `.agents/skills/<name>` fanning out to
+    /// several clients).
+    fn client_output_for(client: &str, relative: &str, content_hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            ..client_output_at(relative, content_hash)
         }
     }
 
@@ -599,5 +709,196 @@ mod tests {
         );
         assert!(text.contains("# user comment"), "unrelated comment preserved");
         assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
+    }
+
+    // ── A9(e)/(f): uninstall through a relocated ancestor ─────────────────
+
+    /// A9(e) — the deadlock breaker (grimoire#57). A record whose output sits
+    /// behind a symlinked ancestor cannot be deleted (the destructive path
+    /// stays `Strict`, so a stored record can never direct a delete outside
+    /// the anchor root), but it must no longer wedge the uninstall: the record
+    /// drops, the file survives untouched, and `retained` names what was left
+    /// so the divergence between state and filesystem is REPORTED rather than
+    /// silent.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_through_relocated_ancestor_drops_record_and_retains_the_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        // The user's own layout: `.claude/rules` relocated out of the
+        // workspace (GNU stow / yadm / a synced config dir).
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/rules");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, ws.join(".claude/rules")).unwrap();
+        let rule_file = store.join("style.md");
+        std::fs::write(&rule_file, b"rule\n").unwrap();
+
+        let mut st = InstallState::empty(&ws.join("state.json"));
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "style".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/style")),
+            dev: false,
+            outputs: vec![client_output_at(
+                ".claude/rules/style.md",
+                content_hash(&rule_file).unwrap(),
+            )],
+        });
+
+        let result = uninstall(&mut st, ArtifactKind::Rule, "style", &roots(&ws))
+            .expect("a relocated ancestor must not wedge uninstall — that is the grimoire#57 deadlock");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert!(
+            rule_file.is_file(),
+            "the file lives outside the anchor root — the Strict delete must be skipped, not performed"
+        );
+        assert!(
+            result.removed.is_empty(),
+            "nothing was deleted, so nothing is reported removed"
+        );
+        assert_eq!(
+            result.retained,
+            vec![rule_file.clone()],
+            "the skipped delete must be reported so the client can say what was left in place"
+        );
+        assert!(
+            st.get(ArtifactKind::Rule, "style").is_none(),
+            "the record must drop, or the user can never recover from the wedge"
+        );
+    }
+
+    /// A9(f) — an `entry` (MCP) output resolving through a relocated ancestor:
+    /// the splice is refused and the shared, user-owned config file is
+    /// byte-unchanged. And it must NOT appear in `retained`: that file was
+    /// never grim's to delete, so reporting "left in place" about it would tell
+    /// the user a falsehood. Instead it must appear exactly once in
+    /// `abandoned_entries` — the signal that grim dropped the record without
+    /// splicing the managed member out, so the entry is now unrecorded and
+    /// grim will never remove it again (design-record item 11 / the ADR's
+    /// "silent divergence is not acceptable" applied to a shared config).
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_entry_through_relocated_ancestor_never_rewrites_the_outside_config() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join("cfg")).unwrap();
+        let store = tmp.join("elsewhere/cfg");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, ws.join("cfg/mcp")).unwrap();
+
+        let cfg = store.join(".mcp.json");
+        let original = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"},\n    \"user-server\": {\"command\": \"x\"}\n  }\n}\n";
+        std::fs::write(&cfg, original).unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = client_output_at("cfg/mcp/.mcp.json", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(&ws))
+            .expect("a relocated ancestor must not wedge uninstall");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            original,
+            "the splice resolves Strict, so a config file outside the anchor root must be byte-unchanged"
+        );
+        assert!(
+            result.retained.is_empty(),
+            "an MCP entry output is a shared user-owned config grim never intended to delete — \
+             reporting it as 'left in place' would be a lie, got {:?}",
+            result.retained
+        );
+        assert_eq!(
+            result.abandoned_entries,
+            vec![AbandonedEntry {
+                path: cfg.clone(),
+                pointer: "/mcpServers/grim".to_string(),
+            }],
+            "the un-spliced entry must be named exactly once so the caller knows grim no longer \
+             tracks it and will never remove it on a later uninstall"
+        );
+        assert!(
+            state.get(ArtifactKind::Mcp, "grim").is_none(),
+            "the record must still drop so the user can recover"
+        );
+    }
+
+    /// A9(g) — the shared-pool dedup. A record's outputs, one per client, can
+    /// share a single escaping `AnchoredPath` (several clients fanning out to
+    /// the same pooled destination). Each escaping output independently
+    /// pushes its resolved path to `retained`, so a naive collect duplicates
+    /// it once per client. `retained` must name each escaping footprint
+    /// exactly once, sorted.
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_dedupes_retained_across_clients_sharing_one_escaping_path() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(tmp.path()).unwrap();
+
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Two relocated ancestors: `elsewhere` sorts before `elsewhere2`, so
+        // pushing them out of order below exercises the sort, not just the
+        // dedup.
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store_a = tmp.join("elsewhere/skills");
+        std::fs::create_dir_all(&store_a).unwrap();
+        symlink(&store_a, ws.join(".claude/pooled")).unwrap();
+        let file_a = store_a.join("hello.md");
+        std::fs::write(&file_a, b"a\n").unwrap();
+
+        std::fs::create_dir_all(ws.join(".other")).unwrap();
+        let store_b = tmp.join("elsewhere2/skills");
+        std::fs::create_dir_all(&store_b).unwrap();
+        symlink(&store_b, ws.join(".other/pooled")).unwrap();
+        let file_b = store_b.join("hello.md");
+        std::fs::write(&file_b, b"b\n").unwrap();
+
+        let mut st = InstallState::empty(&ws.join("state.json"));
+        st.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "hello".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("acme/hello")),
+            dev: false,
+            outputs: vec![
+                // Pushed first, but sorts second — proves the fix sorts
+                // rather than merely preserving push order.
+                client_output_for("cursor", ".other/pooled/hello.md", content_hash(&file_b).unwrap()),
+                // Two clients pooled onto the identical target: the dedup
+                // must collapse these two pushes into one entry.
+                client_output_for("codex", ".claude/pooled/hello.md", content_hash(&file_a).unwrap()),
+                client_output_for("gemini", ".claude/pooled/hello.md", content_hash(&file_a).unwrap()),
+            ],
+        });
+
+        let result = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots(&ws))
+            .expect("a relocated ancestor must not wedge uninstall");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert_eq!(
+            result.retained,
+            vec![file_a.clone(), file_b.clone()],
+            "each escaping footprint must be reported exactly once, sorted"
+        );
+        assert!(file_a.is_file(), "the pooled footprint outside the anchor root survives");
+        assert!(file_b.is_file(), "the second escaping footprint survives");
     }
 }

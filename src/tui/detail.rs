@@ -15,7 +15,7 @@
 //! width, so the geometry is one concern.
 
 use super::bundle_members::MemberNode;
-use super::state::TuiRow;
+use super::state::{ArtifactState, TuiRow};
 
 /// Catalog column widths (chars) — the projection pads/truncates to
 /// these so the table aligns regardless of how long an identifier is.
@@ -190,6 +190,17 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
         lines.push(DetailLine::MetaEntry {
             label: "Pinned:",
             value: p.clone(),
+        });
+    }
+    // `integrity-missing` is the one badge whose cause is invisible from the
+    // list, so it gets one static explanatory line. Static on purpose: the
+    // state enum is matched at ~40 sites and gains no payload for this.
+    if r.state == ArtifactState::IntegrityMissing {
+        lines.push(DetailLine::MetaEntry {
+            label: "Integrity:",
+            value: "recorded files are missing, unreadable, or resolve outside their anchor root — \
+                    uninstall and reinstall to repair"
+                .to_string(),
         });
     }
     lines
@@ -537,6 +548,46 @@ mod tests {
         assert_eq!(meta_value(&lines, "License:"), Some("MIT"));
         for label in ["Authors:", "URL:", "Documentation:", "Vendor:"] {
             assert_eq!(meta_value(&lines, label), None);
+        }
+    }
+
+    /// A7 / W3. `integrity-missing` is the one badge whose cause is invisible
+    /// from the list, so the detail pane carries the only explanation the user
+    /// gets — including for the containment refusal, whose remediation
+    /// (uninstall + reinstall) appears nowhere else on this row.
+    #[test]
+    fn detail_lines_explain_an_integrity_missing_row() {
+        let mut row = tui_row(None);
+        row.state = ArtifactState::IntegrityMissing;
+        let lines = detail_lines(Some(&row));
+        let integrity = meta_value(&lines, "Integrity:").expect("integrity-missing gets its line");
+        assert!(integrity.contains("outside their anchor root"), "got {integrity}");
+        assert!(integrity.contains("uninstall and reinstall"), "got {integrity}");
+        // D3: a containment refusal is never offered an override control.
+        assert!(
+            !integrity.contains("force"),
+            "the explanation must not suggest an override: {integrity}"
+        );
+    }
+
+    #[test]
+    fn detail_lines_omit_the_integrity_line_for_every_other_state() {
+        // Only the one badge earns the line — an ordinary row's pane is
+        // unchanged.
+        for state in [
+            ArtifactState::Installed,
+            ArtifactState::NotInstalled,
+            ArtifactState::Modified,
+            ArtifactState::Outdated,
+            ArtifactState::ViaBundle,
+        ] {
+            let mut row = tui_row(None);
+            row.state = state;
+            assert_eq!(
+                meta_value(&detail_lines(Some(&row)), "Integrity:"),
+                None,
+                "{state:?} must not carry the Integrity line"
+            );
         }
     }
 

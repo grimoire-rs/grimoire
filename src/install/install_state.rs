@@ -41,7 +41,7 @@ use sha2::Digest as _;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
 use crate::install::content_hash::footprint_hash;
-use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath};
+use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment};
 use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
@@ -99,17 +99,20 @@ impl ClientOutput {
     /// (the resolved target plus, for a multi-file rule, its sibling support
     /// dir). The integrity gate compares this against [`Self::content_hash`].
     ///
+    /// `containment` is the caller's intent, forwarded to
+    /// [`AnchoredPath::resolve`] — see [`Containment`].
+    ///
     /// # Errors
     ///
     /// [`AnchorError`] from resolving/validating the anchored target or
     /// support dir, or an I/O error from walking the footprint.
-    pub fn current_hash(&self, roots: &AnchorRoots) -> Result<Digest, AnchorError> {
-        let target = self.resolved_target(roots)?;
+    pub fn current_hash(&self, roots: &AnchorRoots, containment: Containment) -> Result<Digest, AnchorError> {
+        let target = self.resolved_target(roots, containment)?;
         if let Some(pointer) = &self.entry {
             return current_entry_hash(&target, pointer, self.mcp_format())
                 .map_err(|source| AnchorError::Io { path: target, source });
         }
-        let support = self.resolved_support_dir(roots)?;
+        let support = self.resolved_support_dir(roots, containment)?;
         footprint_hash(&target, support.as_deref()).map_err(|source| AnchorError::Io { path: target, source })
     }
 
@@ -119,13 +122,16 @@ impl ClientOutput {
     /// `exists()` so an entry deleted from a still-present config file reads
     /// as missing.
     ///
+    /// `containment` is the caller's intent, forwarded to
+    /// [`AnchoredPath::resolve`] — see [`Containment`].
+    ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard (an unparseable
     /// config file is `Ok(false)`, not an error — absence, not corruption of
     /// grim's own state).
-    pub fn is_present(&self, roots: &AnchorRoots) -> Result<bool, AnchorError> {
-        let target = self.resolved_target(roots)?;
+    pub fn is_present(&self, roots: &AnchorRoots, containment: Containment) -> Result<bool, AnchorError> {
+        let target = self.resolved_target(roots, containment)?;
         if !target.exists() {
             return Ok(false);
         }
@@ -149,22 +155,30 @@ impl ClientOutput {
     }
 
     /// Resolve + validate this output's anchored target into an absolute
-    /// on-disk path (containment-guaranteed).
+    /// on-disk path, contained per `containment` (see [`Containment`]).
     ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard.
-    pub fn resolved_target(&self, roots: &AnchorRoots) -> Result<PathBuf, AnchorError> {
-        self.target.resolve(roots)
+    pub fn resolved_target(&self, roots: &AnchorRoots, containment: Containment) -> Result<PathBuf, AnchorError> {
+        self.target.resolve(roots, containment)
     }
 
-    /// Resolve + validate this output's anchored support dir, when present.
+    /// Resolve + validate this output's anchored support dir, when present,
+    /// contained per `containment` (see [`Containment`]).
     ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard.
-    pub fn resolved_support_dir(&self, roots: &AnchorRoots) -> Result<Option<PathBuf>, AnchorError> {
-        self.support_dir.as_ref().map(|dir| dir.resolve(roots)).transpose()
+    pub fn resolved_support_dir(
+        &self,
+        roots: &AnchorRoots,
+        containment: Containment,
+    ) -> Result<Option<PathBuf>, AnchorError> {
+        self.support_dir
+            .as_ref()
+            .map(|dir| dir.resolve(roots, containment))
+            .transpose()
     }
 }
 
@@ -2617,8 +2631,8 @@ mod tests {
             "{\n  \"other\": 1,\n  \"mcpServers\": {\n    \"grim\": {\n\t\"args\":   [\"mcp\"],\n      \"command\": \"grim\"\n    }\n  }\n}\n",
         )
         .unwrap();
-        assert!(out.is_present(&roots).unwrap());
-        assert_eq!(out.current_hash(&roots).unwrap(), out.content_hash);
+        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
 
         // A real value change flips the hash.
         std::fs::write(
@@ -2626,8 +2640,8 @@ mod tests {
             "{\"mcpServers\": {\"grim\": {\"command\": \"evil\", \"args\": [\"mcp\"]}}}",
         )
         .unwrap();
-        assert!(out.is_present(&roots).unwrap());
-        assert_ne!(out.current_hash(&roots).unwrap(), out.content_hash);
+        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
     }
 
     #[test]
@@ -2637,21 +2651,24 @@ mod tests {
         let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
 
         // No file at all.
-        assert!(!out.is_present(&roots).unwrap());
+        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
         // File present, member absent.
         std::fs::write(tmp.path().join(".mcp.json"), "{\"mcpServers\": {\"other\": {}}}").unwrap();
-        assert!(!out.is_present(&roots).unwrap());
-        assert!(out.current_hash(&roots).is_err(), "absent entry has no current hash");
+        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(
+            out.current_hash(&roots, Containment::Strict).is_err(),
+            "absent entry has no current hash"
+        );
         // Unparseable file: absent, not an error (read-side degradation).
         std::fs::write(tmp.path().join(".mcp.json"), "not json {{{").unwrap();
-        assert!(!out.is_present(&roots).unwrap());
+        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
         // Member present.
         std::fs::write(
             tmp.path().join(".mcp.json"),
             "{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}",
         )
         .unwrap();
-        assert!(out.is_present(&roots).unwrap());
+        assert!(out.is_present(&roots, Containment::Strict).unwrap());
     }
 
     #[test]
@@ -2723,9 +2740,9 @@ mod tests {
             "model = \"gpt-5-codex\"\n\n[mcp_servers.grim]\nargs = [\"mcp\"]\ncommand = \"grim\"\n",
         )
         .unwrap();
-        assert!(out.is_present(&roots).unwrap());
+        assert!(out.is_present(&roots, Containment::Strict).unwrap());
         assert_eq!(
-            out.current_hash(&roots).unwrap(),
+            out.current_hash(&roots, Containment::Strict).unwrap(),
             out.content_hash,
             "reordered TOML keys/foreign content must still match semantically"
         );
@@ -2735,7 +2752,7 @@ mod tests {
             "[mcp_servers.grim]\ncommand = \"evil\"\n",
         )
         .unwrap();
-        assert_ne!(out.current_hash(&roots).unwrap(), out.content_hash);
+        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
     }
 
     #[test]
@@ -2752,7 +2769,10 @@ mod tests {
             "{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}",
         )
         .unwrap();
-        assert!(out.is_present(&roots).unwrap(), "JSON fallback must parse the file");
-        assert_eq!(out.current_hash(&roots).unwrap(), out.content_hash);
+        assert!(
+            out.is_present(&roots, Containment::Strict).unwrap(),
+            "JSON fallback must parse the file"
+        );
+        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
     }
 }

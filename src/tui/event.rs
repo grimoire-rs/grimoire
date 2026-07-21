@@ -141,6 +141,14 @@ pub enum TuiAction {
     LoadBundleMembers { row: usize, bundle_repo: String },
     /// Open `url` in the system browser (the selected row's repository).
     OpenUrl { url: String },
+    /// Re-issue the refused install at `rows[row]` with `force`, after the
+    /// user chose **Overwrite** in [`Mode::ConfirmForce`].
+    ForceRetry {
+        /// The `rows` index to re-issue.
+        row: usize,
+        /// Whether the refused action was an update (vs. a fresh install).
+        is_update: bool,
+    },
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -157,7 +165,40 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::Search => handle_search(state, input),
         Mode::Help => handle_help(state, input),
         Mode::VersionPick => handle_picker(state, input),
+        Mode::ConfirmForce => handle_confirm_force(state, input),
         Mode::List | Mode::Detail => handle_browse(state, input),
+    }
+}
+
+/// Overwrite-confirmation keys: `←`/`→` (which map to
+/// [`TuiInput::Collapse`]/[`TuiInput::Expand`]) and `h`/`l` move between
+/// Cancel and Overwrite, `Enter` commits the highlighted button, `Esc`
+/// cancels, `q` quits.
+///
+/// Deliberately **no bare `y`/`n` accelerator**: this prompt discards the
+/// user's own local edits, and a single unmodified keystroke is exactly how a
+/// queued keypress destroys them. Cancel starts selected for the same reason,
+/// so a stray `Enter` is inert.
+fn handle_confirm_force(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Collapse | TuiInput::Expand | TuiInput::Char('h') | TuiInput::Char('l') => {
+            state.confirm_force_move(1);
+            TuiAction::None
+        }
+        TuiInput::Enter => match state.take_confirm_force() {
+            Some(p) => TuiAction::ForceRetry {
+                row: p.row,
+                is_update: p.is_update,
+            },
+            None => TuiAction::None,
+        },
+        TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        // Esc and anything else dismiss without acting — the safe direction.
+        _ => {
+            state.confirm = None;
+            state.back();
+            TuiAction::None
+        }
     }
 }
 
@@ -872,6 +913,49 @@ mod tests {
         handle(&mut s, TuiInput::Help);
         assert_eq!(s.mode, Mode::Help);
         assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::Quit);
+    }
+
+    /// A7. Cancel is preselected, so a keypress already queued when the modal
+    /// appears dismisses it — a destructive default is exactly how a stray
+    /// Enter discards the user's local edits.
+    #[test]
+    fn queued_enter_on_the_force_confirm_cancels_and_does_not_retry() {
+        let mut s = seeded();
+        s.open_confirm_force(0, false, "r/alpha", "modified locally");
+        assert_eq!(s.mode, Mode::ConfirmForce);
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.confirm.is_none(), "the prompt is consumed, not left open");
+    }
+
+    /// A7. Moving onto Overwrite and committing re-issues the SAME action
+    /// with force; `is_update` is carried so an update never re-issues as a
+    /// fresh install.
+    #[test]
+    fn selecting_overwrite_emits_a_forced_retry_of_the_same_action() {
+        let mut s = seeded();
+        s.open_confirm_force(3, true, "r/alpha", "modified locally");
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::ForceRetry {
+                row: 3,
+                is_update: true
+            }
+        );
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    /// A7. There is no bare `y`/`n` accelerator: a single unmodified keystroke
+    /// must not be able to authorize discarding the user's work. `y` is an
+    /// ordinary key here and therefore dismisses.
+    #[test]
+    fn force_confirm_has_no_bare_yes_accelerator() {
+        let mut s = seeded();
+        s.open_confirm_force(0, false, "r/alpha", "modified locally");
+        assert_eq!(handle(&mut s, TuiInput::Char('y')), TuiAction::None);
+        assert_eq!(s.mode, Mode::List, "an unrecognized key dismisses");
+        assert!(s.confirm.is_none());
     }
 
     #[test]

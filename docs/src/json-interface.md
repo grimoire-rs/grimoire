@@ -86,8 +86,8 @@ One row object per item inside `{"items": [...]}`:
 |---------|-----------|-------------|
 | `lock` | `{kind, name, pinned, action}` | `action`: `locked`, `unchanged` |
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
-| `status` | `{kind, name, source, pinned, state, outputs, clients_missing, clients_extra, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `pinned` null until locked; `outputs` is `[{client, path}]`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
-| `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
+| `status` | `{kind, name, source, pinned, state, outputs, clients_missing, clients_extra, clients_unresolved, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `pinned` null until locked; `outputs` is `[{client, path}]`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `clients_unresolved` is a sorted client-name array naming every active client whose recorded output could not be resolved (anchor root absent here, or refused by the containment guard) and is therefore missing from `outputs` — `[]` normally; `state` stays `missing` and the exit code stays `0`; `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
+| `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
 | `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
@@ -189,7 +189,7 @@ file, so it succeeds identically inside or outside a project.
 | `init` | `{path, scope, status}` | `status`: `created` |
 | `add` | `{kind, name, pinned, status}` | `status`: `added` |
 | `remove` | `{kind, name, status}` | `status`: `removed`, `absent` |
-| `uninstall` | `{kind, name, status}` | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
+| `uninstall` | `{kind, name, status, retained, abandoned_entries}` — `retained` is an always-present array of absolute paths (`[]` on every healthy uninstall) naming the on-disk footprint the containment guard refused to delete while the install-state record was dropped anyway; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` | `status`: `built` |
 | `release` | `{ref, manifest_digest, tags, pushed, pushed_to}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive | `pushed`: bool (`false` = dry run) |
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
@@ -346,6 +346,7 @@ recognize. The reasons defined so far:
 | `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. |
 | `no-config` | `not-found` / 79 | A project-scope command found no `grimoire.toml` by walking up from the working directory. Distinct from an explicit `--config <path>` that does not exist, which also exits 79 but carries no `reason` — that is a wrong path, not "no config anywhere". |
 | `locked` | `temp-fail` / 75 | A config-file write was refused because another `grim` process holds the `<file>.lock` advisory sidecar. Transient — retry the same command. |
+| `anchor-escape` | `data` / 65 | A recorded install path resolves outside the anchor root it was stored against, and its final component is itself a symlink. grim refuses to read or write through it. **Never forceable** — `--force` does not bypass containment. Remediation: `grim uninstall <kind> <name>`, then install again; files may remain on disk and must be removed manually. |
 
 New reasons may appear in any minor release under the [additive-field
 policy][stability-additive]; existing ones never change meaning.
@@ -373,6 +374,33 @@ itself: present only when `reason` is present *and* that specific reason
 is retryable, otherwise the key is absent entirely — never a bare
 `false`. Today only `locked` sets it; every other documented `reason`
 (including a bare `reason`-less failure) omits the key.
+
+### The optional `forceable` field
+
+The error object may likewise carry `"forceable": true` — the same command
+re-run with `--force` can resolve this refusal:
+
+```json
+{
+  "error": {
+    "code": "data",
+    "exit": 65,
+    "reason": "modified",
+    "forceable": true,
+    "message": "installed artifact was modified locally: recorded sha256:…, found sha256:…; rerun with --force to overwrite"
+  }
+}
+```
+
+`forceable` follows the identical rule to `retryable`: **additive and
+omit-when-absent**, present only when `reason` is present *and* that reason
+is forceable, never a bare `false`. Today `modified` and
+`untracked-destination` set it.
+
+Key on `forceable`, **never on the exit code**: `data` / 65 covers both the
+forceable drift refusals *and* the non-forceable `anchor-escape` containment
+refusal, so an exit-code check would offer an override that cannot work.
+`--force` never bypasses containment.
 
 ## Null and additive policy {#null-policy}
 

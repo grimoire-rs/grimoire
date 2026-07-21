@@ -44,7 +44,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
-use crate::install::path_anchor::AnchorRoots;
+use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -205,6 +205,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // "missing" on every row, which isn't real drift.
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            clients_unresolved: Vec::new(),
             // A bundle declaration carries no registry pin of its own —
             // `--check` has nothing to match it against.
             deprecated: None,
@@ -268,6 +269,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             outputs,
             clients_missing,
             clients_extra,
+            clients_unresolved: unresolved_clients(record, &active, &scope.roots),
             // Populated below by `apply_catalog_check` (deprecated/replaced_by)
             // and `resolve_update_availability` (update_available) when
             // `--check` ran online; stays null otherwise.
@@ -300,6 +302,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // desired set would flag spurious drift on every dev row.
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            clients_unresolved: unresolved_clients(Some(record), &active, &scope.roots),
             // A dev install carries no registry pin (always a local path
             // source) — `--check` has nothing to match it against.
             deprecated: None,
@@ -338,6 +341,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 outputs,
                 clients_missing,
                 clients_extra,
+                clients_unresolved: unresolved_clients(record, &active, &scope.roots),
                 deprecated: None,
                 replaced_by: None,
                 update_available: None,
@@ -508,11 +512,39 @@ fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots
     };
     active_outputs(&record.outputs, active)
         .filter_map(|out| {
-            out.resolved_target(roots).ok().map(|path| StatusOutput {
-                client: out.client.clone(),
-                path,
-            })
+            out.resolved_target(roots, Containment::AllowRelocatedAncestor)
+                .ok()
+                .map(|path| StatusOutput {
+                    client: out.client.clone(),
+                    path,
+                })
         })
+        .collect()
+}
+
+/// The exact complement of [`record_outputs`]: the active clients whose
+/// recorded output could NOT be resolved, and which that function therefore
+/// silently drops. Populated into
+/// [`StatusEntry::clients_unresolved`](crate::api::status_report::StatusEntry),
+/// sorted for deterministic JSON like `client_drift`. State stays `missing`
+/// and the exit code stays 0 — `status` is a report.
+///
+/// Under the read/destructive containment split this can only fire for a
+/// symlinked **leaf** or an absent anchor root; a relocated ancestor now
+/// resolves cleanly.
+/// Deliberately a sibling helper rather than a return value threaded out of
+/// [`derive_state`]: that function `return`s on the FIRST failing output, so
+/// it structurally cannot collect the whole set. Walking `active_outputs`
+/// here names every failing client instead of hiding all but one.
+fn unresolved_clients(record: Option<&InstallRecord>, active: &[ClientTarget], roots: &AnchorRoots) -> Vec<String> {
+    let Some(record) = record else {
+        return Vec::new();
+    };
+    active_outputs(&record.outputs, active)
+        .filter(|out| out.resolved_target(roots, Containment::AllowRelocatedAncestor).is_err())
+        .map(|out| out.client.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -583,7 +615,7 @@ fn derive_state(
     // A present (active) client whose file — or managed config entry — is
     // missing still flags `missing`.
     for out in &outputs {
-        match out.is_present(roots) {
+        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
             Ok(true) => {}
             Ok(false) | Err(_) => return ArtifactStatus::Missing,
         }
@@ -591,7 +623,7 @@ fn derive_state(
     // Any drifted client output (canonical OR generated — the recorded
     // hash for a generated target is over its expected bytes) ⇒ modified.
     for out in &outputs {
-        match out.current_hash(roots) {
+        match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
             Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
             Ok(_) => {}
             // An unreadable / unresolvable target is effectively gone.
@@ -649,13 +681,13 @@ async fn derive_dev_state(
         return ArtifactStatus::Missing;
     }
     for out in &outputs {
-        match out.is_present(roots) {
+        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
             Ok(true) => {}
             Ok(false) | Err(_) => return ArtifactStatus::Missing,
         }
     }
     for out in &outputs {
-        match out.current_hash(roots) {
+        match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
             Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
             Ok(_) => {}
             Err(_) => return ArtifactStatus::Missing,
@@ -713,6 +745,7 @@ mod tests {
             outputs: Vec::new(),
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
+            clients_unresolved: Vec::new(),
             deprecated: None,
             replaced_by: None,
             update_available: None,
@@ -1111,6 +1144,147 @@ mod tests {
             state,
             ArtifactStatus::Missing,
             "unresolvable AnchoredPath must degrade to Missing, not error"
+        );
+    }
+
+    // ── A6: naming the clients `status` cannot resolve ────────────────────
+
+    /// A6. `record_outputs` silently drops what it cannot resolve, so today a
+    /// wedged install reports a bare `missing` with no explanation.
+    /// `unresolved_clients` is its complement and must name EVERY failing
+    /// client, not just the first — collecting the whole set is precisely what
+    /// the early-`return`ing control flow in `derive_state` cannot do, and a
+    /// one-element answer here would hide half the problem from the user.
+    #[test]
+    fn unresolved_clients_names_every_failing_client_not_just_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        // claude_root and copilot_root are both None, so BOTH outputs fail to
+        // resolve with `AnchorRootAbsent`; the workspace-anchored codex output
+        // resolves fine and must not be named.
+        let roots = roots(ws);
+
+        let codex_file = ws.join("codex.md");
+        std::fs::write(&codex_file, b"# codex\n").unwrap();
+
+        let record = InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::ClaudeRoot,
+                        relative: "rules/x.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("a".repeat(64)),
+                    support_dir: None,
+                    entry: None,
+                },
+                ClientOutput {
+                    client: "copilot".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::CopilotRoot,
+                        relative: "instructions/x.instructions.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("b".repeat(64)),
+                    support_dir: None,
+                    entry: None,
+                },
+                client_output("codex"),
+            ],
+        };
+
+        let unresolved = unresolved_clients(
+            Some(&record),
+            &[ClientTarget::Claude, ClientTarget::Copilot, ClientTarget::Codex],
+            &roots,
+        );
+        assert_eq!(
+            unresolved,
+            vec!["claude".to_string(), "copilot".to_string()],
+            "every active client whose output cannot be resolved must be named, sorted; \
+             a resolvable one never appears"
+        );
+    }
+
+    /// A6. The key is a report about a failure grim tolerated, so a healthy
+    /// artifact — and a never-installed one — must produce an empty list
+    /// rather than echoing the client set on every row.
+    #[test]
+    fn unresolved_clients_is_empty_when_everything_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+        std::fs::write(ws.join("claude.md"), b"# claude\n").unwrap();
+
+        let record = InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![client_output("claude")],
+        };
+        assert!(
+            unresolved_clients(Some(&record), &[ClientTarget::Claude], &roots).is_empty(),
+            "a resolvable output is not a failure to report"
+        );
+        assert!(
+            unresolved_clients(None, &[ClientTarget::Claude], &roots).is_empty(),
+            "a never-installed artifact has no outputs, so nothing to report"
+        );
+    }
+
+    /// A6, the other trigger. A symlinked **leaf** stays refused even for a
+    /// read-only probe, so `status` must degrade it exactly as it degrades an
+    /// absent anchor root: state `missing`, exit 0 (status is a report, not a
+    /// gate) — and the additive key names the client, so the user learns WHY
+    /// instead of reading an unexplained `missing`.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_leaf_escape_stays_missing_and_names_the_client() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let secret = tmp.join("secret.md");
+        std::fs::write(&secret, b"# secret\n").unwrap();
+        // The recorded target is itself a symlink escaping the workspace root
+        // — the CWE-59 shape, refused in both containment modes.
+        symlink(&secret, ws.join("claude.md")).unwrap();
+
+        let roots = roots(&ws);
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![client_output("claude")],
+        });
+
+        assert_eq!(
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true,
+            ),
+            ArtifactStatus::Missing,
+            "a leaf escape degrades to missing — status never propagates it as an error"
+        );
+        assert_eq!(
+            unresolved_clients(st.get(ArtifactKind::Rule, "x"), &[ClientTarget::Claude], &roots),
+            vec!["claude".to_string()],
+            "the additive key must explain the bare `missing` by naming the client"
         );
     }
 

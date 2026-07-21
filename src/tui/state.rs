@@ -87,6 +87,36 @@ pub enum Mode {
     Help,
     /// Choosing a specific version for the selected row from a popup.
     VersionPick,
+    /// Confirming an overwrite of a refusal `--force` can resolve
+    /// (`adr_anchor_escape_recovery.md` §D3). A containment refusal NEVER
+    /// reaches this mode — it gets a status-line sentence and no override
+    /// control, because offering one on a security refusal trains
+    /// click-through.
+    ConfirmForce,
+}
+
+/// A refused install awaiting the user's Overwrite decision.
+///
+/// The trigger is not an error: an install refusal arrives as
+/// `Ok(InstallOutcome::Refused { .. } | RefusedUntracked { .. })`, so it can
+/// only be caught where the outcome is reduced to a label, never on the error
+/// channel. Only a single-artifact action opens this — a multi-row batch
+/// reports its refusals in the aggregate status line, since one Overwrite
+/// answer cannot speak for several artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingForce {
+    /// The `rows` index to re-issue with `force`.
+    pub row: usize,
+    /// Whether the refused action was an update (vs. a fresh install).
+    pub is_update: bool,
+    /// The refused row's reference, shown in the prompt title.
+    pub repo: String,
+    /// grim's own description of the refusal, shown verbatim in the body.
+    pub detail: String,
+    /// Whether the **Overwrite** button is selected. Starts `false` so a
+    /// queued Enter cancels — a destructive default is how a stray keypress
+    /// discards the user's local edits.
+    pub overwrite_selected: bool,
 }
 
 /// The modal version picker: the row it targets, the fetched tags, and the
@@ -238,6 +268,8 @@ pub struct TuiState {
     pub scope_label: String,
     /// The active version picker, when [`Mode::VersionPick`].
     pub picker: Option<VersionPicker>,
+    /// The refused install awaiting confirmation, when [`Mode::ConfirmForce`].
+    pub confirm: Option<PendingForce>,
     /// The effective default registry; when a row's registry host equals
     /// it the registry prefix is elided from the displayed name (shorter
     /// names) while the stored `repo` keeps the full reference.
@@ -335,6 +367,7 @@ impl Default for TuiState {
             marked: std::collections::BTreeSet::new(),
             scope_label: String::new(),
             picker: None,
+            confirm: None,
             default_registry: None,
             clients: Vec::new(),
             view_mode: ViewMode::default(),
@@ -1384,6 +1417,37 @@ impl TuiState {
     pub fn cancel_version(&mut self) {
         self.picker = None;
         self.mode = Mode::List;
+    }
+
+    /// Open the Overwrite confirmation for a refused single-artifact install.
+    /// Cancel is preselected — see [`PendingForce::overwrite_selected`].
+    pub fn open_confirm_force(&mut self, row: usize, is_update: bool, repo: &str, detail: &str) {
+        self.mode = Mode::ConfirmForce;
+        self.confirm = Some(PendingForce {
+            row,
+            is_update,
+            repo: repo.to_string(),
+            detail: detail.to_string(),
+            overwrite_selected: false,
+        });
+    }
+
+    /// Move the confirm selection between Cancel and Overwrite. Any non-zero
+    /// delta flips it — there are only two buttons.
+    pub fn confirm_force_move(&mut self, delta: i64) {
+        if let Some(c) = self.confirm.as_mut()
+            && delta != 0
+        {
+            c.overwrite_selected = !c.overwrite_selected;
+        }
+    }
+
+    /// Close the confirmation, yielding the pending retry only when the user
+    /// actually chose **Overwrite**. Cancelling yields `None` and shows no
+    /// toast — a declined destructive prompt needs no acknowledgement.
+    pub fn take_confirm_force(&mut self) -> Option<PendingForce> {
+        self.mode = Mode::List;
+        self.confirm.take().filter(|c| c.overwrite_selected)
     }
 
     /// The currently selected row, if any.

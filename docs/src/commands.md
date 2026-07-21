@@ -217,6 +217,17 @@ clobber guard — so re-running the *same* `grim add` with `--force` is the
 recovery path for a modified-state refusal. With `--no-install` nothing is
 materialized, so `--force` is inert.
 
+`--force` **never bypasses path containment.** A refusal carrying the
+[`anchor-escape`](./json-interface.md#error-reason) reason — a recorded path
+that resolves outside the anchor root it was stored against, through a
+symlinked final component — is refused with or without `--force`. Recover
+with `grim uninstall <kind> <name>` followed by a fresh install; files may
+remain on disk and must be removed manually. Under `--format json` the
+forceable refusals are marked with
+[`"forceable": true`](./json-interface.md#the-optional-forceable-field) and
+`anchor-escape` is not, so a consumer must key on that field rather than on
+the shared exit code 65.
+
 The declared name is a unique key per kind: re-running `add` with a
 `(kind, name)` pair that is already declared under a *different* reference
 refuses (exit 64) instead of silently replacing it, and names the existing
@@ -439,6 +450,13 @@ local state (no network) — sorted arrays, `[]` when the two sets agree. When
 instead: diffing against live client detection would report drift whenever
 detection disagrees with what was recorded, which is not real config drift.
 
+A third array, `clients_unresolved`, names every active client whose recorded
+output path could not be resolved at all — an anchor root absent on this
+machine, or a recorded path refused by the containment guard. Those clients
+are silently omitted from `outputs`, so without this key a wedged install
+reports a bare `missing` with no explanation. The artifact's `state` stays
+`missing` and the exit code stays `0`: `grim status` is a report, not a gate.
+
 ```json
 {
   "items": [
@@ -453,6 +471,7 @@ detection disagrees with what was recorded, which is not real config drift.
       ],
       "clients_missing": [],
       "clients_extra": [],
+      "clients_unresolved": [],
       "deprecated": null,
       "replaced_by": null,
       "update_available": null

@@ -55,7 +55,7 @@ pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 #[allow(unused_imports)]
 pub use opencode_config::{InstructionsSync, sync_managed_instruction};
 #[allow(unused_imports)]
-pub use path_anchor::{AnchorError, AnchorRoots, AnchoredPath, PathAnchor};
+pub use path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor};
 #[allow(unused_imports)]
 pub use progress::{InstallProgress, SilentProgress};
 #[allow(unused_imports)]

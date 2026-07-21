@@ -242,9 +242,10 @@ fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reas
 /// (no key) from an unclassified error (still no key — the same, by
 /// design: reasons are purely additive over the existing `code`/`exit`).
 ///
-/// `retryable` is likewise omit-when-absent: present and `true` only when
-/// `reason` is both present and [`ErrorReason::retryable`] — never a bare
-/// `false`, so a consumer's presence check alone answers the question.
+/// `retryable` and `forceable` are likewise omit-when-absent: present and
+/// `true` only when `reason` is both present and [`ErrorReason::retryable`] /
+/// [`ErrorReason::forceable`] — never a bare `false`, so a consumer's
+/// presence check alone answers the question.
 fn error_document(code: ExitCode, message: &str, reason: Option<ErrorReason>) -> serde_json::Value {
     let mut error = serde_json::json!({
         "code": code.slug(),
@@ -255,6 +256,9 @@ fn error_document(code: ExitCode, message: &str, reason: Option<ErrorReason>) ->
         error["reason"] = serde_json::Value::String(reason.to_string());
         if reason.retryable() {
             error["retryable"] = serde_json::Value::Bool(true);
+        }
+        if reason.forceable() {
+            error["forceable"] = serde_json::Value::Bool(true);
         }
     }
     serde_json::json!({ "error": error })
@@ -335,5 +339,56 @@ mod tests {
         let doc = error_document(ExitCode::TempFail, "boom", Some(crate::error::ErrorReason::Locked));
         assert_eq!(doc["error"]["reason"], "locked");
         assert_eq!(doc["error"]["retryable"], true);
+    }
+
+    /// A1: `forceable` mirrors `retryable` exactly — present and `true` for a
+    /// reason `--force` can resolve, so a client's presence check alone
+    /// answers "may I offer an Overwrite button?".
+    #[test]
+    fn error_document_carries_forceable_true_for_modified() {
+        let doc = error_document(
+            ExitCode::DataError,
+            "installed artifact was modified locally",
+            Some(crate::error::ErrorReason::LocalModified),
+        );
+        assert_eq!(doc["error"]["reason"], "modified");
+        assert_eq!(doc["error"]["forceable"], true);
+    }
+
+    #[test]
+    fn error_document_carries_forceable_true_for_untracked_destination() {
+        let doc = error_document(
+            ExitCode::DataError,
+            "destination exists and is not tracked",
+            Some(crate::error::ErrorReason::UntrackedDestination),
+        );
+        assert_eq!(doc["error"]["reason"], "untracked-destination");
+        assert_eq!(doc["error"]["forceable"], true);
+    }
+
+    /// A1: never a bare `false`. `anchor-escape` shares exit 65 with the
+    /// forceable refusals, so the key's ABSENCE is what tells a client not to
+    /// offer an override on a containment refusal.
+    #[test]
+    fn error_document_omits_forceable_for_anchor_escape() {
+        let doc = error_document(
+            ExitCode::DataError,
+            "resolved path escapes its anchor root (anchor: claude-root)",
+            Some(crate::error::ErrorReason::AnchorEscape),
+        );
+        assert_eq!(doc["error"]["reason"], "anchor-escape");
+        assert!(
+            doc["error"].get("forceable").is_none(),
+            "a containment refusal must omit the key, never emit `false`: {doc}"
+        );
+    }
+
+    #[test]
+    fn error_document_omits_forceable_when_reason_is_none() {
+        let doc = error_document(ExitCode::DataError, "boom", None);
+        assert!(
+            doc["error"].get("forceable").is_none(),
+            "no reason ⇒ no forceable key: {doc}"
+        );
     }
 }

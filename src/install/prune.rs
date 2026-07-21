@@ -24,8 +24,8 @@ use std::path::PathBuf;
 
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState};
-use crate::install::path_anchor::{AnchorError, AnchorRoots};
-use crate::install::uninstall::{UninstallError, uninstall};
+use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
+use crate::install::uninstall::{AbandonedEntry, UninstallError, uninstall};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::oci::{ArtifactKind, Digest};
 
@@ -69,14 +69,24 @@ pub enum PruneError {
 }
 
 /// Whether an [`AnchorError`] is **security-class** — a deliberate traversal
-/// or symlink escape that must be FATAL even on the prune path. These
-/// propagate (→ `DataError(65)`) and are NEVER reaped.
+/// that must be FATAL even on the prune path. These propagate (→
+/// `DataError(65)`) and are NEVER reaped.
 ///
 /// `AnchorRootAbsent` (the anchor root is unresolvable on this machine) and
 /// plain `Io` are *resolution-absence*, not tampering: such a record is an
 /// unresolvable orphan, safe to absorb (reap the record). `UnknownAnchor` is a
 /// store-time classification error that cannot arise on this read/resolve path;
 /// it stays non-fatal to preserve the prior behavior.
+///
+/// `EscapedAnchor` is **not** security-class here
+/// (`adr_anchor_escape_recovery.md` §D2): it is overwhelmingly a relocated
+/// ancestor — the user's own GNU stow / yadm / synced-config layout — and
+/// making it fatal wedges every prune pass (grimoire#57). Both prune paths
+/// therefore drop the record, leave the files, and REPORT the retention;
+/// the deletes themselves stay [`Containment::Strict`], so a stored record
+/// still can never direct a delete outside its anchor root.
+/// `TraversalAttempt` — a tampered stored `..`, no filesystem involved —
+/// stays fatal.
 ///
 /// The exhaustive match (no `_` arm) is deliberate: `AnchorError` is defined in
 /// this crate, so gaining a variant fails THIS build until the new variant is
@@ -88,8 +98,11 @@ pub enum PruneError {
 /// wildcard that silently classifies it.
 fn is_security_class(err: &AnchorError) -> bool {
     match err {
-        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. } => true,
-        AnchorError::UnknownAnchor { .. } | AnchorError::AnchorRootAbsent { .. } | AnchorError::Io { .. } => false,
+        AnchorError::TraversalAttempt { .. } => true,
+        AnchorError::EscapedAnchor { .. }
+        | AnchorError::UnknownAnchor { .. }
+        | AnchorError::AnchorRootAbsent { .. }
+        | AnchorError::Io { .. } => false,
     }
 }
 
@@ -118,6 +131,17 @@ pub struct PrunedArtifact {
     /// The on-disk targets actually deleted (empty for [`PruneOutcome::KeptModified`]
     /// or when the files were already gone).
     pub removed: Vec<std::path::PathBuf>,
+    /// The on-disk targets deliberately left in place — a footprint the
+    /// containment guard refuses to delete while the record is dropped
+    /// anyway (see [`UninstallResult::retained`](super::UninstallResult)).
+    /// Empty on every normal prune.
+    pub retained: Vec<std::path::PathBuf>,
+    /// The managed config-file entries (`entry` outputs) left un-spliced
+    /// while the record was dropped anyway — the `entry` counterpart of
+    /// `retained` (see
+    /// [`UninstallResult::abandoned_entries`](super::UninstallResult)). Empty
+    /// on every normal prune.
+    pub abandoned_entries: Vec<AbandonedEntry>,
     /// The client names the removed record carried. A prune can orphan an
     /// artifact installed for clients *outside* the current run's
     /// `--client` selection — the caller must run the vendor config sync
@@ -192,7 +216,7 @@ pub fn prune_orphans(
             target: r
                 .outputs
                 .first()
-                .and_then(|o| o.resolved_target(roots).ok())
+                .and_then(|o| o.resolved_target(roots, Containment::Strict).ok())
                 .unwrap_or_else(|| roots.workspace.clone()),
             clients: r.outputs.iter().map(|c| c.client.clone()).collect(),
         })
@@ -216,6 +240,8 @@ pub fn prune_orphans(
                 old,
                 outcome: PruneOutcome::KeptModified,
                 removed: Vec::new(),
+                retained: Vec::new(),
+                abandoned_entries: Vec::new(),
                 clients,
             });
             continue;
@@ -231,8 +257,13 @@ pub fn prune_orphans(
         // escape) is FATAL — it propagates as PruneError::Anchor (→
         // DataError(65)) and is NEVER reaped. A genuine I/O error
         // (PruneError::Io) still propagates too.
-        let (outcome, removed) = match uninstall(state, kind, &name, roots) {
-            Ok(result) => (PruneOutcome::Pruned, result.removed),
+        let (outcome, removed, retained, abandoned_entries) = match uninstall(state, kind, &name, roots) {
+            Ok(result) => (
+                PruneOutcome::Pruned,
+                result.removed,
+                result.retained,
+                result.abandoned_entries,
+            ),
             Err(UninstallError::Anchor(anchor_err)) if is_security_class(&anchor_err) => {
                 return Err(prune_error(target.clone(), UninstallError::Anchor(anchor_err)));
             }
@@ -241,7 +272,7 @@ pub fn prune_orphans(
                     "unresolvable anchor for orphan '{name}' during prune; dropping record without file delete: {anchor_err}"
                 );
                 state.remove(kind, &name);
-                (PruneOutcome::Pruned, Vec::new())
+                (PruneOutcome::Pruned, Vec::new(), Vec::new(), Vec::new())
             }
             Err(other) => return Err(prune_error(target.clone(), other)),
         };
@@ -251,6 +282,8 @@ pub fn prune_orphans(
             old,
             outcome,
             removed,
+            retained,
+            abandoned_entries,
             clients,
         });
     }
@@ -262,13 +295,17 @@ pub fn prune_orphans(
 /// disk has drifted from its recorded content hash. An absent output is not
 /// "modified" — it is simply gone, and safe to prune.
 ///
-/// An output unresolvable for a *resolution-absence* reason (the anchor root
-/// is absent on this machine, or plain I/O) is treated as **absent/orphaned**
-/// (safe to reap) with a `tracing::warn!`, consistent with status `Missing`
-/// — never silently retained. A **security-class** `AnchorError` (a tampered
-/// `../` relative or a symlink that escapes its anchor root) is FATAL: it
-/// propagates as [`PruneError::Anchor`] (→ `DataError(65)`) and is never
-/// reaped — ARCH-4/SC-03.
+/// An output unresolvable/unhashable for a non-security reason (the anchor
+/// root is absent on this machine, the target escapes it, or plain I/O) is
+/// **skipped** with a `tracing::warn!` and its SIBLINGS are still checked. It
+/// must never answer for the whole record: one output nobody can read would
+/// otherwise declare a record with a hand-edited sibling unmodified, and
+/// [`prune_orphans`]'s preserve-user-edits gate would delete that edit. A
+/// record whose every output is unresolvable still lands on `Ok(false)` at the
+/// bottom — treated as absent/orphaned (safe to reap), consistent with status
+/// `Missing`. A **security-class** `AnchorError` (a tampered `../` relative)
+/// is FATAL: it propagates as [`PruneError::Anchor`] (→ `DataError(65)`) and
+/// is never reaped — ARCH-4/SC-03.
 ///
 /// # Errors
 ///
@@ -279,7 +316,7 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
         return Ok(false);
     };
     for out in &record.outputs {
-        let resolved = match out.resolved_target(roots) {
+        let resolved = match out.resolved_target(roots, Containment::Strict) {
             Ok(resolved) => resolved,
             Err(e) if is_security_class(&e) => {
                 return Err(PruneError::Anchor {
@@ -288,12 +325,12 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
                 });
             }
             Err(e) => {
-                tracing::warn!("treating unresolvable orphan '{name}' as reapable: {e}");
-                return Ok(false);
+                tracing::warn!("skipping unresolvable output of orphan '{name}': {e}");
+                continue;
             }
         };
         if resolved.exists() {
-            let actual = match out.current_hash(roots) {
+            let actual = match out.current_hash(roots, Containment::Strict) {
                 Ok(actual) => actual,
                 Err(e) if is_security_class(&e) => {
                     return Err(PruneError::Anchor {
@@ -302,8 +339,8 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("treating unresolvable orphan '{name}' as reapable: {e}");
-                    return Ok(false);
+                    tracing::warn!("skipping unhashable output of orphan '{name}': {e}");
+                    continue;
                 }
             };
             if actual != out.content_hash {
@@ -343,6 +380,18 @@ pub struct ReapedClients {
     /// sorted. Left in the record so a later `grim update --force` can still
     /// reap them.
     pub kept_modified: Vec<String>,
+    /// The on-disk targets deliberately left in place — a footprint the
+    /// containment guard refuses to delete while the output is dropped from
+    /// the record anyway. Distinct from `kept_modified` (a user edit grim
+    /// chose to preserve, still recorded). Sorted and deduplicated (multiple
+    /// dropped-client outputs can share one escaping target). Empty on every
+    /// normal reap.
+    pub retained: Vec<std::path::PathBuf>,
+    /// The managed config-file entries (`entry` outputs) left un-spliced
+    /// while the output was dropped from the record anyway — the `entry`
+    /// counterpart of `retained`. Sorted and deduplicated. Empty on every
+    /// normal reap.
+    pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
 /// Reap the outputs of every artifact whose client left the configured
@@ -396,6 +445,8 @@ pub fn reap_dropped_clients(
     for (kind, name, outputs) in &records {
         let mut reaped = Vec::new();
         let mut kept_modified = Vec::new();
+        let mut retained = Vec::new();
+        let mut abandoned_entries = Vec::new();
         // Classify every output before deleting anything: the delete pass needs
         // the COMPLETE drop set (`reaped`) so the `.agents/skills` refcount
         // guard can tell a surviving sibling from one dropping in the same pass.
@@ -416,13 +467,41 @@ pub fn reap_dropped_clients(
             }
             // Integrity gate: is the footprint present, and does it still match
             // the recorded hash?
-            let present = match out.is_present(roots) {
+            let present = match out.is_present(roots, Containment::Strict) {
                 Ok(present) => present,
                 Err(e) if is_security_class(&e) => {
                     return Err(PruneError::Anchor {
                         path: roots.workspace.clone(),
                         source: e,
                     });
+                }
+                // Same decision `prune_orphans` reaches through `uninstall`:
+                // drop the record entry, leave the footprint the Strict delete
+                // refuses to touch, and report it. The two paths must not
+                // diverge — one dropping the record and the other keeping it
+                // is exactly the silent inconsistency this arm prevents.
+                Err(AnchorError::EscapedAnchor { anchor, resolved }) => {
+                    tracing::warn!(
+                        %anchor,
+                        path = %resolved.display(),
+                        "dropped-client output '{}' of '{name}' resolves outside its anchor root; reaping the record entry without deleting it",
+                        out.client
+                    );
+                    // Same `entry` guard as `uninstall`: an entry output is a
+                    // member inside a shared, user-owned config file grim
+                    // never intended to delete, so naming it as "left in
+                    // place" would report the user's own `.mcp.json` as
+                    // grim's abandoned footprint — report it as abandoned
+                    // instead, the same mirror `uninstall` draws.
+                    match &out.entry {
+                        Some(pointer) => abandoned_entries.push(AbandonedEntry {
+                            path: resolved,
+                            pointer: pointer.clone(),
+                        }),
+                        None => retained.push(resolved),
+                    }
+                    reaped.push(out.client.clone());
+                    continue;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -433,7 +512,7 @@ pub fn reap_dropped_clients(
                 }
             };
             let delete = if present {
-                let actual = match out.current_hash(roots) {
+                let actual = match out.current_hash(roots, Containment::Strict) {
                     Ok(actual) => actual,
                     Err(e) if is_security_class(&e) => {
                         return Err(PruneError::Anchor {
@@ -487,11 +566,22 @@ pub fn reap_dropped_clients(
         if !reaped.is_empty() || !kept_modified.is_empty() {
             reaped.sort();
             kept_modified.sort();
+            // Same shared-pool dedup as `uninstall`: several dropped-client
+            // outputs can escape to the identical resolved path, each
+            // pushing it above — sort and dedup so `retained` (and
+            // `abandoned_entries`, same shape) names each footprint exactly
+            // once.
+            retained.sort();
+            retained.dedup();
+            abandoned_entries.sort();
+            abandoned_entries.dedup();
             acted.push(ReapedClients {
                 kind: *kind,
                 name: name.clone(),
                 reaped,
                 kept_modified,
+                retained,
+                abandoned_entries,
             });
         }
     }
@@ -545,6 +635,17 @@ pub fn reap_dropped_clients(
 ///
 /// Wired into [`reap_dropped_clients`]'s delete pass: a guarded output still
 /// sheds its record entry, only the filesystem delete is skipped.
+///
+/// # Why this reads with [`Containment::AllowRelocatedAncestor`]
+///
+/// It mutates nothing. Its only effect is to *prevent* a delete, and an
+/// unresolvable sibling falls through to `false` — "non-sharing" — so
+/// `delete_output` runs. The failure directions are asymmetric:
+/// [`Containment::Strict`] here would make a surviving sibling reachable only
+/// through a relocated ancestor invisible, and grim would delete a shared
+/// footprint another record still claims. The delete itself still resolves
+/// `Strict` ([`delete_output`]), so the "a record can never direct a delete
+/// outside its anchor root" invariant holds.
 fn shared_by_surviving_sibling(
     reaping: &ClientOutput,
     record_outputs: &[ClientOutput],
@@ -553,12 +654,15 @@ fn shared_by_surviving_sibling(
 ) -> bool {
     // The reaping output must pin a concrete path to compare against; if it
     // cannot resolve, there is nothing to protect — treat it as unshared.
-    let Ok(reap_target) = reaping.resolved_target(roots) else {
+    let Ok(reap_target) = reaping.resolved_target(roots, Containment::AllowRelocatedAncestor) else {
         return false;
     };
     // An unresolvable support dir collapses to `None` on both sides, so a
     // resolution failure can never forge a false match.
-    let reap_support = reaping.resolved_support_dir(roots).ok().flatten();
+    let reap_support = reaping
+        .resolved_support_dir(roots, Containment::AllowRelocatedAncestor)
+        .ok()
+        .flatten();
 
     record_outputs.iter().any(|out| {
         // A surviving sibling is neither the output being reaped nor itself
@@ -569,10 +673,13 @@ fn shared_by_surviving_sibling(
         if out.client == reaping.client || dropping_clients.contains(&out.client) {
             return false;
         }
-        let Ok(target) = out.resolved_target(roots) else {
+        let Ok(target) = out.resolved_target(roots, Containment::AllowRelocatedAncestor) else {
             return false; // cannot pin a live path → non-sharing
         };
-        let support = out.resolved_support_dir(roots).ok().flatten();
+        let support = out
+            .resolved_support_dir(roots, Containment::AllowRelocatedAncestor)
+            .ok()
+            .flatten();
         target == reap_target && support == reap_support
     })
 }
@@ -586,10 +693,12 @@ fn shared_by_surviving_sibling(
 fn delete_output(out: &ClientOutput, roots: &AnchorRoots) -> Result<(), PruneError> {
     // Resolution already succeeded in `is_present`; a failure here maps to
     // `PruneError::Anchor`, preserving a security-class error's identity.
-    let target = out.resolved_target(roots).map_err(|source| PruneError::Anchor {
-        path: roots.workspace.clone(),
-        source,
-    })?;
+    let target = out
+        .resolved_target(roots, Containment::Strict)
+        .map_err(|source| PruneError::Anchor {
+            path: roots.workspace.clone(),
+            source,
+        })?;
     if let Some(pointer) = &out.entry {
         return crate::install::uninstall::remove_entry(&target, pointer, out.mcp_format())
             .map_err(|source| PruneError::Io { path: target, source });
@@ -599,7 +708,7 @@ fn delete_output(out: &ClientOutput, roots: &AnchorRoots) -> Result<(), PruneErr
         path: target.clone(),
         source,
     })?;
-    match out.resolved_support_dir(roots) {
+    match out.resolved_support_dir(roots, Containment::Strict) {
         Ok(Some(dir)) => crate::install::uninstall::remove_output(&dir, &mut removed)
             .map_err(|source| PruneError::Io { path: dir, source })?,
         Ok(None) => {}
@@ -1416,5 +1525,466 @@ mod tests {
             state.get(ArtifactKind::Rule, "evil").is_some(),
             "a fatal error never reaps the record"
         );
+    }
+
+    // ── Relocated ancestors on the prune paths (adr_anchor_escape_recovery §D2) ──
+
+    /// DATA-LOSS REGRESSION GUARD. `shared_by_surviving_sibling` mutates
+    /// nothing: its only effect is to PREVENT a delete, and an unresolvable
+    /// sibling falls through to "non-sharing" — so `delete_output` runs. The
+    /// failure direction is therefore unsafe in exactly one way: a sibling that
+    /// is invisible because it is reachable only through a relocated ancestor
+    /// makes grim delete a shared footprint that the surviving record still
+    /// claims.
+    ///
+    /// The layout is a user unifying their skill pools by symlinking
+    /// `~/.claude/skills` at `~/.agents/skills`: the codex output resolves
+    /// directly, the claude output reaches the SAME directory through the
+    /// relocated ancestor. Dropping codex must keep the directory, because
+    /// claude still records it.
+    #[cfg(unix)]
+    #[test]
+    fn refcount_guard_sees_sibling_reachable_only_through_a_relocated_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+
+        // The real shared pool, plus a `~/.claude/skills` symlink onto it.
+        let pool = ws.join(".agents/skills");
+        std::fs::create_dir_all(pool.join("s")).unwrap();
+        let claude_root = ws.join(".claude");
+        std::fs::create_dir_all(&claude_root).unwrap();
+        symlink(&pool, claude_root.join("skills")).unwrap();
+
+        let mut roots = roots(&ws);
+        roots.agents_skills = Some(pool.clone());
+        roots.claude_root = Some(claude_root);
+
+        // codex resolves straight to `<pool>/s`; claude reaches the identical
+        // directory via `<claude_root>/skills` -> `<pool>`, which escapes the
+        // claude anchor root.
+        let reaping = pool_output("codex", "s");
+        let surviving = ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::ClaudeRoot,
+                relative: "skills/s".to_string(),
+            },
+            content_hash: Digest::Sha256("a".repeat(64)),
+            support_dir: None,
+            entry: None,
+        };
+        let outputs = [reaping.clone(), surviving];
+
+        assert!(
+            shared_by_surviving_sibling(&reaping, &outputs, &["codex".to_string()], &roots),
+            "a surviving sibling behind a relocated ancestor must still be DETECTED as sharing — \
+             missing it deletes a shared footprint that claude still records"
+        );
+    }
+
+    /// A4 / design-record item 8, path 1 of 2. An orphan whose output sits
+    /// behind a symlinked ancestor must not wedge `grim update`: the record is
+    /// dropped, the files are left in place (the delete stays `Strict`, so a
+    /// record can never direct a delete outside its anchor root), and the pass
+    /// completes instead of exiting 65.
+    #[cfg(unix)]
+    #[test]
+    fn prune_orphans_through_relocated_ancestor_drops_record_and_leaves_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        // The store sits OUTSIDE the workspace anchor root — `.claude/rules`
+        // is the relocated ancestor pointing at it.
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/rules");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, ws.join(".claude/rules")).unwrap();
+        let file = store.join("orphan.md");
+        std::fs::write(&file, b"# orphan\n").unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "orphan".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("orphan")),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".claude/rules/orphan.md".to_string(),
+                },
+                content_hash: content_hash(&file).unwrap(),
+                support_dir: None,
+                entry: None,
+            }],
+        });
+
+        // An empty lock declares nothing, so the record is an orphan.
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), false)
+            .expect("a relocated ancestor must not turn a prune pass into exit 65");
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].name, "orphan");
+        assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
+        assert!(
+            acted[0].removed.is_empty(),
+            "nothing was deleted, so nothing is reported removed"
+        );
+        assert!(file.is_file(), "the file outside the anchor root must survive");
+        assert_eq!(
+            acted[0].retained,
+            vec![file.clone()],
+            "the skipped delete must be REPORTED — reported divergence is acceptable, silent divergence is not"
+        );
+        assert!(
+            state.get(ArtifactKind::Rule, "orphan").is_none(),
+            "the record must drop, matching uninstall — silent divergence is what this fixes"
+        );
+    }
+
+    /// An unresolvable output must NOT answer for its siblings. Tolerating
+    /// `EscapedAnchor` un-gated a delete indirectly: a record-wide
+    /// `return Ok(false)` let the first unreadable output declare the whole
+    /// record unmodified, so [`prune_orphans`]'s preserve-user-edits gate was
+    /// skipped and every RESOLVABLE sibling — including a hand-edited one —
+    /// was deleted without `--force`. Site 1 of 2: the `resolved_target` arm.
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_output_cannot_vouch_for_a_modified_sibling() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        // claude's rules dir is relocated OUTSIDE the workspace (the #57
+        // layout); codex's is an ordinary in-root directory.
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/rules");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, ws.join(".claude/rules")).unwrap();
+        let escaping = store.join("x.md");
+        std::fs::write(&escaping, b"# x\n").unwrap();
+
+        let codex_dir = ws.join(".codex/rules");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let edited = codex_dir.join("x.md");
+        std::fs::write(&edited, b"# x\n").unwrap();
+        let recorded = content_hash(&edited).unwrap();
+        // The user hand-edits the codex copy AFTER install.
+        std::fs::write(&edited, b"# x\n\nmy notes\n").unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("x")),
+            dev: false,
+            outputs: vec![
+                // The escaping output is FIRST — it is what used to short-circuit.
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/x.md".to_string(),
+                    },
+                    content_hash: content_hash(&escaping).unwrap(),
+                    support_dir: None,
+                    entry: None,
+                },
+                ClientOutput {
+                    client: "codex".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".codex/rules/x.md".to_string(),
+                    },
+                    content_hash: recorded,
+                    support_dir: None,
+                    entry: None,
+                },
+            ],
+        });
+
+        assert!(
+            is_modified(&state, ArtifactKind::Rule, "x", &roots(&ws)).expect("not a security-class failure"),
+            "the drifted codex sibling must be seen even though the claude output is unreadable"
+        );
+
+        // End to end: the preserve-user-edits gate fires, so the edit survives.
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), false).expect("prune completes");
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
+        assert_eq!(
+            std::fs::read_to_string(&edited).unwrap(),
+            "# x\n\nmy notes\n",
+            "the user's edit must NOT be deleted"
+        );
+    }
+
+    /// Site 2 of 2: the `current_hash` arm. An output that RESOLVES but cannot
+    /// be hashed (here: its support dir sits behind a relocated ancestor) had
+    /// the identical record-wide early return, so fixing only the
+    /// `resolved_target` arm leaves the same data loss reachable.
+    #[cfg(unix)]
+    #[test]
+    fn an_unhashable_output_cannot_vouch_for_a_modified_sibling() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join(".claude/rules")).unwrap();
+        // The TARGET is in-root and present (so `resolved.exists()` holds and
+        // the hash arm is reached); only its support dir escapes.
+        let target = ws.join(".claude/rules/x.md");
+        std::fs::write(&target, b"# x\n").unwrap();
+        let support_store = tmp.join("elsewhere/x");
+        std::fs::create_dir_all(&support_store).unwrap();
+        symlink(&support_store, ws.join(".claude/rules/x")).unwrap();
+
+        let codex_dir = ws.join(".codex/rules");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let edited = codex_dir.join("x.md");
+        std::fs::write(&edited, b"# x\n").unwrap();
+        let recorded = content_hash(&edited).unwrap();
+        std::fs::write(&edited, b"# x\n\nmy notes\n").unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("x")),
+            dev: false,
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/x.md".to_string(),
+                    },
+                    content_hash: content_hash(&target).unwrap(),
+                    support_dir: Some(AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/x".to_string(),
+                    }),
+                    entry: None,
+                },
+                ClientOutput {
+                    client: "codex".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".codex/rules/x.md".to_string(),
+                    },
+                    content_hash: recorded,
+                    support_dir: None,
+                    entry: None,
+                },
+            ],
+        });
+
+        assert!(
+            is_modified(&state, ArtifactKind::Rule, "x", &roots(&ws)).expect("not a security-class failure"),
+            "an output that resolves but cannot be hashed must not declare the record unmodified"
+        );
+    }
+
+    /// A4 / design-record item 8, path 2 of 2. `reap_dropped_clients` must
+    /// reach the SAME decision as `prune_orphans` above: record dropped, files
+    /// left. The two paths diverging (one dropping the record, the other
+    /// keeping it) is the silent inconsistency item 8 exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn reap_dropped_client_through_relocated_ancestor_drops_record_and_leaves_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        // The store sits OUTSIDE the workspace anchor root — `.claude/rules`
+        // is the relocated ancestor pointing at it.
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store = tmp.join("elsewhere/rules");
+        std::fs::create_dir_all(&store).unwrap();
+        symlink(&store, ws.join(".claude/rules")).unwrap();
+        let file = store.join("dropped.md");
+        std::fs::write(&file, b"# dropped\n").unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "dropped".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("dropped")),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".claude/rules/dropped.md".to_string(),
+                },
+                content_hash: content_hash(&file).unwrap(),
+                support_dir: None,
+                entry: None,
+            }],
+        });
+
+        // claude is no longer in the desired client set, so its output is a
+        // dropped-client output.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Copilot], &roots(&ws), false)
+            .expect("a relocated ancestor must not turn a reap pass into exit 65");
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].reaped, vec!["claude".to_string()]);
+        assert!(acted[0].kept_modified.is_empty());
+        assert!(file.is_file(), "the file outside the anchor root must survive");
+        assert_eq!(
+            acted[0].retained,
+            vec![file.clone()],
+            "both prune paths must report retention identically — `is_modified` and \
+             `reap_dropped_clients` must not diverge"
+        );
+        assert!(
+            state.get(ArtifactKind::Rule, "dropped").is_none(),
+            "every output reaped ⇒ the record drops whole, exactly as prune_orphans does"
+        );
+    }
+
+    /// The shared-pool dedup, reap side. Several dropped-client outputs of one
+    /// record — one per client, fanning out to the same pooled destination —
+    /// can share a single escaping `AnchoredPath`. Each independently pushes
+    /// its resolved path to `retained`, so a naive collect duplicates it once
+    /// per client. `retained` must name each escaping footprint exactly once,
+    /// sorted — the same guarantee `uninstall` gives.
+    #[cfg(unix)]
+    #[test]
+    fn reap_dropped_clients_dedupes_retained_across_clients_sharing_one_escaping_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Two relocated ancestors: `elsewhere` sorts before `elsewhere2`, so
+        // pushing them out of order below exercises the sort, not just the
+        // dedup.
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        let store_a = tmp.join("elsewhere/pooled");
+        std::fs::create_dir_all(&store_a).unwrap();
+        symlink(&store_a, ws.join(".claude/pooled")).unwrap();
+        let file_a = store_a.join("hello.md");
+        std::fs::write(&file_a, b"a\n").unwrap();
+
+        std::fs::create_dir_all(ws.join(".other")).unwrap();
+        let store_b = tmp.join("elsewhere2/pooled");
+        std::fs::create_dir_all(&store_b).unwrap();
+        symlink(&store_b, ws.join(".other/pooled")).unwrap();
+        let file_b = store_b.join("hello.md");
+        std::fs::write(&file_b, b"b\n").unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "hello".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("hello")),
+            dev: false,
+            outputs: vec![
+                // Pushed first, but sorts second — proves the fix sorts
+                // rather than merely preserving push order.
+                output_ws("zed", ".other/pooled/hello.md", content_hash(&file_b).unwrap()),
+                // Two clients pooled onto the identical target: the dedup
+                // must collapse these two pushes into one entry.
+                output_ws("codex", ".claude/pooled/hello.md", content_hash(&file_a).unwrap()),
+                output_ws("gemini", ".claude/pooled/hello.md", content_hash(&file_a).unwrap()),
+            ],
+        });
+
+        // None of codex/gemini/zed are in the desired set, so all three are
+        // dropped-client outputs.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Copilot], &roots(&ws), false)
+            .expect("a relocated ancestor must not turn a reap pass into exit 65");
+        assert_eq!(acted.len(), 1);
+        assert_eq!(
+            acted[0].reaped,
+            vec!["codex".to_string(), "gemini".to_string(), "zed".to_string()]
+        );
+        assert!(acted[0].kept_modified.is_empty());
+        assert!(file_a.is_file(), "the pooled footprint outside the anchor root survives");
+        assert!(file_b.is_file(), "the second escaping footprint survives");
+        assert_eq!(
+            acted[0].retained,
+            vec![file_a.clone(), file_b.clone()],
+            "each escaping footprint must be reported exactly once, sorted"
+        );
+        assert!(
+            state.get(ArtifactKind::Skill, "hello").is_none(),
+            "every output reaped ⇒ the record drops whole"
+        );
+    }
+
+    /// Design-record item 11, reap side. `retained` names grim's OWN abandoned
+    /// footprint. An `entry` output is a member inside a shared, user-owned
+    /// config file grim never intended to delete, so reporting it would tell
+    /// the user their `.mcp.json` was left behind by grim. `uninstall` already
+    /// guards this; the reap path must not diverge. Instead the un-spliced
+    /// entry must appear exactly once in `abandoned_entries` — grim dropped
+    /// the record without splicing the member out, so it is now unrecorded
+    /// and grim will never remove it again on a later reap.
+    #[cfg(unix)]
+    #[test]
+    fn a_relocated_entry_output_is_reaped_but_never_reported_as_retained() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dunce::canonicalize(dir.path()).unwrap();
+
+        // The user keeps their MCP config in a synced dir and symlinks it in —
+        // the same relocated-ancestor layout, one level up from the file.
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let store = tmp.join("elsewhere");
+        std::fs::create_dir_all(&store).unwrap();
+        let cfg = store.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"}\n  }\n}\n",
+        )
+        .unwrap();
+        symlink(&cfg, ws.join(".mcp.json")).unwrap();
+
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = output_ws("copilot", ".mcp.json", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false)
+            .expect("a relocated ancestor must not turn a reap pass into exit 65");
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(
+            acted[0].retained.is_empty(),
+            "the user's own config file is not grim's abandoned footprint; got {:?}",
+            acted[0].retained
+        );
+        assert_eq!(
+            acted[0].abandoned_entries,
+            vec![AbandonedEntry {
+                path: cfg.clone(),
+                pointer: "/mcpServers/grim".to_string(),
+            }],
+            "the un-spliced entry must be named exactly once so the caller knows grim no longer \
+             tracks it and will never remove it on a later reap"
+        );
+        assert!(cfg.is_file(), "and it is of course untouched");
     }
 }

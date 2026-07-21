@@ -6,19 +6,25 @@
 //! Plain format: 5-column table (Kind | Name | Old | New | Action).
 //!
 //! JSON format: `{"items": [...]}` where each item is a
-//! `{kind, name, old, new, action, reaped_clients, kept_modified_clients}`
-//! object (uniform `items` envelope, per subsystem-cli-api.md). `old` is
-//! `null` for an artifact that had no previous lock entry;
-//! `reaped_clients` / `kept_modified_clients` are always-present sorted
-//! client-name arrays (`[]` when no client was dropped on this row). Reap
-//! is only attempted against an explicitly set `[options].clients`; when
-//! it is unset (autodetect), both arrays are always `[]`.
+//! `{kind, name, old, new, action, reaped_clients, kept_modified_clients,
+//! retained, abandoned_entries}` object (uniform `items` envelope, per
+//! subsystem-cli-api.md). `old` is `null` for an artifact that had no
+//! previous lock entry; `reaped_clients` / `kept_modified_clients` are
+//! always-present sorted client-name arrays (`[]` when no client was
+//! dropped on this row). Reap is only attempted against an explicitly set
+//! `[options].clients`; when it is unset (autodetect), both arrays are
+//! always `[]`. `retained` is an always-present path array (`[]` on every
+//! healthy row); `abandoned_entries` is `retained`'s counterpart for a
+//! shared, user-owned config file grim never intended to delete —
+//! always-present `{path, pointer}` objects (`[]` on every healthy row).
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use serde::{Serialize, Serializer};
 
 use crate::cli::printer::{Printable, print_table};
+use crate::install::uninstall::AbandonedEntry;
 use crate::oci::{ArtifactKind, Digest};
 
 use super::artifact_status::UpdateAction;
@@ -47,6 +53,18 @@ pub struct UpdateEntry {
     /// always present (`[]` when none). Same explicit-`[options].clients`-only
     /// gate as `reaped_clients`.
     pub kept_modified_clients: Vec<String>,
+    /// The on-disk targets deliberately left in place on this row — a
+    /// footprint the containment guard refuses to delete while the record (a
+    /// pruned orphan) or the output entry (a reaped dropped client) is
+    /// dropped anyway. Always present, `[]` on every healthy row. Distinct
+    /// from `kept_modified_clients`, which is a user edit grim chose to
+    /// preserve and left *recorded*.
+    pub retained: Vec<PathBuf>,
+    /// The managed config-file entries left un-spliced on this row — the
+    /// `entry` counterpart of `retained` for a shared, user-owned config
+    /// file grim never intended to delete. Always present, `[]` on every
+    /// healthy row.
+    pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -117,6 +135,8 @@ mod tests {
             action: UpdateAction::Updated,
             reaped_clients: Vec::new(),
             kept_modified_clients: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -139,6 +159,8 @@ mod tests {
                 action: UpdateAction::Updated,
                 reaped_clients: Vec::new(),
                 kept_modified_clients: Vec::new(),
+                retained: Vec::new(),
+                abandoned_entries: Vec::new(),
             },
             UpdateEntry {
                 kind: ArtifactKind::Rule,
@@ -148,6 +170,11 @@ mod tests {
                 action: UpdateAction::Unchanged,
                 reaped_clients: vec!["copilot".to_string()],
                 kept_modified_clients: Vec::new(),
+                retained: vec![PathBuf::from("/elsewhere/rules/b.md")],
+                abandoned_entries: vec![AbandonedEntry {
+                    path: PathBuf::from("/elsewhere/.mcp.json"),
+                    pointer: "/mcpServers/grim".to_string(),
+                }],
             },
         ]);
         let mut buf = Vec::new();
@@ -156,11 +183,21 @@ mod tests {
         assert!(v.is_object());
         assert!(v["items"].is_array());
         assert!(v["items"][0]["old"].is_null());
-        // Both new fields are always present, even on a row with no drop.
+        // Every additive field is always present, even on a row with no drop
+        // and nothing left behind.
         assert_eq!(v["items"][0]["reaped_clients"], serde_json::json!([]));
         assert_eq!(v["items"][0]["kept_modified_clients"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["retained"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["abandoned_entries"], serde_json::json!([]));
         assert!(v["items"][1]["old"].as_str().unwrap().starts_with("sha256:"));
         assert_eq!(v["items"][1]["action"], "unchanged");
         assert_eq!(v["items"][1]["reaped_clients"], serde_json::json!(["copilot"]));
+        // A row whose footprint the containment guard refused to delete names
+        // it on the wire — the divergence must not be silent.
+        assert_eq!(v["items"][1]["retained"], serde_json::json!(["/elsewhere/rules/b.md"]));
+        assert_eq!(
+            v["items"][1]["abandoned_entries"],
+            serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim"}])
+        );
     }
 }

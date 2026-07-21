@@ -54,6 +54,40 @@ def test_uninstall_deletes_files_record_and_declaration(
     assert all(r["name"] != "code-review" for r in status)
 
 
+def test_uninstall_report_carries_the_frozen_key_set_with_retained(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The uninstall object carries exactly the 5 frozen fields, and
+    `retained` — the footprint the containment guard refused to delete
+    while the record was dropped anyway — is always present and `[]` on a
+    healthy uninstall. `abandoned_entries` (`retained`'s counterpart for a
+    managed MCP entry inside a shared, user-owned config file) is likewise
+    always present and `[]`.
+
+    Asserted on the SERIALIZED output on purpose: `retained` is produced
+    and propagated in-process, so a struct-level test stays green even
+    when the field never reaches a wire the caller can read, which is
+    exactly the silent state/filesystem divergence the field exists to
+    prevent.
+    """
+    runner, _ = _install_one(grim_at, project_dir, unique_repo)
+
+    out = runner.json("uninstall", "skill", "code-review")
+    assert set(out.keys()) == {
+        "kind", "name", "status", "retained", "abandoned_entries",
+    }, f"uninstall must carry exactly the 5 frozen fields; got: {sorted(out.keys())}"
+    assert out["status"] == "uninstalled"
+    assert out["retained"] == [], "a healthy uninstall deletes everything it recorded"
+    assert out["abandoned_entries"] == [], "a healthy uninstall leaves no entry un-spliced"
+
+    # A no-op uninstall reports the key too — never an absent key a client
+    # would have to version-sniff for.
+    again = runner.json("uninstall", "skill", "code-review")
+    assert again["status"] == "not-installed"
+    assert again["retained"] == []
+    assert again["abandoned_entries"] == []
+
+
 def test_uninstall_is_idempotent(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

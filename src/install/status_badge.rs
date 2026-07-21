@@ -13,7 +13,7 @@
 
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
-use crate::install::path_anchor::AnchorRoots;
+use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 
@@ -83,13 +83,13 @@ pub fn derive_badge(
     // never `?`-propagates an `AnchorError`. Entry outputs (MCP config
     // registrations) count as present only when the managed entry resolves.
     for out in &outputs {
-        match out.is_present(roots) {
+        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
             Ok(true) => {}
             Ok(false) | Err(_) => return StatusBadge::NotInstalled,
         }
     }
     for out in &outputs {
-        match out.current_hash(roots) {
+        match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
             Ok(actual) if actual != out.content_hash => return StatusBadge::Modified,
             Ok(_) => {}
             Err(_) => return StatusBadge::NotInstalled,

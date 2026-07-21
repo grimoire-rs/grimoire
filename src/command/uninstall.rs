@@ -79,6 +79,14 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     //    declared bundle still holds the artifact (see above), in which case
     //    nothing is deleted and only the declaration is dropped in step 2.
     let mut file_removed = false;
+    // The footprint the containment guard refused to delete, carried out to
+    // the report so the state/filesystem divergence is visible to the caller
+    // (`adr_anchor_escape_recovery.md` §D2 — reported divergence is
+    // acceptable, silent divergence is not).
+    let mut retained = Vec::new();
+    // `retained`'s counterpart for a shared, user-owned config file grim
+    // never intended to delete — see `UninstallResult::abandoned_entries`.
+    let mut abandoned_entries = Vec::new();
     if !held_by_bundle {
         let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
         let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
@@ -89,6 +97,8 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             uninstall(&mut state, kind, &args.name, &scope.roots).map_err(|e| uninstall_error(&scope.workspace, e)),
         )?;
         file_removed = result.outcome == UninstallOutcome::Removed;
+        retained = result.retained;
+        abandoned_entries = result.abandoned_entries;
         if file_removed {
             // The single `persist` seam handles project-scope dir creation, the
             // atomic write, and the conditional legacy-file reap in one place.
@@ -146,7 +156,10 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     } else {
         UninstallStatus::NotInstalled
     };
-    Ok((UninstallReport::new(kind, args.name.clone(), status), ExitCode::Success))
+    Ok((
+        UninstallReport::new(kind, args.name.clone(), status, retained, abandoned_entries),
+        ExitCode::Success,
+    ))
 }
 
 /// Undeclare `name` from the scope's config (when declared) and bring the

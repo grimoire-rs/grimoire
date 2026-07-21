@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Derived `forceable` field on the JSON error document, so a client can tell a
+  refusal `--force` resolves from one it does not without keying on exit 65
+  *(error)*
+- `anchor-escape` error reason for a containment refusal *(error)*
+- `retained` on the uninstall and prune reports: the footprint deliberately
+  left in place when the containment guard refuses to delete it *(install)*
+- `clients_unresolved` on each `grim status` item, naming every active client
+  whose recorded output could not be resolved — state stays `missing`, exit
+  stays 0 *(status)*
+- Overwrite confirmation for a forceable install refusal, and a plain
+  status-line explanation with no override control for a containment refusal
+  *(tui)*
+- `Integrity:` detail-pane line explaining an `integrity-missing` row *(tui)*
+
+### Fixed
+
+- An install reached through a symlinked **ancestor** — the layout GNU stow,
+  yadm, and synced config dirs produce — no longer wedges every subsequent
+  read. `status`, `update`, `install`, and `uninstall` recover with no user
+  action and no state migration. Read-only probes tolerate the relocated
+  ancestor; every destructive caller stays strict, so a tampered or stale
+  state record still can never direct a delete outside its anchor root
+  ([#57](https://github.com/grimoire-rs/grimoire/issues/57)) *(install)*
+- `uninstall` no longer leaves an unremovable record behind when an output
+  resolves outside its anchor root: the record drops and the untouched files
+  are reported *(install)*
+- A **dangling** symlink at an install destination was invisible to the
+  untracked-clobber gate, so grim materialized *through* it, writing outside
+  the anchor root. It is now refused, and `--force` unlinks the stale link
+  instead of following it *(install)*
+
 ## [0.10.0] - 2026-07-19
 
 ### Added

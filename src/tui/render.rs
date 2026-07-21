@@ -267,6 +267,17 @@ pub struct PickerView {
     pub pinned: Option<String>,
 }
 
+/// The modal Overwrite-confirmation overlay, projected for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmForceView {
+    /// The popup title (e.g. `Overwrite r/alpha?`).
+    pub title: String,
+    /// grim's own description of the refusal, shown verbatim.
+    pub detail: String,
+    /// Whether the destructive **Overwrite** button is highlighted.
+    pub overwrite_selected: bool,
+}
+
 /// A plain, ratatui-free description of the whole screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderModel {
@@ -320,6 +331,8 @@ pub struct RenderModel {
     pub help_scroll: u16,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
+    /// The Overwrite-confirmation overlay, when [`Mode::ConfirmForce`].
+    pub confirm: Option<ConfirmForceView>,
     /// Whether the flat-view list should prepend a Registry column.
     ///
     /// True when more than one registry is in scope (the column tells the user
@@ -886,6 +899,12 @@ pub fn frame(state: &TuiState) -> RenderModel {
         }
     });
 
+    let confirm = state.confirm.as_ref().map(|c| ConfirmForceView {
+        title: format!("Overwrite {}?", c.repo),
+        detail: c.detail.clone(),
+        overwrite_selected: c.overwrite_selected,
+    });
+
     // Selected clients render as a quiet span on the legend line; empty
     // selection omits the span (no stray `clients:` label).
     let clients = if state.clients.is_empty() {
@@ -922,6 +941,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         show_help: state.mode == Mode::Help,
         help_scroll: state.help_scroll,
         picker,
+        confirm,
         // A: only show Registry column when more than one registry is in scope;
         // the tree view never needs it (registry roots are already tree nodes).
         show_registry_column: state.show_registry_column(),
@@ -1240,6 +1260,67 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     if let Some(p) = &model.picker {
         draw_picker(f, p);
     }
+    if let Some(c) = &model.confirm {
+        draw_confirm_force(f, c);
+    }
+}
+
+/// A centered Overwrite-confirmation popup: the consequence sentence, grim's
+/// own refusal text verbatim, and a two-button row. Cancel is highlighted
+/// until the user moves off it.
+fn draw_confirm_force(f: &mut Frame, c: &ConfirmForceView) {
+    let selected = Style::default()
+        .bg(Color::Indexed(236))
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let unselected = Style::default().fg(Color::White);
+    let (cancel_style, overwrite_style) = if c.overwrite_selected {
+        (unselected, selected)
+    } else {
+        (selected, unselected)
+    };
+
+    let body = vec![
+        Line::from(Span::styled(
+            "Reinstalling discards your local changes. This cannot be undone.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [ Cancel ]  ", cancel_style),
+            Span::styled("  [ Overwrite ]  ", overwrite_style),
+        ]),
+    ];
+
+    let area = centered_rect(60, 35, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    format!(" {} ", c.title),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )),
+        ),
+        area,
+    );
+    let hint_area = Rect {
+        x: area.x + 2,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "←→ select · enter confirm · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+        hint_area,
+    );
 }
 
 /// A centered version-picker popup: the tag list (highest version near the
@@ -1911,6 +1992,31 @@ mod tests {
         let m2 = frame(&s);
         assert_eq!(m2.rows[0].columns[2], fit("*2.1.0", W_TAG));
         assert!(detail_text(&m2).contains("Pinned: 2.1.0"));
+    }
+
+    /// A7 / W3. `draw_confirm_force` is untestable without a terminal, so the
+    /// projection is the whole testable surface of the Overwrite modal: it must
+    /// name the row, carry grim's refusal text VERBATIM (the user decides on
+    /// it), and start with Cancel selected — a preselected destructive button
+    /// is a click-through trap.
+    #[test]
+    fn frame_projects_the_overwrite_confirm_with_cancel_preselected() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
+        // No confirm overlay until one is opened.
+        assert!(frame(&s).confirm.is_none());
+
+        let detail = "installed artifact was modified locally: recorded sha256:aaa, found sha256:bbb";
+        s.open_confirm_force(0, false, "r/alpha", detail);
+        let c = frame(&s).confirm.expect("confirm projected once opened");
+        assert_eq!(c.title, "Overwrite r/alpha?");
+        assert_eq!(c.detail, detail, "grim's refusal text is shown verbatim");
+        assert!(!c.overwrite_selected, "Cancel is preselected");
+
+        // Moving the selection flips the highlight onto Overwrite.
+        s.confirm_force_move(1);
+        assert!(frame(&s).confirm.unwrap().overwrite_selected);
     }
 
     #[test]

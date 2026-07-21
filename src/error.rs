@@ -112,6 +112,10 @@ pub enum ErrorReason {
     /// `<file>.lock` advisory sidecar (`LockErrorKind::Locked`). Transient —
     /// retry may succeed once the other writer releases the lock.
     Locked,
+    /// A recorded path resolved outside its anchor root
+    /// (`AnchorError::EscapedAnchor`). NEVER forceable: `--force` does not
+    /// bypass containment. The remediation is uninstall + reinstall.
+    AnchorEscape,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -122,6 +126,7 @@ impl std::fmt::Display for ErrorReason {
             Self::UntrackedDestination => "untracked-destination",
             Self::NoConfig => "no-config",
             Self::Locked => "locked",
+            Self::AnchorEscape => "anchor-escape",
         })
     }
 }
@@ -135,6 +140,15 @@ impl ErrorReason {
     /// would wrongly mark it retryable.
     pub fn retryable(self) -> bool {
         matches!(self, Self::Locked)
+    }
+
+    /// Whether re-running the same command with `--force` can resolve this
+    /// refusal. Keyed on the reason, never on the exit code: `DataError` (65)
+    /// covers both the forceable drift refusals and the non-forceable
+    /// containment one, so a caller keying on the exit code would offer an
+    /// override that cannot work. `--force` never bypasses containment.
+    pub fn forceable(self) -> bool {
+        matches!(self, Self::LocalModified | Self::UntrackedDestination)
     }
 }
 
@@ -174,7 +188,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 Error::Access(ae) => Classification::new(classify_access(ae)),
                 Error::Resolve(re) => classify_resolve(re),
                 Error::Install(ie) => classify_install(ie),
-                Error::Anchor(ae) => Classification::new(classify_anchor(ae)),
+                Error::Anchor(ae) => classify_anchor(ae),
                 Error::Skill(se) => Classification::new(classify_skill(se)),
                 Error::Release(re) => Classification::new(classify_release(re)),
                 Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
@@ -343,14 +357,22 @@ fn classify_install(err: &InstallError) -> Classification {
     }
 }
 
-/// Map an anchor-tier error to an exit code. A traversal/escape is bad
+/// Map an anchor-tier error to a classification. A traversal/escape is bad
 /// on-disk state data (65); an I/O failure is I/O (74); an unclassifiable or
-/// unresolvable anchor falls through to the generic failure (1).
-fn classify_anchor(err: &AnchorError) -> ExitCode {
+/// unresolvable anchor falls through to the generic failure (1). Only
+/// `EscapedAnchor` carries a reason — a client needs to tell a containment
+/// refusal apart from the forceable drift refusals that share exit 65.
+fn classify_anchor(err: &AnchorError) -> Classification {
     match err {
-        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. } => ExitCode::DataError,
-        AnchorError::Io { .. } => ExitCode::IoError,
-        AnchorError::UnknownAnchor { .. } | AnchorError::AnchorRootAbsent { .. } => ExitCode::Failure,
+        AnchorError::EscapedAnchor { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::AnchorEscape),
+        },
+        AnchorError::TraversalAttempt { .. } => Classification::new(ExitCode::DataError),
+        AnchorError::Io { .. } => Classification::new(ExitCode::IoError),
+        AnchorError::UnknownAnchor { .. } | AnchorError::AnchorRootAbsent { .. } => {
+            Classification::new(ExitCode::Failure)
+        }
     }
 }
 
@@ -646,6 +668,7 @@ mod tests {
         assert_eq!(ErrorReason::UntrackedDestination.to_string(), "untracked-destination");
         assert_eq!(ErrorReason::NoConfig.to_string(), "no-config");
         assert_eq!(ErrorReason::Locked.to_string(), "locked");
+        assert_eq!(ErrorReason::AnchorEscape.to_string(), "anchor-escape");
     }
 
     #[test]
@@ -659,6 +682,67 @@ mod tests {
         assert!(!ErrorReason::UntrackedDestination.retryable());
         assert!(!ErrorReason::NoConfig.retryable());
         assert!(ErrorReason::Locked.retryable());
+        // A containment refusal is a decision about the filesystem's shape,
+        // not a transient condition — retrying the identical command can only
+        // fail identically.
+        assert!(!ErrorReason::AnchorEscape.retryable());
+    }
+
+    /// A1: `forceable` is keyed on the reason, and this variant-by-variant
+    /// enumeration is its ONLY registration guard — `matches!` gives no
+    /// compile-time backstop, so a new reason added without a line here would
+    /// silently default to non-forceable (a lost dialog) or, worse, be folded
+    /// into the `matches!` arm and silently offer an override that cannot work.
+    #[test]
+    fn forceable_is_true_only_for_the_two_drift_refusals() {
+        assert!(!ErrorReason::StaleLock.forceable());
+        assert!(ErrorReason::LocalModified.forceable());
+        assert!(ErrorReason::UntrackedDestination.forceable());
+        assert!(!ErrorReason::NoConfig.forceable());
+        assert!(!ErrorReason::Locked.forceable());
+        // NEVER forceable: `--force` does not bypass containment. Offering an
+        // override on a security refusal trains click-through, and exit 65
+        // covers both this and the forceable refusals — which is exactly why
+        // the client must key on the reason, not the exit code.
+        assert!(!ErrorReason::AnchorEscape.forceable());
+    }
+
+    /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
+    /// carries the `anchor-escape` reason, so a client can tell it apart from
+    /// the forceable drift refusals that share exit 65.
+    #[test]
+    fn escaped_anchor_classifies_reason_as_anchor_escape() {
+        let err: anyhow::Error = Error::from(AnchorError::EscapedAnchor {
+            anchor: crate::install::path_anchor::PathAnchor::ClaudeRoot,
+            resolved: std::path::PathBuf::from("/elsewhere/skills/demo-skill"),
+        })
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::DataError,
+                reason: Some(ErrorReason::AnchorEscape),
+            }
+        );
+    }
+
+    /// A2 companion: a tampered stored `..` is a DIFFERENT failure — no
+    /// filesystem is involved and there is no user layout to accommodate — so
+    /// it keeps exit 65 with no reason. Merging the two would let a client
+    /// present a traversal attempt as a recoverable relocated install.
+    #[test]
+    fn traversal_attempt_carries_no_reason() {
+        let err: anyhow::Error = Error::from(AnchorError::TraversalAttempt {
+            relative: "../../etc/passwd".to_string(),
+        })
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::DataError,
+                reason: None,
+            }
+        );
     }
 
     #[test]
