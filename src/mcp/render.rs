@@ -30,7 +30,9 @@ use super::tool_args::RenderToolArgs;
 /// The `grim_render` tool result payload.
 ///
 /// JSON format: `{ref, digest, kind, name, vendor, dest_dir, files,
-/// warnings?}` — `files` are the absolute paths written.
+/// warnings}` — `files` are the absolute paths written. Every field is
+/// always present; `warnings` serializes as `[]` rather than vanishing,
+/// per the always-present rule in `docs/src/stability.md`.
 #[derive(Debug, Serialize)]
 pub struct RenderReport {
     /// The fully-qualified resolved reference.
@@ -48,8 +50,9 @@ pub struct RenderReport {
     pub dest_dir: PathBuf,
     /// Absolute paths of every file written.
     pub files: Vec<PathBuf>,
-    /// Non-fatal notes (degraded scope, projection typo guards, …).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Non-fatal notes (degraded scope, projection typo guards, …). Always
+    /// serialized — an empty run reports `[]`, never an absent key, so a
+    /// consumer can tell "no warnings" from "older grim without the field".
     pub warnings: Vec<String>,
 }
 
