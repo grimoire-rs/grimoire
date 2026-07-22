@@ -95,6 +95,29 @@ impl CiEnv {
     }
 }
 
+// This type lives beside `ForgeKind` rather than in the `publish` command
+// because it is a forge-domain decision that `ensure_fork` acts on, while the
+// command layer only parses it; the manifest-side spelling — including the
+// legacy boolean — is `command::publish::ForkSetting`'s concern. Kept as a
+// plain comment, not rustdoc: this type's doc comment is published verbatim as
+// the `description` of `$defs/ForkPolicy` in `grim schema --kind publish`, and
+// internal crate layout has no business in a user-facing schema.
+/// How `[announce]` decides whether to fork the index before pushing the
+/// announce branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ForkPolicy {
+    /// Never fork; always push to the upstream index directly.
+    Never,
+    /// Fork only when the authenticated token has no push access to the
+    /// upstream index (the default).
+    Auto,
+    /// Always fork and open a cross-repository PR/MR, even when the token has
+    /// push access — lets a maintainer prefer PR review over a direct push
+    /// (and dogfood the external-contributor path).
+    Always,
+}
+
 /// The resolved forge: kind, API endpoint, credential, CI namespace hint.
 #[derive(Debug, Clone)]
 pub struct ForgeContext {
@@ -703,13 +726,18 @@ pub async fn gitlab_current_user(http: &reqwest::Client, ctx: &ForgeContext) -> 
 /// announce branch, returning the push target (fork clone URL, PR/MR head
 /// owner, and — GitLab — the source project id).
 ///
-/// Returns `Ok(None)` — push to the upstream index unchanged — when there
-/// is no token, the forge is plain, the project path is not derivable, the
-/// permission probe is ambiguous or shows push access, or the authenticated
-/// user owns the upstream (a self-fork is impossible). Returns
-/// [`AnnounceError::Fork`] only once forking is required (no push access)
-/// and the fork cannot be created, security-verified (its parent must match
-/// the upstream), or made ready.
+/// Returns `Ok(None)` — push to the upstream index unchanged — when `policy`
+/// is [`ForkPolicy::Never`] (checked first, before any request is issued),
+/// there is no token, the forge is plain, the project path is not derivable,
+/// the permission probe is ambiguous or shows push access (under
+/// [`ForkPolicy::Auto`]), or the authenticated user owns the upstream (a
+/// self-fork is impossible). Returns [`AnnounceError::Fork`] only once forking
+/// is required and the fork cannot be created, security-verified (its parent
+/// must match the upstream), or made ready.
+///
+/// [`ForkPolicy::Always`] forks even when the token has push access to the
+/// upstream — the only guard it lifts is the push-access early return; the
+/// self-fork and namespace-verification guards still apply.
 ///
 /// # Errors
 ///
@@ -719,7 +747,15 @@ pub async fn ensure_fork(
     http: &reqwest::Client,
     ctx: &ForgeContext,
     repo_url: &str,
+    policy: ForkPolicy,
 ) -> Result<Option<ForkTarget>, AnnounceError> {
+    if policy == ForkPolicy::Never {
+        tracing::debug!("`[announce] fork` is `never` — pushing the announce branch at the upstream index");
+        return Ok(None);
+    }
+    // Past this point only `Auto` and `Always` remain, and the two differ by
+    // exactly one thing: whether the push-access probe can veto the fork.
+    let force = policy == ForkPolicy::Always;
     let (Some(_token), Some(api)) = (&ctx.token, ctx.api_url.clone()) else {
         tracing::debug!("no announce token or forge API endpoint — degrading the announce to the upstream push");
         return Ok(None);
@@ -736,8 +772,8 @@ pub async fn ensure_fork(
         return Ok(None);
     };
     match ctx.kind {
-        ForgeKind::GitHub => github_ensure_fork(http, ctx, &api, &project, &host).await,
-        ForgeKind::GitLab => gitlab_ensure_fork(http, ctx, &api, &project, &host).await,
+        ForgeKind::GitHub => github_ensure_fork(http, ctx, &api, &project, &host, force).await,
+        ForgeKind::GitLab => gitlab_ensure_fork(http, ctx, &api, &project, &host, force).await,
         ForgeKind::Plain => {
             tracing::debug!("forge is plain git with no fork API — degrading the announce to the upstream push");
             Ok(None)
@@ -769,6 +805,7 @@ async fn github_ensure_fork(
     api: &str,
     project: &str,
     host: &str,
+    force: bool,
 ) -> Result<Option<ForkTarget>, AnnounceError> {
     // A failed or permission-less probe is ambiguous — degrade to the
     // upstream push rather than force a fork.
@@ -779,14 +816,17 @@ async fn github_ensure_fork(
             return Ok(None);
         }
     };
-    if github_can_push(&repo) != Some(false) {
+    // `force` (`[announce] fork = "always"`) forks even with push access.
+    if !force && github_can_push(&repo) != Some(false) {
         log_already_pushable(project);
         return Ok(None);
     }
-    // Self-fork guard: GitHub refuses to fork your own repository.
+    // Self-fork guard: GitHub refuses to fork your own repository. Compared
+    // case-insensitively for the same reason as `verify_fork_push_url`: the
+    // owner is spelled by the publisher, the login reported by the API.
     let upstream_owner = project.split('/').next().unwrap_or_default();
     let login = github_login(http, ctx).await;
-    if login.as_deref() == Some(upstream_owner) {
+    if login.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(upstream_owner)) {
         tracing::debug!(
             "authenticated login '{upstream_owner}' owns the upstream '{project}' — a self-fork is impossible, degrading to the upstream push"
         );
@@ -837,6 +877,7 @@ async fn gitlab_ensure_fork(
     api: &str,
     project: &str,
     host: &str,
+    force: bool,
 ) -> Result<Option<ForkTarget>, AnnounceError> {
     let encoded = encode_segment(project);
     let upstream = match get_json(http, ctx, &format!("{api}/projects/{encoded}")).await {
@@ -846,7 +887,8 @@ async fn gitlab_ensure_fork(
             return Ok(None);
         }
     };
-    if gitlab_can_push(&upstream) != Some(false) {
+    // `force` (`[announce] fork = "always"`) forks even with push access.
+    if !force && gitlab_can_push(&upstream) != Some(false) {
         log_already_pushable(project);
         return Ok(None);
     }
@@ -868,6 +910,24 @@ async fn gitlab_ensure_fork(
         );
         return Ok(None);
     };
+    // Self-fork guard (mirror of GitHub's): a project cannot be forked into
+    // the namespace it already occupies — GitLab 409s, and the reuse path
+    // below finds nothing because no project is a fork of itself. Only
+    // reachable under `force`, since owning the project implies push access.
+    // Compared case-insensitively like every other identity check on this
+    // path (see `verify_fork_push_url`): the namespace comes from the
+    // publisher's manifest, the username from the API, and GitLab routes
+    // both case-insensitively.
+    if project
+        .split('/')
+        .next()
+        .is_some_and(|ns| ns.eq_ignore_ascii_case(&user))
+    {
+        tracing::debug!(
+            "authenticated user '{user}' owns the upstream '{project}' — a self-fork is impossible, degrading to the upstream push"
+        );
+        return Ok(None);
+    }
 
     let (status, json) = send_json(authorize(ctx, http.post(format!("{api}/projects/{encoded}/fork"))))
         .await
@@ -1223,8 +1283,9 @@ async fn wait_ready(
 /// client so one black-holed attempt cannot consume the whole deadline; a
 /// transient transport/parse failure is retried, a [`Readiness::Failed`]
 /// fast-fails, and exhausting the deadline yields [`AnnounceError::Fork`]. A
-/// `tracing::info!` line per attempt keeps a slow fork observable in CI logs
-/// rather than looking like a hang.
+/// single `tracing::warn!` announces the wait before the first sleep so it
+/// does not read as a hang at the default log level; the per-attempt detail
+/// is `tracing::info!`, visible with `GRIM_LOG=info`.
 async fn poll_until_ready(
     bounds: PollBounds,
     ctx: &ForgeContext,
@@ -1259,6 +1320,15 @@ async fn poll_until_ready(
             return Err(AnnounceError::Fork {
                 detail: format!("fork not ready within {}s: {url}", bounds.deadline.as_secs()),
             });
+        }
+        if attempt == 1 {
+            // The per-attempt line above is `info`, which the default `warn`
+            // filter hides — so without this the wait is a silent stall of up
+            // to `deadline`. Announced once, not per attempt, to stay quiet.
+            tracing::warn!(
+                "waiting for the fork to become ready (up to {}s): {url}",
+                bounds.deadline.as_secs()
+            );
         }
         tokio::time::sleep(interval.min(remaining)).await;
         interval = next_interval(interval, bounds.max_interval);
@@ -2042,7 +2112,7 @@ mod tests {
             ci_namespace: None,
         };
         let http = client().expect("build forge client");
-        let result = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com").await;
+        let result = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com", false).await;
         handle.abort();
         assert!(
             matches!(result, Ok(None)),
@@ -2052,6 +2122,288 @@ mod tests {
             fork_posts.load(Ordering::SeqCst),
             0,
             "no fork POST must be issued when the authenticated identity is unknown"
+        );
+    }
+
+    /// A throwaway GitHub-shaped forge whose token *has* push access to the
+    /// upstream and already owns a valid fork at the conventional path.
+    ///
+    /// Every branch is method-guarded: `POST /repos/acme/index/forks` is a
+    /// prefix-extension of the `GET /repos/acme/index` probe path, so without
+    /// the guard a fork POST would silently be answered with the upstream's
+    /// permission body. This forge serves the reuse path only — a fork POST
+    /// reaching it is a test-wiring bug and must 404 rather than look like a
+    /// success.
+    async fn spawn_github_pushable_with_fork() -> (String, tokio::task::JoinHandle<()>) {
+        spawn_mock_forge(move |first| {
+            if !first.starts_with("get") {
+                not_found_response()
+            } else if first.contains("/user") {
+                ok_json_response(r#"{"login":"forkuser"}"#)
+            } else if first.contains("/repos/forkuser/index") {
+                ok_json_response(
+                    r#"{"full_name":"forkuser/index","clone_url":"https://github.com/forkuser/index.git","owner":{"login":"forkuser"},"parent":{"full_name":"acme/index"}}"#,
+                )
+            } else if first.contains("/repos/acme/index") {
+                ok_json_response(r#"{"permissions":{"push":true}}"#)
+            } else {
+                not_found_response()
+            }
+        })
+        .await
+    }
+
+    /// `[announce] fork = "always"` (the `force` flag) forks even when the
+    /// token has push access to the upstream; without it, push access degrades
+    /// to the upstream push (today's default). Both are asserted against the
+    /// same forge so the flag is the only difference.
+    #[tokio::test]
+    async fn github_ensure_fork_force_forks_despite_push_access() {
+        let (host, handle) = spawn_github_pushable_with_fork().await;
+        let api = format!("http://{host}");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitHub,
+            api_url: Some(api.clone()),
+            token: Some("ghp-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+
+        // Default (force = false): push access ⇒ no fork.
+        let no_fork = github_ensure_fork(&http, &ctx, &api, "acme/index", "github.com", false).await;
+        assert!(
+            matches!(no_fork, Ok(None)),
+            "push access must degrade to the upstream push by default, got {no_fork:?}"
+        );
+
+        // force = true: fork anyway, reusing the existing fork (created = false).
+        let forced = github_ensure_fork(&http, &ctx, &api, "acme/index", "github.com", true).await;
+        handle.abort();
+        match forced {
+            Ok(Some(target)) => {
+                assert_eq!(target.full_name, "forkuser/index");
+                assert!(!target.created, "the existing fork is reused, not created");
+            }
+            other => panic!("force must fork despite push access, got {other:?}"),
+        }
+    }
+
+    /// An upstream project the token can push to (Maintainer access).
+    const GITLAB_UPSTREAM_PUSHABLE: &str = r#"{"id":42,"permissions":{"project_access":{"access_level":40}}}"#;
+    /// An upstream project carrying no `permissions` block at all — the
+    /// ambiguous probe `gitlab_can_push` answers `None` for.
+    const GITLAB_UPSTREAM_OPAQUE: &str = r#"{"id":42}"#;
+
+    /// A throwaway GitLab-shaped forge that answers the identity probe as
+    /// `forkuser` and serves a ready fork from the fork POST, with the
+    /// upstream project object supplied by the caller (`GITLAB_UPSTREAM_*`)
+    /// so a test can pick the permission shape it needs. Every `POST
+    /// .../fork` is counted so a test can assert the call did or did not
+    /// happen.
+    async fn spawn_gitlab_forge(
+        fork_posts: Arc<AtomicUsize>,
+        upstream: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_mock_forge(move |first| {
+            // Dispatch on the method for the fork call: the project path
+            // `/projects/forkuser%2findex` contains `/fork` as a substring.
+            if first.starts_with("post") && first.contains("/fork") {
+                fork_posts.fetch_add(1, Ordering::SeqCst);
+                ok_json_response(
+                    r#"{"id":22,"path_with_namespace":"forkuser/index","http_url_to_repo":"https://gitlab.example.com/forkuser/index.git","forked_from_project":{"id":42}}"#,
+                )
+            } else if first.contains("/api/v4/user") {
+                ok_json_response(r#"{"username":"forkuser"}"#)
+            } else if first.contains("forkuser%2findex") {
+                // The fork — also the upstream in the self-fork test — and the
+                // readiness poll's target, hence both fields.
+                ok_json_response(
+                    r#"{"id":22,"permissions":{"project_access":{"access_level":40}},"import_status":"finished"}"#,
+                )
+            } else if first.contains("/projects/") {
+                ok_json_response(upstream)
+            } else {
+                not_found_response()
+            }
+        })
+        .await
+    }
+
+    /// GitLab counterpart to [`github_ensure_fork_force_forks_despite_push_access`]:
+    /// the two forges parse permissions differently (`project_access.access_level`
+    /// vs `permissions.push`) and gate the fork in separate functions, so the
+    /// `force` bypass needs its own proof on each.
+    #[tokio::test]
+    async fn gitlab_ensure_fork_force_forks_despite_push_access() {
+        let fork_posts = Arc::new(AtomicUsize::new(0));
+        let (host, handle) = spawn_gitlab_forge(fork_posts.clone(), GITLAB_UPSTREAM_PUSHABLE).await;
+        let api = format!("http://{host}/api/v4");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitLab,
+            api_url: Some(api.clone()),
+            token: Some("glpat-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+
+        // Default (force = false): push access ⇒ no fork, no POST.
+        let no_fork = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com", false).await;
+        assert!(
+            matches!(no_fork, Ok(None)),
+            "push access must degrade to the upstream push by default, got {no_fork:?}"
+        );
+        assert_eq!(
+            fork_posts.load(Ordering::SeqCst),
+            0,
+            "the default policy must not issue a fork POST when the token can push"
+        );
+
+        // force = true: fork anyway.
+        let forced = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com", true).await;
+        handle.abort();
+        match forced {
+            Ok(Some(target)) => {
+                assert_eq!(target.full_name, "forkuser/index");
+                assert!(target.created, "a fork the forced path just POSTed is newly created");
+            }
+            other => panic!("force must fork despite push access, got {other:?}"),
+        }
+    }
+
+    /// `force` deliberately skips the push-access probe, so it also reaches
+    /// the case where that probe could not decide at all (a project object
+    /// carrying no `permissions` block — `gitlab_can_push` answers `None`).
+    /// That combination is what `always` promises: fork without consulting
+    /// the permission read, rather than degrading the way `auto` does.
+    #[tokio::test]
+    async fn gitlab_ensure_fork_force_forks_on_an_ambiguous_permission_probe() {
+        let fork_posts = Arc::new(AtomicUsize::new(0));
+        let (host, handle) = spawn_gitlab_forge(fork_posts.clone(), GITLAB_UPSTREAM_OPAQUE).await;
+        let api = format!("http://{host}/api/v4");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitLab,
+            api_url: Some(api.clone()),
+            token: Some("glpat-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+
+        // Default (force = false): an undecidable probe degrades to the push.
+        let no_fork = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com", false).await;
+        assert!(
+            matches!(no_fork, Ok(None)),
+            "an ambiguous probe must degrade to the upstream push by default, got {no_fork:?}"
+        );
+        assert_eq!(
+            fork_posts.load(Ordering::SeqCst),
+            0,
+            "the default policy must not fork on an ambiguous probe"
+        );
+
+        // force = true: fork without a decidable permission read.
+        let forced = gitlab_ensure_fork(&http, &ctx, &api, "acme/index", "gitlab.example.com", true).await;
+        handle.abort();
+        match forced {
+            Ok(Some(target)) => assert_eq!(target.full_name, "forkuser/index"),
+            other => panic!("force must fork on an ambiguous probe, got {other:?}"),
+        }
+    }
+
+    /// `force` must not defeat the self-fork guard: forking a project into the
+    /// namespace it already occupies is impossible, so the announce degrades to
+    /// the upstream push. Without the guard the fork POST fires and its response
+    /// fails the parent-lineage check in [`gitlab_fork_target`] (no project is a
+    /// fork of itself), turning a working push into exit 69. Real GitLab answers
+    /// that POST with a 409; the mock returns a body whose lineage cannot match,
+    /// which trips the same backstop one step later.
+    #[tokio::test]
+    async fn gitlab_ensure_fork_force_skips_self_owned_upstream() {
+        let fork_posts = Arc::new(AtomicUsize::new(0));
+        let (host, handle) = spawn_gitlab_forge(fork_posts.clone(), GITLAB_UPSTREAM_PUSHABLE).await;
+        let api = format!("http://{host}/api/v4");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitLab,
+            api_url: Some(api.clone()),
+            token: Some("glpat-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+        // The authenticated user (`forkuser`) owns the upstream itself.
+        let result = gitlab_ensure_fork(&http, &ctx, &api, "forkuser/index", "gitlab.example.com", true).await;
+        handle.abort();
+        assert!(
+            matches!(result, Ok(None)),
+            "a self-owned upstream must degrade to the upstream push even under force, got {result:?}"
+        );
+        assert_eq!(
+            fork_posts.load(Ordering::SeqCst),
+            0,
+            "no fork POST must be issued for a self-owned upstream"
+        );
+    }
+
+    /// `never` must short-circuit before any network call: the policy is the
+    /// user saying "do not fork", not "try and give up". Previously the caller
+    /// in `index_announce` gated the call away entirely; the gate now lives
+    /// here, so this pins that it still costs nothing.
+    #[tokio::test]
+    async fn ensure_fork_never_issues_no_forge_request() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let (host, handle) = spawn_mock_forge(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            not_found_response()
+        })
+        .await;
+        let api = format!("http://{host}/api/v4");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitLab,
+            api_url: Some(api.clone()),
+            token: Some("glpat-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+        let result = ensure_fork(&http, &ctx, "https://gitlab.example.com/acme/index", ForkPolicy::Never).await;
+        handle.abort();
+        assert!(
+            matches!(result, Ok(None)),
+            "`never` must degrade to the upstream push, got {result:?}"
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "`never` must not touch the forge API at all"
+        );
+    }
+
+    /// The self-fork guard compares a namespace the publisher typed (in
+    /// `[announce] repository`) against a username the forge API reports.
+    /// GitLab routes namespaces case-insensitively, so those two spellings
+    /// can differ for one and the same account — an ASCII-case-sensitive
+    /// compare would miss the guard and fork the user's own project.
+    #[tokio::test]
+    async fn gitlab_ensure_fork_self_fork_guard_ignores_namespace_case() {
+        let fork_posts = Arc::new(AtomicUsize::new(0));
+        let (host, handle) = spawn_gitlab_forge(fork_posts.clone(), GITLAB_UPSTREAM_PUSHABLE).await;
+        let api = format!("http://{host}/api/v4");
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitLab,
+            api_url: Some(api.clone()),
+            token: Some("glpat-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = client().expect("build forge client");
+        // The API answers `forkuser`; the manifest spells it `Forkuser`.
+        let result = gitlab_ensure_fork(&http, &ctx, &api, "Forkuser/index", "gitlab.example.com", true).await;
+        handle.abort();
+        assert!(
+            matches!(result, Ok(None)),
+            "a case-different self-owned upstream must still degrade to the upstream push, got {result:?}"
+        );
+        assert_eq!(
+            fork_posts.load(Ordering::SeqCst),
+            0,
+            "no fork POST must be issued for a self-owned upstream spelled in a different case"
         );
     }
 

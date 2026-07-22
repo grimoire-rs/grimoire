@@ -96,8 +96,9 @@ exist first. Semantics to know ([full reference][batch-publish]):
   lacks push access to the index — the normal case for a public one —
   grim forks it into the token's account (reusing an existing fork) and
   opens the request cross-repository against upstream. `[announce] fork
-  = false` opts out and pushes straight at the index, failing on missing
-  access the way it always did. The JSON report's `announce.fork` is
+  = "never"` (or the legacy `false`) opts out and pushes straight at the
+  index, failing on missing access the way it always did; `"always"`
+  forks even when the token can push. The JSON report's `announce.fork` is
   `{repo, created}` when a fork carried the branch, `null` otherwise. An
   announce that fails *after* a successful publish exits 69 — the
   packages are pushed, only the announce needs re-running; announce

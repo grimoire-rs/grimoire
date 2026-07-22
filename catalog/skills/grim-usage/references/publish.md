@@ -193,9 +193,12 @@ plain git host gets the pushed branch and its URL printed.
 
 With an API-capable credential, `--announce` auto-forks: when you lack
 push access to the configured index, grim forks it for you and opens the
-cross-repo pull/merge request against the upstream automatically —
-`[announce] fork = false` opts back out to the manual-fork workflow.
-Confirm the current behavior with `grim publish --help`.
+cross-repo pull/merge request against the upstream automatically.
+`[announce] fork` picks the policy — `"auto"` is that default, `"never"`
+opts back out to the manual-fork workflow, and `"always"` forks even when
+you *can* push, so every announce lands as a reviewable PR. The legacy
+booleans still work (`true` = auto, `false` = never). Confirm the current
+behavior with `grim publish --help`.
 
 Configure the target and ownership in an optional `[announce]` table in
 `publish.toml`:

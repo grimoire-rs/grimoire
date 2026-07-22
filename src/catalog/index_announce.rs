@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use super::forge::{ForgeContext, ForgeKind};
+use super::forge::{ForgeContext, ForgeKind, ForkPolicy};
 
 /// The default public index announcements target.
 pub const DEFAULT_INDEX_REPO: &str = "https://github.com/grimoire-rs/index";
@@ -83,11 +83,12 @@ pub struct AnnounceRequest {
     /// credential — see [`job_token_credential_config`]. `None` leaves
     /// the git transport on ambient credentials only.
     pub credential_config: Option<String>,
-    /// Whether an auto-fork is permitted when the authenticated token has no
-    /// push access to the upstream index (`[announce] fork` — default true;
-    /// `false` forces the upstream push). A fork is never attempted without a
-    /// forge API token regardless of this flag.
-    pub allow_fork: bool,
+    /// How to decide whether to fork the index before pushing the announce
+    /// branch (`[announce] fork`; default [`ForkPolicy::Auto`]). A fork is
+    /// never attempted without a forge API token whatever the policy says,
+    /// and the self-fork and namespace-verification guards apply to every
+    /// policy — no value can conjure a fork of your own repository.
+    pub fork: ForkPolicy,
 }
 
 /// The `credential.helper=…` git config value injecting the GitLab CI job
@@ -292,14 +293,15 @@ pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Resu
     let api_capable =
         request.forge.token.is_some() && matches!(request.forge.kind, ForgeKind::GitHub | ForgeKind::GitLab);
     if api_capable || request.forge.kind == ForgeKind::GitHub {
-        // With no push access to the upstream index, fork it and push the
-        // branch there instead — additive: turns today's exit-69 push failure
-        // into a cross-repository PR/MR. Requires a forge API token;
-        // `[announce] fork = false` opts out; ambiguous permission degrades to
-        // the upstream push. The credential helper is host-scoped and the fork
-        // shares the host, so it covers the fork push unchanged.
-        let fork = if request.allow_fork && api_capable {
-            super::forge::ensure_fork(http, &request.forge, &request.repo_url).await?
+        // Fork the upstream index and push the branch there instead of at the
+        // index itself — additive: turns an exit-69 push failure into a
+        // cross-repository PR/MR. Requires a forge API token; `ensure_fork`
+        // applies the `[announce] fork` policy itself (`never` returns
+        // straight away, `auto` forks only on a certain no-push probe, and
+        // `always` forks regardless). The credential helper is host-scoped and
+        // the fork shares the host, so it covers the fork push unchanged.
+        let fork = if api_capable {
+            super::forge::ensure_fork(http, &request.forge, &request.repo_url, request.fork).await?
         } else {
             None
         };

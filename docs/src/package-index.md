@@ -205,15 +205,26 @@ up, so a fork created moments earlier — by this run or a concurrent one
 pull/merge request cross-repository, against the real upstream. grim
 verifies the fork is genuinely derived from the upstream repository
 before pushing to it, so a same-named repository that happens to sit in
-your account is never mistaken for the fork. Set `fork = false` in
-`[announce]` to opt out and always push directly, which fails the same
-way it always has when you lack access; detection only applies with a
-token present and a GitHub or GitLab forge, so a token-less or
+your account is never mistaken for the fork. Detection only applies with
+a token present and a GitHub or GitLab forge, so a token-less or
 plain-git target behaves exactly as before. This is a different use of
 a fork than
 [self-hosting a copy of the index](#self-hosting-fork): that fork becomes
 its own independent index, while the fork `--announce` creates here exists
 only to carry one contribution back to someone else's index.
+
+The `fork` key in `[announce]` chooses when that happens. It takes
+`"auto"` (the default — fork only when the credential cannot push),
+`"never"` (always push straight at the index, failing the same way it
+always has when you lack access), or `"always"` (fork and open the
+cross-repository pull/merge request even when you *could* push directly).
+`"always"` suits a maintainer who wants every announce to land as a
+reviewable PR rather than a direct commit. The older boolean spelling
+still parses — `true` means `"auto"`, `false` means `"never"` — so an
+existing manifest keeps working unchanged. No policy can conjure a fork
+of your own repository: when the authenticated identity owns the index,
+grim skips the fork and pushes directly, because a repository cannot be
+forked into the namespace it already occupies.
 
 When grim has to create a fork rather than reuse one, readiness works
 differently per forge. On GitLab, forking runs an import job: grim polls
@@ -243,7 +254,7 @@ host       = "github.com"        # index/<host>/ segment; default: derived
 api_url    = "https://api.github.com"  # default: CI env / forge convention
 namespace  = "your-login"        # full group path on GitLab
 owner_id   = 12345               # default: resolved via the forge API
-fork       = false               # default: true (auto-fork on missing push access)
+fork       = "always"            # never | auto | always; default: auto
 ```
 
 Every field except `repository` resolves automatically in the common
@@ -269,10 +280,13 @@ cases:
   authenticated GitHub API user.
 - **`owner_id`** — explicit > forge API lookup (GitHub always; GitLab
   with a token). A plain host requires it explicitly.
-- **`fork`** — default `true` (auto-fork when the credential lacks push
-  access to `repository`); `fork = false` forces every announce straight
-  at `repository`, failing with the same permission error grim raised
-  before auto-forking existed.
+- **`fork`** — `auto` (default) forks only when the credential lacks push
+  access to `repository`; `never` forces every announce straight at
+  `repository`, failing with the same permission error grim raised before
+  auto-forking existed; `always` forks and opens the cross-repository
+  PR/MR even with push access — it still needs a forge API token, like
+  every fork path. The legacy booleans remain accepted (`true` = `auto`,
+  `false` = `never`); a self-owned index never forks under any policy.
 
 The host-match gate is deliberate: a GitLab pipeline announcing to a
 GitHub index inherits **nothing** from the GitLab CI environment — wire

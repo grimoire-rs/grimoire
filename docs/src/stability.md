@@ -58,9 +58,18 @@ The newest instance is [`grim publish`][publishing-report]'s
 `announce.fork` (`{repo, created}` or `null`), added when `--announce`
 gained automatic fork detection. It extends the already-frozen `announce`
 object the same always-present-null way: `null` when the branch pushed
-straight to the index repository (no fork involved, or `[announce] fork =
-false`), populated with the fork's full name and whether it was newly
-created once forking activated.
+straight to the index repository (no fork involved, or the `[announce]
+fork` policy resolved to `never`), populated with the fork's full name
+and whether it was newly created once forking activated.
+
+Manifest *inputs* widen the same way, even where the table above stops
+short of freezing them. `publish.toml` is not itself listed as a frozen
+contract, but it is evolved under the same rule: `[announce] fork` began
+as a boolean and grew into the `never | auto | always` policy described
+under [Announcing Packages](./package-index.md#announcing), and the
+boolean spelling stays accepted (`true` = `auto`, `false` = `never`).
+Widening a value's accepted shape never invalidates a manifest that
+already parsed.
 
 ## Unstable — may change in any minor {#unstable}
 

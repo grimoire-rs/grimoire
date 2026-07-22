@@ -156,7 +156,7 @@ def _manifest(
     host: str | None = None,
     forge: str | None = None,
     api_url: str | None = None,
-    fork: bool | None = None,
+    fork: bool | str | None = None,
 ) -> None:
     announce = [f'repository = "{repository}"', 'namespace = "acme"']
     if owner_id is not None:
@@ -168,7 +168,10 @@ def _manifest(
     if api_url is not None:
         announce.append(f'api_url = "{api_url}"')
     if fork is not None:
-        announce.append(f"fork = {'true' if fork else 'false'}")
+        # A str is an explicit policy ("never"/"auto"/"always"); a bool is the
+        # legacy toggle.
+        value = f'"{fork}"' if isinstance(fork, str) else ("true" if fork else "false")
+        announce.append(f"fork = {value}")
     _write(
         project_dir / "publish.toml",
         f'registry = "{REGISTRY_HOST}"\n'
@@ -1296,6 +1299,117 @@ def test_publish_announce_fork_disabled_pushes_upstream(
     assert "announce/" not in _heads(fork), "fork must not be touched"
     assert data["announce"]["fork"] is None, data
     assert not any(p.endswith("/forks") for _, p in api.requests), api.requests
+
+
+def test_publish_announce_fork_never_string_disables_fork(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """`[announce] fork = "never"` is the explicit spelling of the legacy
+    `false`, proving the policy string round-trips through the real
+    `[announce]` table (which denies unknown keys), not just the parser."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-never"
+    _make_skill_source(project_dir, name, "Never fork.")
+    api = forge_api(push_access=False)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url, fork="never")
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    _announce_branch(upstream)  # pushed straight to the index
+    assert "announce/" not in _heads(fork), "fork must not be touched"
+    assert data["announce"]["fork"] is None, data
+    assert not any(p.endswith("/forks") for _, p in api.requests), api.requests
+
+
+def test_publish_announce_fork_always_forks_despite_push_access(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """`[announce] fork = "always"` forks and opens a cross-repository PR even
+    though the token can push to the index — the inverse of
+    `test_publish_announce_push_access_skips_fork`, which shares this setup
+    minus the policy."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-always"
+    _make_skill_source(project_dir, name, "Always fork.")
+    api = forge_api(push_access=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="github", api_url=api.url, fork="always")
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    # The branch lands on the fork even though the upstream was writable.
+    branch = _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+    assert data["announce"]["outcome"] == "pull-request", data
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+    assert ("POST", "/repos/acme/index/forks") in api.requests, api.requests
+    pull_bodies = [b for p, b in api.bodies if p.endswith("/pulls")]
+    assert pull_bodies and pull_bodies[0]["head"] == f"forkuser:{branch}", pull_bodies
+
+
+def test_publish_announce_gitlab_fork_always_forks_despite_push_access(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """GitLab counterpart to `test_publish_announce_fork_always_forks_despite_push_access`:
+    `[announce] fork = "always"` forks and opens a cross-project MR even though
+    the token can push to the upstream index. GitHub's and GitLab's permission
+    parsing and fork plumbing are entirely separate code paths, so a bug that
+    wires the force path for GitHub but not GitLab would still pass the whole
+    suite without this. Shares its setup with
+    `test_publish_announce_gitlab_forks_cross_project_mr` minus the policy
+    (push access there is denied, not forced through)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-always-gitlab"
+    _make_skill_source(project_dir, name, "Always fork GitLab.")
+    api = forge_api(push_access=True)
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url, fork="always")
+
+    runner = grim_at(project_dir)
+    upstream, fork = _index_and_fork_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    data = runner.json("publish", "--announce")
+
+    # The branch lands on the fork even though the upstream was writable.
+    _announce_branch(fork)
+    assert "announce/" not in _heads(upstream), "upstream must not carry the branch"
+    assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+    assert ("POST", "/projects/acme%2Findex/fork") in api.requests, api.requests
+    # The MR is created FROM the fork project, targeting the upstream.
+    mr_bodies = [b for p, b in api.bodies if p.endswith("/merge_requests")]
+    assert mr_bodies and mr_bodies[0].get("target_project_id") == UPSTREAM_PROJECT_ID, mr_bodies
+
+
+def test_publish_announce_gitlab_fork_always_self_owned_upstream_pushes_directly(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """The self-fork guard (forking your own repository is impossible) only
+    had a raw unit test, not CLI-level coverage on either forge — exactly the
+    scenario the ADR calls risky: a missing guard here turns a working push
+    into exit 69 (GitLab 409s a self-fork, and the identity-based reuse hunt
+    then finds nothing to adopt). Set the authenticated login to the upstream
+    index's own namespace (`acme`) under `fork = "always"` and confirm the
+    announce still degrades cleanly to the upstream push."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-fork-always-self-owned"
+    _make_skill_source(project_dir, name, "Self-owned upstream.")
+    api = forge_api(fork_owner="acme")
+    _manifest(project_dir, ns, name, INDEX_URL, forge="gitlab", api_url=api.url, fork="always")
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+
+    _announce_branch(bare)  # pushed straight to the index, no fork involved
+    assert data["announce"]["fork"] is None, data
+    assert not any(m == "POST" and p.endswith("/fork") for m, p in api.requests), api.requests
 
 
 def test_publish_announce_fork_of_foreign_repo_rejected(

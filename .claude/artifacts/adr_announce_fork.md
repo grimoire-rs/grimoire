@@ -13,10 +13,13 @@
 **Domain Tags:** security, integration, api
 **Supersedes:** N/A
 **Amends:** `adr_grim_publish.md` (D6 report shape — see the re-sync note there)
-**Code:** `src/catalog/forge.rs` (`ensure_fork`, `ForkTarget`, forge parsers,
-permission probes, `wait_ready`), `src/catalog/index_announce.rs` (fork
-orchestration + push), `src/api/publish_report.rs` (`PublishFork`),
-`src/error.rs` (`AnnounceError::Fork` classification)
+**Code:** `src/catalog/forge.rs` (`ForkPolicy`, `ensure_fork`, `ForkTarget`,
+forge parsers, permission probes, `wait_ready`),
+`src/catalog/index_announce.rs` (fork orchestration + push),
+`src/command/publish.rs` (`ForkSetting`, `AnnounceSpec::fork` resolution in
+`run_announce`),
+`src/api/publish_report.rs` (`PublishFork`), `src/error.rs`
+(`AnnounceError::Fork` classification)
 
 ## Context
 
@@ -47,22 +50,52 @@ retroactive trail plus the accepted refinements not yet in the shipped code.
 
 ## Decision
 
-### D1 — Default-on, opt-out via `[announce] fork`
+### D1 — Default-on, policy-selected via `[announce] fork`
 
-Auto-fork is **on by default**. `[announce] fork` defaults `true`; setting
-`fork = false` forces the upstream push (today's behavior). The flag rides
-as `AnnounceRequest::allow_fork`. A fork is **never** attempted without a
-forge API token regardless of the flag — a plain-git or tokenless announce
-degrades to the upstream push unchanged.
+Auto-fork is **on by default**. `[announce] fork` is a `ForkPolicy`
+(`src/catalog/forge.rs`, beside `ForgeKind` — it is a forge-domain decision
+`ensure_fork` acts on, and `src/catalog` never depends on `src/command`) with
+three values:
+
+| Value | Behavior | Inside `ensure_fork` |
+|---|---|---|
+| `auto` (default, unset) | fork only on a certain no-push probe (D2) | runs the probe; `force = false` |
+| `never` | always push at the upstream index | returns `Ok(None)` before any request |
+| `always` | fork even when the token *can* push | skips the probe's veto; `force = true` |
+
+`AnnounceRequest` carries the policy as a single `fork: ForkPolicy` field.
+It originally carried an `allow_fork` / `force_fork` bool pair, which made
+the meaningless combination `(false, true)` representable; collapsing it to
+the enum makes that state unconstructible and moves the `never` gate from the
+caller into `ensure_fork`, so one place owns the policy.
+
+The legacy boolean spelling remains accepted permanently — `true` = `auto`,
+`false` = `never` — through a `ForkSetting` wrapper whose hand-written
+`Deserialize` type-switches on bool vs string. It is hand-written rather than
+`#[serde(untagged)]` so a misspelled policy surfaces `ForkPolicy`'s own
+derive-generated `unknown variant 'x', expected one of 'never', 'auto',
+'always'` instead of serde's `data did not match any variant`; the
+`#[serde(untagged)]` attribute stays only to shape the `JsonSchema` `anyOf`
+(boolean | policy string — disjoint JSON types, so the schema stays
+unambiguous). A fork is **never** attempted without a forge API token
+regardless of policy — a plain-git or tokenless announce degrades to the
+upstream push unchanged.
 
 Rationale: the feature is strictly additive — it turns an exit-69 failure
 into a merge request. The failure mode it replaces is worse than any of its
 own failure modes (all of which degrade back to the upstream push). Default
 opt-out would leave the common contributor path broken.
 
+`always` was added afterwards for the inverse case: a maintainer who *can*
+push but wants every announce to arrive as a reviewable PR rather than a
+direct commit — and who thereby dogfoods the external-contributor path that
+`auto` only exercises for people without access. It changes when a fork
+happens, never the guards around one.
+
 ### D2 — Trigger: fork only on a *certain* no-push probe
 
-`ensure_fork` forks **only** when the push-permission probe returns
+Under `auto` — the default, and the only policy before D1 grew the tri-state
+— `ensure_fork` forks **only** when the push-permission probe returns
 `Some(false)` — a definite "cannot push":
 
 - GitHub: `.permissions.push == false` on the repo object (`github_can_push`).
@@ -76,17 +109,44 @@ shows push access. Tri-state (`Some(true)` / `Some(false)` / `None`) is
 deliberate — a `bool` would collapse "ambiguous" into "cannot push" and fork
 when it should not.
 
+`always` (`force_fork`) skips **exactly one** of those returns: the
+`if !force && can_push(...) != Some(false)` early exit in
+`github_ensure_fork` / `gitlab_ensure_fork`. Note what that single `if`
+covers — both `Some(true)` (definite push access) *and* `None` (the
+permissions block was absent, so the probe could not decide). Under
+`always` neither degrades; that is the point of the policy, and
+`gitlab_ensure_fork_force_forks_on_an_ambiguous_permission_probe` pins it.
+
+Everything outside that `if` stands: a probe request that fails outright
+still degrades on its own earlier return, because "the forge did not
+answer at all" is not a licence to fork blind.
+
 Self-fork guard: if the authenticated identity owns the upstream namespace,
 forking is impossible (a forge refuses to fork your own repo), so
-`ensure_fork` returns `Ok(None)` and pushes upstream.
+`ensure_fork` returns `Ok(None)` and pushes upstream. This guard is
+independent of the policy — `always` does not defeat it. It was originally
+implicit on GitLab (owning a project implies push access, so the early
+return above caught it first); `force` made it reachable, and it is now
+explicit on both forges. Without it, GitLab answers the fork POST with a 409
+and the reuse path then hunts, for the full enumeration deadline, a
+fork-of-itself that cannot exist — turning a working push into exit 69.
+
+The namespace comparison is ASCII-case-insensitive on both forges, matching
+`verify_fork_push_url`'s identity checks: the namespace is spelled by the
+publisher in `[announce] repository` while the login comes from the forge
+API, and both forges route namespaces case-insensitively. A case-sensitive
+compare would miss the guard for `Acme/index` vs login `acme` and fork the
+user's own project.
 
 ### D3 — `ensure_fork` contract: `Result<Option<ForkTarget>, AnnounceError>`
 
 - `Ok(Some(target))` — a fork exists and is ready; push the branch there and
   open a cross-repository PR/MR.
 - `Ok(None)` — **degrade to the upstream push.** No token, plain forge,
-  underivable path, ambiguous or push-capable permission, or self-owned
-  upstream. This path is never worse than today's behavior.
+  underivable path, ambiguous permission, or self-owned upstream. A
+  *push-capable* permission also lands here under `auto`, but not under
+  `always`, which forks anyway (still subject to every other guard). This
+  path is never worse than today's behavior.
 - `Err(AnnounceError::Fork { detail })` — forking was **required** (a certain
   no-push) but the fork could not be created, security-verified, or made
   ready. Distinct from a plain push failure: the caller genuinely cannot push
@@ -297,3 +357,12 @@ removed or retyped field.
   guard principles the D8 hardening implements
 - `.claude/rules/arch-principles.md` — "Internal enum exhaustiveness"
   convention behind the exhaustive-`ForgeKind`-match decision (D8)
+
+## Changelog
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-07-19 | Michael Herwig | Initial record, accepted (retroactive trail for the shipped feature plus the D6/D7 refinements and D8 hardening) |
+| 2026-07-22 | Michael Herwig | `[announce] fork` widened from a boolean to the `never \| auto \| always` `ForkPolicy` (legacy bool kept as a permanent alias); D1 rewritten, D2/D3 amended for the `force` bypass. Made the self-fork guard explicit on GitLab — `force` had made it reachable there, where it turned a working upstream push into exit 69 |
+| 2026-07-22 | Michael Herwig | Review follow-ups: self-fork namespace comparison made ASCII-case-insensitive on both forges (was case-sensitive, missing the guard for a case-different namespace); D2 amended to state that the `force` bypass also skips the *ambiguous* permission probe, now pinned by a test |
+| 2026-07-22 | Michael Herwig | `ForkPolicy` moved to `src/catalog/forge.rs` and `AnnounceRequest`'s `allow_fork`/`force_fork` bool pair collapsed into one `fork: ForkPolicy` field, making the meaningless `(false, true)` pair unconstructible; the `never` gate moved from the caller into `ensure_fork`. Internal only — no CLI, report, schema, exit-code, or manifest-parsing change (generated publish schema verified byte-identical) |

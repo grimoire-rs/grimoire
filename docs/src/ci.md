@@ -78,8 +78,11 @@ lacks write access there, to a fork grim creates or reuses on your behalf:
   cross-repository against the upstream index. The
   [auto-merge validation](./package-index.md#spec-validation) checks the
   PR author, so the PR must come from you either way. Set `[announce] fork
-  = false` to disable this and always push directly instead (which fails
-  the same way it always has, without write access). A token that cannot
+  = "never"` (or the legacy `false`) to disable this and always push
+  directly instead, which fails the same way it always has without write
+  access; `"always"` goes the other way and forks even where the token
+  *could* push, so an announce from a maintainer's own credential still
+  arrives as a reviewable PR. A token that cannot
   create the fork — a fine-grained PAT scoped to a single repository, say —
   or a fork that never becomes readable/pushable in time hard-errors here
   (exit 69: the fork could not be created, verified, or readied; the
@@ -150,17 +153,19 @@ include:
 ```
 
 The same write-access rule as on GitHub Actions applies: with a token that
-can push to the index repository, grim pushes there directly; without one,
-it automatically forks the index into the token's account, pushes the
-branch to the fork, and opens the PR cross-repository — no
+can push to the index repository, grim pushes there directly by default;
+without one, it automatically forks the index into the token's account,
+pushes the branch to the fork, and opens the PR cross-repository — no
 `announce_repo` override needed. Fork reuse is identity-based and
 tolerant of a rename, scoped to your **personal namespace** on GitLab (a
 fork later moved into a group namespace is not reused — see [Announcing
 Packages](./package-index.md#announcing) for the full behavior, including
 the bounded wait while a newly created fork becomes ready). Set
-`[announce] fork = false` in `publish.toml` to fall back to the manual
-workaround (`announce_repo: https://github.com/<you>/index`, opening the
-PR from the fork's branch banner) for a token that cannot create forks.
+`[announce] fork = "never"` (or the legacy `false`) in `publish.toml` to
+fall back to the manual workaround (`announce_repo:
+https://github.com/<you>/index`, opening the PR from the fork's branch
+banner) for a token that cannot create forks — or `"always"` to fork even
+when the token can push.
 
 ### Announcing to a self-hosted index {#gitlab-announce-self-hosted}
 
