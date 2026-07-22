@@ -5,7 +5,7 @@ this book are real and tested, but the surface has moved between minor
 releases while the project found its shape.
 
 1.0 draws a line. A script parsing [`grim status --format
-json`][status], a shell `case` on an [exit code][config-exit-codes], or a
+json`][status], a shell `case` on an [exit code][exit-codes], or a
 tool reading `grimoire.lock` needs to know what survives an upgrade
 unmodified and what does not — otherwise "just run `grim update`" is a
 gamble, not a routine operation.
@@ -19,18 +19,26 @@ Breaking any guarantee below is a major-version change, not a minor one.
 
 | Area | Guarantee |
 |------|-----------|
-| CLI surface | Subcommand names, arguments, flags, and [documented exit codes][config-exit-codes] |
+| CLI surface | Subcommand names, arguments, flags, and the [documented exit codes][exit-codes] |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration] |
+| `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
+| Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
+| [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds] and the [release/push mechanics][publishing-release] |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], and the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts |
+| [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json` and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree |
+| [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
+| Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
 | Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars] |
 
 ### Additive fields {#frozen-additive-fields}
 
-Two rows above — `--format json` reports and the install-state schema —
-share one rule: a minor release may add a new optional field, but never
-changes an existing field's type or meaning, and never removes one. The
+Two of the rows above — `--format json` reports and the install-state
+schema — share one rule on the *output* side: a minor release may add a new
+optional field, but never changes an existing field's type or meaning, and
+never removes one. (Manifest *inputs* obey the mirror-image rule, at the end
+of this section.) The
 matching obligation sits on the reader: a consumer of either format must
 ignore fields it does not recognize rather than error on them. That pairing
 is what makes "add a field in a minor" safe for every consumer, including
@@ -62,20 +70,27 @@ straight to the index repository (no fork involved, or the `[announce]
 fork` policy resolved to `never`), populated with the fork's full name
 and whether it was newly created once forking activated.
 
-Manifest *inputs* widen the same way, even where the table above stops
-short of freezing them. `publish.toml` is not itself listed as a frozen
-contract, but it is evolved under the same rule: `[announce] fork` began
-as a boolean and grew into the `never | auto | always` policy described
-under [Announcing Packages](./package-index.md#announcing), and the
-boolean spelling stays accepted (`true` = `auto`, `false` = `never`).
-Widening a value's accepted shape never invalidates a manifest that
-already parsed.
+Manifest *inputs* are covered by the mirror image of that rule. A minor
+release may widen what a key accepts — a new optional key, a new accepted
+value, a new spelling — but never narrows it: a `publish.toml` or
+`grimoire.toml` that parses today parses on every later 1.x, and a value
+that was once valid stays valid even after a better spelling replaces it
+in the documentation.
+
+`[announce] fork` is the worked example. It began as a boolean and grew
+into the `never | auto | always` policy described under [Announcing
+Packages](./package-index.md#announcing); the boolean spelling stays
+accepted permanently (`true` = `auto`, `false` = `never`) rather than
+being deprecated out. The obligation this places on grim is deliberate
+and one-directional: old manifests keep working, so the cost of a widened
+key is paid once by the implementation instead of repeatedly by everyone
+who wrote a manifest against an earlier release.
 
 ## Unstable — may change in any minor {#unstable}
 
-Two things are deliberately excluded from the guarantee above, because
-freezing them would block improving Grimoire's on-disk footprint without a
-major version bump:
+Three things are deliberately excluded from the guarantee above, because
+freezing them would block improving Grimoire without a major version bump —
+the exclusions are what keep 1.x able to move at all:
 
 - **Vendor render layout.** The exact files and paths grim writes under
   `~/.claude`, `.claude/`, `~/.copilot`, the OpenCode config directories,
@@ -89,10 +104,14 @@ major version bump:
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
   exit codes and structured JSON output are contracts.
-- **NDJSON progress events** (`--progress json`) are **experimental
-  pre-1.0**: the event shapes evolve additively only (new fields may
-  appear, existing ones keep their meaning), and the surface freezes at
-  1.0 once external consumers have validated it.
+- **NDJSON progress events** (`--progress json`) stay **experimental
+  through 1.0**, deliberately. The event shapes evolve additively (new
+  fields may appear, existing ones keep their meaning), but the surface
+  itself is not frozen by the 1.0 release: it shipped too recently for any
+  external consumer to have built against it, and freezing a contract
+  nobody has exercised buys a guarantee no one asked for at the cost of
+  never being able to fix it. It freezes in a later minor, once a real
+  consumer has shaped it. Anything you script against it today may move.
 
 ### The supported discovery channel {#unstable-discovery}
 
@@ -133,9 +152,25 @@ stability (`.claude/artifacts/adr_render_layout_stability.md`).
 
 ## Known limitations {#limitations}
 
-Three behaviors fall outside every guarantee above — not because they are
+Four behaviors fall outside every guarantee above — not because they are
 likely to change, but because they are hard constraints of the current
 design.
+
+### A shared `GRIM_HOME` has a single writer {#limitations-shared-home}
+
+Global install state lives in one file, `$GRIM_HOME/state/global.json`.
+When two machines or containers share that directory — a mounted volume
+across devcontainers, a shared home on a build host — they read and write
+the same file, and concurrent `grim install --global` runs are
+last-writer-wins on the record set. Anchored paths make the file portable
+between machines, but portability is not coordination.
+
+Writes are atomic, so the file is never left half-written; what is lost is
+one run's *records*, not the file's integrity, and a subsequent `grim
+install` re-materializes anything dropped. The supported arrangement for
+1.0 is one writer at a time. Project scope is unaffected: each workspace
+owns `<workspace>/.grimoire/state.json`, so two projects never collide
+even on a shared volume.
 
 ### Forward compatibility {#limitations-forward-compat}
 
@@ -233,10 +268,17 @@ unaffected — they read straight from disk and never touch a manifest.
 [install]: ./commands.md#install
 [install-dev]: ./commands.md#install-dev
 [context]: ./commands.md#context
-[config-exit-codes]: ./commands.md#config-exit-codes
+[exit-codes]: ./json-interface.md#error-document
+[annotations]: ./artifacts.md#annotations
+[bundles]: ./artifacts.md#bundles
+[mcp-descriptor]: ./mcp-servers.md#format
+[mcp-server]: ./commands.md#mcp
+[package-index]: ./package-index.md#spec
+[init]: ./commands.md#init
 [configuration]: ./configuration.md
 [env-vars]: ./configuration.md#environment-variables
 [artifacts-kinds]: ./artifacts.md#kinds
+[batch-publish]: ./publishing.md#batch-publish
 [publishing-release]: ./publishing.md#release
 [vendor-metadata]: ./vendor-metadata.md
 [path-sources]: ./concepts.md#references-tags-and-digests
