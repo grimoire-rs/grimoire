@@ -1914,7 +1914,10 @@ mod tests {
             vec!["codex".to_string(), "gemini".to_string(), "zed".to_string()]
         );
         assert!(acted[0].kept_modified.is_empty());
-        assert!(file_a.is_file(), "the pooled footprint outside the anchor root survives");
+        assert!(
+            file_a.is_file(),
+            "the pooled footprint outside the anchor root survives"
+        );
         assert!(file_b.is_file(), "the second escaping footprint survives");
         assert_eq!(
             acted[0].retained,

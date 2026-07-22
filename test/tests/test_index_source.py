@@ -37,6 +37,8 @@ def _package(
     description: str,
     keywords: list[str] | None = None,
     summary: str | None = None,
+    deprecated: str | None = None,
+    replaced_by: str | None = None,
 ) -> dict:
     pkg = {
         "schema": 1,
@@ -53,6 +55,10 @@ def _package(
         pkg["keywords"] = keywords
     if summary is not None:
         pkg["summary"] = summary
+    if deprecated is not None:
+        pkg["deprecated"] = deprecated
+    if replaced_by is not None:
+        pkg["replaced_by"] = replaced_by
     return pkg
 
 
@@ -218,6 +224,51 @@ def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path
     assert row.get("summary") == "terse catalog blurb", (
         f"index summary must reach the search row, got {row!r}"
     )
+
+
+def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path, http_index) -> None:
+    """A deprecated, *not installed*, index-sourced package is hidden by
+    default and marked once shown — the same contract a registry-catalog
+    source already honours. The pointer is the only browse-time source, so
+    dropping its ``deprecated`` field made the row render as verified-healthy
+    (grimoire#58)."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("fresh-skill", "skill", "ghcr.io/acme/skills/fresh-skill", "A current one"),
+            _package(
+                "old-skill",
+                "skill",
+                "ghcr.io/acme/skills/old-skill",
+                "An old one",
+                deprecated="use new-skill instead",
+                replaced_by="ghcr.io/acme/skills/new-skill",
+            ),
+        ],
+    )
+    _index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    repos = [r.get("repo", "") for r in _search_rows(runner)]
+    assert repos == ["ghcr.io/acme/skills/fresh-skill"], (
+        f"a deprecated, uninstalled index row must be hidden by default: {repos}"
+    )
+
+    result = runner.run("--format", "json", "search", "--refresh", "--show-deprecated", check=False)
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)["items"]
+    old = next(r for r in rows if r.get("repo") == "ghcr.io/acme/skills/old-skill")
+    assert old.get("deprecated") == "use new-skill instead", f"got {old!r}"
+    assert old.get("replaced_by") == "ghcr.io/acme/skills/new-skill", f"got {old!r}"
+    assert old.get("status") == "not-installed", f"got {old!r}"
+
+    # Plain output marks the row too — deprecation rides a comma-suffixed
+    # Status cell, so it is greppable for an uninstalled row as well.
+    plain = runner.run("search", "--refresh", "--show-deprecated", check=False)
+    assert plain.returncode == 0, plain.stderr
+    marked = [line for line in plain.stdout.splitlines() if "old-skill" in line]
+    assert marked and "not-installed,deprecated" in marked[0], f"got {marked!r}"
 
 
 def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: Path) -> None:

@@ -898,7 +898,10 @@ mod tests {
             vec![file_a.clone(), file_b.clone()],
             "each escaping footprint must be reported exactly once, sorted"
         );
-        assert!(file_a.is_file(), "the pooled footprint outside the anchor root survives");
+        assert!(
+            file_a.is_file(),
+            "the pooled footprint outside the anchor root survives"
+        );
         assert!(file_b.is_file(), "the second escaping footprint survives");
     }
 }

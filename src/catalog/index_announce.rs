@@ -53,6 +53,12 @@ pub struct AnnouncePackage {
     /// Short single-line blurb (`grim search` matches it too). `None` ⇒
     /// omitted from the written pointer.
     pub summary: Option<String>,
+    /// Publisher deprecation message. Written into the pointer so a browse
+    /// against an index-backed registry can hide/mark the row without a
+    /// manifest fetch per entry. `None` ⇒ omitted.
+    pub deprecated: Option<String>,
+    /// Successor reference. `None` ⇒ omitted.
+    pub replaced_by: Option<String>,
 }
 
 /// The announce request: where, as whom, and what.
@@ -404,6 +410,10 @@ pub struct PointerMetadata {
     pub keywords: Vec<String>,
     /// `com.grimoire.summary`.
     pub summary: Option<String>,
+    /// `com.grimoire.deprecated`.
+    pub deprecated: Option<String>,
+    /// `com.grimoire.replaced-by`.
+    pub replaced_by: Option<String>,
 }
 
 /// Read the pointer metadata (description, HTTPS source URL, keywords,
@@ -452,6 +462,10 @@ pub async fn pointer_metadata(
             .annotations
             .get(crate::oci::annotations::SUMMARY_ANNOTATION)
             .cloned(),
+        // Same read seams the catalog build and `grim describe` use — the
+        // pointer must never become a second source of truth for these.
+        deprecated: crate::oci::annotations::deprecation_message(&manifest.annotations),
+        replaced_by: crate::oci::annotations::replacement_ref(&manifest.annotations),
     }
 }
 
@@ -477,13 +491,19 @@ fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64, forge: F
     if let Some(repo) = &pkg.repository_url {
         value["repository"] = serde_json::Value::String(repo.clone());
     }
-    // Omit-empty: pointers for artifacts without keywords/summary stay
-    // byte-identical to pre-search-metadata index files.
+    // Omit-empty: pointers for artifacts without keywords/summary/deprecation
+    // stay byte-identical to pre-search-metadata index files.
     if !pkg.keywords.is_empty() {
         value["keywords"] = serde_json::Value::from(pkg.keywords.clone());
     }
     if let Some(summary) = &pkg.summary {
         value["summary"] = serde_json::Value::String(summary.clone());
+    }
+    if let Some(deprecated) = &pkg.deprecated {
+        value["deprecated"] = serde_json::Value::String(deprecated.clone());
+    }
+    if let Some(replaced_by) = &pkg.replaced_by {
+        value["replaced_by"] = serde_json::Value::String(replaced_by.clone());
     }
     let mut out = serde_json::to_string_pretty(&value).unwrap_or_default();
     out.push('\n');
@@ -630,6 +650,8 @@ mod tests {
             repository_url: Some("https://github.com/acme/skills".to_string()),
             keywords: Vec::new(),
             summary: None,
+            deprecated: None,
+            replaced_by: None,
         }
     }
 
@@ -649,6 +671,8 @@ mod tests {
         // keeping pre-search-metadata index files byte-identical.
         assert!(value.get("keywords").is_none());
         assert!(value.get("summary").is_none());
+        assert!(value.get("deprecated").is_none());
+        assert!(value.get("replaced_by").is_none());
         assert!(rendered.ends_with('\n'), "trailing newline for clean diffs");
     }
 
@@ -661,6 +685,20 @@ mod tests {
             serde_json::from_str(&metadata_json(&p, "acme", 42, ForgeKind::GitHub)).expect("valid JSON");
         assert_eq!(value["keywords"], serde_json::json!(["review", "quality"]));
         assert_eq!(value["summary"], "Terse review");
+    }
+
+    #[test]
+    fn metadata_json_carries_deprecation_when_present() {
+        // The pointer is the only browse-time source for an index-backed
+        // registry, so announce has to write the deprecation pair through —
+        // otherwise the catalog row reads as healthy.
+        let mut p = pkg("old-skill");
+        p.deprecated = Some("use new-skill instead".to_string());
+        p.replaced_by = Some("ghcr.io/acme/skills/new-skill".to_string());
+        let value: serde_json::Value =
+            serde_json::from_str(&metadata_json(&p, "acme", 42, ForgeKind::GitHub)).expect("valid JSON");
+        assert_eq!(value["deprecated"], "use new-skill instead");
+        assert_eq!(value["replaced_by"], "ghcr.io/acme/skills/new-skill");
     }
 
     #[test]

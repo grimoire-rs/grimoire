@@ -61,6 +61,16 @@ struct IndexPackage {
     /// pre-summary index files — defaults to `None`.
     #[serde(default)]
     summary: Option<String>,
+    /// Publisher deprecation message, mirroring the artifact's
+    /// `com.grimoire.deprecated` annotation. Non-empty ⇒ deprecated. Absent
+    /// in pre-deprecation index files, where the row stays unmarked (the
+    /// pointer is the only browse-time source — reading the annotation would
+    /// cost one manifest fetch per index entry).
+    #[serde(default)]
+    deprecated: Option<String>,
+    /// Successor reference, mirroring `com.grimoire.replaced-by`.
+    #[serde(default)]
+    replaced_by: Option<String>,
 }
 
 impl IndexPackage {
@@ -90,9 +100,17 @@ impl IndexPackage {
             repository_url: self.repository.filter(|r| r.starts_with("https://")),
             revision: None,
             created: None,
-            deprecated: None,
-            // The index phone book carries no replacement metadata.
-            replaced_by: None,
+            // Same trim/empty-⇒-`None` normalization the annotation seam
+            // applies, so a hand-authored `"deprecated": " "` in the index
+            // cannot mark a row deprecated with an empty notice.
+            deprecated: self
+                .deprecated
+                .as_deref()
+                .and_then(crate::oci::annotations::normalize_deprecated),
+            replaced_by: self
+                .replaced_by
+                .as_deref()
+                .and_then(crate::oci::annotations::normalize_deprecated),
             // The index phone book carries no OCI image annotations.
             oci: crate::catalog::registry_catalog::OciMeta::default(),
             // Phone-book contract: no version data in the index; tags are
@@ -317,6 +335,38 @@ mod tests {
         .expect("maps");
         assert!(e.matches(&SearchQuery::parse("fetch")), "keyword-only query matches");
         assert!(!e.matches(&SearchQuery::parse("absent")), "unrelated term does not");
+    }
+
+    #[test]
+    fn package_forwards_deprecation() {
+        let p = pkg(r#"{
+            "schema": 1,
+            "name": "old-skill",
+            "kind": "skill",
+            "ref": "ghcr.io/acme/skills/old-skill",
+            "deprecated": "  use new-skill instead  ",
+            "replaced_by": "ghcr.io/acme/skills/new-skill"
+        }"#);
+        let e = p.into_entry("t").expect("maps");
+        // Trimmed by the shared annotation normalizer, so the browse filter
+        // and the `† deprecated` marker fire off an index-only row.
+        assert_eq!(e.deprecated.as_deref(), Some("use new-skill instead"));
+        assert_eq!(e.replaced_by.as_deref(), Some("ghcr.io/acme/skills/new-skill"));
+    }
+
+    #[test]
+    fn blank_deprecation_is_not_deprecated() {
+        // Absent (pre-deprecation pointers) and whitespace-only both mean
+        // "not deprecated" — never a row marked with an empty notice.
+        let absent = pkg(r#"{"schema": 1, "name": "x", "kind": "skill", "ref": "h/r"}"#)
+            .into_entry("t")
+            .expect("maps");
+        assert_eq!(absent.deprecated, None);
+        assert_eq!(absent.replaced_by, None);
+        let blank = pkg(r#"{"schema": 1, "name": "x", "kind": "skill", "ref": "h/r", "deprecated": "   "}"#)
+            .into_entry("t")
+            .expect("maps");
+        assert_eq!(blank.deprecated, None);
     }
 
     #[test]

@@ -94,9 +94,11 @@ pub const DEPRECATED_ANNOTATION: &str = "com.grimoire.deprecated";
 
 /// Normalize an authored deprecation value: trim surrounding whitespace and
 /// treat an empty result as "not deprecated" (`None`). Shared by the emit
-/// side (all four `annotations_for_*`) and the read side
-/// ([`deprecation_message`]) so presence semantics are one source of truth.
-fn normalize_deprecated(value: &str) -> Option<String> {
+/// side (all four `annotations_for_*`), the read side
+/// ([`deprecation_message`], [`replacement_ref`]), and the package-index
+/// reader — which sees the same pair as JSON fields rather than annotations
+/// — so presence semantics are one source of truth.
+pub fn normalize_deprecated(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }

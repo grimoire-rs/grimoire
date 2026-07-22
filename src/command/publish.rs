@@ -1157,6 +1157,8 @@ async fn run_announce(
             repository_url: meta.repository_url,
             keywords: meta.keywords,
             summary: meta.summary,
+            deprecated: meta.deprecated,
+            replaced_by: meta.replaced_by,
         });
     }
 
