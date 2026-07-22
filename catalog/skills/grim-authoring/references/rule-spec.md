@@ -70,16 +70,26 @@ where catalog UIs look for a readme or icon.
 
 ## Per-Client Transforms
 
-The same published rule lands differently per client:
+Rules reach the fewest clients of any kind: five of the ten host them,
+five decline outright (agents: six host, four decline). The same
+published rule lands differently per client:
 
 | Client | Transform |
 |---|---|
 | Claude Code | ~Verbatim — `paths:` is native frontmatter; re-rendered only when `metadata` carries vendor keys |
-| OpenCode | Frontmatter **stripped**; body written with a provenance comment; loading registered as a managed glob in `opencode.json` |
 | Copilot | Written to `.github/instructions/<name>.instructions.md` at project scope (global scope lands in native `~/.copilot/instructions/`); `paths` comma-joined into a single `applyTo:` string; `copilot.exclude-agent` → `excludeAgent` |
+| Cursor | Written to `.cursor/rules/<name>.mdc`; `paths` comma-joined into a single `globs` string plus a computed `alwaysApply: false` — unscoped emits no `globs` and `alwaysApply: true` |
+| Kiro | Written to `.kiro/steering/<name>.md`; `paths` become a `fileMatchPattern` YAML **array** (not comma-joined) plus `inclusion: fileMatch` — unscoped emits `inclusion: always`. Global-scope scoping is upstream-inert today; grim writes the correct file and warns |
+| OpenCode | Frontmatter **stripped** and `paths` dropped with a warning; body written with a provenance comment; loading registered as a managed glob in `opencode.json` |
+| Codex · Junie · Gemini · Zed · Amp | **Declined** — no ownable path-scoped surface (always-on `AGENTS.md`/`GEMINI.md` hierarchies only); grim warns, skips, and writes no file |
 
 OpenCode never sees rule frontmatter at all — anything that must reach
-OpenCode belongs in the body. Full mapping: [rule keys][rule-keys].
+OpenCode belongs in the body. Two authoring consequences of the rest:
+Cursor splits its `globs` string on **every** comma, including one inside
+a `{a,b}` brace alternation, so author `src/**/*.rs` and `src/**/*.toml`
+as two patterns rather than `src/**/*.{rs,toml}`; and when the audience
+is broad, a skill reaches the five clients a rule cannot. Full mapping:
+[rule keys][rule-keys] · [client matrix and gaps][clients].
 
 ## Examples
 
@@ -127,11 +137,14 @@ Prefer `&str` over `String` parameters...
 - [Catalog metadata for rules][pub-rule] — where summary/keywords go.
 - [Rules with a support directory][support-dir] — packing semantics.
 - [Rule-level vendor keys][rule-keys] — per-client transform detail.
+- [Client compatibility][clients] — which clients host rules, and why the
+  rest decline.
 
 [rules-ref]: https://grimoire.rs/artifacts.html#rules
 [pub-rule]: https://grimoire.rs/publishing.html#metadata-rule
 [support-dir]: https://grimoire.rs/publishing.html#rule-support-dir
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
+[clients]: https://grimoire.rs/clients.html
 [rule-vendor-ex]: https://grimoire.rs/vendor-metadata.html#rule-authoring-example
 [common-unique]: https://grimoire.rs/vendor-metadata.html#common-vs-unique
 [well-known]: https://grimoire.rs/artifacts.html#well-known-assets

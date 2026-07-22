@@ -106,9 +106,10 @@ plain pushes to main.
 
 - `task catalog:verify` runs in CI on every PR — the real parser is the
   schema gate.
-- When `docs/src/{artifacts,publishing,vendor-metadata,commands,package-index}.md`
-  or `src/command/**` or `src/mcp/**` change, review `catalog/skills/grim-usage`
-  and `catalog/skills/grim-authoring` for drift (each package's
+- When `docs/src/{artifacts,clients,publishing,vendor-metadata,commands,package-index}.md`
+  or `src/command/**` or `src/mcp/**` change, review `catalog/skills/grim-usage`,
+  `catalog/skills/grim-authoring`, and — for `clients.md` and
+  `vendor-metadata.md` — `catalog/skills/ai-config-authoring` for drift (each package's
   `references/updating.md` describes the re-research procedure).
 - Hard numbers (vendor limits, activation rates) drift fastest — re-verify
   against the sources in `references/updating.md` before trusting.

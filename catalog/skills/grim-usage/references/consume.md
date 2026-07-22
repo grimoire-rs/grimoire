@@ -9,8 +9,8 @@ Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
 [Removing](#removing) · [Bundles](#bundles)
 
-Flags shown here are grim 0.10.x; confirm with `grim <cmd> --help` before
-relying on one.
+Flags shown here track the release this package ships beside; confirm with
+`grim <cmd> --help` before relying on one.
 
 ## The Loop
 
@@ -176,7 +176,10 @@ dropped out of the lock (most often a bundle member the bundle stopped
 including) is deleted and reported as `removed` — unless you edited it
 locally, in which case it is kept and reported as `kept-modified` until
 you re-run with `--force`. Your local edits are never silently
-discarded.
+discarded. A pruned or reaped row can also report `retained` /
+`abandoned_entries` — the footprint grim dropped from its record but
+deliberately left on disk; same contract as on `uninstall`, see
+[Removing](#removing).
 
 The same reconciliation applies when you narrow the configured client
 set (`[options].clients`): a client that leaves the set has its outputs
@@ -210,7 +213,14 @@ vendor layout itself is not a stable contract). Each item also carries
 `clients_missing`/`clients_extra` — the *explicitly configured*
 `[options].clients` diffed against what is actually recorded installed,
 computed locally, no network. Left unset (autodetect), both stay `[]` on
-every item instead of diffing against live client detection.
+every item instead of diffing against live client detection. A third
+array, `clients_unresolved`, names every active client whose recorded
+output could not be resolved at all — the anchor root is gone, or the
+containment guard refused the path — so that client is silently absent
+from `outputs`. It is `[]` normally; a non-empty one is the signal to look
+at [troubleshooting.md](troubleshooting.md#containment-refusals). `state`
+stays `missing` and the exit code stays `0`: status reports, it never
+gates.
 
 `grim status --check` adds one live catalog round-trip: it fills in
 `deprecated`/`replaced_by` on every registry-sourced item and, via a
@@ -291,6 +301,22 @@ survives via the bundle (and `uninstall` still deletes the files — the
 next `grim install` rematerializes them). When the surviving bundle
 binds a *different* identifier, grim drops the entry, leaves the lock
 stale, and tells you to run `grim lock` — never a silently wrong pin.
+
+"Deleted" has one documented exception, reported rather than hidden. The
+JSON report of `uninstall` (and of a pruning `update`) carries two
+always-present arrays, `[]` on a healthy run:
+
+- `retained` — absolute paths grim dropped from its install record but
+  refused to delete, because the recorded path resolved outside its anchor
+  root. State and filesystem deliberately diverge; remove those paths by
+  hand.
+- `abandoned_entries` — the same idea for a managed MCP entry inside a
+  shared, user-owned config file: `{path, pointer}` per entry, `path` the
+  config file and `pointer` the JSON pointer of the member grim could not
+  splice out. It is now unrecorded, so no later `uninstall` will remove it.
+
+Both come from the containment guard — see
+[troubleshooting.md](troubleshooting.md#containment-refusals).
 
 ## Bundles
 

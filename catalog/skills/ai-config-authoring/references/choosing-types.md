@@ -43,10 +43,10 @@ Reality — support and failure modes:
 
 | Type | Vendor support | Failure modes |
 |---|---|---|
-| Always-on instruction file | All four. Claude Code: CLAUDE.md hierarchy + imports. OpenCode: AGENTS.md (CLAUDE.md fallback) + `instructions` globs. Copilot: copilot-instructions.md + AGENTS.md/CLAUDE.md. Codex: AGENTS.md only, directory-granular, no glob mechanism | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
-| Glob-scoped rule | Claude Code: `.claude/rules/` with `paths:` (lazy, on read). Copilot: `.instructions.md` with `applyTo:`. OpenCode: none — globs resolve at startup and load always-on | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning |
-| On-demand skill | All four natively, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify); Claude Code, OpenCode, and Copilot also scan `.claude/skills/`, Codex reads only the cross-vendor `.agents/skills/` | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
-| Subagent | Four incompatible formats: `.claude/agents/*.md`, `.opencode/agents/*.md`, `.github/agents/*.agent.md` (30k-char body cap, as of 2026), `.codex/agents/*.toml` (TOML, not Markdown) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism |
+| Always-on instruction file | Universal — every client has one, under a different name: CLAUDE.md (Claude Code, hierarchy + imports), AGENTS.md (OpenCode, Codex, Zed, Amp — Amp falls back to AGENT.md then CLAUDE.md), copilot-instructions.md plus AGENTS.md/CLAUDE.md (Copilot), GEMINI.md (Gemini CLI), always-on steering (Kiro), an unscoped always-apply rule (Cursor), `.junie/AGENTS.md` (Junie — a client-specific path, not the root file) — all as of 2026; re-verify | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
+| Glob-scoped rule | A minority capability — see [the grouping below](#where-vendors-disagree). Real per-file scoping on four clients (Claude Code, Copilot, Cursor, Kiro); a per-file surface without scoping on OpenCode; five clients have no ownable per-file rule file at all (as of 2026; re-verify) | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning; porting to a client without scoping either drops the scope or converts it to always-on cost |
+| On-demand skill | Universal — the only type every client hosts, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify). Discovery directories differ, and four clients share one pool — see [skill-design.md](skill-design.md) | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
+| Subagent | Six clients ship an installable agent file, in six incompatible envelopes; four have no installable format at all — the per-client table is in [agent-design.md](agent-design.md) (as of 2026; re-verify) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism; an agent file written for a client with no format is simply never read |
 | Hook | Claude Code: shell commands + exit-code protocol. OpenCode: JS/TS plugins (can throw to cancel a tool call). Copilot: declarative JSON in `.github/hooks/` | Not a security boundary: condition filters fail open, blocked tools get routed around, and some headless/pipe modes skip hooks entirely (as of 2026) |
 
 ## Decision Heuristics
@@ -76,23 +76,52 @@ Ask in order; the first decisive answer picks the type.
    content type at all, but wiring for one; grim distributes the server
    *registration* as its own artifact kind (`mcp` descriptors) so a
    skill that assumes a server can ship next to it.
-7. **Must it work across vendors?** → AGENTS.md for the baseline + skills
-   for workflows; vendor-native rules and hooks are lock-in surfaces.
+7. **Must it work across vendors?** → skills for workflows: the skill is
+   the only universally installable type. AGENTS.md is the widest *always-on*
+   baseline but not a universal one — Claude Code, Cursor, Kiro, Gemini CLI,
+   and Junie each read their own file instead, so the baseline needs a
+   per-client wrapper, import, or symlink. Vendor-native rules and hooks are
+   lock-in surfaces.
 8. **Would removing it cause mistakes?** The deletion test, applied to
    every always-on line. If not, cut.
 
 ## Where Vendors Disagree
 
-- **Glob scoping has three semantics.** Claude Code injects a scoped rule
-  when a matching file is *read* — not when one is created. Copilot
+The first question is not *how* a type behaves per client but *whether the
+client can host it at all* — write a type into a client with no surface for
+it and the config looks installed while doing nothing. Ten clients group
+into three tiers (as of 2026; re-verify):
+
+| Type | Every client | Some clients | No surface at all |
+|---|---|---|---|
+| Skill | [Claude Code][cc], [OpenCode][oc-home], [Copilot][cop-home], [Codex][cx-home], [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | — | — |
+| Always-on file | all ten, under different filenames | — | — |
+| Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode (per-file, no scoping) | Codex, Junie, Gemini CLI, Zed, Amp — always-on file only |
+| Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI | Kiro, Junie, Zed, Amp — no installable format |
+| Hook | — | Claude Code, OpenCode, Copilot | unsurveyed for the other seven |
+
+The two outliers worth memorizing: **rules are the least portable prose
+type** (half the clients cannot host one — route that content to the
+always-on file instead), and **skills are the only universally installable
+type** — which is why cross-client packaging defaults to skills.
+
+- **Glob scoping has no shared semantics.** Claude Code injects a scoped
+  rule when a matching file is *read* — not when one is created. Copilot
   matches `applyTo:` against files in context, plus semantic matching of
-  the rule description. OpenCode resolves `instructions` globs at startup
-  and loads everything always-on — porting scoped rules to OpenCode
-  converts them into permanent cost.
+  the rule description. Cursor takes a `globs` string, and splits it on
+  every comma — including one inside a `{a,b}` alternation, so
+  `src/**/*.{rs,toml}` becomes two patterns; write one extension per glob.
+  Kiro takes a `fileMatchPattern` list. OpenCode resolves `instructions`
+  globs at startup and loads everything always-on — porting scoped rules
+  there converts them into permanent cost.
 - **Skill plumbing differs.** Claude Code injects the body as a
   conversation message that persists; OpenCode returns it as a native
   `skill` tool result; Copilot uses dual activation (semantic + slash).
   Same standard, different delivery — never depend on the delivery.
+- **Four clients share one skills directory.** Codex, Gemini CLI, Zed, and
+  Amp all scan the cross-vendor `.agents/skills/`, so one copy there is
+  read by all four — and a name collision there collides for all four.
+  See [skill-design.md](skill-design.md).
 - **Hooks are three technologies.** Shell + exit codes (Claude Code),
   JS/TS plugins that can cancel tool calls (OpenCode), declarative JSON
   command/http/prompt hooks (Copilot). Hooks must be re-implemented per
@@ -113,7 +142,7 @@ Ask in order; the first decisive answer picks the type.
 | A skill encodes something that must never be skipped | Skill → hook for the enforcement core; the skill keeps the how/why | Skill activation is probabilistic; hooks are the only guarantee |
 | A manual command gets used repeatedly in predictable contexts | Manual-only skill → auto-invocable skill with a trigger-rich description | Removes the "remember to type it" failure |
 | Recurring research keeps flooding the main context | Inline work → subagent; preload needed skills explicitly — auto-activation does not transfer | The main context receives only the distilled summary |
-| The same conventions are duplicated across clients | Per-vendor files → AGENTS.md as source of truth + thin wrappers or symlinks | AGENTS.md and Agent Skills are the two multi-vendor standards |
+| The same conventions are duplicated across clients | Per-vendor files → AGENTS.md as source of truth + a wrapper or symlink for each client that reads its own file | AGENTS.md and Agent Skills are the two multi-vendor standards; only the skill installs everywhere |
 
 Default authoring sequence: start with a lean always-on file → extract
 recurring workflows into skills as patterns emerge → add hooks once a
@@ -134,6 +163,10 @@ parallelism is demonstrably needed.
   mechanism works on which surface.
 - [Codex: skills][cx-skills] / [subagents][cx-agents] — the AGENTS.md-only
   always-on surface, `.agents/skills/` discovery, TOML subagents.
+- [Cursor][cur] / [Kiro][kiro] / [Junie][junie] / [Gemini CLI][gem] /
+  [Zed][zed] / [Amp][amp] — the clients whose rule and agent surfaces are
+  partial or absent; check each product's own docs before assuming a type
+  installs there.
 - [Agent Skills specification][spec] — the open standard and its token
   tiers.
 - [Effective context engineering for AI agents][ctx] — why deferred
@@ -145,6 +178,16 @@ parallelism is demonstrably needed.
 - [Claude Skills are awesome][willison] — the token-economics argument
   that made skills the default knowledge vehicle.
 
+[cc]: https://code.claude.com
+[oc-home]: https://opencode.ai
+[cop-home]: https://github.com/features/copilot
+[cx-home]: https://developers.openai.com/codex
+[cur]: https://cursor.com
+[kiro]: https://kiro.dev
+[junie]: https://www.jetbrains.com/junie/
+[gem]: https://geminicli.com
+[zed]: https://zed.dev
+[amp]: https://ampcode.com
 [cc-mem]: https://code.claude.com/docs/en/memory
 [cc-skills]: https://code.claude.com/docs/en/skills
 [cc-agents]: https://code.claude.com/docs/en/sub-agents

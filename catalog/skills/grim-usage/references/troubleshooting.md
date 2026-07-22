@@ -5,6 +5,7 @@ the exit code, diagnose the cause, or get past an integrity gate.
 
 Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
 [Integrity Gates](#integrity-gates) ·
+[Containment Refusals](#containment-refusals) ·
 [Kind Inference](#the-kind-inference-gotcha) ·
 [Offline Failures](#offline-failures) · [Auth Failures](#auth-failures)
 
@@ -29,20 +30,37 @@ no stderr parsing needed:
 | 80 | Auth error | registry authentication failed |
 | 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) — includes `fetch`/`describe` against an uncached reference, which is 81, not 79 |
 
+One non-failure worth knowing before you debug it: a downstream reader
+that closes the pipe early — `grim status --format json | head`, `grim
+completions zsh | head` — makes grim exit **0** silently, the ordinary
+Unix filter contract. No error document is written on that path. It is
+scoped to grim's own stdout; a registry connection dropping mid-push is
+an unrelated failure and still exits non-zero.
+
 Under `--format json`, a failure emits a `{"error": {code, exit,
 message}}` document on stdout; some failures add a machine-readable
 `reason` field: `stale-lock` (exit 65 — a partial `grim update <name>`
 was refused; retry with a full `grim update`), `modified` (exit 65 — an
 install refused a locally modified artifact; retry with `--force`),
 `untracked-destination` (exit 65 — an install refused to clobber an
-unrecorded pre-existing destination; retry with `--force`), `no-config`
+unrecorded pre-existing destination; retry with `--force`),
+`anchor-escape` (exit 65 — a recorded install path resolved outside its
+anchor root; **never** fixable with `--force`, see [Containment
+Refusals](#containment-refusals)), `no-config`
 (exit 79 — a project-scope command found no `grimoire.toml` walking up
 from the working directory), and `locked` (exit 75 — another grim
 process holds the config-file lock). New reasons are additive — treat an
-unknown one as absent. A reason also carries an optional `retryable: true`
-sibling field when a plain re-run is expected to succeed once the
-transient condition clears — today only `locked` sets it. Full list: the
-[JSON interface][json-interface] docs page.
+unknown one as absent.
+
+A reason also carries two optional sibling booleans, each present only as
+`true` and otherwise absent entirely (never a bare `false`):
+`retryable` — a plain re-run is expected to succeed once the transient
+condition clears (today only `locked`); and `forceable` — the same command
+re-run with `--force` resolves the refusal (today `modified` and
+`untracked-destination`). **Key on `forceable`, never on the exit code**:
+exit 65 covers both those forceable refusals and the non-forceable
+`anchor-escape`, so an exit-code check would offer an override that cannot
+work. Full list: the [JSON interface][json-interface] docs page.
 
 ## Exit 65: Data Errors
 
@@ -106,6 +124,28 @@ grim never silently overwrites or deletes work you did locally:
 `grim status` shows which artifacts are `locally modified`. If a managed
 file needs permanent local changes, copy it out of the managed location
 instead of fighting the gate — managed files are owned by the lock.
+
+## Containment Refusals
+
+Every install path grim records is stored relative to an **anchor root**
+(the workspace, or a client's own config root) and re-resolved against
+that root on every later read or write. A path that resolves *outside* its
+anchor — the final component turned into a symlink pointing elsewhere — is
+refused rather than followed, so a tampered or stale record can never
+direct a write or a delete out of the tree it was recorded against.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Exit 65, JSON `reason: "anchor-escape"`, and `--force` changes nothing | A recorded path resolves outside its anchor root through a symlinked final component | `grim uninstall <kind> <name>`, then install again. Files may remain on disk — remove them by hand. `--force` never bypasses containment. |
+| `grim status` exits 0, an artifact reads `missing`, and a client is absent from `outputs` | That client is listed in the item's `clients_unresolved` — its anchor root is gone, or the path was refused | Reinstall for that client, or `grim uninstall` then reinstall. Status reports; it does not gate. |
+| `grim uninstall` succeeded but files are still there | The report's `retained` (paths) / `abandoned_entries` (`{path, pointer}` MCP members) list what the guard refused to delete while the record was dropped anyway | Delete the listed paths, or splice out the listed config members, by hand — grim will not touch them again. |
+| An install destination is a **dangling** symlink | Materializing through it would write outside the anchor root | Refused as an untracked destination; `--force` unlinks the stale link instead of following it. |
+
+An install reached through a symlinked **ancestor** directory — the layout
+GNU Stow, yadm, and synced config dirs produce — is *not*
+an error: `status`, `update`, `install`, and `uninstall` tolerate the
+relocated ancestor and recover with no user action and no state migration.
+Only the final-component escape above is refused.
 
 ## The Kind-Inference Gotcha
 

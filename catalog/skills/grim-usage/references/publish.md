@@ -12,8 +12,8 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Description Companion](#description-companion) ·
 [Authentication](#authentication)
 
-Flags shown here are grim 0.10.x; confirm with `grim <cmd> --help` before
-relying on one.
+Flags shown here track the release this package ships beside; confirm with
+`grim <cmd> --help` before relying on one.
 
 ## Build, Then Release
 

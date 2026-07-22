@@ -45,7 +45,7 @@ failure modes, migration paths — in
 | An occasional procedure or piece of domain knowledge | Skill |
 | A side-effectful workflow to run only on explicit request | Manual-only skill |
 | Context-heavy research, parallel work, separate privileges | Subagent |
-| Something that must port across clients | Skill — the one open standard |
+| Something that must port across clients | Skill — the only type every client hosts |
 | Logic a machine can run rather than prose to read | Hook, or a script inside a skill |
 
 ## Root-as-Index Pattern
@@ -93,14 +93,24 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
   descriptions, disclosure patterns, eval-first workflow, anti-patterns.
 - [Effective context engineering for AI agents][ctx] — the theory behind
   every budget above: attention as a finite resource, just-in-time loading.
-- [GitHub Copilot: about agent skills][cop] — Copilot's skill discovery
-  paths and supported surfaces.
-- [OpenCode skills documentation][oc] — OpenCode's skill discovery paths
-  and activation model.
+- Per-client documentation — skills install into ten clients as of 2026
+  ([Claude Code][cc], [OpenCode][oc], [Copilot][cop], [Codex][cx],
+  [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem],
+  [Zed][zed], [Amp][amp]), but rules and agents each reach only about
+  half of them; every `references/` file carries the per-client links for
+  the type it covers.
 
 [grimoire]: https://github.com/grimoire-rs/grimoire
 [spec]: https://agentskills.io/specification
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [ctx]: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
-[cop]: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills
+[cc]: https://code.claude.com/docs/en/skills
 [oc]: https://opencode.ai/docs/skills/
+[cop]: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills
+[cx]: https://developers.openai.com/codex/skills
+[cur]: https://cursor.com
+[kiro]: https://kiro.dev
+[junie]: https://www.jetbrains.com/junie/
+[gem]: https://geminicli.com
+[zed]: https://zed.dev
+[amp]: https://ampcode.com

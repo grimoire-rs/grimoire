@@ -58,31 +58,42 @@ metadata:
 This matters most for `model`: Claude reads aliases like `sonnet`, while
 OpenCode expects `provider/model-id`. Set `opencode.model` whenever the
 common value is not OpenCode-shaped. Everything one vendor understands
-(`claude.permission-mode`, `opencode.temperature`, `copilot.tools`, …)
-is a string key in `metadata` — registries are linked from
-[vendor-metadata.md](vendor-metadata.md).
+(`claude.permission-mode`, `opencode.temperature`, `cursor.readonly`,
+`gemini.temperature`, …) is a string key in `metadata` — registries are
+linked from [vendor-metadata.md](vendor-metadata.md).
 
 ## Per-Client Emit
 
-The canonical format *is* Claude Code's native subagent format: a plain
-agent (no vendor keys) installs for Claude byte-identical. OpenCode
-drops `name` (filename is its identity) and drops `tools` with a warning
-(deprecated upstream in favor of `permission`); Copilot emits `name`,
-`description`, `model`, and `tools` as a YAML list; both add a
-provenance comment.
+**Six of the ten clients host an agent at all**, each with its own
+populated `<vendor>.*` agent registry — decide up front whether your
+audience is in that set:
 
-Codex emits a **TOML** file at `.codex/agents/<name>.toml`. The body
-becomes `developer_instructions`; `name` and `description` map directly;
-`model` is optional. The `tools` field is **dropped with a warning** —
-Codex does not project tool allowlists from grim's universal schema.
-Optional Codex-specific knobs live in `metadata` as `codex.*` keys:
-`codex.model` (Codex-native model name), `codex.reasoning-effort`
-(`ultra` | `max` | `xhigh` | `high` | `medium` | `low` | `minimal` |
-`none`), and `codex.sandbox-mode` (`read-only` | `workspace-write` |
-`danger-full-access`). Universal skill keys have no `codex.*` equivalents
-— codex skills use the standard grim skill shape unchanged.
+| Client | Registry | Emit |
+|---|---|---|
+| Claude Code | `claude.*` (richest) | The canonical format itself — a plain agent installs byte-identical, no provenance comment |
+| OpenCode | `opencode.*` | Drops `name` (the filename is its identity) and drops `tools` with a warning (deprecated upstream in favor of `permission`) |
+| Copilot | `copilot.*` | Emits `name`, `description`, `model`, and `tools` as a YAML list |
+| Codex | `codex.*` | **TOML** (see below) |
+| Cursor | `cursor.*` | Markdown frontmatter; the common `tools` has no equivalent and is dropped with a warning |
+| Gemini CLI | `gemini.*` | Markdown frontmatter; Gemini loads agents only when its `experimental.enableAgents` setting is on (the default) |
 
-Full matrix: [emit matrix][emit-matrix].
+Every emit but Claude's carries a provenance comment. **Kiro, Junie,
+Zed, and Amp decline agents** — no installable agent file format exists
+for them, so grim warns, skips, and writes nothing. Their namespaces are
+still reserved but carry **no populated registry for any kind**: a
+`kiro.*`/`junie.*`/`zed.*`/`amp.*` key hits an empty registry and is
+warned + dropped, the same typo-guard outcome as a misspelt key in a
+populated one.
+
+Codex emits its TOML at `.codex/agents/<name>.toml`. The body becomes
+`developer_instructions`; `name` and `description` map directly; `model`
+is optional; `tools` is dropped with a warning. Its three keys —
+`codex.model`, `codex.reasoning-effort` (`ultra` | `max` | `xhigh` |
+`high` | `medium` | `low` | `minimal` | `none`), `codex.sandbox-mode`
+(`read-only` | `workspace-write` | `danger-full-access`) — live in
+`metadata` like any vendor key.
+
+Full matrix: [emit matrix][emit-matrix] · [client compatibility][clients].
 
 ## Limitations
 
@@ -138,5 +149,6 @@ You are a code reviewer. Examine the diff...
 [well-known]: https://grimoire.rs/artifacts.html#well-known-assets
 [precedence]: https://grimoire.rs/agents.html#override-precedence
 [emit-matrix]: https://grimoire.rs/agents.html#emit-matrix
+[clients]: https://grimoire.rs/clients.html
 [registries]: https://grimoire.rs/vendor-metadata.html#claude-agent-registry
 [pub-agent]: https://grimoire.rs/publishing.html#metadata-agent

@@ -21,6 +21,10 @@ reaches a registry:
    without it clears the flag), and point consumers at the successor with
    `replaced-by` — authored independently of `deprecated`, must parse as
    a reference (65 otherwise), surfaced by `grim search`/`grim describe`.
+   `deprecated` travels into the package-index pointer on the next
+   announce, so `grim search`/the TUI hide the package — unless it is
+   installed or `show_deprecated` is on — without fetching its manifest;
+   `replaced-by` travels alongside it and only names the successor.
 2. **`grim build <path>` exits 0** — and read the *warnings* too:
    warn-and-drop vendor keys and migration nudges are silent data loss
    if shipped.
@@ -86,6 +90,18 @@ exist first. Semantics to know ([full reference][batch-publish]):
   mirror). Report entries carry the push-side reference in the
   always-present `pushed_to` field (`null` when inactive). Malformed
   value: 65 before any push.
+- **`--announce` needs no fork of your own.** After a fully successful,
+  non-dry-run publish it writes the index pointers, pushes a topic
+  branch, and opens the PR/MR through the forge API. When the credential
+  lacks push access to the index — the normal case for a public one —
+  grim forks it into the token's account (reusing an existing fork) and
+  opens the request cross-repository against upstream. `[announce] fork
+  = false` opts out and pushes straight at the index, failing on missing
+  access the way it always did. The JSON report's `announce.fork` is
+  `{repo, created}` when a fork carried the branch, `null` otherwise. An
+  announce that fails *after* a successful publish exits 69 — the
+  packages are pushed, only the announce needs re-running; announce
+  misconfiguration exits 64 ([announcing][announcing]).
 - Confirm flags with `grim publish --help`; `--dry-run` prints the full
   plan (including planned description companions) with zero registry
   writes.
@@ -156,3 +172,4 @@ members) surface as config/parse failures rather than 65 — see
 [publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation
 [batch-publish]: https://grimoire.rs/publishing.html#batch-publish
 [description-companion]: https://grimoire.rs/publishing.html#description-companion
+[announcing]: https://grimoire.rs/package-index.html#announcing

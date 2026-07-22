@@ -87,9 +87,10 @@ a description companion instead — see
 
 ## Client-Agnostic Content
 
-One published skill serves Claude Code, OpenCode, and Copilot. The
-OpenCode and Copilot skill registries are intentionally empty — both get
-the identical universal render; only `claude.*` skill keys exist today
+One published skill serves all ten clients — skill is the one kind no
+client declines. Only Claude Code carries a *skill* registry; every other
+client's is intentionally empty, so they all receive the identical
+universal render and read the lifted `claude.*` fields as unknown keys
 ([empty registries][empty-registries]). Write the body client-neutrally:
 never assume one client's tool names or directory layout; put
 Claude-only behavior in `claude.*` keys, not prose.
@@ -146,7 +147,7 @@ All hard errors exit 65 (DataError) at `grim build` / `grim release`.
 | `keywords` written as a YAML list | Not accepted — must be one comma string |
 | Known `claude.*` key with a bad literal (`claude.effort: extreme`) | Hard error — publish stops ([projection][projection]) |
 | Typo'd own-namespace key (`claude.efort`) | **Warning + dropped** — silent loss if ignored |
-| Any `opencode.*` / `copilot.*` key on a skill | Always unknown → warning + dropped |
+| Any non-`claude.*` vendor key on a skill (`opencode.*`, `codex.*`, `cursor.*`, `kiro.*`, …) | Always unknown → warning + dropped |
 | Legacy Claude field at top level (`user-invocable: true`) | Warning only — installs verbatim; migrate to `claude.user-invocable` ([migration][migration]) |
 | `summary`/`keywords` at top level (rule-style) | No error — preserved as unknown keys, but the catalog never sees them |
 

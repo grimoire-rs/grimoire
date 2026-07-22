@@ -5,6 +5,7 @@ an existing one, or reviewing a skill's anatomy, size, or bundled files.
 
 Contents: [Anatomy](#anatomy) · [Size](#size) ·
 [Progressive Disclosure](#progressive-disclosure) ·
+[Discovery and Portability](#discovery-and-portability) ·
 [Eval-Driven Authoring](#eval-driven-authoring) ·
 [Anti-Patterns](#anti-patterns)
 
@@ -81,6 +82,30 @@ manual — table of contents, then chapters, then a detailed appendix.
   re-verify).
 - Relative paths from the skill root, forward slashes only.
 
+## Discovery and Portability
+
+The skill is the one artifact type every surveyed client hosts — rules and
+agents are supported by roughly half each. Write one canonical `SKILL.md`
+against the open standard and it is readable everywhere; only the directory
+it must sit in changes (as of 2026; re-verify):
+
+| Directory | Scanned by |
+|---|---|
+| `.claude/skills/` | [Claude Code][cc], also scanned by [OpenCode][oc] and [Copilot][cop] |
+| `.agents/skills/` | the cross-vendor pool: [Codex][cx], [Gemini CLI][gem], [Zed][zed], [Amp][amp] — also scanned by [OpenCode][oc] and [Copilot][cop] |
+| `<client>/skills/` | each client's own dir: `.opencode/`, `.github/`, `.cursor/`, `.kiro/`, `.junie/` |
+
+Two consequences worth designing for:
+
+- **The shared pool is one copy with four readers.** A skill in
+  `.agents/skills/` is visible to Codex, Gemini CLI, Zed, and Amp
+  simultaneously — so a name collision there collides for all four, and
+  editing or deleting it changes what all four see. Unique, specific names
+  matter more here than anywhere else.
+- **Vendor frontmatter degrades silently.** All major clients ignore
+  unknown frontmatter, so a client-specific field is dropped rather than
+  rejected — never make correctness depend on one (see [Anatomy](#anatomy)).
+
 ## Eval-Driven Authoring
 
 Build evaluations *before* writing extensive documentation. The loop:
@@ -135,6 +160,13 @@ body.
   trigger diagnostics, testing matrix, distribution.
 
 [spec]: https://agentskills.io/specification
+[cc]: https://code.claude.com/docs/en/skills
+[oc]: https://opencode.ai/docs/skills
+[cop]: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills
+[cx]: https://developers.openai.com/codex/skills
+[gem]: https://geminicli.com
+[zed]: https://zed.dev
+[amp]: https://ampcode.com
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [overview]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
 [eng]: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills

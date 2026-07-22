@@ -1,8 +1,10 @@
 # Vendor Metadata
 
-You loaded this file because you are adding `claude.*`, `opencode.*`,
-`copilot.*`, `codex.*`, `cursor.*`, or `gemini.*` keys to an artifact, or a
-publish failed on a vendor literal.
+You loaded this file because you are adding a key in one of the ten
+reserved vendor namespaces — `claude.*`, `opencode.*`, `copilot.*`,
+`codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`,
+`amp.*` — to an artifact, or a publish failed or warned on a vendor
+key.
 
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
 [Literal Discipline](#literal-discipline) ·

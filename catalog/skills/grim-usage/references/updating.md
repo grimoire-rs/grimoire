@@ -7,9 +7,10 @@ need to refresh it against a newer grim release.
 
 1. Run `grim --version` and `grim <cmd> --help` for every command this
    package narrates (init, config, add, lock, install, update, status,
-   context, fetch, describe, remove, uninstall, search, schema, tui, mcp,
-   build, release, publish, login, logout). Diff the help output against
-   what the reference files claim.
+   context, fetch, describe, remove, uninstall, search, schema,
+   completions, tui, mcp, build, release, publish, login, logout). Diff
+   the help output against what the reference files claim. Run `grim
+   --help` too — the global flag set is narrated in `SKILL.md`.
 2. Re-read the docs pages each reference file distills (links below) and
    diff against the file's claims — especially lifecycle semantics
    (pruning, effective declarations, integrity gates, deprecation
@@ -17,8 +18,15 @@ need to refresh it against a newer grim release.
 3. Re-check the exit-code table in
    [troubleshooting.md](troubleshooting.md) against the docs' command
    reference — codes are a stable contract but new codes can appear.
-4. Bump the `compatibility` frontmatter and the "Verified against"
-   footer in `SKILL.md` to the verified version line.
+4. Re-read the [JSON interface][json-interface] page and diff the report
+   shapes this package names — the enveloped-report list and the item
+   fields in [consume.md](consume.md), and the error-document `reason` /
+   `retryable` / `forceable` set in
+   [troubleshooting.md](troubleshooting.md). Fields and reasons are
+   additive, so a new one is a gap here, never a contradiction.
+5. Bump the `compatibility` frontmatter in `SKILL.md` to the verified
+   version line. The prose and the footer stay version-neutral — they
+   track the release the package ships beside, so nothing else to bump.
 
 ## What Drifts, and How Fast
 
@@ -45,9 +53,12 @@ a reference file has accreted one, delete it and link instead.
   (env vars, precedence)
 - [Publishing][publishing] — publish.md
 - [Authentication][auth] — publish.md, troubleshooting.md
+- [JSON interface][json-interface] — consume.md (report shapes),
+  troubleshooting.md (error document)
 
 [commands]: https://grimoire.rs/commands.html
 [concepts]: https://grimoire.rs/concepts.html
 [config]: https://grimoire.rs/configuration.html
 [publishing]: https://grimoire.rs/publishing.html
 [auth]: https://grimoire.rs/authentication.html
+[json-interface]: https://grimoire.rs/json-interface.html

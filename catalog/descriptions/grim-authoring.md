@@ -5,10 +5,10 @@ directories, rule files, agent definitions, MCP server descriptors, and
 bundle TOMLs.
 
 The skill carries the per-kind packaging specs — required frontmatter,
-catalog metadata, vendor-namespaced keys (`claude.*`, `opencode.*`,
-`copilot.*`, `codex.*`), name rules — plus the release checklist that
-takes an artifact from `grim build` validation to a published, announced
-package.
+catalog metadata, vendor-namespaced keys (`claude.*`, `cursor.*`,
+`gemini.*`, … — the vendor namespaces grim reserves), name rules —
+plus the release checklist that takes an artifact from `grim build`
+validation to a published, announced package.
 
 ## Install
 
@@ -23,6 +23,8 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0
   `mcp-spec.md`, `bundle-spec.md` — one packaging spec per kind
 - `references/vendor-metadata.md` — vendor-namespaced metadata keys
 - `references/release-checklist.md` — build → release → publish → announce
+- `references/bootstrap-existing-repo.md` — turning an existing repo into
+  a publishable catalog
 
 ## Links
 

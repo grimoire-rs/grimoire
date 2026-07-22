@@ -1,8 +1,8 @@
 ---
 name: grim-authoring
-description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding claude, opencode, copilot, codex, cursor, or gemini vendor keys; or when grim build fails validation with exit code 65.
+description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, or amp vendor keys; or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.9
+compatibility: grim>=0.11
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,bundle,packaging
@@ -30,6 +30,30 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 | Agent | Single `.md`, frontmatter required | **never — `--kind agent` mandatory** | One agent file per client, per-client render |
 | MCP server | `.toml` descriptor with a `[server]` table | **never — `--kind mcp` mandatory** | Entry in each client's MCP config file, per-client render |
 | Bundle | `.toml` member list | `.toml` → bundle | Never materializes — expands to its members |
+
+## Which Clients Host Which Kind
+
+Grim installs into ten clients, and not every client can host every
+kind — decide this **before** you author, because it changes what you
+write:
+
+- **Skills** install everywhere. The universal kind.
+- **Rules** are native for Claude Code, Copilot, Cursor, and Kiro;
+  degraded for OpenCode (the file installs, its path scoping does not);
+  and **declined** by Codex, Junie, Gemini, Zed, and Amp — grim warns,
+  skips, and writes no file. Half the fleet cannot scope instructions:
+  when the audience is broad, a skill reaches clients a rule never will.
+- **Agents** install for Claude Code, OpenCode, Copilot, Codex, Cursor,
+  and Gemini. Kiro, Junie, Zed, and Amp decline them.
+- **MCP servers** register for all ten, but only Claude accepts the `ws`
+  transport and the `[server.oauth]` block; every other client skips
+  such a descriptor with a warning.
+
+A declined kind is an honest refusal, not a silent failure — but it is
+still zero files. The enforced matrix and the upstream reason behind
+every degrade and decline: [Client Compatibility][clients]. A
+`compatibility:` frontmatter field is a human-facing hint only and never
+overrides it.
 
 ## Universal Invariants
 
@@ -124,7 +148,7 @@ repeat → release. Confirm flags with `grim install --help`.
 | [references/agent-spec.md](references/agent-spec.md) | Authoring an agent definition or its vendor overrides |
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
-| [references/vendor-metadata.md](references/vendor-metadata.md) | Adding `claude.*` / `opencode.*` / `copilot.*` / `codex.*` / `cursor.*` / `gemini.*` keys |
+| [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in any of the ten reserved `<vendor>.*` namespaces (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`) |
 | [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, batch manifests, description companions, or triaging an exit-65 failure |
 | [references/bootstrap-existing-repo.md](references/bootstrap-existing-repo.md) | Turning an existing skill repo (agentskills.io `skills/<name>/SKILL.md` or `.claude/skills/`) into a grim publisher — inventorying artifacts, fixing names, backfilling catalog metadata, wiring publish CI |
 | [references/updating.md](references/updating.md) | Maintaining this skill package itself |
@@ -135,7 +159,8 @@ This skill teaches the craft and the pitfalls; the authoritative schema
 reference is the Grimoire docs site. When a field table here feels
 incomplete, the docs page is the source of truth:
 [Artifact Reference][artifacts] · [Vendor-Specific Metadata][vendor] ·
-[Publishing][publishing] · [Agent Artifacts][agents]. For the TOML
+[Publishing][publishing] · [Agent Artifacts][agents] ·
+[Client Compatibility][clients]. For the TOML
 surfaces, `grim schema --kind <config|publish|lock|mcp>` prints the JSON
 Schema generated from grim's own parsers — bind it in your editor to
 catch manifest typos before any command runs.
@@ -149,9 +174,10 @@ trust the tool. Treat this skill as the map, not the territory.
 
 ---
 
-Verified against grim 0.10.0.
+Verified against the grim release this package ships beside.
 
 [artifacts]: https://grimoire.rs/artifacts.html
 [vendor]: https://grimoire.rs/vendor-metadata.html
 [publishing]: https://grimoire.rs/publishing.html
 [agents]: https://grimoire.rs/agents.html
+[clients]: https://grimoire.rs/clients.html

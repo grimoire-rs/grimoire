@@ -85,21 +85,44 @@ with a tree: always-on root → catalog/index file → scoped leaf rules.
 
 ## Vendor Differences
 
-| Concern | Claude Code | OpenCode | Copilot |
-|---|---|---|---|
-| Always-on file | CLAUDE.md (directory hierarchy + imports) | AGENTS.md; CLAUDE.md as fallback; `instructions` array | copilot-instructions.md + AGENTS.md/CLAUDE.md |
-| Glob scoping | `.claude/rules/*.md` with `paths:` — lazy, fires on read | None — `instructions` globs resolve at startup, always-on | `.github/instructions/*.instructions.md` with `applyTo:` |
-| Hard limits | Listing/compaction budgets (as of 2026) | No size guard — an oversized AGENTS.md can force context compaction | Code review reads only the **first 4,000 characters** of copilot-instructions.md (as of 2026; re-verify); >~1,000 lines degrades all surfaces |
+**Every client has an always-on file; per-file scoping is the minority
+capability.** Of the ten clients surveyed (as of 2026; re-verify), four
+support real glob scoping, one hosts per-file rules without scoping, and
+five have no ownable per-file rule surface at all — for those five the
+always-on file is the *only* place rule content can live.
 
-- Claude Code does not read AGENTS.md natively (as of 2026); bridge with
-  an import or a symlink. OpenCode and Copilot read it natively —
-  AGENTS.md is the closest thing to a portable always-on baseline.
+| Per-file rule surface | Clients | What you get |
+|---|---|---|
+| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list | Content loads only when a matching file is in play |
+| Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array | The body loads, the scope does not: permanent cost |
+| None | [Codex][cx-skills], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | Nothing to install — route the content to the always-on file |
+
+Per-client caveats worth knowing before you write a glob:
+
+- **Cursor** splits its `globs` string on every comma, including one inside
+  a `{a,b}` alternation — `src/**/*.{rs,toml}` is read as two patterns.
+  Write one extension per glob (as of 2026; re-verify).
+- **Kiro** honors `fileMatch` steering at project scope; the same file at
+  user scope is written correctly but currently ignored ([kiro
+  #9176][kiro-9176], as of 2026; re-verify).
+
+Always-on hard limits: Copilot code review reads only the **first 4,000
+characters** of copilot-instructions.md (as of 2026; re-verify), and
+>~1,000 lines degrades all its surfaces; OpenCode has no size guard at all,
+so an oversized AGENTS.md can force context compaction.
+
+- AGENTS.md is the closest thing to a portable always-on baseline —
+  OpenCode, Copilot, Codex, Zed, and Amp read the root file natively (Amp
+  falls back to AGENT.md then CLAUDE.md). Claude Code does not read it
+  natively (as of 2026); bridge with an import or a symlink. Gemini CLI uses
+  its own GEMINI.md hierarchy, Kiro an always-on steering file, Cursor an
+  unscoped always-apply rule, and Junie its own `.junie/AGENTS.md` — a
+  client-specific path, not the portable root file.
 - Porting scoped rules to OpenCode converts them into always-on cost;
   consider converting procedural rules into skills there instead.
-- Codex has no rule mechanism at all, scoped or otherwise — a rule
-  installed with `--client codex` is declined with a warning and writes
-  no file. Codex's only always-on surface is its directory-granular
-  AGENTS.md; route content there instead.
+- For the five clients with no rule surface, do not ship a rule file and
+  hope — the content belongs in the always-on file, or in a skill if it is
+  occasional.
 - Write for the worst consumer: most-critical content first, short
   imperative bullets, and never rely on the client fetching external URLs
   as normative content.
@@ -125,8 +148,12 @@ session and merely lives in another file.
   `instructions` array.
 - [Copilot: custom instructions][cop-ci] — file types and precedence
   across surfaces.
-- [Codex: skills][cx-skills] — the client with no rule mechanism at all;
-  AGENTS.md is its only always-on surface.
+- [Codex: skills][cx-skills] — one of the clients with no rule mechanism at
+  all; AGENTS.md is its only always-on surface.
+- [Cursor][cur] / [Kiro][kiro] — the two newer clients with real glob
+  scoping; check both for the comma-split and user-scope caveats above.
+- [Junie][junie] / [Gemini CLI][gem] / [Zed][zed] / [Amp][amp] — always-on
+  instruction files only; re-check before assuming a rule installs.
 - [VS Code: custom instructions][vsc-ci] — `applyTo:` mechanics and the
   documented mismatch failure mode.
 - [Copilot code review instructions deep-dive][gh-blog] — the 4,000-char
@@ -142,6 +169,13 @@ session and merely lives in another file.
 [oc-rules]: https://opencode.ai/docs/rules/
 [cop-ci]: https://docs.github.com/en/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot
 [cx-skills]: https://developers.openai.com/codex/skills
+[cur]: https://cursor.com
+[kiro]: https://kiro.dev
+[kiro-9176]: https://github.com/kirodotdev/Kiro/issues/9176
+[junie]: https://www.jetbrains.com/junie/
+[gem]: https://geminicli.com
+[zed]: https://zed.dev
+[amp]: https://ampcode.com
 [vsc-ci]: https://code.visualstudio.com/docs/agent-customization/custom-instructions
 [gh-blog]: https://github.blog/ai-and-ml/github-copilot/unlocking-the-full-power-of-copilot-code-review-master-your-instructions-files/
 [humanlayer]: https://humanlayer.dev/blog/writing-a-good-claude-md

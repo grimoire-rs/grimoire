@@ -14,12 +14,12 @@ Contents: [File Shape](#file-shape) · [Top-Level Keys](#top-level-keys) ·
 An MCP server descriptor is one `.toml` file named by its file stem under
 the standard name rules, with catalog metadata at the top level and a
 single `[server]` table. It never materializes a file at install time —
-grim registers a vendor-native entry in each client's own MCP config
-(Claude's `.mcp.json` / `~/.claude.json`, OpenCode's `opencode.json`,
-the VS Code / Copilot surfaces, and Codex's `config.toml` under
-`[mcp_servers.<name>]`) and removes exactly that entry on uninstall.
-Codex's config is TOML, not JSON — grim splices it span-preserving the
-same way, so surrounding user keys and comments survive.
+grim registers a vendor-native entry in the MCP config file each client
+already reads, and removes exactly that entry on uninstall. All ten
+clients have such a file, so an MCP descriptor is the only kind besides
+skills that no client declines outright. Codex's config is TOML, not
+JSON — grim splices it span-preserving the same way, so surrounding user
+keys and comments survive.
 
 **`--kind mcp` is mandatory.** A `.toml` is bundle-shaped by default;
 grim errors with a `--kind mcp` hint when it sees a `[server]` table on
@@ -82,14 +82,20 @@ env references: a secret has no safe home in a published artifact.
 
 Values may reference host environment variables with the canonical
 `${VAR}` form — never a literal secret. Grim translates the reference
-per client at install time (`{env:VAR}` for OpenCode, `${env:VAR}` for
-the VS Code config; Claude reads `${VAR}` natively).
+per client at install time: `{env:VAR}` for OpenCode, `${env:VAR}` for
+the VS Code config and Cursor; Claude, Kiro, Gemini, and Amp read
+`${VAR}` natively. Exact per-client syntax:
+[env references][env-refs].
 
 - `${VAR:-default}` is **rejected** — only Claude supports
   defaults natively, so a default would behave differently per client.
-- Copilot CLI's global `mcp-config.json` supports no substitution at
-  all: a descriptor that uses `${VAR}` skips that client with a warning
-  rather than ever writing a secret (or a broken literal) to disk.
+- **Three surfaces have no substitution mechanism at all** — Copilot
+  CLI's global `mcp-config.json`, Junie (interpolation undocumented
+  upstream), and Zed. A descriptor carrying any `${VAR}` skips those
+  clients with a warning rather than ever writing a secret (or a broken
+  literal) to disk; every other client still installs normally. Budget
+  for it: an env-referencing server reaches a smaller fleet than a
+  self-contained one.
 - Codex's `config.toml` receives a stdio `env` value **verbatim** — the
   literal `${VAR}` string is written as the launched subprocess's OS
   environment assignment (the same passthrough Claude/OpenCode give it),
@@ -103,18 +109,27 @@ the VS Code config; Claude reads `${VAR}` natively).
 
 ## What Each Client Receives
 
-Grim renders the vendor's own schema — confirm the authoritative matrix
-on the docs site ([MCP Server Artifacts][mcp-docs]). Highlights: OpenCode
-gets `command` as ONE array (`["grim", "mcp"]`) under `type: "local"`
-with env under `environment`; the VS Code config uses `type: "stdio"`;
-Copilot CLI's global entry gains `tools: ["*"]`; Codex gets a
-`[mcp_servers.<name>]` TOML table with `command`/`args`/`env` (stdio) or
-`url` + the three header surfaces (http/sse). The `ws` transport and the
-`[server.oauth]` block project for **Claude only** — every other client
-skips such a descriptor with a warning. Only the managed entry
-is ever touched — user keys, formatting, and comments in the config file
-survive, and grim's drift check is semantic (reordering the file is not
-a modification; editing the entry's values is).
+Grim renders each of the ten clients' own schema — container key, entry
+shape, and file differ per client, and the authoritative matrix lives on
+the docs site ([emit matrix][emit-matrix]). What matters while
+*authoring*, rather than at install time:
+
+- **`stdio`, `http`, and `sse` register for every client.** The `ws`
+  transport and the `[server.oauth]` block project for **Claude only** —
+  every other client skips such a descriptor with a warning. A ws-only
+  or oauth-only server therefore reaches exactly one client; prefer
+  `http`/`sse` when the fleet is broad.
+- **Shape differences are grim's problem, not yours.** OpenCode receives
+  `command` as ONE array (`["grim", "mcp"]`), Codex a
+  `[mcp_servers.<name>]` TOML table, Zed a flat entry under
+  `context_servers`, Amp one under the literal dotted key
+  `amp.mcpServers` — all from the same descriptor, no per-client
+  authoring.
+
+Only the managed entry is ever touched — user keys, formatting, and
+comments in the config file survive, and grim's drift check is semantic
+(reordering the file is not a modification; editing the entry's values
+is).
 
 ## Example
 
@@ -147,4 +162,5 @@ in-tree README. For a readme/logo/changelog on the *repository*, publish
 a description companion — see
 [release-checklist.md](release-checklist.md#description-companion).
 
-[mcp-docs]: https://grimoire.rs/mcp-servers.html
+[emit-matrix]: https://grimoire.rs/mcp-servers.html#emit-matrix
+[env-refs]: https://grimoire.rs/mcp-servers.html#env-references

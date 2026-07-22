@@ -32,6 +32,12 @@ durable; update the numbers, keep the spine.
 - `opencode rules instructions glob always loaded`
 - `copilot custom instructions support matrix applyTo instructions.md`
 - `codex skills subagents AGENTS.md site:developers.openai.com`
+- `cursor rules mdc globs alwaysApply subagents site:cursor.com`
+- `kiro steering inclusion fileMatchPattern skills site:kiro.dev`
+- `junie skills agents guidelines site:jetbrains.com`
+- `gemini cli subagents enableAgents GEMINI.md site:geminicli.com`
+- `zed rules precedence agent client protocol site:zed.dev`
+- `amp AGENTS.md skills subagents site:ampcode.com`
 - `AGENTS.md standard adoption nearest file precedence`
 - `skills not activating subagent headless`
 - `anthropic effective context engineering attention budget`
@@ -46,6 +52,13 @@ durable; update the numbers, keep the spine.
   [agent skills][cop-skills] — surface support changes often.
 - [Codex: skills][cx-skills] / [subagents][cx-agents] — AGENTS.md-only
   always-on surface, no rule mechanism; re-verify both claims here.
+- [Cursor: subagents][cur-agents] / [Kiro][kiro] — the newer clients with
+  both rule scoping and (Cursor only) an agent file; re-verify the
+  comma-in-glob split and Kiro's user-scope steering bug.
+- [Gemini CLI: subagents][gem-agents] — re-verify the enabling setting and
+  the enterprise-vs-individual serving status.
+- [Junie][junie] / [Zed][zed] / [Amp][amp] — currently skills-only targets;
+  re-check whether a rule or agent surface has shipped.
 - [Skill authoring best practices][bp] and the
   [official example skills][repo] — re-measure body-length norms there.
 
@@ -62,5 +75,11 @@ durable; update the numbers, keep the spine.
 [cop-skills]: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills
 [cx-skills]: https://developers.openai.com/codex/skills
 [cx-agents]: https://developers.openai.com/codex/subagents
+[cur-agents]: https://cursor.com/docs/context/subagents
+[kiro]: https://kiro.dev
+[gem-agents]: https://geminicli.com/docs/core/subagents
+[junie]: https://www.jetbrains.com/junie/
+[zed]: https://zed.dev
+[amp]: https://ampcode.com
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [repo]: https://github.com/anthropics/skills

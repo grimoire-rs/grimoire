@@ -1,8 +1,8 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.9
+compatibility: grim>=0.11
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
@@ -15,8 +15,8 @@ Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
 It distributes five artifact kinds — **skills**, **rules**, **agents**,
 **MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
 Docker Hub, a private Distribution), with lockfile-pinned installs into ten
-AI clients (grim 0.10): Claude Code, OpenCode, GitHub Copilot, Codex,
-Cursor, Kiro, JetBrains Junie, Gemini CLI, Zed, and Amp. An MCP
+AI clients: Claude Code, OpenCode, GitHub Copilot, Codex, Cursor, Kiro,
+JetBrains Junie, Gemini CLI, Zed, and Amp. An MCP
 server artifact installs by registering an entry in each client's native MCP
 config file (never as a file of its own); uninstall removes only that
 entry, never the file.
@@ -33,8 +33,8 @@ docs page — trust it over this summary.
 
 Before composing any non-trivial grim command:
 
-1. Run `grim --version`. This guide is written against grim 0.10.x; on a
-   different minor, treat every flag mentioned here as a hypothesis.
+1. Run `grim --version`. This guide tracks the release it ships beside; on
+   a different minor, treat every flag mentioned here as a hypothesis.
 2. Run `grim <command> --help` before using flags you have not verified
    this session — it is the authoritative, always-current flag list.
 3. On any conflict between this skill and live `--help` output, **trust
@@ -65,6 +65,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
 | `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor | [publish](references/publish.md) |
+| `grim completions <shell>` | Print a shell completion script (bash, elvish, fish, powershell, zsh) to stdout; redirect it into your shell's completion dir | `grim completions --help` |
 
 > **Deprecation:** a publisher can retire a package without
 > unpublishing it; `add` and `status` flag it as deprecated (an `add` of a
@@ -78,6 +79,14 @@ full reference is `--help` plus the docs site linked below.
 > **Git provenance:** `build`, `release`, and `publish` can embed
 > the publishing commit, date, and origin as OCI annotations via opt-in
 > `--git`; confirm with `grim release --help`.
+>
+> **Global flags** apply to every subcommand — `--format`, `--global`,
+> `--config`, `--registry`, `--offline`, `--log-level`, and `--color
+> <auto|always|never>` (default `auto` colorizes clap's help/error output
+> and `--format json` only when stdout is a terminal; `--color always`
+> colorizes unconditionally, so never pass it into a pipeline that parses
+> the document. The JSON error document is never colorized in any mode).
+> Confirm the set with `grim --help`.
 
 ## Reference Syntax
 
@@ -138,4 +147,4 @@ multi-registry browse behavior in
 
 ---
 
-Verified against grim 0.10.0.
+Verified against the grim release this package ships beside.
