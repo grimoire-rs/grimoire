@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-23
+
+### Added
+
+- Add a never|auto|always fork policy to announce *(publish)*
+
+### Documentation
+
+- Freeze the remaining 1.0 contract surfaces *(stability)*
+
+### Fixed
+
+- Always serialize grim_render warnings *(mcp)*
+
 ## [0.11.0] - 2026-07-22
 
 ### Added
@@ -556,6 +570,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.11.1]: https://github.com/grimoire-rs/grimoire/compare/v0.11.0..v0.11.1
 [0.11.0]: https://github.com/grimoire-rs/grimoire/compare/v0.10.0..v0.11.0
 [0.10.0]: https://github.com/grimoire-rs/grimoire/compare/v0.9.1..v0.10.0
 [0.9.1]: https://github.com/grimoire-rs/grimoire/compare/v0.9.0..v0.9.1
