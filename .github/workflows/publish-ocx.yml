@@ -57,7 +57,7 @@ jobs:
           lfs: true
 
       - name: Install OCX
-        uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3 # v1.2.2
+        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
           version: ${{ env.OCX_VERSION }}
           project: "" # binary-only; grimoire has no ocx.toml project to activate
