@@ -18,11 +18,8 @@ registries (GHCR, Docker Hub, private registries) as storage — the same way
 container images are distributed. It is a backend tool: a building block for
 keeping agent configuration versioned, shareable, and reproducible.
 
-> **Status:** provisional, pre-1.0. The core CLI — `init`, `add`, `lock`,
-> `install`, `update`, `status`, `search`, `tui`, `build`, `release`,
-> `remove`, `uninstall` — is implemented and shipping in
-> [released binaries][releases]. The surface is still moving toward 1.0, so
-> pin a version when you depend on it.
+> **Status:** stabilizing toward 1.0 — released surfaces are frozen
+> contracts; pin a version when you depend on it.
 
 ## Install
 
@@ -51,10 +48,10 @@ cargo install --git https://github.com/grimoire-rs/grimoire grimoire
 ## Quick Start
 
 ```sh
-grim init --registry ghcr.io/acme                      # create grimoire.toml
-grim add skill code-review ghcr.io/acme/code-review:1  # declare + lock
-grim install                                           # materialize into your editor
-grim tui                                               # browse the catalog
+grim init                                        # create grimoire.toml
+grim add ghcr.io/grimoire-rs/skills/grim-usage   # declare, lock, install
+grim install                                     # re-materialize after a clone
+grim tui                                         # browse the index
 ```
 
 Full documentation: **[grimoire docs][docs]**.
