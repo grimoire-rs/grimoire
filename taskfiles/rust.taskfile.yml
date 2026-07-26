@@ -96,3 +96,14 @@ tasks:
     deps:
       - install:cargo-deny
     cmd: cargo deny check licenses
+
+  # Separate from license:deps because it needs the network (it fetches the
+  # RUSTSEC advisory DB) and because it can start failing on a commit that
+  # changed nothing — an advisory published upstream is not a regression in
+  # this diff. Kept a hard gate anyway: a known-vulnerable dependency should
+  # stop a release, and "warn" gates get ignored.
+  audit:
+    desc: Check dependencies against the RUSTSEC advisory database
+    deps:
+      - install:cargo-deny
+    cmd: cargo deny check advisories bans sources

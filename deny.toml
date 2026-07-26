@@ -15,6 +15,20 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+[advisories]
+# Explicit rather than inherited: cargo-deny has changed these defaults
+# across major versions, and a supply-chain gate that silently loosens on a
+# tool upgrade is worse than no gate. A yanked crate is a warning, not a
+# failure — it is a publishing event, not a vulnerability.
+yanked = "warn"
+# "workspace", not "all": the only unmaintained advisories in this tree are
+# RUSTSEC-2024-0370 and RUSTSEC-2026-0173 (proc-macro-error / -error2), four
+# levels down via getset -> oci-spec -> oci-client, and RUSTSEC says "no safe
+# upgrade is available". Failing every PR over a transitive crate nobody here
+# can swap teaches people to bypass the gate. Direct dependencies — the ones
+# actually chosen — still fail.
+unmaintained = "workspace"
+
 [bans]
 multiple-versions = "warn"
 
