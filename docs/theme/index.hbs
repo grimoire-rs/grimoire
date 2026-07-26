@@ -1,0 +1,784 @@
+{{!--
+    Grimoire site root.
+
+    mdBook renders this template for every page. `is_index` is true only for
+    the generated site root (grimoire.rs/), so the landing page below replaces
+    it while every chapter — `introduction.html` included — still renders
+    through the stock mdBook branch after `{{else}}`.
+
+    The landing branch is a standalone document: it loads none of mdBook's CSS
+    or JS, so the theme switcher does not reach it. It commits to one dark
+    look, tuned to sit next to the `navy` docs theme.
+
+    Fully self-contained by contract — no CDN, no webfont, no external script.
+    Indigo is an accent only: hairlines and one faint glow, never a filled
+    panel.
+
+    Client marks are inlined from @lobehub/icons-static-svg (MIT,
+    Copyright (c) 2025 LobeHub) — every client except Zed, whose mark comes
+    from Simple Icons (CC0-1.0). The card icons for the package index and
+    the VS Code extension are drawn here: neither icon set carries a
+    Visual Studio Code mark, and a puzzle piece is the generic symbol for
+    an editor extension rather than anyone's trademark. All brand marks
+    remain the trademarks of their owners and appear as nominative
+    reference to the clients grim installs into.
+
+    The `{{else}}` branch is mdBook 0.5.3's default `index.hbs`, byte for byte.
+    Re-copy it from `mdbook init --theme` when mdBook is upgraded — a stock
+    template change is invisible until someone diffs it.
+--}}
+{{#if is_index}}
+<!DOCTYPE HTML>
+<html lang="{{ language }}" dir="{{ text_direction }}">
+    <head>
+        <meta charset="UTF-8">
+        <title>{{ book_title }} — a lockfile for your AI-agent config</title>
+        <meta name="description" content="{{ description }}">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#161826">
+        {{#if favicon_svg}}
+        <link rel="icon" href="{{ resource "favicon.svg" }}">
+        {{/if}}
+        {{#if favicon_png}}
+        <link rel="shortcut icon" href="{{ resource "favicon.png" }}">
+        {{/if}}
+        <style>
+:root {
+  --color-bg: #161826;
+  --color-text: #e9e9ed;
+  --color-accent: #9184d9;
+  --color-accent-300: #d2cefd;
+  --color-accent-900: #2b2741;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-heading);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--color-text);
+  text-wrap: pretty;
+  background:
+    radial-gradient(1100px 640px at 88% -220px, color-mix(in srgb, var(--color-accent-900) 62%, transparent), transparent 62%),
+    var(--color-bg);
+}
+
+a { color: var(--color-accent-300); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
+a:hover { color: var(--color-accent); }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+
+.wrap { max-width: 1160px; margin: 0 auto; padding-inline: clamp(20px, 5vw, 64px); }
+.mono { font-family: var(--font-mono); }
+.kicker { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.spacer { flex: 1; }
+.dim { color: color-mix(in srgb, var(--color-text) 52%, transparent); }
+
+pre { margin: 0; overflow-x: auto; font-family: var(--font-mono); }
+pre::-webkit-scrollbar { height: 6px; }
+pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radius: 6px; }
+
+/* — calls to action — */
+.cta {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 20px; border-radius: var(--radius-md);
+  font-family: var(--font-heading); font-weight: 500; font-size: 14.5px; line-height: 1.2;
+  text-decoration: none; white-space: nowrap;
+}
+.cta-primary { color: #14121f; background: var(--color-accent); }
+.cta-primary:hover { color: #14121f; background: var(--color-accent-300); }
+.cta-secondary { color: var(--color-text); border: 1px solid var(--color-neutral-700); }
+.cta-secondary:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+
+/* — invitation cards (shape borrowed from the ocx website's closing row) — */
+.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.card {
+  display: flex; gap: 13px; align-items: flex-start;
+  padding: 17px 18px; border-radius: var(--radius-md);
+  border: 1px solid var(--color-neutral-800);
+  text-decoration: none; color: inherit;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+.card:hover, .card:focus-visible {
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  color: inherit;
+}
+.card svg {
+  display: block; flex: none; width: 21px; height: 21px; margin-top: 1px;
+  fill: color-mix(in srgb, var(--color-text) 52%, transparent);
+  transition: fill 140ms ease;
+}
+.card:hover svg, .card:focus-visible svg { fill: var(--color-accent); }
+.card strong { display: block; font-weight: 500; font-size: 14px; line-height: 20px; margin-bottom: 3px; }
+.card span { display: block; font-size: 12.5px; line-height: 19px; color: color-mix(in srgb, var(--color-text) 58%, transparent); }
+
+/* — client marks — */
+.clients { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 26px 8px; }
+.client {
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  text-align: center; text-decoration: none;
+  color: color-mix(in srgb, var(--color-text) 58%, transparent);
+  transition: color 140ms ease;
+}
+.client:hover, .client:focus-visible { color: var(--brand, var(--color-accent)); }
+.client svg { display: block; width: 27px; height: 27px; fill: currentColor; }
+.client .tile {
+  width: 27px; height: 27px; display: grid; place-items: center;
+  border: 1px solid currentColor; border-radius: 7px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+}
+.client .name {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--color-text) 62%, transparent);
+}
+.client:hover .name, .client:focus-visible .name { color: color-mix(in srgb, var(--color-text) 88%, transparent); }
+
+/* — the fan-out: one declaration, the files each client actually gets.
+     Flat and full width. Splitting it narrower clips
+     `.github/instructions/rust-style.instructions.md`, and a truncated file
+     path reads as a broken page rather than as something you can scroll. */
+.fanout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 clamp(24px, 4vw, 56px); }
+.fanout pre { font-size: 12.5px; line-height: 24px; }
+.fanout > * + * { border-left: 1px solid var(--color-neutral-800); padding-left: clamp(24px, 4vw, 56px); }
+
+/* — copy buttons: inert without JS, so they only appear once wired up — */
+.cmd-copy { display: none; }
+.js .cmd-copy {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; white-space: nowrap; cursor: pointer;
+  font-family: var(--font-heading); font-weight: 500; font-size: 14px; line-height: 1.2;
+  color: var(--color-accent); background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-md);
+  padding: 5.6px 2.8px;
+  opacity: 0.45; transition: opacity 120ms ease;
+}
+.cmd-copy:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+[data-cmd]:hover .cmd-copy, [data-cmd]:focus-within .cmd-copy { opacity: 1; }
+
+/* — OS switch: radio + :has(), no script — */
+[data-os-row] { display: flex; }
+[data-osblock]:has(input[value="win"]:checked) [data-os-row="unix"] { display: none; }
+[data-osblock]:not(:has(input[value="win"]:checked)) [data-os-row="win"] { display: none; }
+[data-osopt] { white-space: nowrap; cursor: pointer; color: color-mix(in srgb, var(--color-text) 45%, transparent); transition: color 120ms ease; }
+[data-osopt]:hover { color: color-mix(in srgb, var(--color-text) 75%, transparent); }
+[data-osopt]:has(input:checked) { color: var(--color-accent); }
+[data-osopt] input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+[data-osopt]:has(input:focus-visible) { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: var(--radius-sm); }
+
+/* Single-column collapse. `minmax(0, 1fr)`, never bare `1fr` — a bare `fr`
+   track floors at min-content, which a long command or file path pushes wider
+   than the viewport. The zero floor lets each `pre` scroll inside itself. */
+@media (max-width: 940px) {
+  [data-hero] { grid-template-columns: minmax(0, 1fr) !important; gap: 44px 0 !important; }
+  .fanout { grid-template-columns: minmax(0, 1fr); }
+  .fanout > * + * { border-left: 0; padding-left: 0; margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--color-neutral-800); }
+  [data-spec] { grid-template-columns: minmax(0, 1fr) !important; gap: 0 !important; }
+}
+@media (max-width: 940px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) {
+  [data-navlinks] { display: none !important; }
+  .clients { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px 8px; }
+  .cards { grid-template-columns: minmax(0, 1fr); }
+}
+        </style>
+    </head>
+    <body>
+
+<header style="border-bottom:1px solid var(--color-neutral-800)">
+  <div class="wrap" style="padding-block:14px; display:flex; align-items:center; gap:clamp(16px,3vw,32px)">
+    <span style="display:flex; align-items:center; gap:8.4px; flex:none">
+      <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display:block; flex:none">
+        <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
+          <path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path>
+          <path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path>
+          <path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path>
+          <path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path>
+          <path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path>
+          <path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path>
+        </g>
+      </svg>
+      <span style="font-weight:500; font-size:15px; letter-spacing:-0.01em">grimoire<span style="color:var(--color-accent)">.rs</span></span>
+      <span class="mono dim" style="font-size:12px">0.11.1</span>
+    </span>
+    <span class="spacer"></span>
+    <span data-navlinks class="mono" style="display:flex; align-items:center; gap:clamp(14px,2.2vw,26px); font-size:13px">
+      <a href="https://index.grimoire.rs">index</a>
+      <a href="{{ path_to_root }}introduction.html">docs</a>
+      <a href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">vs&nbsp;code</a>
+      <a href="https://github.com/grimoire-rs/grimoire">source</a>
+    </span>
+  </div>
+</header>
+
+<div class="wrap">
+  <section data-hero style="padding:clamp(40px,4.5vw,60px) 0 clamp(36px,3.6vw,48px); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,0.92fr); gap:0 clamp(32px,5vw,72px); align-items:center">
+    <div>
+      <h1 style="font-weight:500; font-size:clamp(32px,3.4vw,44px); line-height:1.14; letter-spacing:-0.02em; margin:0 0 0 -0.04em">A lockfile for your AI-agent config.</h1>
+      <p style="font-size:16.5px; line-height:28px; margin:22px 0 0; max-width:46ch; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Skills, rules, agents and MCP servers — declared once, pinned by digest, written into each coding agent in the format it actually reads. Storage is any OCI registry. There is no Grimoire service.</p>
+      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:30px">
+        <a class="cta cta-primary" href="#install">Install grim</a>
+        <a class="cta cta-secondary" href="https://index.grimoire.rs">Browse the index →</a>
+      </div>
+    </div>
+
+    <div>
+      <p class="kicker">installs into</p>
+      <div class="clients">
+        <a class="client" style="--brand:#D97757" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"></path></svg>
+          <span class="name">Claude Code</span>
+        </a>
+        <a class="client" style="--brand:#e9e9ed" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M19.245 5.364c1.322 1.36 1.877 3.216 2.11 5.817.622 0 1.2.135 1.592.654l.73.964c.21.278.323.61.323.955v2.62c0 .339-.173.669-.453.868C20.239 19.602 16.157 21.5 12 21.5c-4.6 0-9.205-2.583-11.547-4.258-.28-.2-.452-.53-.453-.868v-2.62c0-.345.113-.679.321-.956l.73-.963c.392-.517.974-.654 1.593-.654l.029-.297c.25-2.446.81-4.213 2.082-5.52 2.461-2.54 5.71-2.851 7.146-2.864h.198c1.436.013 4.685.323 7.146 2.864zm-7.244 4.328c-.284 0-.613.016-.962.05-.123.447-.305.85-.57 1.108-1.05 1.023-2.316 1.18-2.994 1.18-.638 0-1.306-.13-1.851-.464-.516.165-1.012.403-1.044.996a65.882 65.882 0 00-.063 2.884l-.002.48c-.002.563-.005 1.126-.013 1.69.002.326.204.63.51.765 2.482 1.102 4.83 1.657 6.99 1.657 2.156 0 4.504-.555 6.985-1.657a.854.854 0 00.51-.766c.03-1.682.006-3.372-.076-5.053-.031-.596-.528-.83-1.046-.996-.546.333-1.212.464-1.85.464-.677 0-1.942-.157-2.993-1.18-.266-.258-.447-.661-.57-1.108-.32-.032-.64-.049-.96-.05zm-2.525 4.013c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zm5 0c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zM7.635 5.087c-1.05.102-1.935.438-2.385.906-.975 1.037-.765 3.668-.21 4.224.405.394 1.17.657 1.995.657h.09c.649-.013 1.785-.176 2.73-1.11.435-.41.705-1.433.675-2.47-.03-.834-.27-1.52-.63-1.813-.39-.336-1.275-.482-2.265-.394zm6.465.394c-.36.292-.6.98-.63 1.813-.03 1.037.24 2.06.675 2.47.968.957 2.136 1.104 2.776 1.11h.044c.825 0 1.59-.263 1.995-.657.555-.556.765-3.187-.21-4.224-.45-.468-1.335-.804-2.385-.906-.99-.088-1.875.058-2.265.394zM12 7.615c-.24 0-.525.015-.84.044.03.16.045.336.06.526l-.001.159a2.94 2.94 0 01-.014.25c.225-.022.425-.027.612-.028h.366c.187 0 .387.006.612.028-.015-.146-.015-.277-.015-.409.015-.19.03-.365.06-.526a9.29 9.29 0 00-.84-.044z"></path></svg>
+          <span class="name">Copilot</span>
+        </a>
+        <a class="client" style="--brand:#e9e9ed" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"></path></svg>
+          <span class="name">Cursor</span>
+        </a>
+        <a class="client" style="--brand:#e9e9ed" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"></path></svg>
+          <span class="name">Codex</span>
+        </a>
+        <a class="client" style="--brand:#4285F4" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"></path></svg>
+          <span class="name">Gemini</span>
+        </a>
+        <a class="client" style="--brand:#5b8cf5" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z"/></svg>
+          <span class="name">Zed</span>
+        </a>
+        <a class="client" style="--brand:#F34E3F" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg>
+          <span class="name">Amp</span>
+        </a>
+        <a class="client" style="--brand:#9046FF" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M4.594 6.677C6.67-2.226 18.746-2.211 21.16 6.632c.353 1.297 1.725 7.582-1.673 13.747-1.545 2.797-5.841 5.49-6.99 1.883C8.6 25.477 3.315 24.1 5.789 18.609l-.318.143c-3.57 1.305-3.863-1.208-3.173-2.513.45-.84.727-1.335.937-1.897.353-.975.458-1.568.593-2.498.27-1.837.277-3.607.765-5.167zm8.37.01a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.214-.705 1.214-1.89 0-.622-.127-1.125-.367-1.455a1.014 1.014 0 00-.855-.435zm4.08 0a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.215-.705 1.215-1.89 0-.622-.128-1.125-.368-1.455a1.014 1.014 0 00-.855-.435z"></path></svg>
+          <span class="name">Kiro</span>
+        </a>
+        <a class="client" style="--brand:#47E054" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M24 9.333C24 18.666 20 24 9.333 24H8v-8h1.333C14 16 16 14 16 9.333V8h8v1.333zM8 16H0V8h8v8zM16 8H8V0h8v8z"></path></svg>
+          <span class="name">Junie</span>
+        </a>
+        <a class="client" style="--brand:#e9e9ed" href="{{ path_to_root }}clients.html">
+          <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path></svg>
+          <span class="name">opencode</span>
+        </a>
+      </div>
+      <p class="mono dim" style="font-size:12px; margin:26px 0 0"><a href="{{ path_to_root }}clients.html">what each one accepts →</a></p>
+    </div>
+  </section>
+</div>
+
+<section id="install" style="border-block:1px solid var(--color-neutral-800)">
+  <div class="wrap" data-osblock style="padding-block:clamp(28px,3vw,40px)">
+    <div style="display:flex; align-items:center; gap:14px; padding-bottom:12px">
+      <span class="mono" role="radiogroup" aria-label="Platform" style="display:flex; align-items:baseline; gap:22px; font-size:12.5px; letter-spacing:0.04em">
+        <label data-osopt><input type="radio" name="os" value="unix" checked>macOS / Linux</label>
+        <label data-osopt><input type="radio" name="os" value="win">Windows</label>
+      </span>
+      <span class="spacer"></span>
+      <span class="mono dim" style="font-size:12.5px">the binary is grim</span>
+    </div>
+    <div data-os-row="unix" data-cmd style="align-items:center; gap:11.2px">
+      <pre style="flex:1; min-width:0; font-size:13.5px; line-height:28px"><span style="color:var(--color-accent)">$ </span>curl --proto '=https' --tlsv1.2 -LsSf https://setup.grimoire.rs/sh | sh</pre>
+      <button type="button" class="cmd-copy" data-copy="curl --proto '=https' --tlsv1.2 -LsSf https://setup.grimoire.rs/sh | sh">copy</button>
+    </div>
+    <div data-os-row="win" data-cmd style="align-items:center; gap:11.2px">
+      <pre style="flex:1; min-width:0; font-size:13.5px; line-height:28px"><span style="color:var(--color-accent)">&gt; </span>irm https://setup.grimoire.rs/ps1 | iex</pre>
+      <button type="button" class="cmd-copy" data-copy="irm https://setup.grimoire.rs/ps1 | iex">copy</button>
+    </div>
+    <p class="mono dim" style="font-size:12px; line-height:20px; margin:10px 0 0">The installer verifies a SHA-256 checksum before it writes anything. <a href="{{ path_to_root }}installation.html">Other install methods</a>.</p>
+  </div>
+</section>
+
+<div class="wrap">
+  <section style="padding:clamp(36px,4vw,52px) 0 clamp(28px,3vw,40px)">
+    <div style="display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--color-neutral-700); padding-bottom:11.2px">
+      <span class="mono" style="font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--color-accent)">quick start</span>
+      <span class="spacer"></span>
+      <span class="mono dim" style="font-size:12px">copy any line</span>
+    </div>
+    <div style="padding-top:14px">
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim init<span class="dim">                                        # create grimoire.toml</span></pre>
+        <button type="button" class="cmd-copy" data-copy="grim init">copy</button>
+      </div>
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim add ghcr.io/grimoire-rs/skills/grim-usage<span class="dim">   # declare, lock, install</span></pre>
+        <button type="button" class="cmd-copy" data-copy="grim add ghcr.io/grimoire-rs/skills/grim-usage">copy</button>
+      </div>
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim install<span class="dim">                                     # re-materialize after a clone</span></pre>
+        <button type="button" class="cmd-copy" data-copy="grim install">copy</button>
+      </div>
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim update<span class="dim">                                      # roll the pins forward</span></pre>
+        <button type="button" class="cmd-copy" data-copy="grim update">copy</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="fanout" style="padding:clamp(20px,2.4vw,30px) 0 clamp(36px,4vw,52px)">
+    <div>
+      <p class="kicker">one declaration</p>
+      <pre><span class="dim"># grimoire.toml</span>
+[rules]
+rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-style:2"</span>
+
+<span class="dim"># grimoire.lock pins it to a digest
+# ghcr.io/acme/rust-style@sha256:9f2c…</span></pre>
+    </div>
+    <div>
+      <p class="kicker">what grim install writes</p>
+      <pre>.claude/rules/rust-style.md
+.cursor/rules/rust-style.mdc
+.github/instructions/rust-style.instructions.md
+.kiro/steering/rust-style.md
+.opencode/rules/rust-style.md
+<span class="dim">five clients decline rules — reported, not faked</span></pre>
+    </div>
+  </section>
+
+  <section style="padding:0 0 clamp(36px,4vw,52px)">
+    <div style="border-top:1px solid var(--color-neutral-700)">
+      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
+        <div class="mono dim" style="font-size:13px; line-height:26px">artifacts</div>
+        <div style="font-size:15px; line-height:26px">skills · rules · agents · MCP servers · bundles that group them</div>
+      </div>
+      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
+        <div class="mono dim" style="font-size:13px; line-height:26px">storage</div>
+        <div style="font-size:15px; line-height:26px">any OCI registry · publish your own · <a href="{{ path_to_root }}package-index.html">the index is self-hostable</a></div>
+      </div>
+      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
+        <div class="mono dim" style="font-size:13px; line-height:26px">interface</div>
+        <div style="font-size:15px; line-height:26px">0.11.1, stabilizing toward 1.0 — <a href="{{ path_to_root }}stability.html">released surfaces are frozen contracts</a>, with JSON output for scripting</div>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding:0 0 clamp(36px,4vw,52px)">
+    <h2 style="font-weight:500; font-size:20px; line-height:1.2; letter-spacing:-0.01em; margin:0 0 6px">Still reading?</h2>
+    <p style="font-size:15px; line-height:24px; margin:0 0 22px; color:color-mix(in srgb, var(--color-text) 66%, transparent)">A solo project heading for 1.0. Questions and issues get read.</p>
+    <div class="cards">
+      <a class="card" href="https://index.grimoire.rs">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>
+        <span><strong>Package index</strong><span>Browse what is published, and open any package straight into your editor.</span></span>
+      </a>
+      <a class="card" href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 2A2.5 2.5 0 0 1 13 4.5V6h3.5A1.5 1.5 0 0 1 18 7.5V11h1.5a2.5 2.5 0 0 1 0 5H18v3.5a1.5 1.5 0 0 1-1.5 1.5H13v-1.5a2.5 2.5 0 0 0-5 0V21H4.5A1.5 1.5 0 0 1 3 19.5V16h1.5a2.5 2.5 0 0 0 0-5H3V7.5A1.5 1.5 0 0 1 4.5 6H8V4.5A2.5 2.5 0 0 1 10.5 2Z"/></svg>
+        <span><strong>VS Code extension</strong><span>Search, install and manage artifacts without leaving the editor.</span></span>
+      </a>
+      <a class="card" href="https://github.com/grimoire-rs/grimoire/discussions">
+        <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M3 5a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H9l-6 5V5Zm5 2.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm4 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm4 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/></svg>
+        <span><strong>Discussions</strong><span>Ask questions, share what you built, follow where this is going.</span></span>
+      </a>
+      <a class="card" href="https://github.com/grimoire-rs/grimoire">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        <span><strong>GitHub</strong><span>Star the repo, file an issue, or send a patch.</span></span>
+      </a>
+    </div>
+  </section>
+
+  <footer class="mono" style="padding:0 0 clamp(40px,5vw,70px); border-top:1px solid var(--color-neutral-800); padding-top:22px; display:flex; flex-wrap:wrap; gap:12px 32px; align-items:baseline; font-size:12.5px; line-height:24px">
+    <a href="{{ path_to_root }}introduction.html">documentation</a>
+    <a href="{{ path_to_root }}stability.html">stability</a>
+    <a href="https://github.com/grimoire-rs/grimoire/blob/main/LICENSE">Apache-2.0</a>
+    <span class="spacer"></span>
+    <span class="dim">artifacts live in your registry, not ours</span>
+  </footer>
+</div>
+
+<script>
+    document.documentElement.classList.add('js');
+    document.addEventListener('click', function (e) {
+        const b = e.target.closest('[data-copy]');
+        if (!b || !navigator.clipboard) return;
+        navigator.clipboard.writeText(b.getAttribute('data-copy'));
+        const prev = b.textContent;
+        b.textContent = 'copied';
+        setTimeout(function () { b.textContent = prev; }, 1400);
+    });
+</script>
+    </body>
+</html>
+{{else}}
+<!DOCTYPE HTML>
+<html lang="{{ language }}" class="{{ default_theme }} sidebar-visible" dir="{{ text_direction }}">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>{{ title }}</title>
+        {{#if is_print }}
+        <meta name="robots" content="noindex">
+        {{/if}}
+        {{#if base_url}}
+        <base href="{{ base_url }}">
+        {{/if}}
+
+
+        <!-- Custom HTML head -->
+        {{> head}}
+
+        <meta name="description" content="{{ description }}">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        {{#if favicon_svg}}
+        <link rel="icon" href="{{ resource "favicon.svg" }}">
+        {{/if}}
+        {{#if favicon_png}}
+        <link rel="shortcut icon" href="{{ resource "favicon.png" }}">
+        {{/if}}
+        <link rel="stylesheet" href="{{ resource "css/variables.css" }}">
+        <link rel="stylesheet" href="{{ resource "css/general.css" }}">
+        <link rel="stylesheet" href="{{ resource "css/chrome.css" }}">
+        {{#if print_enable}}
+        <link rel="stylesheet" href="{{ resource "css/print.css" }}" media="print">
+        {{/if}}
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="{{ resource "fonts/fonts.css" }}">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="{{ resource "highlight.css" }}">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="{{ resource "tomorrow-night.css" }}">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="{{ resource "ayu-highlight.css" }}">
+
+        <!-- Custom theme stylesheets -->
+        {{#each additional_css}}
+        <link rel="stylesheet" href="{{ resource this }}">
+        {{/each}}
+
+        {{#if mathjax_support}}
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+        {{/if}}
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "{{ path_to_root }}";
+            const default_light_theme = "{{ default_theme }}";
+            const default_dark_theme = "{{ preferred_dark_theme }}";
+        {{#if search_js}}
+            window.path_to_searchindex_js = "{{ resource "searchindex.js" }}";
+        {{/if}}
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="{{ resource "toc.js" }}"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                {{#if search_enabled}}
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                {{/if}}
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('{{ default_theme }}')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="{{ path_to_root }}toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                {{> header}}
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            {{fa "solid" "bars"}}
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            {{fa "solid" "paintbrush"}}
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        {{#if search_enabled}}
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            {{fa "solid" "magnifying-glass"}}
+                        </button>
+                        {{/if}}
+                    </div>
+
+                    <h1 class="menu-title">{{ book_title }}</h1>
+
+                    <div class="right-buttons">
+                        {{#if print_enable}}
+                        <a href="{{ path_to_root }}print.html" title="Print this book" aria-label="Print this book">
+                            {{fa "solid" "print" "print-button"}}
+                        </a>
+                        {{/if}}
+                        {{#if git_repository_url}}
+                        <a href="{{git_repository_url}}" title="Git repository" aria-label="Git repository">
+                            {{fa git_repository_icon_class git_repository_icon}}
+                        </a>
+                        {{/if}}
+                        {{#if git_repository_edit_url}}
+                        <a href="{{git_repository_edit_url}}" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            {{fa "solid" "pencil" "git-edit-button"}}
+                        </a>
+                        {{/if}}
+
+                    </div>
+                </div>
+
+                {{#if search_enabled}}
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                {{fa "solid" "spinner" "fa-spin"}}
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+                {{/if}}
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        {{{ content }}}
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                        {{#if previous}}
+                            <a rel="prev" href="{{ path_to_root }}{{previous.link}}" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                {{#if (eq ../text_direction "rtl")}}
+                                {{fa "solid" "angle-right"}}
+                                {{else}}
+                                {{fa "solid" "angle-left"}}
+                                {{/if}}
+                            </a>
+                        {{/if}}
+
+                        {{#if next}}
+                            <a rel="next prefetch" href="{{ path_to_root }}{{next.link}}" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                {{#if (eq ../text_direction "rtl")}}
+                                {{fa "solid" "angle-left"}}
+                                {{else}}
+                                {{fa "solid" "angle-right"}}
+                                {{/if}}
+                            </a>
+                        {{/if}}
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                {{#if previous}}
+                    <a rel="prev" href="{{ path_to_root }}{{previous.link}}" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        {{#if (eq ../text_direction "rtl")}}
+                        {{fa "solid" "angle-right"}}
+                        {{else}}
+                        {{fa "solid" "angle-left"}}
+                        {{/if}}
+                    </a>
+                {{/if}}
+
+                {{#if next}}
+                    <a rel="next prefetch" href="{{ path_to_root }}{{next.link}}" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        {{#if (eq text_direction "rtl")}}
+                        {{fa "solid" "angle-left"}}
+                        {{else}}
+                        {{fa "solid" "angle-right"}}
+                        {{/if}}
+                    </a>
+                {{/if}}
+            </nav>
+
+        </div>
+
+        <template id=fa-eye>{{fa "solid" "eye"}}</template>
+        <template id=fa-eye-slash>{{fa "solid" "eye-slash"}}</template>
+        <template id=fa-copy>{{fa "regular" "copy"}}</template>
+        <template id=fa-play>{{fa "solid" "play"}}</template>
+        <template id=fa-clock-rotate-left>{{fa "solid" "clock-rotate-left"}}</template>
+
+        {{#if live_reload_endpoint}}
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "{{{live_reload_endpoint}}}";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+        {{/if}}
+
+        {{#if playground_line_numbers}}
+        <script>
+            window.playground_line_numbers = true;
+        </script>
+        {{/if}}
+
+        {{#if playground_copyable}}
+        <script>
+            window.playground_copyable = true;
+        </script>
+        {{/if}}
+
+        {{#if playground_js}}
+        <script src="{{ resource "ace.js" }}"></script>
+        <script src="{{ resource "mode-rust.js" }}"></script>
+        <script src="{{ resource "editor.js" }}"></script>
+        <script src="{{ resource "theme-dawn.js" }}"></script>
+        <script src="{{ resource "theme-tomorrow_night.js" }}"></script>
+        {{/if}}
+
+        {{#if search_js}}
+        <script src="{{ resource "elasticlunr.min.js" }}"></script>
+        <script src="{{ resource "mark.min.js" }}"></script>
+        <script src="{{ resource "searcher.js" }}"></script>
+        {{/if}}
+
+        <script src="{{ resource "clipboard.min.js" }}"></script>
+        <script src="{{ resource "highlight.js" }}"></script>
+        <script src="{{ resource "book.js" }}"></script>
+
+        <!-- Custom JS scripts -->
+        {{#each additional_js}}
+        <script src="{{ resource this}}"></script>
+        {{/each}}
+
+        {{#if is_print}}
+        {{#if mathjax_support}}
+        <script>
+        window.addEventListener('load', function() {
+            MathJax.Hub.Register.StartupHook('End', function() {
+                window.setTimeout(window.print, 100);
+            });
+        });
+        </script>
+        {{else}}
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+        {{/if}}
+        {{/if}}
+
+        {{#if fragment_map}}
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const fragmentMap =
+                    {{{fragment_map}}}
+                ;
+                const target = fragmentMap[window.location.hash];
+                if (target) {
+                    let url = new URL(target, window.location.href);
+                    window.location.replace(url.href);
+                }
+            });
+        </script>
+        {{/if}}
+
+    </div>
+    </body>
+</html>
+{{/if}}
