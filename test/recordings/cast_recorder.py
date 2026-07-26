@@ -11,10 +11,19 @@ W6 plan for the source). grim's plain-text tables carry no ANSI color and no
 progress-spinner redraws (no ``comfy-table``/``indicatif`` in this codebase —
 confirmed by manual PTY probe before writing this), so the color-aware
 table-realignment and spinner-stripping machinery in the OCX original is not
-ported: there is nothing for it to do here. What's kept is the generic core
-— simulated-typing capture, real-time output capture, and post-hoc string
-sanitization (hide the throwaway local registry host and tmp paths behind
-the clean public reference a reader would actually type).
+ported: there is nothing for it to do here.
+
+The OCX original also carried post-hoc string sanitization (swap a throwaway
+registry host / tmp path for a clean public one after the fact). That is
+gone too, and deliberately not ported: ``print_table`` (``src/cli/printer.rs``)
+pads every column to the width of what it *actually rendered*, so replacing
+a captured cell with a shorter string after the fact leaves the header
+padding sized for the original, longer text — every column downstream falls
+short of its own header. The fix is at the source, not in this file: the
+caller (``test_record_demo.py``) drives grim against a real, anonymously
+pullable registry with an unshortened digest and a short cwd, so nothing
+ever needs rewriting. ``assert_tables_column_aligned`` below is the
+regression guard for that invariant.
 """
 from __future__ import annotations
 
@@ -25,10 +34,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pexpect
-
-# One SGR-free digest ref, as grim prints it: `@sha256:<64 hex>`. Shortened
-# for a readable recording; grim itself never truncates.
-_DIGEST_REF_RE = re.compile(r"@sha256:([a-f0-9]{12})[a-f0-9]{52}")
 
 
 @dataclass
@@ -78,48 +83,6 @@ class CastRecording:
         self.height = max(max_y + padding, minimum)
         return self
 
-    def sanitize(self, replacements: dict[str, str]) -> CastRecording:
-        """Replace literal strings in all event data (registry host, tmp paths)."""
-        self._merge_close_events()
-        for event in self.events:
-            for old, new in replacements.items():
-                event.data = event.data.replace(old, new)
-        return self
-
-    def shorten_digests(self) -> CastRecording:
-        """Shorten ``@sha256:<64 hex>`` refs to ``@sha256:<12 hex>..`` for
-        a readable recording. Merges close events first so a digest isn't
-        split across two PTY read chunks."""
-        self._merge_close_events()
-        for event in self.events:
-            event.data = _DIGEST_REF_RE.sub(r"@sha256:\1..", event.data)
-        return self
-
-    def _merge_close_events(self, threshold: float = 0.05) -> None:
-        """Merge consecutive output events within *threshold* seconds.
-
-        Compares each event to the previous *raw* event's timestamp, not the
-        first event already folded into the current merge group -- a run of
-        simulated keystrokes ``threshold``-apart (e.g. ``type_command``'s
-        per-char events) must coalesce into one string so a sanitize()/
-        shorten_digests() substring match isn't defeated by a match straddling
-        a merge-group boundary. Comparing against the group's first timestamp
-        instead would let cumulative drift exceed ``threshold`` after only a
-        couple of characters.
-        """
-        if not self.events:
-            return
-        merged: list[CastEvent] = [self.events[0]]
-        last_raw_ts = self.events[0].timestamp
-        for event in self.events[1:]:
-            prev = merged[-1]
-            if event.event_type == prev.event_type and event.timestamp - last_raw_ts < threshold:
-                prev.data += event.data
-            else:
-                merged.append(event)
-            last_raw_ts = event.timestamp
-        self.events = merged
-
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_cast())
@@ -141,11 +104,11 @@ class CastRecorder:
         cwd: str,
         *,
         # grim never truncates its own table columns, so the PTY must be
-        # wide enough to hold the *unshortened* digest before sanitize()
-        # ever sees it -- shorten_digests() only rewrites captured bytes,
-        # it cannot un-wrap a line the terminal already hard-wrapped.
-        # `grim status`'s widest row (Kind/Name/Source/Pinned@sha256-64hex/
-        # State) measures 154 cols for this demo's fixed repo path; 180
+        # wide enough to hold the full, unshortened digest -- there is no
+        # post-hoc rewriting left to un-wrap a line the terminal already
+        # hard-wrapped. `grim status`'s widest row
+        # (Kind/Name/Source/Pinned@sha256-64hex/State) measures ~147 cols
+        # for the real `ghcr.io/grimoire-rs/skills/grim-usage` ref; 180
         # leaves headroom.
         width: int = 180,
         height: int = 24,
@@ -272,3 +235,58 @@ class CastRecorder:
         self._clock += self.end_pause
         events.append(CastEvent(self._clock, "o", ""))
         return CastRecording(width=self.width, height=self.height, title=title, theme=theme, events=events)
+
+
+# A grim table header: 2+ capitalized words separated by print_table's GAP
+# (two spaces, `src/cli/printer.rs`) or more (extra column padding). Never
+# matches a data row -- every cell grim renders in this demo (kind, name,
+# digest ref, path, status word) is a single token, and a data row mixing a
+# lowercase digest/path with a capitalized status word never satisfies "every
+# token capitalized".
+_TABLE_HEADER_RE = re.compile(r"^[A-Z][A-Za-z]*(?:  +[A-Z][A-Za-z]*)+$")
+_TOKEN_RE = re.compile(r"\S+")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def assert_tables_column_aligned(cast_path: Path) -> None:
+    """Assert every plain-text table in the ``.cast`` at *cast_path* has its
+    data columns starting at the same character offset as their header.
+
+    Parses the asciicast v2 JSON lines, concatenates every output ("o")
+    event into one terminal stream, and strips ANSI escapes (grim's plain
+    output carries none, but a recording is not guaranteed to stay that
+    way). Any line matching the header shape opens a table; every following
+    non-blank, non-prompt line must start each of its columns at the same
+    offset as the header's.
+
+    Regression guard: this must fail against a recording built with
+    post-hoc string substitution (a header sized for a long, real
+    registry-host/digest/path, followed by a row shortened to a friendlier
+    display string) and pass against one where grim renders the displayed
+    text directly -- see the module docstring and `test_record_demo.py`.
+    """
+    text = "".join(
+        _ANSI_RE.sub("", event[2])
+        for raw_line in cast_path.read_text().splitlines()
+        if isinstance(event := json.loads(raw_line), list) and event[1] == "o"
+    )
+    lines = text.replace("\r\n", "\n").replace("\r", "").split("\n")
+
+    misaligned: list[str] = []
+    i = 0
+    while i < len(lines):
+        header = lines[i]
+        if not _TABLE_HEADER_RE.match(header):
+            i += 1
+            continue
+        header_starts = [m.start() for m in _TOKEN_RE.finditer(header)]
+        j = i + 1
+        while j < len(lines) and lines[j].strip() and not lines[j].startswith("$ ") and not _TABLE_HEADER_RE.match(lines[j]):
+            row_starts = [m.start() for m in _TOKEN_RE.finditer(lines[j])]
+            for col, (h_start, r_start) in enumerate(zip(header_starts, row_starts)):
+                if h_start != r_start:
+                    misaligned.append(f"header {header!r} col {col} starts at {h_start}, row {lines[j]!r} starts at {r_start}")
+            j += 1
+        i = j
+
+    assert not misaligned, "misaligned table column(s) in " + str(cast_path) + ":\n" + "\n".join(misaligned)
