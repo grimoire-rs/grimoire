@@ -739,6 +739,42 @@ Resolution precedence per entry (highest first):
 2. manifest `repository_prefix` → `{prefix}/{name}`
 3. default → `{kind.subdir()}/{name}` (unchanged backward-compatible behavior)
 
+#### Do you need the kind segment? {#batch-publish-flat}
+
+Usually not. An artifact's kind travels **in the manifest**, as the
+`com.grimoire.kind` annotation grim reads back through
+[`kind_from_manifest`][kind-read] — never from its repository path. `grim
+describe ghcr.io/michael-herwig/arcana/hex-core` reports `kind=skill` and
+`…/arcana/hex` reports `kind=bundle`, though neither path names a kind.
+
+So `{kind-subdir}` is a **namespace partition, not a type tag**. It buys one
+thing: room for the same name to exist as two kinds — a skill `foo` and a
+bundle `foo` side by side. If your names are unique across kinds, it buys
+nothing and costs a segment in every reference your users type.
+
+Publish flat by setting `repository_prefix` to your namespace:
+
+```toml
+registry = "ghcr.io"
+repository_prefix = "acme"
+
+[skills.code-review]     # → ghcr.io/acme/code-review
+[bundles.essentials]     # → ghcr.io/acme/essentials
+```
+
+Bundles work unchanged — a flat bundle names its members with the
+same-directory form `./code-review:0` instead of `../skills/code-review:0`
+(see [Deployment-relative members][relative-members]).
+
+The layout also decides how short a reference your users can type. A short
+reference expands to `{default-registry}/{what-was-typed}` verbatim, so a
+flat layout resolves from a bare `code-review`, while a kind-segmented one
+requires `skills/code-review`. Pick the segment when you need the partition,
+not by default.
+
+[kind-read]: https://github.com/grimoire-rs/grimoire/blob/main/src/oci/annotations.rs
+[relative-members]: ./artifacts.md#bundle-relative-refs
+
 **CLI-enforced prefix** — a third, outer layer set per run rather than in
 the manifest. When the global `--registry` flag value carries a path after
 the host (`--registry registry.gitlab.com/durzn/hearth`), the first `/`
