@@ -101,7 +101,6 @@ def test_stdout_pipe_closed_render_command_exits_zero(
     timing-margin case, not a guaranteed-deterministic one. Kept anyway to
     cover the render() path rather than only the two payload-plain commands."""
     (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n")
-    (project_dir / ".claude").mkdir()
     runner = grim_at(project_dir)
 
     result = _run_stdout_pipe_closed(

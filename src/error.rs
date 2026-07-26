@@ -354,7 +354,10 @@ fn classify_install(err: &InstallError) -> Classification {
         | InstallErrorKind::LocalSource(_)
         | InstallErrorKind::LocalContentChanged { .. } => Classification::new(ExitCode::DataError),
         InstallErrorKind::TargetIo { source, .. } => Classification::new(classify_io(source)),
-        InstallErrorKind::UnsupportedClient(_) => Classification::new(ExitCode::ConfigError),
+        // Both are "your client selection cannot work" — one code (78).
+        InstallErrorKind::UnsupportedClient(_) | InstallErrorKind::NoInstallableClient => {
+            Classification::new(ExitCode::ConfigError)
+        }
     }
 }
 

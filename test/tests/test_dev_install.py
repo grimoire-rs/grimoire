@@ -22,7 +22,6 @@ def _write(p: Path, body: str) -> None:
 
 
 def _project(project_dir: Path) -> Path:
-    (project_dir / ".claude").mkdir()
     _write(project_dir / "grimoire.toml", "[skills]\n")
     d = project_dir / "dev-skill"
     _write(
@@ -117,6 +116,10 @@ def test_global_dev_install_renders_to_native_home(
         "---\nname: dev-skill\ndescription: Dev.\n---\n# Global dev\n",
     )
     runner = _offline(grim_at(tmp_path))
+    # The three vendors this test asserts on must be *detected* globally;
+    # an unmarked home resolves to the generic `agents` client instead.
+    for marker in (".claude", ".config/opencode/skills", ".copilot/skills"):
+        (runner.home / marker).mkdir(parents=True, exist_ok=True)
     runner.run("--global", "install", str(src))
 
     outputs = (
@@ -266,7 +269,6 @@ def test_dev_install_name_collision_with_declared_binding_is_rejected(
     # keeping dev records disjoint from declared bindings so this can never
     # happen downstream. The declared binding must survive the rejection
     # untouched.
-    (project_dir / ".claude").mkdir()
     declared = project_dir / "skills" / "foo"
     _write(
         declared / "SKILL.md",
@@ -307,7 +309,6 @@ def test_dev_install_no_collision_when_declared_binding_name_differs(
     # name)` equality, not "some binding is already declared". A
     # dev-install of a DIFFERENT-named local skill must succeed even
     # though `foo` is already declared in grimoire.toml.
-    (project_dir / ".claude").mkdir()
     declared = project_dir / "skills" / "foo"
     _write(
         declared / "SKILL.md",
@@ -341,7 +342,6 @@ def test_add_declaration_after_dev_install_same_name_is_rejected(
     # undeclared the real binding (data loss). Fix: `grim add` rejects (exit
     # 64) a declaration whose (kind, name) collides with an existing dev
     # record, keeping the two keyspaces disjoint at BOTH creation paths.
-    (project_dir / ".claude").mkdir()
     _write(project_dir / "grimoire.toml", "[skills]\n")
 
     dev = project_dir / "dev-skill"
@@ -379,7 +379,6 @@ def test_dev_install_name_collision_with_declared_rule_binding_is_rejected(
     # on (kind, name) for skill/rule/agent, but only the skill arm had
     # coverage. A dev-install of a RULE whose stem collides with a declared
     # rule binding must be rejected (exit 64) too.
-    (project_dir / ".claude").mkdir()
     _write(
         project_dir / "rules" / "foo.md",
         "---\ndescription: Declared rule.\n---\n# Declared v1\n",
@@ -414,7 +413,6 @@ def test_add_declaration_aborts_on_unreadable_state(
     # the guard and re-open the data-loss path it exists to prevent. (A MISSING
     # state file is `Ok(empty)` and still declares fine — covered by every
     # other add test that runs without prior install state.)
-    (project_dir / ".claude").mkdir()
     _write(project_dir / "grimoire.toml", "[skills]\n")
     cfg_before = (project_dir / "grimoire.toml").read_text()
 

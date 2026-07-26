@@ -30,7 +30,7 @@ use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::StatusBadge;
-use crate::install::target::detect_clients;
+use crate::install::target::detect_clients_or_all;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 
@@ -249,7 +249,7 @@ fn resolve_scope(
     let registries = super::registries_for_scope(ctx, &scope);
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    let active = detect_clients(&scope.workspace, scope.scope);
+    let active = detect_clients_or_all(&scope.workspace, scope.scope);
     let show_deprecated = scope.options.show_deprecated;
     (registries, lock, state, scope.roots, active, show_deprecated)
 }
@@ -273,7 +273,7 @@ fn load_badges_best_effort(
     };
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    let active = detect_clients(&scope.workspace, scope.scope);
+    let active = detect_clients_or_all(&scope.workspace, scope.scope);
     (lock, state, scope.roots, active)
 }
 

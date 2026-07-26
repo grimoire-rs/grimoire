@@ -128,7 +128,6 @@ def test_mcp_install_refuses_untracked_member(
     and a different value is never replaced without --force."""
     runner = grim_at(project_dir)
     ref = _release_mcp(runner, project_dir, registry, unique_repo)
-    (project_dir / ".claude").mkdir()
     (project_dir / ".mcp.json").write_text(
         '{\n  "mcpServers": {\n    "grim-mcp": {"command": "user-owned"}\n  }\n}\n'
     )
@@ -158,7 +157,6 @@ def test_mcp_install_adopts_identical_member(
     semantically identical to what the install would write — adopt."""
     runner = grim_at(project_dir)
     ref = _release_mcp(runner, project_dir, registry, unique_repo)
-    (project_dir / ".claude").mkdir()
     write_config(project_dir)
     runner.json("add", "--no-install", ref)
     rows = runner.json("install")["items"]

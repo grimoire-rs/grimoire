@@ -47,6 +47,10 @@ def test_global_scope_is_independent_of_project(
         f'[rules]\nglobal-rule = "{ru.fq}"\n'
     )
     runner = GrimRunner(grim_binary, grim_home)
+    # Claude must be *detected* globally for the default target set to
+    # include it; without any marker grim resolves to the generic `agents`
+    # client (skills-only pool).
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
 
     lock_rows = runner.json("lock", "--global")["items"]
     assert lock_rows[0]["name"] == "global-rule"
@@ -96,6 +100,7 @@ def test_global_install_claude_skill_lands_in_home_dot_claude(
     )
     (grim_home / "grimoire.toml").write_text(f'[skills]\nmy-skill = "{sk.fq}"\n')
     runner = GrimRunner(grim_binary, grim_home)
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
 
     install_rows = runner.json("install", "--global")["items"]
@@ -125,6 +130,10 @@ def test_global_install_claude_rule_lands_in_home_dot_claude(
     )
     (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n')
     runner = GrimRunner(grim_binary, grim_home)
+    # Claude must be *detected* globally for the default target set to
+    # include it; without any marker grim resolves to the generic `agents`
+    # client (skills-only pool).
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
 
     install_rows = runner.json("install", "--global")["items"]
@@ -390,6 +399,9 @@ def test_global_claude_install_honors_claude_config_dir(
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config"
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    # `CLAUDE_CONFIG_DIR` replaces the whole `~/.claude` tree, detection
+    # included: the override dir must exist for Claude to be detected.
+    config_dir.mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
 
     install_rows = runner.json("install", "--global")["items"]
@@ -479,6 +491,9 @@ def test_global_uninstall_removes_files_from_env_override_dir(
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config-un"
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    # `CLAUDE_CONFIG_DIR` replaces the whole `~/.claude` tree, detection
+    # included: the override dir must exist for Claude to be detected.
+    config_dir.mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
     runner.json("install", "--global")
     assert (config_dir / "skills/env-un-skill/SKILL.md").is_file(), (
@@ -506,6 +521,10 @@ def test_global_empty_env_override_is_treated_as_unset(
     )
     (grim_home / "grimoire.toml").write_text(f'[skills]\nempty-env-skill = "{sk.fq}"\n')
     runner = GrimRunner(grim_binary, grim_home)
+    # Claude must be *detected* globally for the default target set to
+    # include it; without any marker grim resolves to the generic `agents`
+    # client (skills-only pool).
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
     runner.env["CLAUDE_CONFIG_DIR"] = ""
     runner.json("lock", "--global")
 
@@ -534,6 +553,9 @@ def test_global_update_rematerializes_into_env_override_dir(
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config-up"
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    # `CLAUDE_CONFIG_DIR` replaces the whole `~/.claude` tree, detection
+    # included: the override dir must exist for Claude to be detected.
+    config_dir.mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
     runner.json("install", "--global")
     installed = config_dir / "skills/env-up-skill/SKILL.md"

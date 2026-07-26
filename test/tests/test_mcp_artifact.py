@@ -150,7 +150,6 @@ def _release(runner, project_dir: Path, registry: str, unique_repo: str, body: s
 
 
 def _detect_all_clients(project_dir: Path) -> None:
-    (project_dir / ".claude").mkdir()
     (project_dir / ".opencode").mkdir()
     (project_dir / ".github").mkdir()
     (project_dir / ".github" / "copilot-instructions.md").write_text("# ci\n")
@@ -202,31 +201,31 @@ def test_install_registers_entries_in_every_client_config(
 
 
 def test_project_status_reports_installed_for_claude_mcp_without_claude_dir(
-    grim_at, project_dir: Path, registry: str, unique_repo: str
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """Project-scope sibling of the global regression
     (test_global_status_reports_installed_for_claude_mcp_without_claude_dir):
     ``.mcp.json`` (Claude's project MCP config) is a SIBLING of ``.claude/``,
     not something inside it — ``Vendor::detect`` checks only ``.claude/``."""
-    runner = grim_at(project_dir)
-    ref = _release(runner, project_dir, registry, unique_repo)
+    runner = grim_at(bare_project_dir)
+    ref = _release(runner, bare_project_dir, registry, unique_repo)
 
     # CRITICAL repro condition: another vendor IS detected (.codex/) so
     # detect_clients returns a non-empty set that excludes claude. No
     # .claude/ dir is ever created.
-    (project_dir / ".codex").mkdir()
-    write_config(project_dir)
+    (bare_project_dir / ".codex").mkdir()
+    write_config(bare_project_dir)
     runner.json("add", "--no-install", ref)
     rows = runner.json("install", "--client", "claude")["items"]
     assert rows[0]["status"] == "installed", rows
 
     # Sanity: write side is correct — fails only on the read side below.
-    claude_json = project_dir / ".mcp.json"
+    claude_json = bare_project_dir / ".mcp.json"
     assert claude_json.is_file()
     assert json.loads(claude_json.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
-    assert not (project_dir / ".claude").exists(), "install must not create .claude itself"
+    assert not (bare_project_dir / ".claude").exists(), "install must not create .claude itself"
 
-    state_text = (project_dir / ".grimoire" / "state.json").read_text()
+    state_text = (bare_project_dir / ".grimoire" / "state.json").read_text()
     assert "grim-mcp" in state_text and '"claude"' in state_text, (
         f"install-state record must carry the mcp entry: {state_text}"
     )
@@ -248,7 +247,6 @@ def test_reformatting_the_config_is_not_modified_but_a_value_change_is(
     `modified`, refuses install without --force, and --force restores it."""
     runner = grim_at(project_dir)
     ref = _release(runner, project_dir, registry, unique_repo)
-    (project_dir / ".claude").mkdir()  # detect Claude only
     write_config(project_dir)
     runner.json("add", ref)
     runner.json("install")
@@ -346,7 +344,6 @@ def test_install_mcp_refinement_fields_project_claude_and_opencode(
     ``timeout`` + ``cwd``; fields with no native target are dropped."""
     runner = grim_at(project_dir)
     ref = _release(runner, project_dir, registry, unique_repo, body=REFINED_DESCRIPTOR)
-    (project_dir / ".claude").mkdir()
     (project_dir / ".opencode").mkdir()
     write_config(project_dir)
     runner.json("add", ref)
@@ -683,6 +680,11 @@ def test_global_copilot_skips_env_ref_descriptors(
     from src.runner import GrimRunner
 
     runner = GrimRunner(grim_binary, grim_home)
+    # This test asserts on all three clients' global configs, so all three
+    # must be detected; an unmarked home resolves to the generic `agents`
+    # client, which has no MCP surface at all.
+    for marker in (".claude", ".config/opencode/skills", ".copilot/skills"):
+        (runner.home / marker).mkdir(parents=True, exist_ok=True)
     descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(ENV_DESCRIPTOR)
@@ -901,6 +903,8 @@ def test_global_copilot_registers_env_free_descriptors(
     from src.runner import GrimRunner
 
     runner = GrimRunner(grim_binary, grim_home)
+    # Copilot must be detected globally for the default target set.
+    (runner.home / ".copilot" / "skills").mkdir(parents=True, exist_ok=True)
     descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(DESCRIPTOR)

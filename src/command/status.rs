@@ -45,7 +45,7 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
 use crate::install::path_anchor::{AnchorRoots, Containment};
-use crate::install::target::{InstallTarget, detect_clients};
+use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -146,7 +146,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // `desired` below ("which clients does the project's config target"):
     // `active` degrades gracefully (never removed-client-lies-missing),
     // `desired` is compared straight against the recorded set for drift.
-    let active = detect_clients(&scope.workspace, scope.scope);
+    let active = detect_clients_or_all(&scope.workspace, scope.scope);
 
     // The project's configured client target — same seam `grim context`
     // reports (`InstallTarget::parse` over `[options].clients`, no
@@ -564,6 +564,31 @@ fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
 ///
 /// `desired: None` means autodetect — no explicit target to diff against,
 /// so both vectors come back empty rather than keying off live detection.
+///
+/// This leaves the autodetect orphan hole open: a user who uninstalls a
+/// client is never told about the files grim left behind. ADR
+/// `adr_vendor_config_and_selection.md` D5 decided to close it by reporting
+/// `recorded − detected` as `clients_extra`. **That decision was
+/// implemented and reversed** — `detect_clients` is not a sound oracle for
+/// "grim installed here", in either direction:
+///
+/// - *False positives.* At project scope five vendors materialize skills
+///   outside the directory their own `detect` checks — copilot →
+///   `.github/skills` vs `.github/instructions`, and codex/gemini/zed/amp →
+///   `.agents/skills` vs `.codex`/`.gemini`/`.zed`/`.amp` (those four at
+///   global scope too; copilot is contained globally, where its skills root
+///   *is* its marker). A healthy first install therefore reports phantom
+///   orphans on every row.
+/// - *False negatives.* Claude and OpenCode write MCP/config registration
+///   outside their marker dir (`<ws>/.mcp.json`, `$HOME/.claude.json`,
+///   `<ws>/opencode.json`) **and** `detect` reads those same files, so
+///   grim's own leftover output keeps the client detected and its genuine
+///   orphans are never flagged.
+///
+/// A real fix needs a path-level probe ("a recorded output no surviving
+/// client wants"), not a client-level set difference — and it must respect
+/// pool sharing (`prune.rs::shared_by_surviving_sibling`), since one
+/// `.agents/skills` tree backs four vendors at once.
 fn client_drift(desired: Option<&[ClientTarget]>, recorded: &[ClientOutput]) -> (Vec<String>, Vec<String>) {
     let Some(desired) = desired else {
         return (Vec::new(), Vec::new());
@@ -967,6 +992,11 @@ mod tests {
 
     /// Autodetect (`desired: None`) reports no drift — there is no explicit
     /// target to diff the recorded outputs against.
+    ///
+    /// This is a *known hole*, not a desirable property: it is why an
+    /// autodetect user never hears about orphaned files. Closing it by
+    /// substituting `detect_clients()` was tried and rejected — see the
+    /// `client_drift` doc comment for why detection is an unsound oracle.
     #[test]
     fn client_drift_none_desired_is_no_drift() {
         let recorded = [client_output("claude"), client_output("opencode")];

@@ -64,6 +64,19 @@ defaults are never written — they keep floating with the binary).
 `--global` creates the global config at `$GRIM_HOME/grimoire.toml`
 instead of a project-local one.
 
+`init` also seeds `[options].clients` with the
+[clients](./concepts.md#clients) it detects for the scope, so the selection
+is recorded once rather than re-derived on every run. Detecting nothing
+writes no `[options]` table at all — the scope stays on autodetect and the
+generic-client fallback remains a per-run decision.
+
+An explicitly set `[options].clients` is what turns on two behaviours that
+autodetect leaves off, so a seeded config gets both from the first run:
+[`grim status`](#status) reports `clients_missing` / `clients_extra` against
+it, and [`grim update`](#update) reaps the output of a client you later
+remove from the list. Neither fires while the key is absent. Edit or unset
+the key (`grim config unset options.clients`) to go back to autodetect.
+
 ```sh
 grim init --registry ghcr.io/acme
 ```
@@ -207,6 +220,16 @@ members) is materialized; the rest of the lock is left for
 useful when adding several artifacts before one `grim install` pass, or when
 choosing clients explicitly with [`grim install --client`](#install).
 
+Install-on-add resolves its client targets exactly like
+[`grim install`](#install), including the generic-client fallback — so
+`grim add` of a rule, agent, or MCP server in a workspace where no client is
+detected exits **78**: the generic `agents` client renders skills only, and
+there is nowhere to put what you just asked for. The declaration and the lock
+entry are still written, so selecting a client (`[options].clients`, or
+`grim install --client <name>`) completes the install without re-adding.
+`grim add` has no `--client` flag of its own; use `--no-install` when you mean
+to declare now and choose clients later.
+
 Install-on-add honours the same integrity gates as [`grim install`](#install):
 a previously installed artifact that was modified locally, or a pre-existing
 destination grim has no record of writing, refuses with exit 65 (under
@@ -319,13 +342,18 @@ already locks what it declares.
 ## grim install {#install}
 
 Materializes every locked artifact into your AI clients' configuration
-directories. `--client <list>` selects AI clients (comma-separated; any of the
-ten supported clients — see the [client compatibility matrix](./clients.md#matrix)),
+directories. `--client <list>` selects AI clients (comma-separated; any
+supported client — see the [client compatibility matrix](./clients.md#matrix)),
 overriding the config `clients` option. When
 neither selects a client, the **detected** clients for the scope are
-targeted — every client whose vendor directory or marker is present —
-falling back to all clients when none are detected. `--force` overwrites a
-locally modified artifact instead of refusing it.
+targeted — every client whose vendor directory or marker is present. When
+nothing is detected, the generic `agents` client is targeted instead: one
+copy into the cross-vendor `.agents/skills` pool, rather than a copy into
+every vendor directory grim knows about. That generic client renders skills
+only, so an artifact set of nothing but rules, agents, and MCP servers has
+nowhere to go — grim then exits **78** telling you to name a client with
+`--client`. `--force` overwrites a locally modified artifact instead of
+refusing it.
 
 Install never clobbers files it did not create: a destination that already
 exists on disk **without an install record** — a hand-authored skill

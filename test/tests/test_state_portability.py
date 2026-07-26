@@ -116,8 +116,8 @@ def test_no_collision_two_projects_share_grim_home(
     # Two sibling workspace directories.
     ws_a = tmp_path / "project-a"
     ws_b = tmp_path / "project-b"
-    ws_a.mkdir()
-    ws_b.mkdir()
+    (ws_a / ".claude").mkdir(parents=True)
+    (ws_b / ".claude").mkdir(parents=True)
 
     runner_a = GrimRunner(grim_binary, grim_home, cwd=ws_a)
     runner_b = GrimRunner(grim_binary, grim_home, cwd=ws_b)
@@ -178,7 +178,7 @@ def test_status_resolves_after_project_dir_move(
     art = _rule_artifact(unique_repo)
 
     orig = tmp_path / "original-workspace"
-    orig.mkdir()
+    (orig / ".claude").mkdir(parents=True)
 
     runner_orig = GrimRunner(grim_binary, grim_home, cwd=orig)
     write_config(orig, rules={"rust-style": art.fq})
@@ -653,7 +653,7 @@ def test_no_collision_reaps_legacy_sha_file_on_install(
     art = _rule_artifact(unique_repo)
 
     ws = tmp_path / "legacy-workspace"
-    ws.mkdir()
+    (ws / ".claude").mkdir(parents=True)
 
     # Write a real grimoire.toml so the config exists on disk and the
     # canonicalized-path formula used by the legacy writer and the reap step

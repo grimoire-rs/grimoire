@@ -122,8 +122,9 @@ def test_project_install_warns_on_global_scope_shadow(
     )
     runner = grim_at(project_dir)
 
-    # Install at global scope first (isolated $HOME; detection falls back
-    # to all clients, so the global record covers claude).
+    # Install at global scope first; the isolated $HOME needs a detected
+    # Claude for the global record to overlap the project one below.
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
     runner.run("add", "--global", sk.fq)
 
     # Now the same (kind, name) at project scope.

@@ -75,6 +75,9 @@ CLIENT_VALUE_NAMES = [
     "gemini",
     "zed",
     "amp",
+    # The vendor-neutral generic client — a target, not a product. Additive
+    # under Principle 9: `options.clients` only ever gains accepted values.
+    "agents",
 ]
 
 

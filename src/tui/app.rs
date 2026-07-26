@@ -41,7 +41,7 @@ use crate::install::installer::{InstallIntent, InstallOutcome, install_and_persi
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::progress::{InstallProgress, SilentProgress};
-use crate::install::target::{InstallTarget, detect_clients};
+use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -450,7 +450,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 // fresher than any previous network fetch in most sessions.
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-                let active = detect_clients(&ctx.workspace, ctx.scope);
+                let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
                 // Direct declarations decide the via-bundle badge; a declaration-
                 // matched bundle snapshot lets a stale-dropped member still derive
                 // via the snapshot. A member also declared standalone shows plain
@@ -842,7 +842,7 @@ fn drain_bundle_member_checks(
                 // the catalog even when the bundle itself has no lock snapshot.
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-                let active = detect_clients(&ctx.workspace, ctx.scope);
+                let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
                 let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
                     .map(|(_, _, set)| {
                         let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
@@ -912,7 +912,7 @@ fn drain_bundle_member_checks(
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
         load_scope_for_badges(ctx);
-    let active = detect_clients(&ctx.workspace, ctx.scope);
+    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
         state: &install_state,
@@ -981,7 +981,7 @@ async fn load_into(ctx: &TuiContext, state: &mut TuiState) {
 /// a failed refresh keeps the previously-loaded rows visible.
 async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     let (lock, install_state, config, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
-    let active = detect_clients(&ctx.workspace, ctx.scope);
+    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     // The simpler catalog_service::BadgeContext (4 fields) drives the per-row
     // StatusBadge derivation inside load_catalog itself.
     let catalog_badges = catalog_service::BadgeContext {
@@ -1401,7 +1401,7 @@ fn snapshot_declared_repos(
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
         load_scope_for_badges(ctx);
-    let active = detect_clients(&ctx.workspace, ctx.scope);
+    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
         state: &install_state,
@@ -4497,7 +4497,7 @@ mod tests {
     fn member_badge(ctx: &TuiContext, registry: &str, repository: &str) -> ArtifactState {
         let lock = lock_io::load(&ctx.lock_path).ok();
         let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-        let active = detect_clients(&ctx.workspace, ctx.scope);
+        let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
         let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
             .map(|(_, _, set)| {
                 let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);

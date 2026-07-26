@@ -189,6 +189,11 @@ minor release (see [stability][stability-unstable]).
 | [Zed][zed-docs] | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 
+The vendor-neutral `agents` client is absent from the table because it has no
+MCP surface at all: there is no cross-vendor standard MCP config location, so
+it declines the kind — grim warns, skips, and writes nothing. It is the one
+target with no row here.
+
 Codex is the one **TOML** target — every other client above writes
 JSON/JSONC — so its splice runs through a separate span-preserving
 engine built on [`toml_edit`][toml-edit-crate] instead of grim's own

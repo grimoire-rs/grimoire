@@ -109,6 +109,25 @@ pub enum InstallErrorKind {
     #[error("unsupported client target '{0}'; supported clients are {list}", list = supported_clients_list())]
     UnsupportedClient(String),
 
+    /// No AI client was detected, so the install fell back to the generic
+    /// `agents` client — and nothing in the artifact set can install into
+    /// it. The generic client renders skills only; rules, agents, and MCP
+    /// have no vendor-neutral surface at all. Selection failure, not data
+    /// failure: it classifies to the same exit 78 as
+    /// [`InstallErrorKind::UnsupportedClient`].
+    ///
+    /// The message names **both** knobs deliberately: `grim install` and
+    /// `grim update` take `--client`, but `grim add` reaches this error
+    /// through the same install seam without having that flag, so pointing
+    /// only at `--client` would be unactionable there.
+    #[error(
+        "no AI client detected and nothing here installs into the generic 'agents' client (it renders skills only; \
+         rules, agents, and MCP have no vendor-neutral surface); select a client with --client or \
+         `[options].clients` — supported clients are {list}",
+        list = supported_clients_list()
+    )]
+    NoInstallableClient,
+
     /// A local path source failed to pack at install time: it is missing,
     /// fails validation, or is unreadable. Carries the packing
     /// [`crate::skill::SkillError`] structurally (boxed to keep the kind

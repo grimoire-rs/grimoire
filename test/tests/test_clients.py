@@ -17,6 +17,14 @@ from src.assertions import assert_not_exists, assert_path_exists
 from src.helpers import make_artifact
 
 
+@pytest.fixture()
+def project_dir(bare_project_dir: Path) -> Path:
+    """Override: this suite is *about* client selection, so every workspace
+    starts with no vendor marker at all and each test creates exactly the
+    markers it means to have detected."""
+    return bare_project_dir
+
+
 def _build_toml(
     project_dir: Path,
     skill_ref: str,
@@ -99,11 +107,17 @@ def test_no_clients_config_installs_to_detected_clients(
     assert_not_exists(project_dir / ".claude/rules/rust-style.md")
 
 
-def test_no_detected_clients_falls_back_to_all_clients(
+def test_no_detected_clients_falls_back_to_the_generic_agents_client(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """No ``--client``, no ``[options].clients``, and no vendor dirs present
-    falls back to **all** clients — no client is silently preferred."""
+    targets the single generic ``agents`` client — one copy into the
+    cross-vendor pool, not a copy into every vendor directory grim knows.
+
+    The old behaviour installed into all ten clients, and the ten vendor
+    directories it created were exactly what made the *next* run "detect"
+    all ten: a fallback that manufactured its own detection signal.
+    """
     sk, ru = _publish_skill_and_rule(unique_repo)
     _build_toml(project_dir, sk.fq, ru.fq, clients=None)
 
@@ -112,18 +126,161 @@ def test_no_detected_clients_falls_back_to_all_clients(
     rows = runner.json("install")["items"]
     assert rows, "install must return a non-empty result set"
 
-    # Every client layout received the artifacts.
-    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
-    assert_path_exists(project_dir / ".claude/rules/rust-style.md")
-    assert_path_exists(project_dir / ".opencode/skills/code-review/SKILL.md")
-    assert_path_exists(project_dir / ".opencode/rules/rust-style.md")
-    assert_path_exists(project_dir / ".github/skills/code-review/SKILL.md")
-    assert_path_exists(project_dir / ".github/instructions/rust-style.instructions.md")
-    # C3.9 leftover: Codex is the 4th ALL-fallback client — its skill lands
-    # at the cross-vendor `.agents/skills` standard (the rule is declined,
-    # same as the other Codex tests in this file).
+    # The skill lands once, in the cross-vendor pool.
     assert_path_exists(project_dir / ".agents/skills/code-review/SKILL.md")
-    assert_not_exists(project_dir / ".codex/rules/rust-style.md")
+
+    # No vendor directory was created for any product client.
+    for vendor_dir in (
+        ".claude",
+        ".opencode",
+        ".github",
+        ".codex",
+        ".cursor",
+        ".kiro",
+        ".junie",
+        ".gemini",
+        ".zed",
+        ".amp",
+    ):
+        assert_not_exists(project_dir / vendor_dir)
+
+    # The rule is declined by the generic client (no vendor-neutral rule
+    # surface exists): warn, skip, zero outputs — never a hard error, because
+    # the skill in the same set did install.
+    assert_not_exists(project_dir / ".agents/rules/rust-style.md")
+
+    # Only `agents` is recorded, and the pool directory it just wrote must
+    # not change the *next* run's resolution.
+    outputs = {o["client"] for row in runner.json("status")["items"] for o in row["outputs"]}
+    assert outputs == {"agents"}, f"only the generic client is recorded; got {outputs}"
+    assert runner.json("context")["clients"] == ["agents"]
+    second = runner.json("install")["items"]
+    assert {r["name"]: r["status"] for r in second} == {
+        "code-review": "unchanged",
+        "rust-style": "skipped",
+    }, second
+    for vendor_dir in (".claude", ".opencode", ".github", ".codex"):
+        assert_not_exists(project_dir / vendor_dir)
+
+
+def test_undetected_workspace_with_no_installable_kind_exits_78(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The residual 78: the generic fallback renders skills only, so an
+    artifact set of nothing but a rule has nowhere at all to go. That is the
+    one case where grim genuinely cannot act, and it must say so instead of
+    exiting 0 having written nothing."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    result = runner.run("install", check=False)
+    assert result.returncode == 78, (
+        f"expected EX_CONFIG (78), got {result.returncode}: {result.stderr}"
+    )
+    assert "--client" in result.stderr, (
+        f"the message must name --client so the user can act: {result.stderr}"
+    )
+    assert_not_exists(project_dir / ".claude")
+    assert_not_exists(project_dir / ".agents")
+
+
+def test_generic_client_output_survives_a_real_client_appearing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression: the generic client is never *detected*, so reconciling its
+    recorded output against detection would erase it. Install on a bare
+    workspace, then let a real client appear — `status` must still report the
+    skill installed with its `agents` output, not `missing` with `outputs: []`.
+    The file is on disk and grim put it there."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+
+    pooled = project_dir / ".agents/skills/code-review/SKILL.md"
+    assert_path_exists(pooled)
+
+    # A real client shows up afterwards — detection now answers `[claude]`.
+    (project_dir / ".claude").mkdir()
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
+    assert row["state"] == "installed", f"the pooled skill is still on disk: {row}"
+    assert [o["client"] for o in row["outputs"]] == ["agents"], row
+    assert pooled.is_file()
+
+
+def test_undetected_add_of_a_rule_exits_78_but_keeps_the_declaration(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim add` installs what it declares through the same seam, so it hits
+    the same 78 — and it has no `--client` flag, which is why the message
+    names `[options].clients` too. The declaration and the lock entry must
+    survive so selecting a client finishes the job without re-adding."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    runner = grim_at(project_dir)
+    (project_dir / "grimoire.toml").write_text("[rules]\n")
+
+    result = runner.run("add", ru.fq, check=False)
+    assert result.returncode == 78, f"got {result.returncode}: {result.stderr}"
+    assert "--client" in result.stderr and "[options].clients" in result.stderr, (
+        f"`add` has no --client flag, so the message must name the config key too: {result.stderr}"
+    )
+
+    # Declared and locked despite the refusal — the recovery path is to pick
+    # a client, not to re-add.
+    assert "rust-style" in (project_dir / "grimoire.toml").read_text()
+    assert "rust-style" in (project_dir / "grimoire.lock").read_text()
+    rows = runner.json("install", "--client", "claude")["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert_path_exists(project_dir / ".claude/rules/rust-style.md")
+
+
+def test_undetected_dev_install_of_a_rule_exits_78(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    """The dev-install path builds a synthetic single-entry lock and runs the
+    same seam, so it refuses identically — no network, no registry."""
+    src = tmp_path / "rust-style.md"
+    src.write_text("---\npaths: ['**/*.rs']\n---\n# Rust Style\n")
+    (project_dir / "grimoire.toml").write_text("[rules]\n")
+    runner = grim_at(project_dir)
+
+    result = runner.run("install", str(src), "--kind", "rule", check=False)
+    assert result.returncode == 78, f"got {result.returncode}: {result.stderr}"
+    assert_not_exists(project_dir / ".agents")
+
+
+def test_explicit_agents_client_with_only_a_rule_still_exits_zero(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``--client agents`` is a choice, not a fallback: the rule is declined
+    with a warning exactly as Codex declines rules, and the exit code stays 0.
+    The residual 78 fires only when grim picked the generic client itself."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    result = runner.run("install", "--client", "agents", check=False)
+    assert result.returncode == 0, f"explicit selection is never refused: {result.stderr}"
 
 
 def test_config_clients_array_installs_to_all_declared_clients(

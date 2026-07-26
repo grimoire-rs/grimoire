@@ -13,7 +13,6 @@ def _project(project_dir: Path, registry: str) -> None:
         f'[[registries]]\nalias = "test"\noci = "{registry}"\ndefault = true\n\n'
         "[skills]\n\n[rules]\n"
     )
-    (project_dir / ".claude").mkdir()
 
 
 def test_context_reports_scope_paths_clients_registries(

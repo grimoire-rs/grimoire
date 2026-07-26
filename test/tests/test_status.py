@@ -190,7 +190,19 @@ def test_status_no_client_drift_reported_without_explicit_clients(
     drift sourced from live detection disagreeing with what was recorded —
     a client's marker directory disappearing (e.g. the user deletes
     `.opencode/`) is a detection-environment change, not a config change,
-    and must not surface as `clients_missing`/`clients_extra`."""
+    and must not surface as `clients_missing`/`clients_extra`.
+
+    This leaves the ADR-D5 orphan hole open: an autodetect user who
+    uninstalls a client is never told about the files grim left behind.
+    Reporting `recorded - detected` as `clients_extra` was implemented and
+    reverted — detection is unsound in both directions. False positives: at
+    project scope copilot installs skills to `.github/skills` but detects on
+    `.github/instructions`, and codex/gemini/zed/amp install to
+    `.agents/skills` but detect on their own dirs, so a healthy first
+    install reports phantom orphans. False negatives: claude and opencode
+    detect on the very MCP/config files grim writes outside their marker
+    dir, so their real orphans keep the client "detected". See
+    `client_drift` in `src/command/status.rs`."""
     repo = f"{unique_repo}/s"
     make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
     write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})  # no [options]

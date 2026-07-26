@@ -39,11 +39,14 @@ code-reviewer = "ghcr.io/acme/code-reviewer:1"
 
 The `[[registries]]` entry with `default = true` sets the primary registry short references expand against; `clients` selects which
 [AI clients](./concepts.md#clients) `grim install` and `grim update` materialize
-into. It accepts a TOML array of client names — any of the ten supported
-clients (see the [client compatibility matrix](./clients.md#matrix)); when
+into. It accepts a TOML array of client names — any supported
+client (see the [client compatibility matrix](./clients.md#matrix)); when
 absent, the **detected** clients for the scope are targeted — every client
-whose vendor directory or marker is present — falling back to all clients when
-none are detected. Unknown keys are rejected on parse, so a typo surfaces
+whose vendor directory or marker is present — falling back to the generic
+`agents` client when none are detected. [`grim init`](./commands.md#init)
+seeds this key with what it detects, so a workspace configured through
+`init` records its client set once instead of re-deriving it every run.
+Unknown keys are rejected on parse, so a typo surfaces
 immediately rather than silently doing nothing. A hand-authored entry
 outside the closed set, or a repeated entry, is rejected at config
 **load** — exit 78 (`EX_CONFIG`), the same class of error as an invalid

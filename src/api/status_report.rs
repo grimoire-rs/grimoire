@@ -30,7 +30,9 @@
 //! project's configured client set). When `[options].clients` is unset
 //! (autodetect), there is no explicit target to diff against, so both
 //! fields stay `[]` on every item rather than diffing against live client
-//! detection.
+//! detection — which is not a sound oracle for "grim installed here" in
+//! either direction (see [`crate::command::status`]'s `client_drift` for
+//! the vendor-by-vendor evidence and the reversal of ADR D5).
 //!
 //! `checked` (top-level, sibling of `items` — same envelope pattern as
 //! `publish`'s `announce`) is `true` only when `--check` was passed **and**

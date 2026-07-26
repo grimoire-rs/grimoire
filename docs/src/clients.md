@@ -46,10 +46,18 @@ Legend:
 | [Gemini] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"></path></svg> | ✓ | ✗ | ✓ | ◐ |
 | [Zed] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z"/></svg> | ✓ | ✗ | ✗ | ◐ |
 | [Amp] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg> | ✓ | ✗ | ✗ | ◐ |
+| agents | ✓ | ✗ | ✗ | ✗ |
 
 </div>
 
 Bundles decompose into their member kinds and are not a column.
+
+`agents` is not a product — it is the vendor-neutral target. Selecting it
+installs one copy of each skill into the cross-vendor `.agents/skills` pool
+that Codex, Gemini, Zed, and Amp all scan, rather than into any one client's
+directory. Rules, agents, and MCP have no vendor-neutral format, so it declines
+all three. It is never detected, only selected: request it explicitly with
+`--client agents` or in `[options].clients`.
 
 ## Known gaps {#known-gaps}
 

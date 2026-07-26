@@ -56,16 +56,50 @@ def test_init_explicit_registry_beats_env(grim_at, project_dir: Path) -> None:
     assert "env.example" not in body
 
 
-def test_init_without_any_registry_omits_options(grim_at, project_dir: Path) -> None:
+def test_init_without_any_registry_never_snapshots_the_fallback(
+    grim_at, project_dir: Path
+) -> None:
     """No --registry, no env: the built-in fallback registry is never
-    snapshotted — ``[options]`` stays absent so the default keeps floating
-    with the binary."""
+    snapshotted, so the default keeps floating with the binary."""
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
     runner.plain("init", check=False)
     body = (project_dir / "grimoire.toml").read_text()
-    assert "[options]" not in body
+    assert "[[registries]]" not in body
     assert "default_registry" not in body
+
+
+def test_init_seeds_options_clients_from_detection(
+    grim_at, bare_project_dir: Path
+) -> None:
+    """``init`` records the clients it detects, so the selection is decided
+    once at the moment the user asked for a config file rather than
+    re-derived on every later run. Started bare and marked explicitly, so
+    the expected value comes entirely from this test body."""
+    (bare_project_dir / ".claude").mkdir()
+    (bare_project_dir / ".opencode").mkdir()
+    runner = grim_at(bare_project_dir)
+    runner.plain("init", check=False)
+    body = (bare_project_dir / "grimoire.toml").read_text()
+    assert "[options]" in body
+    # Written in ClientTarget::ALL order, not the order they were created.
+    assert 'clients = ["claude", "opencode"]' in body, body
+    assert runner.json("context")["clients"] == ["claude", "opencode"]
+
+
+def test_init_writes_no_client_set_when_nothing_is_detected(
+    grim_at, bare_project_dir: Path
+) -> None:
+    """An undetected workspace stays on autodetect: no ``[options]`` table at
+    all. The generic-client fallback must never be persisted — it is
+    recomputed each run so a workspace that later gains a real client is not
+    stuck writing to the pool forever."""
+    runner = grim_at(bare_project_dir)
+    runner.plain("init", check=False)
+    body = (bare_project_dir / "grimoire.toml").read_text()
+    assert "[options]" not in body
+    assert "agents" not in body
+    assert runner.json("context")["clients"] == ["agents"]
 
 
 def test_init_refuses_existing_config_exit_64(

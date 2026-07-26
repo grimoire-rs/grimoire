@@ -66,7 +66,6 @@ def test_install_materializes_path_skill_offline(
     grim_at, project_dir: Path
 ) -> None:
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -84,7 +83,6 @@ def test_path_rule_with_support_dir(grim_at, project_dir: Path) -> None:
         "---\npaths: ['**/*.rs']\n---\n# Style\nsee ./house-style/x.md\n",
     )
     _write(project_dir / "rules" / "house-style" / "x.md", "# extra\n")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "rules", "house-style", "./rules/house-style.md")
 
     runner = _offline(grim_at(project_dir))
@@ -100,7 +98,6 @@ def test_path_agent_via_kind_table(grim_at, project_dir: Path) -> None:
         project_dir / "agents" / "reviewer.md",
         "---\nname: reviewer\ndescription: Reviews.\n---\nYou review.\n",
     )
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "agents", "reviewer", "./agents/reviewer.md")
 
     runner = _offline(grim_at(project_dir))
@@ -113,7 +110,6 @@ def test_source_edit_flags_outdated_and_update_rerenders(
     grim_at, project_dir: Path
 ) -> None:
     skill = _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -142,7 +138,6 @@ def test_update_unchanged_source_reports_unchanged(
     grim_at, project_dir: Path
 ) -> None:
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -239,7 +234,6 @@ def test_add_path_from_subdir_writes_config_relative(
     grim_at, project_dir: Path
 ) -> None:
     _skill(project_dir, "quick-notes")
-    (project_dir / ".claude").mkdir()
     _write(project_dir / "grimoire.toml", "[skills]\n")
     sub = project_dir / "skills" / "quick-notes"
 
@@ -268,7 +262,6 @@ def test_add_path_conflict_with_registry_binding_is_64(
 
 def test_remove_and_uninstall_path_dep(grim_at, project_dir: Path) -> None:
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -286,7 +279,6 @@ def test_path_dep_installs_into_all_detected_clients(
     # One local source fans out into every detected vendor's project dir —
     # the multi-vendor render engine sits downstream of the source branch.
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     (project_dir / ".opencode").mkdir()
     _write(project_dir / ".github" / "copilot-instructions.md", "# ci\n")
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
@@ -319,6 +311,10 @@ def test_global_scope_path_dep(grim_at, grim_home: Path, tmp_path: Path) -> None
     _write(grim_home / "grimoire.toml", f'[skills]\nmy-skill = "{shared.as_posix()}"\n')
 
     runner = _offline(grim_at(tmp_path))
+    # The three vendors this test asserts on must be *detected* globally;
+    # an unmarked home resolves to the generic `agents` client instead.
+    for marker in (".claude", ".config/opencode/skills", ".copilot/skills"):
+        (runner.home / marker).mkdir(parents=True, exist_ok=True)
     result = runner.run("--global", "lock")
     assert "absolute path source" not in result.stderr
     runner.run("--global", "install")
@@ -338,7 +334,6 @@ def test_declared_install_state_record_has_no_dev_marker(
     # omitted from the wire when false (`skip_serializing_if`), so absence
     # counts as `false` too.
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -360,7 +355,6 @@ def test_bare_install_refuses_when_source_content_drifted_since_lock(
     # wrote its pin — never silently install stale (or worse, mismatched)
     # content.
     skill = _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -381,7 +375,6 @@ def test_bare_install_refuses_when_source_missing(
     # F5: a bare `grim install` must fail-closed with exit 65 when the
     # locked path source no longer exists at all.
     skill = _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -401,7 +394,6 @@ def test_declared_path_status_flags_deleted_source_as_problem(
     # as drift (outdated), mirroring the dev arm. Read-only status stays
     # exit-0 (state is data).
     skill = _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -435,7 +427,6 @@ def test_symlinked_out_of_tree_secret_never_installed(
 
     skill = _skill(project_dir, "my-skill")
     (skill / "leak.txt").symlink_to(secret)
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))
@@ -472,7 +463,6 @@ def test_local_bundle_lock_writes_path_hash_entry_and_installs_members(
     )
     _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
     _config(project_dir, "bundles", "x", "./bundles/x.toml")
-    (project_dir / ".claude").mkdir()
 
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -569,7 +559,6 @@ def test_local_bundle_traversal_member_name_rejected_65(
         '[skills]\n"../../evil" = "ghcr.io/acme/code-review:1"\n',
     )
     _config(project_dir, "bundles", "x", "./bundles/x.toml")
-    (project_dir / ".claude").mkdir()
 
     runner = _offline(grim_at(project_dir))
     result = runner.run("lock", check=False)
@@ -603,7 +592,6 @@ def test_local_bundle_offline_reinstall_is_network_free(
     )
     _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
     _config(project_dir, "bundles", "x", "./bundles/x.toml")
-    (project_dir / ".claude").mkdir()
 
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -694,7 +682,6 @@ def test_remove_local_bundle_evicts_member_from_lock_and_install_does_not_resurr
     )
     _write(project_dir / "bundles" / "x.toml", f'[skills]\ncode-review = "{sk.fq}"\n')
     _config(project_dir, "bundles", "x", "./bundles/x.toml")
-    (project_dir / ".claude").mkdir()
 
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -808,7 +795,6 @@ def test_update_named_path_entry_is_not_rejected_as_undeclared(
     # (the `has_path_entry` guard already exists) — coverage, not proven
     # regression, until run.
     _skill(project_dir, "my-skill")
-    (project_dir / ".claude").mkdir()
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 
     runner = _offline(grim_at(project_dir))

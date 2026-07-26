@@ -314,17 +314,19 @@ fn resolve_registries_for_tui(ctx: &Context, scope: &scope_resolution::ResolvedS
 /// the **same** resolution the install / update path uses:
 /// [`InstallTarget::parse`] with no `--client` flag and the config
 /// `[options].clients` as the default. That folds in detection (empty
-/// config ⇒ detected clients for the scope, falling back to all clients),
-/// so the status line never shows a target set that diverges from what an
-/// install would actually write to.
+/// config ⇒ detected clients for the scope, falling back to the generic
+/// `agents` client when nothing is detected), so the status line never
+/// shows a target set that diverges from what an install would actually
+/// write to.
 ///
 /// The display is best-effort: an unparseable config `clients` entry makes
 /// `parse` error (the install path surfaces that hard error to the user),
-/// so here it degrades to the detected set rather than failing the TUI.
+/// so here it degrades to the permissive detected set rather than failing
+/// the TUI.
 fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clients: &[String]) -> Vec<ClientTarget> {
     match crate::install::target::InstallTarget::parse(workspace, scope, &[], config_clients) {
         Ok(target) => target.clients().to_vec(),
-        Err(_) => crate::install::target::detect_clients(workspace, scope),
+        Err(_) => crate::install::target::detect_clients_or_all(workspace, scope),
     }
 }
 
@@ -454,14 +456,25 @@ mod tests {
     #[test]
     fn selected_clients_empty_config_uses_detection() {
         // An empty config `clients` list folds into detection (and the
-        // all-clients fallback when nothing is detected) — identical to the
-        // install path's behavior for an unconfigured scope.
+        // generic-client fallback when nothing is detected) — identical to
+        // the install path's behavior for an unconfigured scope.
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
         let display = selected_clients(tmp.path(), ConfigScope::Project, &[]);
-        let detected = crate::install::target::detect_clients(tmp.path(), ConfigScope::Project);
-        assert_eq!(display, detected);
-        // A bare workspace detects nothing ⇒ the shared all-clients fallback.
-        assert_eq!(display, ClientTarget::ALL.to_vec());
+        assert_eq!(
+            display,
+            crate::install::target::detect_clients(tmp.path(), ConfigScope::Project)
+        );
+        assert_eq!(display, vec![ClientTarget::OpenCode]);
+
+        // A bare workspace detects nothing ⇒ the generic client alone, which
+        // is exactly what an install would write to. The status line must NOT
+        // claim all eleven clients.
+        let bare = tempfile::tempdir().unwrap();
+        assert_eq!(
+            selected_clients(bare.path(), ConfigScope::Project, &[]),
+            vec![ClientTarget::Agents]
+        );
     }
 
     #[test]
@@ -474,7 +487,8 @@ mod tests {
         let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
         assert_eq!(
             display,
-            crate::install::target::detect_clients(tmp.path(), ConfigScope::Project)
+            crate::install::target::detect_clients_or_all(tmp.path(), ConfigScope::Project),
+            "an unparseable config degrades to the permissive detected set, never to an empty target"
         );
     }
 }
