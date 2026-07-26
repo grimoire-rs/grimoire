@@ -68,21 +68,7 @@ package whose version is new).
 Registry refs are kind-segmented: `ghcr.io/grimoire-rs/skills/<name>:<version>`,
 `ghcr.io/grimoire-rs/bundles/<name>:<version>` (per-entry `repository`
 overrides in `publish.toml` set the `skills/`/`bundles/` segment — see
-[Batch publishing with a manifest][batch-publish]).
-
-> **The segment is historical, not required.** It comes from grim's publish
-> default `{kind.subdir()}/{name}`, and it partitions the namespace so one
-> name could exist as two kinds. No catalog name collides across kinds, so it
-> buys nothing here — and it costs the short reference: `grim add grim-usage`
-> expands to `ghcr.io/grimoire-rs/grim-usage` and 404s, while a flat layout
-> would resolve. The kind itself always travels in the manifest annotation,
-> never in the path. New namespaces should publish flat
-> (`repository_prefix = "<org>"`) unless they genuinely need the partition —
-> see [Do you need the kind segment?][flat-layout]. These published paths are
-> frozen under Principle 9; going flat here means *adding* names, never
-> moving them.
-
-Semver releases
+[Batch publishing with a manifest][batch-publish]). Semver releases
 cascade (`1.2.3` also moves `1.2`, `1`, `latest`). Bundle members
 reference the floating major tag (`:0` while on the 0.x line, relative to
 the bundle's own deployment — `../skills/<name>:0`) and bundles publish
@@ -131,4 +117,3 @@ plain pushes to main.
 [agentskills.io specification]: https://agentskills.io/specification
 [docs site]: https://grimoire.rs/
 [batch-publish]: https://grimoire.rs/publishing.html#batch-publish
-[flat-layout]: https://grimoire.rs/publishing.html#batch-publish-flat
