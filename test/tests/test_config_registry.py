@@ -812,3 +812,94 @@ def test_dotted_alias_roundtrips_via_get(
     assert "ghcr.io/dotted" in result.stdout, (
         f"get must return the URL; got: {result.stdout!r}"
     )
+
+
+def test_load_registry_hostile_locator_exits_78_without_raw_escape(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Authored ``[[registries]]`` content is never echoed raw at exit 78.
+
+    Every ``RegistryInvalid`` arm quotes authored TOML back to stderr, so a
+    cloned repo whose ``grimoire.toml`` carries ESC + ``[2J`` in a locator, or
+    ``U+202E`` in an alias, would inject a terminal control sequence into the
+    terminal of anyone running a config-loading command. Both bytes are
+    authored via TOML backslash escapes because the parser rejects the raw
+    forms — the escapes are the genuine vector.
+    """
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    cfg = project_dir / "grimoire.toml"
+
+    # ESC reaches the locator through the both-sources-set arm.
+    cfg.write_text(
+        '[[registries]]\noci = "\\u001b[2Jghcr.io/x"\nindex = "https://y"\n'
+    )
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"an invalid authored registry entry must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\x1b" not in result.stderr, (
+        f"error must not echo the raw ESC byte to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    assert r"\u{1b}[2Jghcr.io/x" in result.stderr, (
+        f"error must still name the offending locator, escaped; "
+        f"got: {result.stderr!r}"
+    )
+
+    # U+202E is not a control character, so it survives the alias control-char
+    # guard and reaches the duplicate-alias arm intact.
+    cfg.write_text(
+        '[[registries]]\nalias = "a\\u202Eb"\noci = "ghcr.io/x"\n\n'
+        '[[registries]]\nalias = "a\\u202Eb"\noci = "ghcr.io/y"\n'
+    )
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"a duplicate authored alias must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\u202e" not in result.stderr, (
+        f"error must not echo the raw override to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    assert r"a\u{202e}b" in result.stderr, (
+        f"error must still name the offending alias, escaped; "
+        f"got: {result.stderr!r}"
+    )
+
+
+def test_registry_add_duplicate_hostile_alias_exits_64_without_raw_override(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """The duplicate-alias message escapes a bidi override in the alias.
+
+    ``U+202E`` is neither whitespace nor a control character, so no alias
+    guard rejects it — a script that feeds an attacker-influenced name to
+    ``registry add`` twice would otherwise reorder the caller's terminal
+    line. This is the set-time twin of the load-time ``duplicate alias``
+    message.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    alias = "a\u202eb"
+    runner.run("config", "registry", "add", alias, "--oci", "ghcr.io/acme")
+
+    result = runner.run(
+        "config", "registry", "add", alias, "--oci", "ghcr.io/acme-v2",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"duplicate registry add must exit 64 (UsageError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\u202e" not in result.stderr, (
+        f"error must not echo the raw override to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    assert r"a\u{202e}b" in result.stderr, (
+        f"error must still name the duplicated alias, escaped; "
+        f"got: {result.stderr!r}"
+    )

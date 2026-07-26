@@ -447,9 +447,13 @@ fn apply_set(
                         )));
                     }
                     if crate::config::registry_resolve::classify_index(value_str).is_none() {
+                        // Set-time twin of the load-time `index '{locator}'`
+                        // message: `reject_control_chars` above stops ESC, but
+                        // U+202E is not `char::is_control` and reaches here.
                         return Err(super::config_value(format!(
-                            "invalid index locator '{value_str}': must be an http(s):// base or a \
-                             git repository (git+…, ssh://, git@…, or ending in .git)"
+                            "invalid index locator '{}': must be an http(s):// base or a \
+                             git repository (git+…, ssh://, git@…, or ending in .git)",
+                            value_str.escape_debug()
                         )));
                     }
                     set_registry_field(registries, alias, |rc| rc.index = Some(value_str.to_string()));
@@ -629,12 +633,21 @@ fn clients_set_error(reason: crate::config::project_config::ClientsInvalid) -> a
             "options.clients: client name contains control characters: '{}'",
             c.escape_debug()
         )),
+        // Escaped like the arm above, and for a reason `reject_control_chars`
+        // does not cover: `char::is_control` is false for the bidi and
+        // zero-width format characters (U+202E, U+200B), so those pass the
+        // pre-check and reach this arm intact.
         ClientsInvalid::Unknown(c) => super::config_value(format!(
-            "invalid value for options.clients: '{c}'; valid values: {}",
+            "invalid value for options.clients: '{}'; valid values: {}",
+            c.escape_debug(),
             ClientTarget::VALUE_NAMES.join(", ")
         )),
+        // `Duplicate` can only carry a name from the closed set today —
+        // `check_clients` returns `Unknown` first — so the escape is a no-op
+        // here. Kept so reordering those two checks cannot reopen the hole.
         ClientsInvalid::Duplicate(c) => super::config_value(format!(
-            "options.clients: duplicate client '{c}'; each client may appear once"
+            "options.clients: duplicate client '{}'; each client may appear once",
+            c.escape_debug()
         )),
     }
 }
@@ -740,27 +753,33 @@ fn reject_control_chars(value: &str, key: &str) -> anyhow::Result<()> {
 /// Called in `run_registry_add` and `parse_key` so bad aliases exit 64 rather
 /// than reaching `validate_registries` → exit 78 (config error).
 fn validate_alias_format(alias: &str) -> anyhow::Result<()> {
+    // Escaped for the same reason as `validate_registries`, which this
+    // function mirrors: the control-character check is the LAST arm, so three
+    // messages quote the alias before anything has rejected a control byte in
+    // it — and `char::is_control` never matches U+202E at all, so the last arm
+    // would still echo a bidi override raw.
+    let shown = alias.escape_debug();
     if alias.is_empty() {
         return Err(super::config_usage("registry alias must not be empty".to_string()));
     }
     if alias != alias.trim() {
         return Err(super::config_usage(format!(
-            "registry alias '{alias}' must not have leading or trailing whitespace"
+            "registry alias '{shown}' must not have leading or trailing whitespace"
         )));
     }
     if alias.contains('/') {
         return Err(super::config_usage(format!(
-            "registry alias '{alias}' must not contain '/'"
+            "registry alias '{shown}' must not contain '/'"
         )));
     }
     if alias.contains('"') || alias.contains('\\') {
         return Err(super::config_usage(format!(
-            "registry alias '{alias}' must not contain '\"' or '\\'"
+            "registry alias '{shown}' must not contain '\"' or '\\'"
         )));
     }
     if alias.chars().any(char::is_control) {
         return Err(super::config_usage(format!(
-            "registry alias '{alias}' must not contain control characters"
+            "registry alias '{shown}' must not contain control characters"
         )));
     }
     Ok(())
@@ -931,9 +950,13 @@ fn run_registry_add(
     };
     reject_control_chars(locator, if is_index { "registry.index" } else { "registry.oci" })?;
     if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
+        // Escaped like its `apply_set` twin above: the control-char guard on
+        // the line before does not match the bidi and zero-width format
+        // characters, which reach this message intact.
         return Err(super::config_value(format!(
-            "invalid index locator '{locator}': must be an http(s):// base or a \
-             git repository (git+…, ssh://, git@…, or ending in .git)"
+            "invalid index locator '{}': must be an http(s):// base or a \
+             git repository (git+…, ssh://, git@…, or ending in .git)",
+            locator.escape_debug()
         )));
     }
 
@@ -945,9 +968,13 @@ fn run_registry_add(
     let mut registries = scope.registries.clone();
 
     if registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
+        // Set-time twin of the load-time `duplicate alias '{shown}'` message.
+        // `validate_alias_format` above does not stop U+202E — nothing rejects
+        // a format character in an alias — so it reaches this message intact.
+        let shown = alias.escape_debug();
         return Err(super::config_usage(format!(
-            "registry '{alias}' already exists; use `grim config set registry.{alias}.oci <ref>` \
-             to update or `grim config registry rm {alias}` to remove"
+            "registry '{shown}' already exists; use `grim config set registry.{shown}.oci <ref>` \
+             to update or `grim config registry rm {shown}` to remove"
         )));
     }
 
@@ -1582,6 +1609,57 @@ mod tests {
     }
 
     #[test]
+    fn validate_alias_format_never_echoes_a_raw_hostile_byte() {
+        // Mirror of `registries_messages_never_echo_raw_authored_bytes`: the
+        // control-char arm is LAST, so the whitespace and '/' arms quote the
+        // alias before anything rejects a control byte — and U+202E is not
+        // `char::is_control`, so it reaches every arm including the last.
+        // The whole message is pinned per case, not a substring: `shown` is one
+        // binding shared by every arm, so a substring check would stay green if
+        // a case fell through to a different arm than its comment claims.
+        for (alias, raw, expected) in [
+            (
+                " \u{1b}[2Jx",
+                '\u{1b}',
+                r"registry alias ' \u{1b}[2Jx' must not have leading or trailing whitespace",
+            ),
+            (
+                "/\u{1b}[2Jx",
+                '\u{1b}',
+                r"registry alias '/\u{1b}[2Jx' must not contain '/'",
+            ),
+            (
+                "a\u{1b}[2Jb",
+                '\u{1b}',
+                r"registry alias 'a\u{1b}[2Jb' must not contain control characters",
+            ),
+            // U+202E alone is accepted by every arm (it is neither whitespace
+            // nor a control character), so it only reaches a message paired
+            // with something that does fail — here, leading whitespace.
+            (
+                " a\u{202e}b",
+                '\u{202e}',
+                r"registry alias ' a\u{202e}b' must not have leading or trailing whitespace",
+            ),
+        ] {
+            let msg = validate_alias_format(alias)
+                .expect_err("a hostile alias must be rejected")
+                .to_string();
+            assert!(
+                !msg.contains(raw),
+                "message for {alias:?} must not embed the raw {raw:?} byte: {msg:?}"
+            );
+            assert_eq!(msg, expected, "wrong arm or wrong rendering for {alias:?}");
+        }
+
+        // An alias with nothing to escape keeps its exact shipped message.
+        let msg = validate_alias_format("a/b")
+            .expect_err("a slash alias must be rejected")
+            .to_string();
+        assert_eq!(msg, "registry alias 'a/b' must not contain '/'");
+    }
+
+    #[test]
     fn validate_alias_format_allows_dots() {
         // Dots are allowed in aliases (FIX 2 addressability).
         assert!(validate_alias_format("a.b").is_ok(), "alias with dot must be allowed");
@@ -1674,6 +1752,40 @@ mod tests {
             tui: TuiOptions::default(),
             vendors: Default::default(),
         }
+    }
+
+    #[test]
+    fn clients_set_unknown_value_never_echoes_a_raw_format_byte() {
+        // Set-time twin of the load-time escape. `reject_control_chars` runs
+        // first and catches ESC, but U+202E is not `char::is_control`, so a
+        // format character sails past it into the unknown-value arm — which
+        // quotes the segment straight back to stderr.
+        let key = ParsedKey::Fixed(ConfigKey::Clients);
+        let mut options = fresh_options();
+        let mut registries = vec![];
+        let msg = apply_set(&key, "cursor\u{202e}evil", &mut options, &mut registries)
+            .expect_err("an unknown client must be rejected")
+            .to_string();
+        assert!(
+            !msg.contains('\u{202e}'),
+            "message must not embed the raw override byte: {msg:?}"
+        );
+        assert!(
+            msg.contains(r"cursor\u{202e}evil"),
+            "the offending name must survive in escaped form: {msg:?}"
+        );
+
+        // A plain unknown name keeps its exact shipped message text.
+        let msg = apply_set(&key, "vscode", &mut options, &mut registries)
+            .expect_err("an unknown client must be rejected")
+            .to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "invalid value for options.clients: 'vscode'; valid values: {}",
+                ClientTarget::VALUE_NAMES.join(", ")
+            )
+        );
     }
 
     #[test]
