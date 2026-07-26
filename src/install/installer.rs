@@ -534,23 +534,67 @@ async fn install_one<M: ArtifactMaterializer>(
     let mut adopted = 0usize;
     if !force {
         for client in &materialize_set {
-            let tracked = recorded
-                .as_ref()
-                .is_some_and(|rec| rec.outputs.iter().any(|out| out.client == client.as_str()));
+            let dest = target.path_for(*client, kind, &artifact.name);
+            // "Tracked" must mean tracked **at this destination**, not merely
+            // "this client has a record somewhere". A layout move — a release
+            // that relocated a render layout, or the user flipping
+            // `[options.vendors.<name>].shared_skills` — makes the two
+            // diverge: the record proves grim wrote the OLD path, and says
+            // nothing about who wrote the new one. Comparing on client alone
+            // let a flip silently `remove_path` a hand-authored file at the
+            // destination, with no refusal and no `--force` needed, while the
+            // identical file with no record at all was correctly refused.
+            //
+            // The comparison is the stored `(anchor, relative)` pair, the same
+            // one `output_at_current_layout` uses — and it is matched against
+            // **every** output in the record, not just this client's. The
+            // shared-pool dedup means several clients legitimately own one
+            // directory, so "untracked" has to mean "no recorded output claims
+            // this path"; asking only about this client would refuse a
+            // destination grim itself wrote, for a sibling, in this very
+            // record. When the destination cannot be anchored on this host
+            // there is nothing to compare, so the answer falls back to the
+            // client-level one — `output_at_current_layout`'s rule that an
+            // uncomputable layout counts as current.
+            //
+            // Sibling: the MCP untracked gate in `install_mcp` still keys on
+            // client alone. No shipped MCP layout move changes an entry's
+            // stored pair (root relocations leave it byte-identical), so it is
+            // latent — but a release that moves one must fix it the same way.
+            let here =
+                crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)
+                    .ok();
+            let tracked = recorded.as_ref().is_some_and(|rec| {
+                rec.outputs.iter().any(|out| match &here {
+                    Some(current) => current == &out.target,
+                    None => out.client == client.as_str(),
+                })
+            });
             if tracked {
                 continue;
             }
-            let dest = target.path_for(*client, kind, &artifact.name);
-            // `exists()` follows symlinks, so a DANGLING leaf symlink at the
-            // destination is invisible to the footprint comparison below and
-            // `materialize` would write THROUGH it — landing the artifact
-            // wherever the stale link points, outside the anchor root. Refuse
-            // with the same forceable `RefusedUntracked` the gate already
-            // emits: the client's existing Overwrite dialog resolves it, and
-            // the forced path unlinks the link (see the widened `remove_path`
-            // condition below). A LIVE symlink needs nothing here — the
-            // footprint hash already sees it.
-            if dest.is_symlink() && !dest.exists() {
+            // Two symlink shapes the footprint comparison below cannot judge,
+            // both refused with the same forceable `RefusedUntracked` the gate
+            // already emits — the client's existing Overwrite dialog resolves
+            // them, and the forced path unlinks the link itself (see the
+            // widened `remove_path` condition below), never its target.
+            //
+            // - **Dangling**: `exists()` follows symlinks, so a stale link is
+            //   invisible here and `materialize` would write THROUGH it,
+            //   landing the artifact wherever it points, outside the anchor
+            //   root.
+            // - **Live, pointing at a directory**: `footprint_hash` stats with
+            //   `symlink_metadata`, so the link is not `is_dir()` and is hashed
+            //   as a file — then `read` follows it into the directory and
+            //   fails `EISDIR`, aborting the whole install with an I/O error
+            //   (74) instead of the forceable refusal this gate exists to
+            //   produce. A skill destination is a directory, so this is the
+            //   ordinary shape there.
+            //
+            // A live symlink to a FILE needs nothing: the hash reads the
+            // target's bytes, so an identical footprint is still adopted
+            // exactly as before.
+            if dest.is_symlink() && (!dest.exists() || dest.is_dir()) {
                 return Ok(InstallOutcome::RefusedUntracked {
                     client: client.to_string(),
                     path: dest,
@@ -777,7 +821,13 @@ async fn install_one<M: ArtifactMaterializer>(
         // which the pair-keyed reaper above cannot see. `materialize_set` is
         // exactly the set that got a fresh output above, so a client this pass
         // skipped keeps its only copy.
-        reap_relocated_roots(rec, roots, &relocated_vendor_roots_from_env(), &materialize_set);
+        reap_relocated_roots(
+            rec,
+            roots,
+            &relocated_vendor_roots_from_env(),
+            &materialize_set,
+            ReapContext::Reinstalled,
+        );
     }
 
     // `outputs` is the single source of truth — no denormalized top-level
@@ -1024,12 +1074,20 @@ fn output_at_current_layout(
 /// 3. an absent anchor root (or any resolve/containment failure) — skip,
 ///    nothing can be safely resolved on this machine;
 /// 4. hash-match: the on-disk footprint must equal the recorded
-///    `content_hash` — a user-edited orphan is preserved (the
-///    untracked-clobber philosophy);
+///    `content_hash` — a user-edited orphan is **preserved and warned
+///    about**, never deleted, and there is no `--force` override
+///    (`docs/src/stability.md`'s kept-modified promise, which is what makes
+///    "a layout move is not a compatibility break" legitimate). The warning
+///    names the old path, the new one, and the client, because under additive
+///    scanning that client now sees the artifact twice;
 /// 5. resolved-identity: no old footprint component (index target OR
 ///    support dir) may canonicalize onto any new output's footprint
 ///    component — a symlink alias of a live output is never reaped
 ///    (guard 2 compares stored pairs, not resolved identity).
+///
+/// **Sibling:** [`reap_relocated_roots`] carries a near-identical guard
+/// 3/4/5-plus-delete tail against a *different* root set. A correctness fix to
+/// either one is almost certainly a fix to both — check before you land it.
 fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots: &AnchorRoots) {
     for out in &prior.outputs {
         // Guard 1: never delete a shared config file.
@@ -1045,11 +1103,45 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
         if !matches!(out.is_present(roots, Containment::Strict), Ok(true)) {
             continue;
         }
-        // Guard 4: preserve anything the user edited.
+        // Guard 4: preserve — and announce — anything the user edited (ADR
+        // sub-decision A7-a: warn, never delete). The warning is mandatory,
+        // not cosmetic: the preserved output drops out of the record, so this
+        // is the only moment the user is told the old copy still exists. Under
+        // additive skill scanning the client now sees the artifact twice, so
+        // the message names both absolute paths and the client.
+        //
+        // The new path is best-effort — this pass may have produced no output
+        // for that client at all (a record carrying an unparsable/legacy
+        // client string on a pin change is neither re-materialized nor carried
+        // forward). Silence would be the one outcome A7-a rules out, so the
+        // message degrades to naming the preserved copy alone rather than
+        // disappearing. `reap_relocated_roots` warns unconditionally for the
+        // same reason.
         let intact = out
             .current_hash(roots, Containment::Strict)
             .is_ok_and(|actual| actual == out.content_hash);
         if !intact {
+            if let Ok(old) = out.target.resolve(roots, Containment::Strict) {
+                let moved_to = new_outputs
+                    .iter()
+                    .find(|new| new.client == out.client)
+                    .and_then(|new| new.resolved_target(roots, Containment::Strict).ok());
+                match moved_to {
+                    Some(new) => tracing::warn!(
+                        "'{}' at '{}' was edited since grim wrote it; it is preserved, but {} now reads '{}' instead — remove the old copy by hand if you do not want both",
+                        prior.name,
+                        old.display(),
+                        out.client,
+                        new.display()
+                    ),
+                    None => tracing::warn!(
+                        "'{}' at '{}' was edited since grim wrote it; it is preserved, but the render layout moved and {} no longer reads it — remove it by hand if you no longer want it",
+                        prior.name,
+                        old.display(),
+                        out.client
+                    ),
+                }
+            }
             continue;
         }
         let Ok(target) = out.target.resolve(roots, Containment::Strict) else {
@@ -1169,11 +1261,9 @@ pub(crate) fn relocated_vendor_roots_from_env() -> Vec<(&'static str, PathBuf)> 
 }
 
 /// `roots` with every relocated vendor root replaced by its pre-override
-/// value — the view a grim that predates the override resolved under.
-///
-/// Field-exhaustive on purpose: a new [`AnchorRoots`] field must be a
-/// conscious decision here, not a silent default that would make the legacy
-/// view diverge from the live one on an anchor this reaper does not own.
+/// value — the view a grim that predates the override resolved under. This is
+/// what lets `is_present` / `current_hash` / `resolve` be reused unchanged
+/// against the old location instead of reimplementing path joins.
 fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, PathBuf)]) -> AnchorRoots {
     let mut vendor_roots = roots.vendor_roots.clone();
     for (name, legacy) in relocated {
@@ -1240,14 +1330,27 @@ fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, Path
 /// to either one is almost certainly a fix to both — check before you land it.
 /// They are kept separate because the two guard *sets* invert: that one skips
 /// `entry` outputs and keys on the stored pair, this one must do neither.
+///
+/// Returns what guard 4 **preserved** — the footprint now deliberately
+/// diverging from the record, split by shape because `uninstall` reports the
+/// two through different arrays: grim's own paths go to
+/// [`UninstallResult::retained`](super::uninstall::UninstallResult::retained),
+/// a managed member left inside a config file the user owns goes to
+/// [`UninstallResult::abandoned_entries`](super::uninstall::UninstallResult::abandoned_entries).
+/// Both are documented as "grim will never remove this; do it by hand", which
+/// is exactly what a preserved edit is — and without them the only signal is a
+/// human-readable warning no automated consumer can see.
 pub(crate) fn reap_relocated_roots(
     prior: &InstallRecord,
     roots: &AnchorRoots,
     relocated: &[(&'static str, PathBuf)],
     written: &[crate::install::client_target::ClientTarget],
-) {
+    context: ReapContext,
+) -> (Vec<PathBuf>, Vec<super::uninstall::AbandonedEntry>) {
+    let mut preserved = Vec::new();
+    let mut abandoned = Vec::new();
     if relocated.is_empty() {
-        return;
+        return (preserved, abandoned);
     }
     let legacy = roots_before_relocation(roots, relocated);
     for out in &prior.outputs {
@@ -1283,26 +1386,62 @@ pub(crate) fn reap_relocated_roots(
         }
         // Guard 4: preserve — and announce — anything the user edited. The
         // warning is mandatory: the preserved footprint drops out of the
-        // record, so this is the only moment the user is told it exists. The
-        // remedy differs by output shape — an `entry` is a managed member
-        // inside a config file the user owns, so "delete the old copy" would
-        // be advice to delete their own `mcp.json`.
+        // record, so this is the only moment the user is told it exists. Both
+        // halves of the wording vary:
+        //
+        // - by output shape — an `entry` is a managed member inside a config
+        //   file the user owns, so "delete the old copy" would be advice to
+        //   delete their own `mcp.json`;
+        // - by call site — after an uninstall the client reads nothing at all,
+        //   so "X now reads <new path> instead" would tell the user the
+        //   artifact is still installed when grim just removed it.
         let intact = out
             .current_hash(&legacy, Containment::Strict)
             .is_ok_and(|actual| actual == out.content_hash);
         if !intact {
-            let remedy = if out.entry.is_some() {
-                "remove the stale entry from that file by hand if you do not want both"
-            } else {
-                "remove the old copy by hand if you do not want both"
+            let remedy = match (context, out.entry.is_some()) {
+                (ReapContext::Reinstalled, true) => {
+                    "remove the stale entry from that file by hand if you do not want both"
+                }
+                (ReapContext::Reinstalled, false) => "remove the old copy by hand if you do not want both",
+                (ReapContext::Uninstalled, true) => "remove the stale entry from that file by hand",
+                (ReapContext::Uninstalled, false) => "remove it by hand if you no longer want it",
             };
-            tracing::warn!(
-                "'{}' at '{}' was edited since grim wrote it; it is preserved, but {} now reads '{}' instead — {remedy}",
-                prior.name,
-                old.display(),
-                out.client,
-                new.display()
-            );
+            match context {
+                ReapContext::Reinstalled => tracing::warn!(
+                    "'{}' at '{}' was edited since grim wrote it; it is preserved, but {} now reads '{}' instead — {remedy}",
+                    prior.name,
+                    old.display(),
+                    out.client,
+                    new.display()
+                ),
+                ReapContext::Uninstalled => tracing::warn!(
+                    "'{}' at '{}' was edited since grim wrote it; it is preserved, but {} no longer reads it — {remedy}",
+                    prior.name,
+                    old.display(),
+                    out.client
+                ),
+            }
+            // Report it, split by shape. A file is grim's own footprint —
+            // the WHOLE footprint, index plus a multi-file rule's support dir,
+            // because that is what `uninstall` itself names in `retained`. An
+            // `entry` is a member inside the user's own config file, which is
+            // `abandoned_entries`' case exactly: unrecorded from here on, and
+            // grim will never remove it.
+            match &out.entry {
+                Some(pointer) => abandoned.push(super::uninstall::AbandonedEntry {
+                    path: old,
+                    pointer: pointer.clone(),
+                }),
+                None => {
+                    preserved.push(old);
+                    if let Some(dir) = out.resolved_support_dir(&legacy, Containment::Strict).ok().flatten()
+                        && dir.exists()
+                    {
+                        preserved.push(dir);
+                    }
+                }
+            }
             continue;
         }
         // An entry output: splice the managed member out of the OLD config
@@ -1363,6 +1502,19 @@ pub(crate) fn reap_relocated_roots(
             tracing::warn!("could not reap relocated support dir '{}': {e}", dir.display());
         }
     }
+    (preserved, abandoned)
+}
+
+/// Why [`reap_relocated_roots`] is running. It decides the kept-modified
+/// wording and nothing else: after an uninstall the client reads nothing at
+/// the new root either, so the install-path phrasing ("… now reads X
+/// instead") would tell the user the artifact is still installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapContext {
+    /// An install or update re-materialized the artifact at the current root.
+    Reinstalled,
+    /// An uninstall removed the artifact at the current root.
+    Uninstalled,
 }
 
 /// Validate + pack a locked path source and verify the bytes hash to the
@@ -1711,7 +1863,13 @@ async fn install_mcp(
             .iter()
             .filter_map(|out| out.client.parse().ok())
             .collect();
-        reap_relocated_roots(rec, roots, &relocated_vendor_roots_from_env(), &registered);
+        reap_relocated_roots(
+            rec,
+            roots,
+            &relocated_vendor_roots_from_env(),
+            &registered,
+            ReapContext::Reinstalled,
+        );
     }
 
     // Merge with the prior record (same-pin additive `--client` installs) —
@@ -3080,7 +3238,13 @@ mod tests {
         std::fs::write(&old, b"body\n").unwrap();
         let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&old, None).unwrap())]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(
             !old.exists(),
@@ -3098,7 +3262,13 @@ mod tests {
         // Recorded hash deliberately differs from the on-disk bytes.
         let prior = reap_record(vec![kiro_output("steering/r.md", Digest::Sha256("d".repeat(64)))]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(
             old.exists(),
@@ -3123,7 +3293,13 @@ mod tests {
         });
         let prior = reap_record(vec![out]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(!old_index.exists(), "the stranded index must be reaped");
         assert!(!old_support.exists(), "the stranded support dir must be reaped too");
@@ -3143,7 +3319,13 @@ mod tests {
         std::fs::write(&live, b"body\n").unwrap();
         let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&live, None).unwrap())]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(live.exists(), "an override naming the default root deletes nothing");
     }
@@ -3165,7 +3347,13 @@ mod tests {
 
         // `reap_output` records client `copilot`, so pass it as written: the
         // anchor filter must be what saves this file, not the written guard.
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Copilot]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Copilot],
+            ReapContext::Reinstalled,
+        );
 
         assert!(project.exists(), "a workspace-anchored output is out of scope");
     }
@@ -3188,7 +3376,13 @@ mod tests {
         let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&old, None).unwrap())]);
 
         // This pass wrote Claude, not Kiro — nothing was migrated.
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Claude]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Claude],
+            ReapContext::Reinstalled,
+        );
 
         assert!(
             old.exists(),
@@ -3214,7 +3408,13 @@ mod tests {
         out.entry = Some("/mcpServers/grim".to_string());
         let prior = reap_record(vec![out]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Claude]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Claude],
+            ReapContext::Reinstalled,
+        );
 
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
         assert!(
@@ -3237,7 +3437,13 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("current"), dir.path().join("legacy")).unwrap();
         let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&live, None).unwrap())]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(live.exists(), "a symlink alias of the live output must never be reaped");
     }
@@ -3267,7 +3473,13 @@ mod tests {
         out.entry = Some("/mcpServers/grim".to_string());
         let prior = reap_record(vec![out]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         assert!(old.is_file(), "the user's config file must never be deleted");
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
@@ -3296,7 +3508,13 @@ mod tests {
         out.entry = Some("/mcpServers/grim".to_string());
         let prior = reap_record(vec![out]);
 
-        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
 
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
         assert_eq!(

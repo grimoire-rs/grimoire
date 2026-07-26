@@ -1209,6 +1209,59 @@ def test_global_kiro_home_upgrade_reaps_the_pre_override_root(
     )
 
 
+def test_global_gemini_cli_home_upgrade_reaps_the_pre_override_root(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """The same upgrade fixture for the second relocated root.
+
+    ``GEMINI_CLI_HOME`` has the opposite shape to ``KIRO_HOME`` — it replaces
+    ``$HOME`` and the ``.gemini`` segment is still appended — so the legacy
+    root must be ``$HOME/.gemini``, not ``$HOME``. This test is what proves
+    the row computes that, end to end.
+
+    An **agent**, not a skill: Gemini skills anchor at ``agents-skills`` (the
+    shared pool, deliberately keyed on the real ``$HOME``), so only an agent
+    or MCP output is anchored at ``gemini-root`` at all.
+
+    The third relocated root — Zed on macOS — has no acceptance fixture: it
+    cannot be reproduced on a Linux or Windows host. Its arm is covered by
+    ``relocated_vendor_roots_lists_only_the_roots_that_moved``, which injects
+    the legacy root instead of reading the platform."""
+    ag = make_artifact(
+        f"{unique_repo}/gmig-agent",
+        "agent",
+        {"gmig-agent.md": "---\nname: gmig-agent\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ngmig-agent = "{ag.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    # Pre-upgrade: GEMINI_CLI_HOME unset, so the agent lands under ~/.gemini.
+    rows = runner.json("install", "--global", "--client", "gemini")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    old_agent = runner.home / ".gemini/agents/gmig-agent.md"
+    assert old_agent.is_file()
+
+    gemini_cli_home = grim_home.parent / "gemini_home_upgrade"
+    (gemini_cli_home / ".gemini").mkdir(parents=True)
+    runner.env["GEMINI_CLI_HOME"] = str(gemini_cli_home)
+
+    runner.json("update", "--global", "--client", "gemini")
+
+    assert (gemini_cli_home / ".gemini/agents/gmig-agent.md").is_file(), (
+        "the agent must re-materialize under $GEMINI_CLI_HOME/.gemini/"
+    )
+    assert not old_agent.exists(), (
+        "the unmodified copy at the pre-override root must be reaped"
+    )
+    state = json.loads((grim_home / "state/global.json").read_text())
+    [record] = [r for r in state["records"] if r["name"] == "gmig-agent"]
+    assert [o["target"]["anchor"] for o in record["outputs"]] == ["gemini-root"], (
+        f"the recorded anchor must be unchanged: {record['outputs']}"
+    )
+
+
 def test_global_kiro_home_upgrade_keeps_the_only_copy_when_kiro_is_not_written(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:
@@ -1548,12 +1601,72 @@ def test_global_kiro_home_upgrade_uninstall_preserves_a_hand_edited_stray(
     kiro_home.mkdir()
     runner.env["KIRO_HOME"] = str(kiro_home)
 
-    runner.json("uninstall", "--global", "skill", "kedit-skill")
-    runner.json("uninstall", "--global", "skill", "kctrl-skill")
+    edited_report = runner.json("uninstall", "--global", "skill", "kedit-skill")
+    control_report = runner.json("uninstall", "--global", "skill", "kctrl-skill")
 
     assert not control_dir.exists(), (
         "the control proves the uninstall-path reaper ran: an unmodified stray is reaped"
     )
     assert edited_doc.read_text().endswith("# MINE\n"), (
         "a hand-edited stranded copy must be preserved, never deleted"
+    )
+    # `retained` is the documented divergence channel: a non-empty array means
+    # state and filesystem deliberately disagree and the listed paths must be
+    # removed by hand. Dropping the record while silently leaving the file
+    # would make that promise false exactly when it matters.
+    retained = [Path(p).resolve() for p in edited_report["retained"]]
+    assert edited_doc.parent.resolve() in retained or edited_doc.resolve() in retained, (
+        f"the preserved stray must be reported in `retained`: {edited_report}"
+    )
+    assert control_report["retained"] == [], (
+        f"a fully reaped uninstall must report no divergence: {control_report}"
+    )
+
+
+def test_global_kiro_home_upgrade_uninstall_abandons_a_hand_edited_stranded_entry(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """A stranded MCP member the user edited is preserved — and must therefore
+    be *reported*. `abandoned_entries` is the field for exactly this: the entry
+    is now unrecorded and grim will never remove it, because the kept-modified
+    rule has no ``--force`` override. Without the report the only signal is a
+    human-readable warning, which no automated consumer can see."""
+    descriptor = tmp_path / "kaband_src" / "mcp" / "kaband-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/kaband-mcp:1.0.0"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkaband-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "kiro")
+
+    old_config = runner.home / ".kiro/settings/mcp.json"
+    parsed = json.loads(old_config.read_text())
+    assert parsed["mcpServers"]["kaband-mcp"]["command"] == "grim"
+    # The user edits the managed member itself, so the recorded hash drifts.
+    parsed["mcpServers"]["kaband-mcp"]["args"] = ["mcp", "--mine"]
+    old_config.write_text(json.dumps(parsed, indent=2))
+
+    kiro_home = grim_home.parent / "kiro_home_uninstall_entry"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    report = runner.json("uninstall", "--global", "mcp", "kaband-mcp")
+
+    left = json.loads(old_config.read_text())
+    assert left["mcpServers"]["kaband-mcp"]["args"] == ["mcp", "--mine"], (
+        f"the hand-edited stranded member must be preserved: {left}"
+    )
+    assert report["abandoned_entries"], (
+        f"a preserved stranded entry must be reported, not only warned about: {report}"
+    )
+    entry = report["abandoned_entries"][0]
+    assert Path(entry["path"]).resolve() == old_config.resolve(), entry
+    assert "kaband-mcp" in entry["pointer"], entry
+    assert report["retained"] == [], (
+        f"a config file the user owns is never grim's to name in `retained`: {report}"
     )

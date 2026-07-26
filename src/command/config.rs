@@ -405,6 +405,12 @@ fn apply_set(
         ParsedKey::VendorField { vendor } => {
             let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
             if enabled {
+                // The client name is a valid KEY (checked in `parse_key`), so
+                // a client that cannot host the pool is a bad VALUE — exit 65,
+                // the same mapping `check_clients` gets at set time. Shares its
+                // accepted set with load-time validation via
+                // `check_pool_capable`.
+                crate::config::project_config::check_pool_capable(vendor).map_err(super::config_value)?;
                 options.vendors.entry(vendor.clone()).or_default().shared_skills = true;
             } else {
                 // `false` is the default, so it is stored as absence rather

@@ -983,6 +983,59 @@ metadata:
     }
 
     #[test]
+    fn every_pool_capable_vendor_renders_the_universal_skill_bytes() {
+        // The test above covers the vendors that render into the pool by
+        // default. `[options.vendors.<name>].shared_skills` lets a user move
+        // ANY pool-capable client in there — cursor, copilot, opencode — onto
+        // the same one `.agents/skills/<name>` directory, where every member
+        // records its own `content_hash` against the same bytes. So the
+        // identity has to hold for the whole capability roster, not just the
+        // default members, and it is where a future `cursor.*` skill field
+        // would break first.
+        //
+        // Derived from `pool_capable` rather than a literal list, so a vendor
+        // added to the roster is covered without editing this.
+        //
+        // What it actually catches, since the two routes differ: a vendor
+        // declaring `skill_fields` cannot reach here at all — `pool_capable`
+        // ANDs an empty registry, so that drift is refused upstream. What
+        // survives is a vendor whose `skill_index` OVERRIDE does something
+        // other than delegate to `render_skill_doc` (prepend a provenance
+        // header, rewrite the body — `rule_index` already varies that way).
+        // Mutation-proven against exactly that.
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n  claude.model: opus\n  codex.reasoning-effort: high\n---\n# body\n";
+        let universal = render_universal_skill_doc(doc)
+            .expect("namespaced metadata ⇒ rendered")
+            .document;
+        let mut checked = 0usize;
+        for client in ClientTarget::ALL {
+            if !client.vendor().pool_capable() {
+                continue;
+            }
+            checked += 1;
+            let rendered = client
+                .vendor()
+                .skill_index(doc)
+                .expect("render")
+                .expect("namespaced metadata ⇒ rendered")
+                .document;
+            assert_eq!(
+                rendered,
+                universal,
+                "'{}' is pool-capable, so shared_skills can put its skills in the same \
+                 directory as every other member — its render must be byte-identical to \
+                 the universal one, or opting it in silently rewrites its siblings' bytes \
+                 and invalidates their recorded content_hash",
+                client.vendor().name()
+            );
+        }
+        assert!(
+            checked >= 8,
+            "the capability roster shrank unexpectedly ({checked} clients)"
+        );
+    }
+
+    #[test]
     fn universal_render_is_none_for_a_plain_or_foreign_skill() {
         // No tool-namespaced metadata ⇒ verbatim install (None), like the
         // vendor-aware path. A `vendor.x` key is plain (unknown namespace).

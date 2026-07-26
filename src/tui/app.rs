@@ -103,6 +103,12 @@ pub struct TuiContext {
     /// option; empty triggers detection at install time). Still needed for
     /// the `InstallTarget::parse` fallback in [`perform`].
     pub clients_default: Vec<String>,
+    /// The active scope's raw `[options.vendors]` table — the per-client
+    /// rendering options `InstallTarget::parse` reads (today: which clients
+    /// pool their skills into `.agents/skills`). Carried raw, like
+    /// `clients_default`: `ResolvedOptions` deliberately drops it, because a
+    /// missing entry already means "every field at its resting state".
+    pub vendors: std::collections::BTreeMap<String, crate::config::declaration::VendorOptions>,
     /// The *effective* selected clients for the active scope (config clients
     /// when set, else detected) — surfaced in the status area for display.
     pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
@@ -141,6 +147,8 @@ pub struct ScopeSwap {
     pub roots: AnchorRoots,
     /// The AI client target(s) to materialize into (raw config clients).
     pub clients_default: Vec<String>,
+    /// This scope's raw `[options.vendors]` table (mirrors `TuiContext::vendors`).
+    pub vendors: std::collections::BTreeMap<String, crate::config::declaration::VendorOptions>,
     /// The effective selected clients for this scope (config or detected).
     pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
     /// Human label (`project` / `global`).
@@ -171,6 +179,7 @@ impl TuiContext {
             config_path: std::mem::replace(&mut self.config_path, alt.config_path),
             roots: std::mem::replace(&mut self.roots, alt.roots),
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
+            vendors: std::mem::replace(&mut self.vendors, alt.vendors),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
             resolved_options: std::mem::replace(&mut self.resolved_options, alt.resolved_options),
@@ -2336,7 +2345,7 @@ async fn perform(
             .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
     };
 
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
@@ -2469,7 +2478,7 @@ async fn perform_local_declared(
         _ => single_entry_lock(&new_lock, kind, name)
             .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
     };
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
@@ -2561,7 +2570,7 @@ async fn perform_local_dev(
         }
     }
 
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
+    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
@@ -3930,6 +3939,7 @@ mod tests {
                 ..Default::default()
             },
             clients_default: Vec::new(),
+            vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
@@ -4166,6 +4176,7 @@ mod tests {
             config_path: workspace.join("grimoire.toml"),
             roots: test_roots(workspace),
             clients_default: vec!["claude".to_string()],
+            vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
@@ -5246,6 +5257,7 @@ mod tests {
                 ..Default::default()
             },
             clients_default: vec![],
+            vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,
@@ -5767,6 +5779,7 @@ mod p2_app_member_node_tests {
                 ..Default::default()
             },
             clients_default: vec!["claude".to_string()],
+            vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
             alt: None,

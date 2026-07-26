@@ -48,6 +48,7 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
         scope.scope,
         &[],
         &scope.options.clients,
+        &scope.options.vendors,
     ))?;
     let clients = target.clients().iter().map(ToString::to_string).collect();
 
@@ -118,7 +119,14 @@ mod tests {
 
         // Build the report through the same seams `run` uses, minus the
         // ctx-global flag (hermetic contexts are project-scoped).
-        let target = InstallTarget::parse(&scope.workspace, scope.scope, &[], &scope.options.clients).unwrap();
+        let target = InstallTarget::parse(
+            &scope.workspace,
+            scope.scope,
+            &[],
+            &scope.options.clients,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         assert!(
             !target.clients().is_empty(),
             "context reports the resolved set — the generic client at minimum, never []"
@@ -134,7 +142,14 @@ mod tests {
         // to. Not `[]` (which would read as "grim will do nothing") and not
         // all eleven (the old fallback's lie).
         let tmp = tempfile::tempdir().unwrap();
-        let target = InstallTarget::parse(tmp.path(), crate::config::scope::ConfigScope::Project, &[], &[]).unwrap();
+        let target = InstallTarget::parse(
+            tmp.path(),
+            crate::config::scope::ConfigScope::Project,
+            &[],
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         let clients: Vec<String> = target.clients().iter().map(ToString::to_string).collect();
         assert_eq!(clients, vec!["agents".to_string()]);
     }

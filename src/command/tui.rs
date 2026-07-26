@@ -107,6 +107,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
                 state_path: other.state_path.clone(),
                 config_path: other.config_path.clone(),
                 clients_default: other.options.clients.clone(),
+                vendors: other.options.vendors.clone(),
                 clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
                 label: scope_label(other.scope).to_string(),
                 roots: other.roots,
@@ -128,6 +129,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         state_path: scope.state_path.clone(),
         config_path: scope.config_path.clone(),
         clients_default: scope.options.clients.clone(),
+        vendors: scope.options.vendors.clone(),
         clients_selected: selected_clients(&scope.workspace, scope.scope, &scope.options.clients),
         scope_label: scope_label(scope.scope).to_string(),
         alt,
@@ -323,8 +325,18 @@ fn resolve_registries_for_tui(ctx: &Context, scope: &scope_resolution::ResolvedS
 /// `parse` error (the install path surfaces that hard error to the user),
 /// so here it degrades to the permissive detected set rather than failing
 /// the TUI.
+///
+/// `[options.vendors]` is deliberately not threaded in: it changes *where* a
+/// selected client's skills land, never *which* clients are selected, so an
+/// empty table gives the same answer as the real one for this question.
 fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clients: &[String]) -> Vec<ClientTarget> {
-    match crate::install::target::InstallTarget::parse(workspace, scope, &[], config_clients) {
+    match crate::install::target::InstallTarget::parse(
+        workspace,
+        scope,
+        &[],
+        config_clients,
+        &std::collections::BTreeMap::new(),
+    ) {
         Ok(target) => target.clients().to_vec(),
         Err(_) => crate::install::target::detect_clients_or_all(workspace, scope),
     }
@@ -445,10 +457,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = ["copilot,claude".to_string()];
         let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
-        let installed = crate::install::target::InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &cfg)
-            .unwrap()
-            .clients()
-            .to_vec();
+        let installed = crate::install::target::InstallTarget::parse(
+            tmp.path(),
+            ConfigScope::Project,
+            &[],
+            &cfg,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap()
+        .clients()
+        .to_vec();
         assert_eq!(display, installed);
         assert_eq!(display, vec![ClientTarget::Copilot, ClientTarget::Claude]);
     }

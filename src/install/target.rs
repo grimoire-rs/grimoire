@@ -19,8 +19,10 @@
 //! *next* run "detect" every client — a fallback that manufactures its own
 //! detection signal, unrecoverably.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::declaration::VendorOptions;
 use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
 
@@ -37,6 +39,13 @@ pub struct InstallTarget {
     /// were all empty and the generic client was substituted. Gates the
     /// residual "nothing here is installable" error.
     generic_fallback: bool,
+    /// Clients whose skills render into the shared `.agents/skills` pool
+    /// instead of their native skills directory
+    /// (`[options.vendors.<name>].shared_skills = true`).
+    ///
+    /// Derived in [`Self::parse`] from the resolved scope's `[options.vendors]`
+    /// table — never merged across scopes, never overridable by a flag.
+    shared_skills: Vec<ClientTarget>,
 }
 
 impl InstallTarget {
@@ -51,6 +60,10 @@ impl InstallTarget {
     /// `new` is reached with an empty list only from unit tests, whose
     /// rules-only fixtures depend on the historic all-clients behaviour. A
     /// new production call site must go through `parse`, not this.
+    ///
+    /// Same reason `shared_skills` is empty here and only ever populated by
+    /// `parse`: it comes from the resolved scope's config, which `new` does
+    /// not take.
     pub fn new(workspace: &Path, scope: ConfigScope, clients: Vec<ClientTarget>) -> Self {
         let clients = if clients.is_empty() {
             detect_clients_or_all(workspace, scope)
@@ -62,6 +75,7 @@ impl InstallTarget {
             scope,
             clients,
             generic_fallback: false,
+            shared_skills: Vec::new(),
         }
     }
 
@@ -78,6 +92,13 @@ impl InstallTarget {
     /// function's read-only consumers (`status`, `search`, the TUI badge
     /// sites) must keep working on a bare workspace.
     ///
+    /// `vendors` is the resolved scope's raw `[options.vendors]` table (read
+    /// off [`ConfigOptions`](crate::config::declaration::ConfigOptions), never
+    /// `ResolvedOptions` — a missing entry already means "every field at its
+    /// resting state"). It is unrelated to client *selection*: an opted-in
+    /// client that the flag/config/detection chain did not select is simply
+    /// not installed for.
+    ///
     /// # Errors
     ///
     /// [`super::install_error::InstallErrorKind::UnsupportedClient`] for an
@@ -87,6 +108,7 @@ impl InstallTarget {
         scope: ConfigScope,
         flag_values: &[String],
         config_default: &[String],
+        vendors: &BTreeMap<String, VendorOptions>,
     ) -> Result<Self, InstallError> {
         let source: &[String] = if flag_values.is_empty() {
             config_default
@@ -111,6 +133,20 @@ impl InstallTarget {
             }
         }
 
+        // An unknown client name, or one the capability gate would have
+        // refused, is dropped rather than raised: both are already refused at
+        // the config surface (exit 64 / 65 at `config set`, 78 at load), so a
+        // survivor here can only come from a config this process did not
+        // validate. Silently ignoring it keeps the resting (native) layout —
+        // rendering into a pool the client never reads is the failure this
+        // whole feature exists to prevent.
+        let shared_skills: Vec<ClientTarget> = vendors
+            .iter()
+            .filter(|(_, options)| options.shared_skills)
+            .filter_map(|(name, _)| name.parse::<ClientTarget>().ok())
+            .filter(|client| client.vendor().pool_capable())
+            .collect();
+
         if clients.is_empty() {
             let detected = detect_clients(workspace, scope);
             if detected.is_empty() {
@@ -119,11 +155,14 @@ impl InstallTarget {
                     scope,
                     clients: vec![ClientTarget::Agents],
                     generic_fallback: true,
+                    shared_skills,
                 });
             }
             clients = detected;
         }
-        Ok(Self::new(workspace, scope, clients))
+        let mut target = Self::new(workspace, scope, clients);
+        target.shared_skills = shared_skills;
+        Ok(target)
     }
 
     /// The client targets, in declared order (deduplicated).
@@ -155,7 +194,21 @@ impl InstallTarget {
     }
 
     /// The install path for `(kind, name)` under `client`.
+    ///
+    /// A client opted into `shared_skills` has its **skills** — and only its
+    /// skills — routed to the cross-vendor pool, by borrowing the generic
+    /// client's skills root (the pool's single definition, at both scopes)
+    /// rather than restating the path here. Every other kind, and every
+    /// client that did not opt in, keeps its native layout untouched.
+    ///
+    /// The five clients that already render into the pool (`codex`, `gemini`,
+    /// `zed`, `amp`, `agents`) resolve their skills root through that exact
+    /// same helper, so opting one of them in is a genuine no-op rather than a
+    /// coincidence.
     pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
+        if kind == ArtifactKind::Skill && self.shared_skills.contains(&client) {
+            return ClientTarget::Agents.path_for(&self.workspace, self.scope, kind, name);
+        }
         client.path_for(&self.workspace, self.scope, kind, name)
     }
 }
@@ -220,7 +273,7 @@ mod tests {
         let t = InstallTarget::new(tmp.path(), ConfigScope::Project, vec![]);
         assert_eq!(t.clients(), &[ClientTarget::OpenCode, ClientTarget::Copilot]);
         // The same set reaches detection through `parse` (empty flag+config).
-        let p = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let p = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(p.clients(), &[ClientTarget::OpenCode, ClientTarget::Copilot]);
     }
 
@@ -230,7 +283,14 @@ mod tests {
         // declaration wins over detection.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
-        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &["claude".to_string()]).unwrap();
+        let t = InstallTarget::parse(
+            tmp.path(),
+            ConfigScope::Project,
+            &[],
+            &["claude".to_string()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Claude]);
     }
 
@@ -256,7 +316,7 @@ mod tests {
         // Flag, config, and detection all empty ⇒ the single generic client,
         // NOT every known client (which scattered eleven vendor directories).
         let tmp = tempfile::tempdir().unwrap();
-        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Agents]);
         assert!(t.is_generic_fallback());
     }
@@ -267,13 +327,13 @@ mod tests {
         // pool must not make the *next* run resolve differently. Two runs on a
         // bare workspace both resolve to `agents` alone.
         let tmp = tempfile::tempdir().unwrap();
-        let first = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let first = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(first.clients(), &[ClientTarget::Agents]);
 
         // Simulate what the install writes.
         std::fs::create_dir_all(tmp.path().join(".agents").join("skills").join("demo")).unwrap();
 
-        let second = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let second = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(
             second.clients(),
             &[ClientTarget::Agents],
@@ -290,7 +350,7 @@ mod tests {
             (vec!["agents".to_string()], vec![]),
             (vec![], vec!["agents".to_string()]),
         ] {
-            let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &flag, &cfg).unwrap();
+            let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &flag, &cfg, &BTreeMap::new()).unwrap();
             assert_eq!(t.clients(), &[ClientTarget::Agents]);
             assert!(
                 !t.is_generic_fallback(),
@@ -303,7 +363,7 @@ mod tests {
     fn a_detected_client_never_reaches_the_generic_fallback() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Claude]);
         assert!(!t.is_generic_fallback());
     }
@@ -315,6 +375,7 @@ mod tests {
             ConfigScope::Project,
             &["claude,copilot".to_string()],
             &[],
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Claude, ClientTarget::Copilot]);
@@ -324,6 +385,7 @@ mod tests {
             ConfigScope::Project,
             &["copilot".to_string(), "copilot".to_string(), "claude".to_string()],
             &[],
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(t2.clients(), &[ClientTarget::Copilot, ClientTarget::Claude]);
@@ -337,11 +399,12 @@ mod tests {
             ConfigScope::Project,
             &[],
             &["opencode".to_string(), "claude".to_string()],
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::OpenCode, ClientTarget::Claude]);
         // `/w` does not exist ⇒ nothing detected ⇒ the generic client.
-        let t2 = InstallTarget::parse(Path::new("/w"), ConfigScope::Project, &[], &[]).unwrap();
+        let t2 = InstallTarget::parse(Path::new("/w"), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
         assert_eq!(t2.clients(), &[ClientTarget::Agents]);
         // A flag list overrides the config default entirely.
         let t3 = InstallTarget::parse(
@@ -349,6 +412,7 @@ mod tests {
             ConfigScope::Project,
             &["copilot".to_string()],
             &["claude".to_string()],
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(t3.clients(), &[ClientTarget::Copilot]);
@@ -356,7 +420,16 @@ mod tests {
 
     #[test]
     fn parse_rejects_unknown_client() {
-        assert!(InstallTarget::parse(Path::new("/w"), ConfigScope::Project, &["vscode".to_string()], &[]).is_err());
+        assert!(
+            InstallTarget::parse(
+                Path::new("/w"),
+                ConfigScope::Project,
+                &["vscode".to_string()],
+                &[],
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -366,5 +439,129 @@ mod tests {
             t.path_for(ClientTarget::Copilot, ArtifactKind::Rule, "rust-style"),
             PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
         );
+    }
+
+    // ── `[options.vendors.<name>].shared_skills` ────────────────────────────
+
+    /// A `[options.vendors]` table opting `names` into the shared pool.
+    fn pooled(names: &[&str]) -> BTreeMap<String, VendorOptions> {
+        names
+            .iter()
+            .map(|n| ((*n).to_string(), VendorOptions { shared_skills: true }))
+            .collect()
+    }
+
+    #[test]
+    fn shared_skills_moves_only_that_clients_skills_into_the_pool() {
+        // Cursor opted in: its SKILLS go to the cross-vendor pool, everything
+        // else — its own other kinds, and every other client — is untouched.
+        let t = InstallTarget::parse(
+            Path::new("/w"),
+            ConfigScope::Project,
+            &["cursor,copilot".to_string()],
+            &[],
+            &pooled(&["cursor"]),
+        )
+        .unwrap();
+        assert_eq!(
+            t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x"),
+            PathBuf::from("/w/.agents/skills/x"),
+            "an opted-in client's skills must render into the shared pool"
+        );
+        assert_eq!(
+            t.path_for(ClientTarget::Cursor, ArtifactKind::Rule, "x"),
+            PathBuf::from("/w/.cursor/rules/x.mdc"),
+            "the opt-in governs skills ONLY — other kinds keep the native layout"
+        );
+        assert_eq!(
+            t.path_for(ClientTarget::Copilot, ArtifactKind::Skill, "x"),
+            PathBuf::from("/w/.github/skills/x"),
+            "a client that did not opt in keeps its native skills dir"
+        );
+    }
+
+    #[test]
+    fn absent_or_false_shared_skills_keeps_the_native_layout() {
+        // The resting state, and the reverse flip: no entry and an explicit
+        // `false` must both produce the native path, or turning the option
+        // back off would never move the skill home.
+        let cursor_skill = PathBuf::from("/w/.cursor/skills/x");
+        for vendors in [
+            BTreeMap::new(),
+            [("cursor".to_string(), VendorOptions { shared_skills: false })]
+                .into_iter()
+                .collect(),
+        ] {
+            let t = InstallTarget::parse(
+                Path::new("/w"),
+                ConfigScope::Project,
+                &["cursor".to_string()],
+                &[],
+                &vendors,
+            )
+            .unwrap();
+            assert_eq!(t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x"), cursor_skill);
+        }
+    }
+
+    #[test]
+    fn shared_skills_is_ignored_for_a_client_that_cannot_pool() {
+        // Defence in depth: the config surface already refuses this (exit 65
+        // at `config set`, 78 at load), so this only fires for a config this
+        // process did not validate. Writing into a pool Claude never reads —
+        // and, at global scope, into an anchor its candidate set does not even
+        // contain — is strictly worse than ignoring the entry.
+        let t = InstallTarget::parse(
+            Path::new("/w"),
+            ConfigScope::Project,
+            &["claude".to_string()],
+            &[],
+            &pooled(&["claude", "nonsense-client"]),
+        )
+        .unwrap();
+        assert_eq!(
+            t.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x"),
+            PathBuf::from("/w/.claude/skills/x"),
+            "a non-pool-capable client must keep its native layout regardless"
+        );
+    }
+
+    #[test]
+    fn opting_in_an_already_pooled_client_is_a_genuine_no_op() {
+        // `codex`/`gemini`/`zed`/`amp`/`agents` are on the capability roster
+        // and already render into the pool, so the key is accepted for them
+        // and changes nothing. That holds because the opt-in borrows the
+        // generic client's skills root — the same helper they resolve through
+        // — rather than restating the path.
+        for client in [
+            ClientTarget::Codex,
+            ClientTarget::Gemini,
+            ClientTarget::Zed,
+            ClientTarget::Amp,
+            ClientTarget::Agents,
+        ] {
+            let name = client.as_str();
+            let native = InstallTarget::parse(
+                Path::new("/w"),
+                ConfigScope::Project,
+                &[name.to_string()],
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let opted = InstallTarget::parse(
+                Path::new("/w"),
+                ConfigScope::Project,
+                &[name.to_string()],
+                &[],
+                &pooled(&[name]),
+            )
+            .unwrap();
+            assert_eq!(
+                opted.path_for(client, ArtifactKind::Skill, "x"),
+                native.path_for(client, ArtifactKind::Skill, "x"),
+                "{name} already pools — opting it in must not move anything"
+            );
+        }
     }
 }
