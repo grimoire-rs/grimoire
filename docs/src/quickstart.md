@@ -23,10 +23,11 @@ grim init --registry ghcr.io/acme
 
 ## 2. Declare an artifact
 
-`grim add` records a skill or rule in `grimoire.toml` and immediately pins it
-in `grimoire.lock`. The only required argument is the reference to fetch; the
-kind is inferred from the published manifest and the binding name defaults to
-the reference's last path segment:
+`grim add` records a skill or rule in `grimoire.toml`, immediately pins it in
+`grimoire.lock`, and materializes that one entry into the clients it detects.
+The only required argument is the reference to fetch; the kind is inferred
+from the published manifest and the binding name defaults to the reference's
+last path segment:
 
 ```sh
 grim add ghcr.io/grimoire-rs/skills/grim-usage
@@ -44,6 +45,10 @@ grim search authoring
 ```
 
 ## 3. Install into your AI client(s)
+
+Step 2 already installed the entry it declared, so there is nothing left to do
+here yet — `grim install` earns its keep on a `grimoire.toml` you did *not*
+just write: a fresh clone, a hand-edited config, or an `add --no-install`.
 
 `grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets every AI client it detects in
