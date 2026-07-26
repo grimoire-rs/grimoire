@@ -6,7 +6,9 @@ variables. Settings (`[options]`, `[options.tui]`) and named registries
 (`[skills]`, `[rules]`, `[agents]`, `[bundles]`) stay under [`grim add`][grim-add]
 and [`grim remove`][grim-remove]. You can also hand-edit either file directly,
 but note that **any `grim` write — `grim config`, `grim add`, `grim remove` — uses a
-lossy serializer: comments are removed** on every write. The one exception
+lossy serializer: comments are removed** on every write, and so is any key whose
+default value collapses to unset (`show_deprecated = false`, an all-default
+`[options.tui]`, an all-default `[options.vendors.<name>]`). The one exception
 is a leading [`#:schema` editor directive](#editor-schema), which every
 rewrite preserves at the top of the file.
 
@@ -82,6 +84,48 @@ Configuration parse errors — including an unrecognised `default_view` value or
 The registry host is always the tree root. When the browsed registry matches
 the configured default registry, the host node is elided from the display
 so leaf names stay short.
+
+### `[options.vendors]` {#options-vendors}
+
+The optional `[options.vendors.<name>]` sub-tables carry per-client rendering
+options. The table key is a client name — the same closed set `clients` accepts
+— so a misspelled client is rejected at config **load** with exit 78
+(`EX_CONFIG`) rather than sitting in the file doing nothing:
+
+```toml
+[options.vendors.cursor]
+shared_skills = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `shared_skills` | boolean | `false` | When `true`, this client's skills install into the cross-vendor `.agents/skills` pool ([Codex, Gemini, Zed, and Amp](./clients.md) already read it) instead of the client's own skills directory. Absent or `false`, the client keeps its native layout. |
+
+**Reserved — not yet honoured.** The key parses, validates, and stores today,
+but [`grim install`](./commands.md#install) does not read it yet: setting it
+changes no client's layout until the renderer opt-in ships.
+
+An entry set to `true` round-trips through every `grim` write. One left at the
+default — `shared_skills = false`, or a bare `[options.vendors.<name>]` header —
+is dropped on the next write, like every other default-valued key.
+
+The field has no CLI flag and no `[options]`-level equivalent, so its
+precedence chain is two links long: the resolved scope's
+`[options.vendors.<name>].shared_skills`, else the built-in default `false`.
+There is no cross-scope merge — like every other key, each command resolves
+exactly one scope and reads that scope's table whole.
+
+[`grim config`](./commands.md#config) addresses the field as one dotted key per
+client:
+
+```sh
+grim config set options.vendors.cursor.shared_skills true
+grim config get options.vendors.cursor.shared_skills
+grim config unset options.vendors.cursor.shared_skills
+```
+
+Because the client name is part of the key, naming a client that does not
+exist is an unknown key — exit 64 (`EX_USAGE`), not a value error.
 
 ### `[bundles]` {#bundles}
 

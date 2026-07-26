@@ -156,6 +156,25 @@ impl TuiOptions {
     }
 }
 
+/// Per-client rendering options, nested under `[options.vendors.<name>]`.
+///
+/// `#[serde(deny_unknown_fields)]` so an unknown key (e.g. a typo'd field
+/// name) surfaces as a parse error rather than a silent ignore. The table
+/// key itself — the client name — is validated separately, because serde
+/// cannot reject a map key against a closed set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VendorOptions {
+    /// Controls whether this client's skills install into the shared
+    /// `.agents/skills` pool instead of its own directory — reserved,
+    /// `grim install` does not read it yet. Disabled by default, keeping
+    /// the native layout. There is no `--client` flag and no
+    /// `[options]`-level equivalent, so the resolved scope's value is the
+    /// only source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_skills: bool,
+}
+
 /// Optional config options shared by both scopes.
 ///
 /// `#[serde(deny_unknown_fields)]` so schema drift surfaces as a parse
@@ -194,6 +213,13 @@ pub struct ConfigOptions {
     /// TUI `h` key toggles this ephemerally — config is never rewritten.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_deprecated: bool,
+    /// Per-client rendering options, keyed by client name — the same
+    /// closed set `[options].clients` accepts. An unknown name is rejected
+    /// at load. A `BTreeMap` for deterministic serialization order; the
+    /// table is omitted entirely when no client is configured, so a config
+    /// that never sets it never grows the key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vendors: BTreeMap<String, VendorOptions>,
 }
 
 /// One configured browse source in the top-level `[[registries]]` array.
@@ -410,6 +436,47 @@ mod tests {
         // No invalidate call — the clone's cache started empty so the
         // first fill must reflect the mutated state.
         assert_ne!(original_hash, cloned.declaration_hash_cached());
+    }
+
+    #[test]
+    fn vendor_table_round_trips_and_stays_absent_when_empty() {
+        // Additive-only contract: an unset table never serializes, so a
+        // config that predates the key round-trips byte-identically, and a
+        // set entry survives parse → serialize → parse unchanged.
+        let empty = ConfigOptions::default();
+        let json = serde_json::to_value(&empty).expect("ConfigOptions must serialize");
+        assert!(
+            json.get("vendors").is_none(),
+            "an empty vendor table must be skipped entirely: {json}"
+        );
+
+        let mut populated = ConfigOptions::default();
+        populated
+            .vendors
+            .insert("cursor".to_string(), VendorOptions { shared_skills: true });
+        let round_tripped: ConfigOptions =
+            serde_json::from_value(serde_json::to_value(&populated).expect("serialize")).expect("deserialize");
+        assert_eq!(round_tripped, populated, "the vendor table must round-trip unchanged");
+
+        // `false` is the resting state and is skipped on the way out, so an
+        // entry that only carries the default reads back as the default.
+        let default_entry = VendorOptions::default();
+        let json = serde_json::to_value(default_entry).expect("VendorOptions must serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({}),
+            "a default VendorOptions must serialize to an empty table: {json}"
+        );
+    }
+
+    #[test]
+    fn old_config_without_vendors_parses_unchanged() {
+        // The `deny_unknown_fields` guarantee runs both ways: a config that
+        // names no vendor table still deserializes, with the field defaulted.
+        let options: ConfigOptions =
+            serde_json::from_value(serde_json::json!({ "clients": ["claude"] })).expect("old config must parse");
+        assert!(options.vendors.is_empty());
+        assert_eq!(options.clients, vec!["claude".to_string()]);
     }
 
     #[test]

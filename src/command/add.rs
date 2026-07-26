@@ -884,6 +884,24 @@ pub(crate) fn write_config(
         }
         out.push('\n');
     }
+    // One `[options.vendors.<name>]` sub-table per configured client, after
+    // `[options.tui]` so every `[options]` sub-table follows the parent's
+    // scalar keys. An entry holding nothing but defaults is dropped rather
+    // than written as an empty header — the same rule `has_tui_options`
+    // applies to an all-default `[options.tui]`. The guard derives from
+    // `PartialEq + Default` and so needs no edit when a field is added; the
+    // emitter below does, and the drift test
+    // `vendor_field_completeness_matches_vendor_options` fails until it gets one.
+    for (name, vendor) in &options.vendors {
+        if *vendor == crate::config::declaration::VendorOptions::default() {
+            continue;
+        }
+        let _ = writeln!(out, "[options.vendors.{}]", toml_key(name));
+        if vendor.shared_skills {
+            let _ = writeln!(out, "shared_skills = true");
+        }
+        out.push('\n');
+    }
     // Preserve declared `[[registries]]` verbatim — re-serializing the
     // declaration must never silently drop a user's registry array.
     for rc in registries {
@@ -1063,6 +1081,7 @@ mod tests {
         );
         let set = DesiredSet::from_parts(skills, rules);
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
@@ -1094,6 +1113,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: true,
             default_registry: None,
             clients: vec![],
@@ -1105,6 +1125,57 @@ mod tests {
         assert!(body.contains("show_deprecated = true"), "body was:\n{body}");
         let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
         assert!(cfg.options.show_deprecated, "show_deprecated must round-trip as true");
+    }
+
+    #[test]
+    fn write_config_round_trips_vendor_tables() {
+        // Regression guard: `[options.vendors]` is a manual serializer field
+        // (write_config is not serde-driven), so an unrelated `add`/`remove`
+        // must neither drop a user's vendor settings nor emit a table that
+        // fails to parse back.
+        use crate::config::declaration::VendorOptions;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let mut opts = ConfigOptions {
+            vendors: Default::default(),
+            show_deprecated: false,
+            default_registry: None,
+            clients: vec!["cursor".to_string()],
+            tui: Default::default(),
+        };
+        opts.vendors
+            .insert("cursor".to_string(), VendorOptions { shared_skills: true });
+        // An entry holding nothing but defaults carries no information, so it
+        // is dropped — the same treatment an all-default `[options.tui]` and a
+        // `show_deprecated = false` already get from this serializer.
+        opts.vendors.insert("zed".to_string(), VendorOptions::default());
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[options.vendors.cursor]"), "body was:\n{body}");
+        assert!(body.contains("shared_skills = true"), "body was:\n{body}");
+        assert!(!body.contains("[options.vendors.zed]"), "body was:\n{body}");
+
+        let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        assert_eq!(
+            cfg.options.vendors.keys().collect::<Vec<_>>(),
+            vec!["cursor"],
+            "a meaningful entry round-trips; a default-only one is not written"
+        );
+        assert!(cfg.options.vendors["cursor"].shared_skills);
+    }
+
+    #[test]
+    fn write_config_omits_vendor_table_when_unset() {
+        // A config that declares no vendor must not grow the table.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("[options.vendors"), "body was:\n{body}");
     }
 
     #[test]
@@ -1159,6 +1230,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: None,
             clients: vec![],
@@ -1203,6 +1275,7 @@ mod tests {
         // Provide a non-empty base options so [options] itself appears, but
         // leave tui at its Default.
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
@@ -1235,6 +1308,7 @@ mod tests {
             default: true,
         }];
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: None,
             clients: vec![],
@@ -1279,6 +1353,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: None,
             clients: vec![],
@@ -1328,6 +1403,7 @@ tree_separators_typo = 1
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
@@ -1413,6 +1489,7 @@ tree_separators_typo = 1
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            vendors: Default::default(),
             show_deprecated: false,
             default_registry: Some("legacy.example".to_string()),
             clients: vec![],

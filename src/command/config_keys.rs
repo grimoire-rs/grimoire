@@ -3,8 +3,9 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 7 fixed `options.*` keys and the 3
-//! per-registry field names: their [`crate::api::ValueType`] (which
+//! Single source of truth for the 7 fixed `options.*` keys, the 3
+//! per-registry field names, and the per-vendor field
+//! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
 //! description. `command::config` drives `parse_key`, `collect_entries`,
 //! and the unknown-key error message off this registry instead of
@@ -240,12 +241,43 @@ impl RegistryField {
     }
 }
 
+/// The one addressable per-vendor field, `options.vendors.<name>.shared_skills`.
+///
+/// A *dynamic* key like [`RegistryField`], not a [`ConfigKey`] arm: there is
+/// one instance per client name, so it cannot live in the fixed
+/// `ConfigKey::ALL` array. `key` is a pattern string — the `<name>` segment
+/// is supplied by the user and validated against the closed client set.
+///
+/// Like `registry.<alias>.default`, the default is a literal rather than a
+/// `config::defaults` const: the resting value is `VendorOptions`' own
+/// serde-derived `bool` default, which is not const-evaluable. The tripwire
+/// is `vendor_shared_skills_spec_matches_derived_default`.
+pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
+    key: "options.vendors.<name>.shared_skills",
+    value_type: ValueType::Bool { default: false },
+    title: "Shared skills pool",
+    description: "Controls whether this client's skills install into the shared `.agents/skills` \
+                   pool instead of its own directory — reserved, `grim install` does not read it \
+                   yet. Disabled by default, keeping the native layout.",
+    constraints: None,
+};
+
+/// The field name addressable under a vendor table — the last segment of
+/// [`VENDOR_SHARED_SKILLS`]'s pattern key, used by the key parser and by the
+/// unknown-field error message.
+pub const VENDOR_FIELD_NAME: &str = "shared_skills";
+
 /// All valid dotted key names (fixed keys' literal keys, then registry
-/// field pattern keys), comma-joined for the unknown-key error message.
+/// field pattern keys, then the per-vendor field pattern key), comma-joined
+/// for the unknown-key error message.
 pub fn valid_keys() -> String {
     let fixed = ConfigKey::ALL.iter().map(|k| k.spec().key);
     let registry = RegistryField::ALL.iter().map(|f| f.spec().key);
-    fixed.chain(registry).collect::<Vec<_>>().join(", ")
+    fixed
+        .chain(registry)
+        .chain(std::iter::once(VENDOR_SHARED_SKILLS.key))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -339,13 +371,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn config_options_completeness_matches_config_key_all() {
-        // DRIFT TEST 1: a fully-populated ConfigOptions (every field
-        // set/non-empty/true, so no serde skip fires) must produce exactly
-        // the dotted-key set ConfigKey::ALL declares — in both directions.
-        use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions};
-        let options = ConfigOptions {
+    /// A fully-populated `ConfigOptions` — every field set/non-empty/true so
+    /// no serde skip fires, including one `[options.vendors]` entry.
+    fn fully_populated_options() -> crate::config::declaration::ConfigOptions {
+        use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions, VendorOptions};
+        ConfigOptions {
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
             tui: TuiOptions {
@@ -355,15 +385,77 @@ mod tests {
                 expand_levels: Some(1),
             },
             show_deprecated: true,
-        };
-        let value = serde_json::to_value(&options).expect("ConfigOptions must serialize");
+            vendors: [("claude".to_string(), VendorOptions { shared_skills: true })]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn config_options_completeness_matches_config_key_all() {
+        // DRIFT TEST 1: a fully-populated ConfigOptions (every field
+        // set/non-empty/true, so no serde skip fires) must produce exactly
+        // the dotted-key set ConfigKey::ALL declares — in both directions.
+        let value = serde_json::to_value(fully_populated_options()).expect("ConfigOptions must serialize");
         let mut flattened = BTreeSet::new();
         flatten_options(&value, "options", &mut flattened);
+
+        // `options.vendors.*` is a DYNAMIC key family (one per client name),
+        // like `registry.<alias>.*`: it has no ConfigKey arm by design, so
+        // its instances are removed here and checked against the pattern
+        // spec by `vendor_field_completeness_matches_vendor_options`.
+        let vendor_keys: BTreeSet<String> = flattened
+            .iter()
+            .filter(|k| k.starts_with("options.vendors."))
+            .cloned()
+            .collect();
+        assert_eq!(
+            vendor_keys,
+            BTreeSet::from(["options.vendors.claude.shared_skills".to_string()]),
+            "the populated vendor entry must flatten to exactly its one dynamic key"
+        );
+        flattened.retain(|k| !k.starts_with("options.vendors."));
 
         let expected: BTreeSet<String> = ConfigKey::ALL.iter().map(|k| k.spec().key.to_string()).collect();
         assert_eq!(
             flattened, expected,
-            "every ConfigOptions field (fully populated) must have exactly one ConfigKey spec, and vice versa"
+            "every fixed ConfigOptions field (fully populated) must have exactly one ConfigKey spec, and vice versa"
+        );
+    }
+
+    #[test]
+    fn vendor_field_completeness_matches_vendor_options() {
+        // DRIFT TEST: a fully-populated VendorOptions must produce exactly
+        // the field set the per-vendor spec declares. A second field added
+        // to VendorOptions without a matching spec fails here.
+        use crate::config::declaration::VendorOptions;
+        let value = serde_json::to_value(VendorOptions { shared_skills: true }).expect("VendorOptions must serialize");
+        let fields: BTreeSet<String> = value
+            .as_object()
+            .expect("VendorOptions must serialize as an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            fields,
+            BTreeSet::from([VENDOR_FIELD_NAME.to_string()]),
+            "every VendorOptions field must have exactly one spec, and vice versa"
+        );
+        assert!(
+            VENDOR_SHARED_SKILLS.key.ends_with(VENDOR_FIELD_NAME),
+            "the spec pattern key must end with the addressable field name"
+        );
+    }
+
+    /// Tripwire mirroring `registry_default_spec_matches_registry_config_derived_default`:
+    /// the per-vendor spec default is a literal, so pin it against the real
+    /// derived default it claims to mirror.
+    #[test]
+    fn vendor_shared_skills_spec_matches_derived_default() {
+        use crate::config::declaration::VendorOptions;
+        assert_eq!(
+            VENDOR_SHARED_SKILLS.value_type.default_str(),
+            Some(VendorOptions::default().shared_skills.to_string())
         );
     }
 
@@ -541,5 +633,18 @@ mod tests {
             let type_node = unwrap_nullable(&schema, node);
             assert_schema_type_matches(spec.value_type, type_node, spec.key);
         }
+
+        // The per-vendor field is a dynamic key, so its schema node hangs off
+        // the `vendors` map's VALUE type rather than off `ConfigOptions`.
+        let vendor_options = resolve_ref(
+            &schema,
+            config_options["properties"]["vendors"]
+                .get("additionalProperties")
+                .expect("options.vendors must publish an additionalProperties value schema"),
+        );
+        let node = &vendor_options["properties"][VENDOR_FIELD_NAME];
+        assert_description_prefix(node, VENDOR_SHARED_SKILLS.description, VENDOR_SHARED_SKILLS.key);
+        let type_node = unwrap_nullable(&schema, node);
+        assert_schema_type_matches(VENDOR_SHARED_SKILLS.value_type, type_node, VENDOR_SHARED_SKILLS.key);
     }
 }

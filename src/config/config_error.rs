@@ -147,6 +147,13 @@ pub enum ConfigErrorKind {
     /// install-time failure.
     #[error("invalid options.clients: {detail}")]
     ClientsInvalid { detail: String },
+
+    /// An authored `[options.vendors.<name>]` table names something outside
+    /// the closed client set. The name is a table *key*, so serde cannot
+    /// reject it — without this check the settings under it would silently
+    /// never apply.
+    #[error("invalid options.vendors: {detail}")]
+    VendorsInvalid { detail: String },
 }
 
 #[cfg(test)]
