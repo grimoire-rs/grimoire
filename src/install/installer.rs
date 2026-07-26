@@ -304,11 +304,18 @@ fn warn_cross_scope_shadow(other: &InstallState, kind: ArtifactKind, name: &str,
 /// `progress` sink; everything downstream of `install_all` is shared.
 ///
 /// The per-item outcomes are returned for the caller to render. A persist
-/// failure is the only hard error (as [`InstallErrorKind::TargetIo`]); a
+/// failure is a hard error (as [`InstallErrorKind::TargetIo`]); a
 /// config-sync failure is warn-only because the artifacts and state are
 /// already on disk. `grim_home` is read from `roots`, so the caller passes
 /// only the remaining persist coordinates (`scope`, `workspace`,
 /// `config_path`).
+///
+/// One pre-flight gate runs before any of that: a *generic-client fallback*
+/// target (nothing selected, nothing detected) whose artifact set declines
+/// in full is refused with [`InstallErrorKind::NoInstallableClient`] (78).
+/// It lives here rather than in `InstallTarget::parse` because only this
+/// seam sees both the target and the lock — and because `grim context`
+/// resolves the same target through `parse` and must never error.
 #[allow(clippy::too_many_arguments)]
 pub async fn install_and_persist<M: ArtifactMaterializer>(
     lock: &GrimoireLock,
@@ -324,6 +331,8 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
+    refuse_uninstallable_fallback(lock, target, state, roots)?;
+
     // Path sources resolve against the config file's directory.
     let anchor = config_path.parent().unwrap_or_else(|| Path::new("."));
     let outcomes = install_all_with_progress(
@@ -824,6 +833,47 @@ fn client_supports_kind(
 /// still-active recorded clients at the old pin — the downstream
 /// `pin_changed` re-materialization logic (already in [`install_one`])
 /// needs the gate to stay open for them.
+/// Refuse a no-client-detected install that would write nothing at all.
+///
+/// The residual failure from the client-selection design record: when nothing
+/// selected the target, grim falls back to the generic `agents` client, which
+/// renders skills only. A lock of nothing but rules, agents, and/or MCP then
+/// has no destination anywhere — grim genuinely cannot act, so it says so
+/// (exit 78) instead of fetching every blob to produce zero outputs and exit 0.
+///
+/// The predicate is [`effective_supporting_clients`] itself, not a narrower
+/// re-derivation over `target.clients()`. That matters: the installer also
+/// writes to *recorded* clients whose output is still resolvable, so a
+/// workspace whose marker dir vanished can still be re-pinned by the very
+/// install this would otherwise refuse. Checking the same set the writer uses
+/// is what keeps `install` and `update` from disagreeing about the same state.
+///
+/// A no-op for every explicitly selected target — `--client agents` on a
+/// rules-only lock is a choice, and stays a warn-and-skip at exit 0 — and for
+/// an empty lock, where there is nothing to fail to install.
+fn refuse_uninstallable_fallback(
+    lock: &GrimoireLock,
+    target: &InstallTarget,
+    state: &InstallState,
+    roots: &AnchorRoots,
+) -> Result<(), InstallError> {
+    if !target.is_generic_fallback() {
+        return Ok(());
+    }
+    let mut declared = false;
+    for artifact in lock.iter_artifacts() {
+        declared = true;
+        let recorded = state.get(artifact.kind, &artifact.name);
+        if !effective_supporting_clients(target, artifact.kind, recorded, roots).is_empty() {
+            return Ok(());
+        }
+    }
+    if !declared {
+        return Ok(());
+    }
+    Err(InstallError::without_reference(InstallErrorKind::NoInstallableClient))
+}
+
 fn effective_supporting_clients(
     target: &InstallTarget,
     kind: ArtifactKind,
@@ -3548,6 +3598,75 @@ mod tests {
             effective.is_empty(),
             "a forged codex output for a rule (a kind Codex declines) must never be reattached: {effective:?}"
         );
+    }
+
+    /// The residual 78: a no-client-detected fallback whose whole artifact
+    /// set is declined by the generic client has nowhere to write. The guard
+    /// must fire *only* then — and must agree with what the installer would
+    /// actually write, including the recorded clients it re-pins.
+    #[test]
+    fn uninstallable_fallback_is_refused_unless_a_recorded_client_can_take_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let rules_only = lock_of(vec![locked_rule("rust-style", &blob)]);
+
+        // A bare workspace: nothing detected ⇒ the generic-client fallback.
+        let fallback = InstallTarget::parse(dir.path(), ConfigScope::Project, &[], &[]).unwrap();
+        assert!(fallback.is_generic_fallback());
+
+        let empty = InstallState::load(&dir.path().join("state.json")).unwrap();
+        assert!(
+            refuse_uninstallable_fallback(&rules_only, &fallback, &empty, &roots).is_err(),
+            "a rules-only lock has no destination under the skills-only generic client"
+        );
+
+        // Nothing declared is not a failure to install anything.
+        refuse_uninstallable_fallback(&lock_of(vec![]), &fallback, &empty, &roots)
+            .expect("an empty lock still exits 0");
+
+        // One installable kind in the set is enough — the rest warn and skip.
+        let skill_blob = skill_tar("code-review", b"---\nname: code-review\ndescription: d\n---\n#\n");
+        let mut mixed = lock_of(vec![locked_rule("rust-style", &blob)]);
+        mixed.skills = vec![locked_skill("code-review", &skill_blob)];
+        refuse_uninstallable_fallback(&mixed, &fallback, &empty, &roots)
+            .expect("the skill has a destination, so the run proceeds");
+
+        // The sharp case: the workspace lost its `.claude` marker, but the
+        // rule is still RECORDED for claude at a resolvable path. The
+        // installer re-materializes it (that is what
+        // `effective_supporting_clients` is for), so the guard must not
+        // refuse — otherwise `grim install` would 78 on state that
+        // `grim update` happily repairs.
+        let pin = PinnedIdentifier::try_from(
+            Identifier::new_registry("rust-style", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        let mut recorded_state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        recorded_state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pin),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".claude/rules/rust-style.md".to_string(),
+                },
+                content_hash: Digest::Sha256("b".repeat(64)),
+                support_dir: None,
+                entry: None,
+            }],
+        });
+        refuse_uninstallable_fallback(&rules_only, &fallback, &recorded_state, &roots)
+            .expect("a still-resolvable recorded client keeps the install viable");
+
+        // An explicit selection is never refused, whatever the artifact set.
+        let explicit = InstallTarget::parse(dir.path(), ConfigScope::Project, &["agents".to_string()], &[]).unwrap();
+        assert!(!explicit.is_generic_fallback());
+        refuse_uninstallable_fallback(&rules_only, &explicit, &empty, &roots)
+            .expect("`--client agents` is a choice: warn and skip, exit 0");
     }
 
     #[tokio::test]

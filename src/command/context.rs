@@ -38,7 +38,11 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     // Effective client set: config `[options].clients` (no --client flag on
-    // this command), else detection, else all — same seam install uses.
+    // this command), else detection, else the generic `agents` client — the
+    // same seam install uses, so this reports the RESOLVED set, never the
+    // raw detection. `grim context` is the diagnostic surface for exactly
+    // the no-client-detected situation, so it must answer `["agents"]` here
+    // and never error.
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -117,9 +121,21 @@ mod tests {
         let target = InstallTarget::parse(&scope.workspace, scope.scope, &[], &scope.options.clients).unwrap();
         assert!(
             !target.clients().is_empty(),
-            "empty detection falls back to all clients"
+            "context reports the resolved set — the generic client at minimum, never []"
         );
         let primary = crate::command::primary_registry_for_scope(&ctx, &scope);
         assert!(!primary.is_empty(), "default registry always resolves");
+    }
+
+    #[test]
+    fn bare_workspace_reports_the_generic_client() {
+        // The diagnostic contract: on a workspace where nothing is detected,
+        // `clients` is `["agents"]` — the set an install would actually write
+        // to. Not `[]` (which would read as "grim will do nothing") and not
+        // all eleven (the old fallback's lie).
+        let tmp = tempfile::tempdir().unwrap();
+        let target = InstallTarget::parse(tmp.path(), crate::config::scope::ConfigScope::Project, &[], &[]).unwrap();
+        let clients: Vec<String> = target.clients().iter().map(ToString::to_string).collect();
+        assert_eq!(clients, vec!["agents".to_string()]);
     }
 }

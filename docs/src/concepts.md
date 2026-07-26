@@ -198,9 +198,13 @@ their own reasons, each recorded in the matrix.
 
 [`grim install`](./commands.md#install) writes to the targets listed in the
 `clients` option in your config; without one it targets every client it
-detects (vendor directory or marker present), falling back to all clients
-when nothing is detected. `--client` overrides both and accepts a
-comma-separated list to install into several AI clients at once.
+detects (vendor directory or marker present). When nothing is detected it
+targets the generic **`agents`** client — not a product, but the
+vendor-neutral pool at `.agents/skills` that several clients already read.
+It is never *detected*, only selected: writing the pool directory changes no
+future run's answer, which is exactly why grim no longer falls back to every
+known client. `--client` overrides both and accepts a comma-separated list to
+install into several AI clients at once.
 
 ## The catalog
 

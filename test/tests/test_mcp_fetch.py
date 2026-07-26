@@ -164,7 +164,6 @@ def test_fetch_vendor_projection_matches_installed_skill_md(
     )
     make_artifact(f"{ns}/proj-demo", "skill", {"proj-demo/SKILL.md": doc})
     (project_dir / "grimoire.toml").write_text("[skills]\n")
-    (project_dir / ".claude").mkdir()
     runner = grim_at(project_dir)
 
     canonical = _payload(
@@ -426,7 +425,6 @@ def test_render_skill_writes_install_identical_projection(
         {"render-demo/SKILL.md": doc, "render-demo/scripts/run.sh": "echo hi\n"},
     )
     (project_dir / "grimoire.toml").write_text("[skills]\n")
-    (project_dir / ".claude").mkdir()
     runner = grim_at(project_dir)
 
     dest = tmp_path / "render-out" / "nested"

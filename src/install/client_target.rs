@@ -32,6 +32,7 @@ use crate::skill::{AgentFrontmatter, RuleFrontmatter};
 use super::install_error::{InstallError, InstallErrorKind};
 
 use super::vendor::Vendor;
+use super::vendor_agents::AgentsVendor;
 use super::vendor_amp::AmpVendor;
 use super::vendor_claude::ClaudeVendor;
 use super::vendor_codex::CodexVendor;
@@ -77,6 +78,12 @@ pub enum ClientTarget {
     /// Amp — shared `.agents/skills` + `.amp/settings.json` (skills + MCP;
     /// rules and agents declined — AGENTS.md only / runtime subagents).
     Amp,
+    /// The vendor-neutral generic client — shared `.agents/skills` only
+    /// (rules, agents, and MCP declined: no vendor-neutral surface exists).
+    /// Not a product. Never detected, only selected: today solely by explicit
+    /// request (`--client agents`, `[options].clients`). See
+    /// [`AgentsVendor::detect`](super::vendor_agents::AgentsVendor).
+    Agents,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -94,6 +101,7 @@ impl std::str::FromStr for ClientTarget {
             "gemini" => Ok(Self::Gemini),
             "zed" => Ok(Self::Zed),
             "amp" => Ok(Self::Amp),
+            "agents" => Ok(Self::Agents),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -125,6 +133,7 @@ impl ClientTarget {
             Self::Gemini => "gemini",
             Self::Zed => "zed",
             Self::Amp => "amp",
+            Self::Agents => "agents",
         }
     }
 
@@ -143,6 +152,7 @@ impl ClientTarget {
         Self::Gemini.as_str(),
         Self::Zed.as_str(),
         Self::Amp.as_str(),
+        Self::Agents.as_str(),
     ];
 }
 
@@ -181,7 +191,7 @@ pub struct MaterializeRequest<'a> {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 10] = [
+    pub const ALL: [ClientTarget; 11] = [
         Self::Claude,
         Self::OpenCode,
         Self::Copilot,
@@ -192,6 +202,7 @@ impl ClientTarget {
         Self::Gemini,
         Self::Zed,
         Self::Amp,
+        Self::Agents,
     ];
 
     /// The per-vendor materialization strategy behind this identity.
@@ -207,6 +218,7 @@ impl ClientTarget {
             Self::Gemini => &GeminiVendor,
             Self::Zed => &ZedVendor,
             Self::Amp => &AmpVendor,
+            Self::Agents => &AgentsVendor,
         }
     }
 
@@ -501,25 +513,27 @@ mod tests {
 
     // ── kind_support grid + G4 parity tests (adr_client_compat_matrix) ──
 
-    /// Full 10-vendor × kind grid asserted against the `adr_vendor_wave_expansion`
+    /// Full vendor × kind grid asserted against the `adr_vendor_wave_expansion`
     /// §1 mapping table: Skill/Rule/Agent via [`Vendor::kind_support`], MCP via
     /// the boolean [`Vendor::mcp_config_path`] surface.
     #[test]
     fn kind_support_grid_matches_adr_mapping_table() {
         use crate::install::vendor::KindSupport::{Declined, Degraded, Native};
-        // (client, Skill, Rule, Agent). Every wave-1 vendor also exposes an
-        // MCP config surface (asserted below).
+        // (client, Skill, Rule, Agent, has-MCP-surface). Every real vendor
+        // exposes an MCP config surface; the generic `agents` client is the one
+        // target with none — there is no vendor-neutral MCP config location.
         let grid = [
-            (ClientTarget::Claude, Native, Native, Native),
-            (ClientTarget::OpenCode, Native, Degraded, Native),
-            (ClientTarget::Copilot, Native, Native, Native),
-            (ClientTarget::Codex, Native, Declined, Native),
-            (ClientTarget::Cursor, Native, Native, Native),
-            (ClientTarget::Kiro, Native, Native, Declined),
-            (ClientTarget::Junie, Native, Declined, Declined),
-            (ClientTarget::Gemini, Native, Declined, Native),
-            (ClientTarget::Zed, Native, Declined, Declined),
-            (ClientTarget::Amp, Native, Declined, Declined),
+            (ClientTarget::Claude, Native, Native, Native, true),
+            (ClientTarget::OpenCode, Native, Degraded, Native, true),
+            (ClientTarget::Copilot, Native, Native, Native, true),
+            (ClientTarget::Codex, Native, Declined, Native, true),
+            (ClientTarget::Cursor, Native, Native, Native, true),
+            (ClientTarget::Kiro, Native, Native, Declined, true),
+            (ClientTarget::Junie, Native, Declined, Declined, true),
+            (ClientTarget::Gemini, Native, Declined, Native, true),
+            (ClientTarget::Zed, Native, Declined, Declined, true),
+            (ClientTarget::Amp, Native, Declined, Declined, true),
+            (ClientTarget::Agents, Native, Declined, Declined, false),
         ];
         assert_eq!(
             grid.len(),
@@ -527,14 +541,23 @@ mod tests {
             "grid must cover every ClientTarget"
         );
         let project = crate::config::scope::ConfigScope::Project;
-        for (client, skill, rule, agent) in grid {
+        for (client, skill, rule, agent, has_mcp) in grid {
             let v = client.vendor();
             assert_eq!(v.kind_support(ArtifactKind::Skill), skill, "{client} skill");
             assert_eq!(v.kind_support(ArtifactKind::Rule), rule, "{client} rule");
             assert_eq!(v.kind_support(ArtifactKind::Agent), agent, "{client} agent");
-            assert!(
+            assert_eq!(
                 v.mcp_config_path(Path::new("/w"), project).is_some(),
-                "{client} must expose an MCP config surface"
+                has_mcp,
+                "{client} MCP config surface must match the grid"
+            );
+            // The two MCP signals must agree: a vendor with no config path
+            // must also decline the kind, so the installer skips it at the
+            // `kind_support` gate rather than resolving a phantom target.
+            assert_eq!(
+                v.kind_support(ArtifactKind::Mcp) != Declined,
+                has_mcp,
+                "{client} kind_support(Mcp) must track mcp_config_path"
             );
         }
     }
@@ -809,6 +832,7 @@ mod tests {
             ("gemini", ClientTarget::Gemini),
             ("zed", ClientTarget::Zed),
             ("amp", ClientTarget::Amp),
+            ("agents", ClientTarget::Agents),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
@@ -833,7 +857,7 @@ mod tests {
         let w = Path::new("/w");
         let project = crate::config::scope::ConfigScope::Project;
 
-        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 10] = [
+        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 11] = [
             (
                 ClientTarget::Claude,
                 ".claude/skills/x",
@@ -881,6 +905,8 @@ mod tests {
             // Zed / Amp: skills via the shared pool only.
             (ClientTarget::Zed, ".agents/skills/x", None, None),
             (ClientTarget::Amp, ".agents/skills/x", None, None),
+            // Generic client: the shared pool is its only surface.
+            (ClientTarget::Agents, ".agents/skills/x", None, None),
         ];
         assert_eq!(
             table.len(),

@@ -95,8 +95,8 @@ impl ConfigKey {
             },
             title: "Clients",
             description: "Determines which clients receive installs and updates when `--client` is \
-                           absent. Auto-detects clients when left empty, falling back to all clients \
-                           when none are detected.",
+                           absent. Auto-detects clients when left empty, falling back to the generic \
+                           `agents` client when none are detected.",
             // Closed set — already machine-readable via ConfigEntry::values,
             // no item-pattern needed.
             constraints: None,

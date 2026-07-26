@@ -249,13 +249,24 @@ fn current_entry_hash(
 ///
 /// An output whose client string does not name a supported target is treated
 /// as inactive (filtered out) — it can never belong to the active set.
+///
+/// [`ClientTarget::Agents`] is the one **unconditional** member: the generic
+/// client is never *detected* (`AgentsVendor::detect` is `false` at both
+/// scopes, by design), so it can never appear in `active` and reconciling it
+/// against detection is meaningless. It is only ever *selected* — explicitly
+/// or as the no-client-detected fallback — so a recorded `agents` output is
+/// always a real one. Filtering it would make a healthy install report
+/// `outputs: []` and state `missing` the moment any real client appeared in
+/// the workspace.
 pub fn active_outputs<'a>(
     outputs: &'a [ClientOutput],
     active: &'a [ClientTarget],
 ) -> impl Iterator<Item = &'a ClientOutput> + 'a {
-    outputs
-        .iter()
-        .filter(move |o| o.client.parse::<ClientTarget>().is_ok_and(|c| active.contains(&c)))
+    outputs.iter().filter(move |o| {
+        o.client
+            .parse::<ClientTarget>()
+            .is_ok_and(|c| c == ClientTarget::Agents || active.contains(&c))
+    })
 }
 
 /// One installed artifact's recorded state.
@@ -1059,6 +1070,41 @@ mod tests {
             support_dir: None,
             entry: None,
         }
+    }
+
+    #[test]
+    fn active_outputs_keeps_agents_but_still_reconciles_every_real_client() {
+        // `AgentsVendor::detect` is false at both scopes by design, so the
+        // generic client can NEVER appear in the active set. Reconciling it
+        // against detection would make a healthy install report `outputs: []`
+        // and state `missing` the moment any real client showed up in the
+        // workspace — the file is on disk and grim put it there.
+        let outputs = vec![
+            client_output_workspace("agents", "code-review", ArtifactKind::Skill),
+            client_output_workspace("claude", "code-review", ArtifactKind::Skill),
+            client_output_workspace("opencode", "code-review", ArtifactKind::Skill),
+            client_output_workspace("not-a-client", "code-review", ArtifactKind::Skill),
+        ];
+
+        let kept: Vec<&str> = active_outputs(&outputs, &[ClientTarget::Claude])
+            .map(|o| o.client.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["agents", "claude"],
+            "the generic client survives detection; opencode is correctly reconciled away"
+        );
+
+        // The reconciliation this function exists for still works: an empty
+        // active set drops every real client but keeps the generic one.
+        let kept: Vec<&str> = active_outputs(&outputs, &[]).map(|o| o.client.as_str()).collect();
+        assert_eq!(kept, vec!["agents"]);
+
+        // An unparseable client name is still never active.
+        let kept: Vec<&str> = active_outputs(&outputs, &ClientTarget::ALL)
+            .map(|o| o.client.as_str())
+            .collect();
+        assert_eq!(kept, vec!["agents", "claude", "opencode"]);
     }
 
     /// Build a `ClientOutput` with a configurable anchor.

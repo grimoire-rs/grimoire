@@ -243,21 +243,28 @@ no extra configuration. The TUI flips scope at runtime with `g`.
 ## Client Targets
 
 An installed artifact lands in a **client target**: `claude`, `opencode`,
-`copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, or `amp`,
-each receiving the artifact in its native layout. `grim install` and
-`grim update` choose targets by precedence:
+`copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, or
+the vendor-neutral `agents`, each receiving the artifact in its native
+layout. `grim install` and `grim update` choose targets by precedence:
 
 1. `--client <list>` flag (comma-separated: `--client claude,copilot`)
 2. config `[options].clients` (TOML array of client names)
 3. auto-detection — every client whose marker exists for the active
    scope (e.g. a `.claude/` directory in the project)
-4. fallback to **all** clients when nothing is detected, so an install
-   never silently targets zero clients or prefers one
+4. the generic `agents` client when nothing is detected — one copy into
+   the cross-vendor `.agents/skills` pool that several clients already
+   read, instead of a copy into every vendor directory grim knows about
 
-The detected set is recomputed each run, never written back to config.
-Pin `[options].clients` when you want deterministic targets in CI — set it
-with `grim config set options.clients claude,opencode` (see [Managing
-Config](#managing-config)).
+`agents` renders **skills only**; it has no vendor-neutral surface for
+rules, agents, or MCP servers. So if nothing is detected and your lock
+holds none of those kinds, `grim install` exits **78** and tells you to
+name a client with `--client`.
+
+The detected set is recomputed each run and never written back to config —
+except by `grim init`, which seeds `[options].clients` with what it detects
+at the moment you create the file. Pin `[options].clients` when you want
+deterministic targets in CI — set it with `grim config set options.clients
+claude,opencode` (see [Managing Config](#managing-config)).
 
 ## Offline Mode
 

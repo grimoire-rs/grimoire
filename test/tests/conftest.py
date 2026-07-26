@@ -17,8 +17,32 @@ from src.runner import GrimRunner
 
 @pytest.fixture()
 def project_dir(tmp_path: Path) -> Path:
-    """An empty project workspace `grim` runs inside of."""
+    """A project workspace `grim` runs inside of, marked as a Claude project.
+
+    The `.claude/` marker makes the workspace a **detected** Claude
+    workspace, so the default client set is a stable `["claude"]`. Without
+    any marker, detection finds nothing and grim targets the generic
+    `agents` client — one skills-only copy into `.agents/skills` — which is
+    correct behaviour but not what a test about install, update, uninstall,
+    or state mechanics wants to assert paths against.
+
+    A test that exercises client *selection* needs a genuinely undetected
+    workspace: use `bare_project_dir`.
+    """
     d = tmp_path / "project"
+    (d / ".claude").mkdir(parents=True)
+    return d
+
+
+@pytest.fixture()
+def bare_project_dir(tmp_path: Path) -> Path:
+    """A project workspace carrying no vendor marker at all.
+
+    Nothing is detected here, so `grim install` resolves to the generic
+    `agents` client. This is the fixture for client-selection tests; every
+    other suite wants `project_dir`.
+    """
+    d = tmp_path / "bare-project"
     d.mkdir()
     return d
 

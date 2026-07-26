@@ -579,6 +579,10 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 (ClientTarget::Amp, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
                 (ClientTarget::Amp, ArtifactKind::Mcp) => Some(PathAnchor::AmpRoot),
 
+                // Generic client: the shared pool is its ONLY surface — rules,
+                // agents, and MCP are all declined (no vendor-neutral format).
+                (ClientTarget::Agents, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
+
                 // MCP config-entry anchors: Claude's user config file dir
                 // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
                 // config dir (`opencode.json`), Copilot's native root
@@ -602,7 +606,10 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Zed, ArtifactKind::Rule)
                 | (ClientTarget::Zed, ArtifactKind::Agent)
                 | (ClientTarget::Amp, ArtifactKind::Rule)
-                | (ClientTarget::Amp, ArtifactKind::Agent) => None,
+                | (ClientTarget::Amp, ArtifactKind::Agent)
+                | (ClientTarget::Agents, ArtifactKind::Rule)
+                | (ClientTarget::Agents, ArtifactKind::Agent)
+                | (ClientTarget::Agents, ArtifactKind::Mcp) => None,
 
                 // Bundles are never materialized; they expand into members, so
                 // no (client, Bundle) pair has an anchor. A legacy/hand-edited
@@ -2146,6 +2153,15 @@ mod tests {
                 (PathAnchor::AgentsSkills, name.to_string())
             }
 
+            // Generic client: the shared pool is its only surface (rules,
+            // agents, and MCP all declined).
+            (ConfigScope::Project, ClientTarget::Agents, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Agents, ArtifactKind::Skill) => {
+                (PathAnchor::AgentsSkills, name.to_string())
+            }
+
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
             // MCP descriptors register into client configs, not files —
@@ -2161,7 +2177,9 @@ mod tests {
             | (_, ClientTarget::Zed, ArtifactKind::Rule)
             | (_, ClientTarget::Zed, ArtifactKind::Agent)
             | (_, ClientTarget::Amp, ArtifactKind::Rule)
-            | (_, ClientTarget::Amp, ArtifactKind::Agent) => {
+            | (_, ClientTarget::Amp, ArtifactKind::Agent)
+            | (_, ClientTarget::Agents, ArtifactKind::Rule)
+            | (_, ClientTarget::Agents, ArtifactKind::Agent) => {
                 unreachable!("declined (client, kind) pairs are skipped by the test loop before this call")
             }
         }
@@ -2302,15 +2320,15 @@ mod tests {
             }
         }
 
-        // Exhaustiveness guard: 2 scopes × 10 clients × 3 kinds = 60, minus the
-        // 9 declined (client, kind) pairs the `kind_support` gate skips
+        // Exhaustiveness guard: 2 scopes × 11 clients × 3 kinds = 66, minus the
+        // 11 declined (client, kind) pairs the `kind_support` gate skips
         // (Codex-Rule, Kiro-Agent, Junie-Rule/Agent, Gemini-Rule, Zed-Rule/Agent,
-        // Amp-Rule/Agent) × 2 scopes = 18 → 42 combos. If a new ClientTarget or
-        // ArtifactKind variant is added, this fails, forcing the table to be
-        // extended.
+        // Amp-Rule/Agent, Agents-Rule/Agent) × 2 scopes = 22 → 44 combos. If a
+        // new ClientTarget or ArtifactKind variant is added, this fails, forcing
+        // the table to be extended.
         assert_eq!(
-            combo_count, 42,
-            "expected 42 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 44,
+            "expected 44 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }

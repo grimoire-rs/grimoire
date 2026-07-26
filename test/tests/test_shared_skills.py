@@ -28,7 +28,7 @@ from src.runner import GrimRunner
 
 
 def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
-    grim_at, project_dir: Path, registry: str, unique_repo: str
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """Install one skill for codex+zed+amp → a single ``.agents/skills/<name>``
     dir recorded once per client. Narrowing ``[options].clients`` to drop zed
@@ -40,14 +40,14 @@ def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
         {"shared-skill/SKILL.md": "---\nname: shared-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    shared_dir = project_dir / ".agents/skills/shared-skill"
+    shared_dir = bare_project_dir / ".agents/skills/shared-skill"
 
     # All three pool members select the same .agents/skills target.
-    (project_dir / "grimoire.toml").write_text(
+    (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["codex", "zed", "amp"]\n\n'
         f'[skills]\nshared-skill = "{sk.fq}"\n'
     )
-    runner = grim_at(project_dir)
+    runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     rows = runner.json("install")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
@@ -63,7 +63,7 @@ def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
 
     # Drop zed from the client set; update reaps zed but the dir survives
     # because codex + amp still reference it.
-    (project_dir / "grimoire.toml").write_text(
+    (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["codex", "amp"]\n\n'
         f'[skills]\nshared-skill = "{sk.fq}"\n'
     )

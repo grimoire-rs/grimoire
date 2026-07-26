@@ -368,12 +368,34 @@ extra clause is needed there).
 
 Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
 scope)`), driven by `install::target::detect_clients`, which iterates
-`ClientTarget::ALL` so the set is deterministic. When **nothing** is
-detected the set falls back to **all** clients so an install never
-silently targets zero clients or prefers one. An explicit `[options].clients` and the `--client`
-flag both override detection. The detected set is **not** persisted to
-config — it is recomputed each run. Detection reuses the same vendor env
-overrides documented in the table above.
+`ClientTarget::ALL` so the set is deterministic and returns the **raw**
+detected set (possibly empty).
+
+Two callers, two answers, and the split is load-bearing:
+
+- **`InstallTarget::parse`** — the seam every mutating command uses.
+  Nothing detected ⇒ the single generic `agents` client (`.agents/skills`,
+  skills only). *Not* all clients: that fallback wrote eleven vendor
+  directories, and those directories were exactly what made the next run
+  "detect" every client. `AgentsVendor::detect` returns `false` at both
+  scopes by design — the generic client is selected, never detected, so
+  writing the pool changes no future resolution. When that fallback is
+  active **and** the artifact set holds nothing installable (only rules,
+  agents, and/or MCP, all declined by the generic client), install exits
+  **78** naming `--client` (`InstallTarget::ensure_installable`, gated in
+  `install_and_persist`).
+- **`detect_clients_or_all`** — the permissive wrapper for read-only
+  consumers (`status`, `search`, the TUI badge sites), which reconcile
+  *recorded* outputs against "which clients might be present". Nothing
+  detected ⇒ all clients, unchanged from before.
+
+An explicit `[options].clients` and the `--client` flag both override
+detection. The detected set is **not** persisted to config — it is
+recomputed each run, with one exception: `grim init` seeds
+`[options].clients` from detection (writing no `[options]` table when
+detection is empty, so the generic fallback is never persisted).
+Detection reuses the same vendor env overrides documented in the table
+above.
 
 ## Constraints
 

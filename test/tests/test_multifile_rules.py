@@ -49,6 +49,7 @@ def test_release_install_lands_index_and_support_dir(
     # Install the released rule into a clean workspace.
     write_dir = project_dir / "consumer"
     write_dir.mkdir()
+    (write_dir / ".claude").mkdir()
     consumer = grim_at(write_dir)
     write_config(write_dir, rules={"my-rule": f"{repo}:1.0.0"})
     consumer.run("lock", check=False)
