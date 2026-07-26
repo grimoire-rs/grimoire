@@ -72,27 +72,53 @@ Recurring attack surfaces in Grimoire codebase. Use as STRIDE scoping checklist 
 
 ### Registry Communication
 - TLS verification for all registry connections (except insecure registries)
-- Digest verification on downloaded content (SHA-256 match)
-- Manifest signature validation
+- Digest verification on downloaded content (SHA-256 match) — this is
+  **integrity, not authenticity**: it proves the bytes match the lock, never
+  who published them
+- **No signature verification exists.** No cosign, notation, or sigstore
+  anywhere in `src/`. Do not audit for it and never claim it. Signing is
+  named only in `adr_hooks_support.md`, which is *Proposed*, for a kind that
+  does not ship
 
-### Symlink Safety
-- Install symlinks no escape `GRIM_HOME` via traversal
-- Windows junction point handling (NTFS junctions, no priv escalation)
-- Back-reference integrity — no manipulation to prevent GC or cause spurious deletion
+### Path Containment
+- Install paths no escape their anchor via traversal — two-layer guard
+  (`path_safety.rs::contain`, `install/path_anchor.rs::AnchoredPath::resolve`):
+  Layer 1 rejects `..`/root/prefix components before touching the filesystem,
+  Layer 2 canonicalizes and asserts `starts_with`
+- Windows junction points: **unverified.** `dunce::canonicalize` plausibly
+  resolves NTFS junctions like symlinks, but every escape test is
+  `#[cfg(unix)]` — untested on the platform it names
 
 ### Archive Extraction
-- Path traversal in tar archives (zip slip)
-- Symlink injection in archives
-- File permission preservation (especially setuid/setgid)
-- Decompression bombs (xz/gz resource limits)
+- Path traversal in tar archives (zip slip) — `materializer.rs::safe_relative_path`
+- Symlink injection: any tar entry not `Dir`/`Regular` is refused outright
+- Tar-header permission bits are **never applied** — extraction is plain
+  `std::fs::write`, so files land at the default umask. There is no
+  setuid/setgid surface to guard
+- Oversized blobs (CWE-770) — a streamed `CappedSink` aborts past `max_bytes`
+  before the digest re-hash, plus a per-caller pre-download gate. Compression
+  bombs do not apply: the layer media type is uncompressed tar and there is no
+  `flate2`/`gzip`/`zstd` dependency
 
-### Code Signing (macOS)
-- Ad-hoc signing on Mach-O binaries after extraction
-- Signing no mask malicious binaries
+### MCP Descriptor Execution
+- An `mcp` artifact carries `command` + `args` for the stdio transport. Install
+  writes them into the client's own MCP config **verbatim from the registry**.
+  grim never executes them — the AI client does, on its next session. This is
+  the one shipped path from registry content to a running process
+- `${VAR}` in a descriptor is passthrough, not expansion: grim writes the
+  literal string for the client's runtime to substitute, and never interprets
+  it
 
-### Environment Variable Injection
-- `${installPath}` template expansion in `metadata.json` env vars
-- PATH prepend ordering (Grimoire packages vs system tools)
+<!-- Corrected 2026-07-26 against source (research_security_policy.md, Q3).
+     Removed: manifest signature validation, macOS Mach-O code signing,
+     `${installPath}` env templating, decompression bombs, setuid preservation,
+     and back-reference/GC integrity — none of these describe shipped code.
+     A stale checklist entry is worse than a missing one: it gets repeated into
+     a public document as a control that does not exist. -->
+
+### Content Store
+- Append-only and immutable; no garbage-collection command exists.
+  `install/prune.rs` prunes **client-side orphaned outputs**, not store content
 
 ## Grimoire Audit Checklist
 
