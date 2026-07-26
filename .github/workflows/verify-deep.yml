@@ -20,7 +20,7 @@ jobs:
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # `external/docker_credential` is the [patch.crates-io] source.
@@ -30,7 +30,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2.83.1
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest
       - name: Test
@@ -55,7 +55,7 @@ jobs:
           - { name: Windows ARM64, target: aarch64-pc-windows-msvc }
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # `external/docker_credential` is the [patch.crates-io] source.
@@ -86,7 +86,7 @@ jobs:
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe" }
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -98,7 +98,7 @@ jobs:
           mv "test/bin/grim-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/grim${{ matrix.job.ext }}"
           chmod +x test/bin/grim${{ matrix.job.ext }}
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run Acceptance Tests
