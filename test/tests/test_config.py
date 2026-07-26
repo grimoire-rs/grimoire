@@ -876,6 +876,72 @@ def test_load_clients_control_char_project_exits_78_no_raw_escape(
     _assert_not_a_panic(result)
 
 
+def test_load_clients_format_char_project_exits_78_no_raw_override(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored client name with a bidi override is rejected safely.
+
+    ``U+202E RIGHT-TO-LEFT OVERRIDE`` is *not* a control character, so it
+    sails past the control-char guard the test above covers and reaches the
+    unknown-client arm, which quotes the authored name back. Unescaped, a
+    ``git clone`` plus any config-loading command reorders the rest of the
+    caller's terminal line — the same injection class, a different Unicode
+    category.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["cursor\\u202Eevil"]\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"authored unknown client must exit 78 (ConfigError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\u202e" not in result.stderr, (
+        f"error must not echo the raw override to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    assert "cursor\\u{202e}evil" in result.stderr, (
+        f"error must still name the offending client, escaped; "
+        f"got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
+def test_load_artifact_value_control_char_exits_65_no_raw_escape(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """An authored ``[skills]`` value with a control byte is rejected safely.
+
+    This message is echoed **twice** — once by the ``ArtifactValueInvalid``
+    kind and once by the ``IdentifierError`` it carries as ``#[source]``.
+    Escaping only the outer one would leave the injection fully live, so the
+    test counts both occurrences of the escaped form.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[skills]\nfoo = "\\u001b[2Jghcr.io/a/B:1"\n'
+    )
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 65, (
+        f"an authored invalid artifact value must exit 65 (DataError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "\x1b" not in result.stderr, (
+        f"error must not echo the raw ESC byte to the terminal; "
+        f"got: {result.stderr!r}"
+    )
+    assert result.stderr.count(r"\u{1b}[2Jghcr.io/a/B:1") == 2, (
+        f"both the kind and its #[source] identifier error must name the "
+        f"value in escaped form; got: {result.stderr!r}"
+    )
+    _assert_not_a_panic(result)
+
+
 def test_load_clients_unknown_name_global_exits_78(
     grim_binary: Path,
     grim_home: Path,

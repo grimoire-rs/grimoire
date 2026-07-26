@@ -220,6 +220,12 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
     let mut seen_aliases = std::collections::BTreeSet::new();
     for rc in registries {
+        // Every message below that quotes authored TOML content renders it
+        // escaped — a raw ESC byte or bidi override echoed to a terminal is a
+        // control-sequence-injection vector, and no check here rejects one
+        // first (`char::is_control` does not even match U+202E).
+        // See `ClientsInvalid::ControlChar`.
+        let locator = rc.locator().escape_debug();
         let oci_set = rc.oci.as_deref().is_some_and(|u| !u.trim().is_empty());
         let index_set = rc.index.as_deref().is_some_and(|i| !i.trim().is_empty());
         match (oci_set, index_set) {
@@ -228,9 +234,8 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
                         reason: format!(
-                            "entry '{}' sets both oci and index; exactly one must be set \
-                             (index entries carry their own registry refs)",
-                            rc.locator()
+                            "entry '{locator}' sets both oci and index; exactly one must be set \
+                             (index entries carry their own registry refs)"
                         ),
                     },
                 ));
@@ -250,19 +255,23 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 path.to_path_buf(),
                 ConfigErrorKind::RegistryInvalid {
                     reason: format!(
-                        "index '{}' must be an http(s):// base or a git repository \
-                         (git+…, ssh://, git@…, or ending in .git)",
-                        rc.locator()
+                        "index '{locator}' must be an http(s):// base or a git repository \
+                         (git+…, ssh://, git@…, or ending in .git)"
                     ),
                 },
             ));
         }
         if let Some(alias) = &rc.alias {
+            // Escaped for the same reason as `locator`, and it matters more
+            // here: the control-character check below is the FOURTH arm, so
+            // two messages quote the alias before anything has rejected a
+            // control byte in it.
+            let shown = alias.escape_debug();
             if alias.trim().is_empty() {
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias for '{}' must not be empty", rc.locator()),
+                        reason: format!("alias for '{locator}' must not be empty"),
                     },
                 ));
             }
@@ -270,7 +279,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias '{alias}' must not have leading or trailing whitespace"),
+                        reason: format!("alias '{shown}' must not have leading or trailing whitespace"),
                     },
                 ));
             }
@@ -280,7 +289,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias '{alias}' must not contain '/'"),
+                        reason: format!("alias '{shown}' must not contain '/'"),
                     },
                 ));
             }
@@ -288,7 +297,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias '{alias}' must not contain control characters"),
+                        reason: format!("alias '{shown}' must not contain control characters"),
                     },
                 ));
             }
@@ -296,7 +305,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias '{alias}' must not contain '\"' or '\\'"),
+                        reason: format!("alias '{shown}' must not contain '\"' or '\\'"),
                     },
                 ));
             }
@@ -304,7 +313,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("duplicate alias '{alias}'"),
+                        reason: format!("duplicate alias '{shown}'"),
                     },
                 ));
             }
@@ -449,13 +458,24 @@ fn validate_clients(clients: &[String], path: &Path) -> Result<(), ConfigError> 
             ClientsInvalid::ControlChar(c) => {
                 format!("client name contains control characters: '{}'", c.escape_debug())
             }
+            // Escaped like the arm above, and for a reason that arm does not
+            // cover: `char::is_control` is false for the bidi and zero-width
+            // format characters (U+202E, U+200B), so a hostile authored name
+            // reaches this arm intact.
             ClientsInvalid::Unknown(c) => {
                 format!(
-                    "unknown client '{c}'; valid values: {}",
+                    "unknown client '{}'; valid values: {}",
+                    c.escape_debug(),
                     ClientTarget::VALUE_NAMES.join(", ")
                 )
             }
-            ClientsInvalid::Duplicate(c) => format!("duplicate client '{c}'; each client may appear once"),
+            // `Duplicate` can only carry a name from the closed set today —
+            // `check_clients` returns `Unknown` first — so the escape is a
+            // no-op here. Kept so reordering those two checks cannot silently
+            // reopen the hole.
+            ClientsInvalid::Duplicate(c) => {
+                format!("duplicate client '{}'; each client may appear once", c.escape_debug())
+            }
         };
         ConfigError::new(path.to_path_buf(), ConfigErrorKind::ClientsInvalid { detail })
     })
@@ -1682,6 +1702,44 @@ tree_separators = ["/", "::"]
     }
 
     #[test]
+    fn clients_unknown_name_escapes_only_hostile_names() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE is NOT `char::is_control`, so it slips
+        // past the control-char arm above and lands in the unknown-client arm
+        // — which quotes the authored name back. Unescaped, merely loading a
+        // cloned repo's `grimoire.toml` reorders the rest of the caller's
+        // terminal line. Same hole, same fix as
+        // `vendors_format_char_rejected_without_echoing_raw_byte`.
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"cursor\\u202Eevil\"]\n")
+            .expect_err("an unknown client name must be rejected");
+        let ConfigErrorKind::ClientsInvalid { detail } = &err.kind else {
+            panic!("expected ClientsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            !detail.contains('\u{202e}'),
+            "rendered detail must not embed the raw override byte: {detail:?}"
+        );
+        assert!(
+            detail.contains(r"cursor\u{202e}evil"),
+            "the offending name must survive in escaped form: {detail:?}"
+        );
+
+        // A name carrying nothing to escape must render byte-identically to
+        // the pre-fix message — the shipped error text is frozen.
+        let err = ProjectConfig::from_toml_str("[options]\nclients = [\"vscode\"]\n")
+            .expect_err("unknown authored client must be rejected");
+        let ConfigErrorKind::ClientsInvalid { detail } = &err.kind else {
+            panic!("expected ClientsInvalid, got {:?}", err.kind);
+        };
+        assert_eq!(
+            *detail,
+            format!(
+                "unknown client 'vscode'; valid values: {}",
+                ClientTarget::VALUE_NAMES.join(", ")
+            )
+        );
+    }
+
+    #[test]
     fn clients_valid_set_accepted_at_load() {
         let cfg = ProjectConfig::from_toml_str("[options]\nclients = [\"claude\", \"opencode\", \"copilot\"]\n")
             .expect("a valid authored clients set must parse");
@@ -1865,6 +1923,85 @@ oci = "registry.corp/team"
         assert_eq!(cfg.registries.len(), 2);
         assert!(!cfg.registries[0].default);
         assert!(!cfg.registries[1].default);
+    }
+
+    #[test]
+    fn registries_messages_never_echo_raw_authored_bytes() {
+        // Every `RegistryInvalid` arm that quotes authored TOML content is the
+        // same exit-78 terminal-injection vector `ClientsInvalid::ControlChar`
+        // guards against. Ordering cannot substitute for escaping: three arms
+        // fire BEFORE the alias control-char check, and U+202E is not
+        // `char::is_control` at all, so it reaches every arm intact.
+        // (authored TOML, raw byte that must not survive, the whole rendered
+        // reason). The reason is pinned in full rather than by substring so
+        // each case proves it reached the arm its comment names — `shown` is
+        // one binding shared by all five alias arms, so a `contains` check
+        // would stay green if a case fell through to a different arm.
+        let cases: [(&str, char, &str); 5] = [
+            // Locator, both-sources arm: ESC + `[2J` clears the caller's screen.
+            (
+                "[[registries]]\noci = \"\\u001b[2Jghcr.io/x\"\nindex = \"https://y\"\n",
+                '\u{1b}',
+                concat!(
+                    r"entry '\u{1b}[2Jghcr.io/x' sets both oci and index; ",
+                    "exactly one must be set (index entries carry their own registry refs)"
+                ),
+            ),
+            // Locator, unclassifiable-index arm.
+            (
+                "[[registries]]\nindex = \"\\u001b[2Jnope\"\n",
+                '\u{1b}',
+                concat!(
+                    r"index '\u{1b}[2Jnope' must be an http(s):// base or a git repository ",
+                    "(git+…, ssh://, git@…, or ending in .git)"
+                ),
+            ),
+            // Alias, leading-whitespace arm — checked before the control arm.
+            (
+                "[[registries]]\nalias = \" \\u001b[2Jx\"\noci = \"ghcr.io/x\"\n",
+                '\u{1b}',
+                r"alias ' \u{1b}[2Jx' must not have leading or trailing whitespace",
+            ),
+            // Alias, contains-'/' arm — also before the control arm.
+            (
+                "[[registries]]\nalias = \"/\\u001b[2Jx\"\noci = \"ghcr.io/x\"\n",
+                '\u{1b}',
+                r"alias '/\u{1b}[2Jx' must not contain '/'",
+            ),
+            // Alias, duplicate arm — reached only after the control arm passes,
+            // which a format character does.
+            (
+                "[[registries]]\nalias = \"a\\u202Eb\"\noci = \"ghcr.io/x\"\n\n\
+                 [[registries]]\nalias = \"a\\u202Eb\"\noci = \"ghcr.io/y\"\n",
+                '\u{202e}',
+                r"duplicate alias 'a\u{202e}b'",
+            ),
+        ];
+        for (toml, raw, expected) in cases {
+            let err = ProjectConfig::from_toml_str(toml).expect_err("hostile registry entry must be rejected");
+            let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+                panic!("expected RegistryInvalid for {toml:?}, got {:?}", err.kind);
+            };
+            assert!(
+                !reason.contains(raw),
+                "reason for {toml:?} must not embed the raw {raw:?} byte: {reason:?}"
+            );
+            // Absence alone would stay green if the value were dropped from the
+            // message entirely — the operator must still be told what offended.
+            assert_eq!(reason, expected, "wrong arm or wrong rendering for {toml:?}");
+        }
+
+        // An alias with nothing to escape renders byte-identically to the
+        // pre-fix message — the shipped error text is frozen.
+        let err = ProjectConfig::from_toml_str(
+            "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/x\"\n\n\
+             [[registries]]\nalias = \"acme\"\noci = \"ghcr.io/y\"\n",
+        )
+        .expect_err("a duplicate alias must be rejected");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert_eq!(*reason, "duplicate alias 'acme'");
     }
 
     // ── Contract (d) — both-fields baseline: array wins, legacy ignored ────

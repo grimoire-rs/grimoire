@@ -73,14 +73,20 @@ pub enum ConfigErrorKind {
     /// declaration requires fully-qualified identifiers so resolution is
     /// reproducible regardless of `GRIM_DEFAULT_REGISTRY`.
     #[error(
-        "artifact '{name}': value '{value}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ghcr.io/acme/code-review:stable')"
+        "artifact '{}': value '{}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ghcr.io/acme/code-review:stable')",
+        .name.escape_debug(),
+        .value.escape_debug()
     )]
     ArtifactValueMissingRegistry { name: String, value: String },
 
     /// A `[skills]` / `[rules]` value failed to parse as an identifier for
     /// a reason other than missing registry (invalid chars, malformed
     /// digest, uppercase repo). Carries the underlying error via `#[source]`.
-    #[error("artifact '{name}': value '{value}' is not a valid identifier")]
+    #[error(
+        "artifact '{}': value '{}' is not a valid identifier",
+        .name.escape_debug(),
+        .value.escape_debug()
+    )]
     ArtifactValueInvalid {
         name: String,
         value: String,
@@ -91,7 +97,11 @@ pub enum ConfigErrorKind {
     /// A path-shaped artifact value (`./`/`../`-prefixed or absolute) is
     /// invalid: malformed (backslashes), or declared under a table that
     /// does not support path sources (`[mcp]`).
-    #[error("artifact '{name}': path value '{value}' is not usable: {reason}")]
+    #[error(
+        "artifact '{}': path value '{}' is not usable: {reason}",
+        .name.escape_debug(),
+        .value.escape_debug()
+    )]
     ArtifactValuePathInvalid {
         name: String,
         value: String,
@@ -102,7 +112,11 @@ pub enum ConfigErrorKind {
     /// (`./`/`../` form — issue #31): a misplaced dot segment or a grammar
     /// violation in the remainder. Bundle sources only; `grimoire.toml`
     /// artifact tables never accept relative values.
-    #[error("artifact '{name}': value '{value}' is not a valid relative member reference")]
+    #[error(
+        "artifact '{}': value '{}' is not a valid relative member reference",
+        .name.escape_debug(),
+        .value.escape_debug()
+    )]
     ArtifactValueRelativeInvalid {
         name: String,
         value: String,
@@ -189,6 +203,86 @@ mod tests {
             rendered.matches("no grimoire.toml found").count(),
             1,
             "kind message must render exactly once, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn artifact_value_kinds_escape_the_authored_name_and_value() {
+        // Both fields are echoed verbatim from a hand-authored `grimoire.toml`
+        // or bundle source, which arrive with a `git clone`. All four arms
+        // quote them, and nothing upstream rejects a control byte — nor could
+        // it reject U+202E, which is not `char::is_control`.
+        let name = "\u{1b}[2Jfoo".to_string();
+        let value = "ghcr.io/a/B\u{202e}c:1".to_string();
+        let cases: [(ConfigErrorKind, &str); 4] = [
+            (
+                ConfigErrorKind::ArtifactValueMissingRegistry {
+                    name: name.clone(),
+                    value: value.clone(),
+                },
+                concat!(
+                    r"artifact '\u{1b}[2Jfoo': value 'ghcr.io/a/B\u{202e}c:1' is missing a registry; ",
+                    "expected 'registry/repo:tag' (e.g. 'ghcr.io/acme/code-review:stable')"
+                ),
+            ),
+            (
+                ConfigErrorKind::ArtifactValueInvalid {
+                    name: name.clone(),
+                    value: value.clone(),
+                    source: IdentifierError::new(value.clone(), IdentifierErrorKind::UppercaseRepository),
+                },
+                r"artifact '\u{1b}[2Jfoo': value 'ghcr.io/a/B\u{202e}c:1' is not a valid identifier",
+            ),
+            (
+                ConfigErrorKind::ArtifactValuePathInvalid {
+                    name: name.clone(),
+                    value: value.clone(),
+                    reason: "path sources are not supported for mcp artifacts".to_string(),
+                },
+                concat!(
+                    r"artifact '\u{1b}[2Jfoo': path value 'ghcr.io/a/B\u{202e}c:1' is not usable: ",
+                    "path sources are not supported for mcp artifacts"
+                ),
+            ),
+            (
+                ConfigErrorKind::ArtifactValueRelativeInvalid {
+                    name: name.clone(),
+                    value: value.clone(),
+                    // Deliberately a BENIGN source. `MemberRefError` renders its
+                    // own copy of the reference raw (`src/oci/member_ref.rs`),
+                    // and this test asserts only this kind's own message — so a
+                    // hostile source here would construct a leak the assertion
+                    // cannot see and read as coverage it does not provide.
+                    source: Box::new(crate::oci::member_ref::MemberRefError::MisplacedDotSegment(
+                        "./a/../b:1".to_string(),
+                    )),
+                },
+                concat!(
+                    r"artifact '\u{1b}[2Jfoo': value 'ghcr.io/a/B\u{202e}c:1' ",
+                    "is not a valid relative member reference"
+                ),
+            ),
+        ];
+        for (kind, expected) in cases {
+            let rendered = kind.to_string();
+            assert!(
+                !rendered.contains('\u{1b}') && !rendered.contains('\u{202e}'),
+                "rendered kind must not embed a raw hostile byte: {rendered:?}"
+            );
+            // Pinned in full, not by substring: the four arms share a shape, so
+            // a substring check could not tell which one rendered.
+            assert_eq!(rendered, expected);
+        }
+
+        // Nothing to escape → byte-identical to the shipped message.
+        let kind = ConfigErrorKind::ArtifactValuePathInvalid {
+            name: "foo".to_string(),
+            value: "./x".to_string(),
+            reason: "path sources are not supported for mcp artifacts".to_string(),
+        };
+        assert_eq!(
+            kind.to_string(),
+            "artifact 'foo': path value './x' is not usable: path sources are not supported for mcp artifacts"
         );
     }
 
