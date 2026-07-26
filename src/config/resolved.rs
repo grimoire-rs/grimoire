@@ -9,10 +9,10 @@
 //!
 //! Scope is deliberately narrow: only `[options.tui]` keys that carry a
 //! built-in runtime default flow through here. The remaining `[options]`
-//! keys — `default_registry`, `clients`, and `show_deprecated` — pass
-//! through **untouched** at their own consumers, because none has a runtime
-//! default to substitute (their empty/`None`/`false` state is itself
-//! meaningful):
+//! keys — `default_registry`, `clients`, `show_deprecated`, and `vendors`
+//! — pass through **untouched** at their own consumers, because none has a
+//! runtime default to substitute (their empty/`None`/`false` state is
+//! itself meaningful):
 //!
 //! - `default_registry`: `None` falls through the registry-precedence chain
 //!   (`command::resolve_default_registry`); there is no single "default
@@ -21,8 +21,10 @@
 //!   unset value awaiting a default.
 //! - `show_deprecated`: `false` is already the resting state, and the CLI
 //!   `--show-deprecated` flag ORs into it at the call site.
+//! - `vendors`: a missing entry already means "every field at its resting
+//!   state"; there is no per-client default to fill in.
 //!
-//! Routing those three here would fake a default where the raw value
+//! Routing those four here would fake a default where the raw value
 //! already means something, so they are read straight off [`ConfigOptions`]
 //! by their consumers instead.
 
@@ -73,6 +75,11 @@ impl ConfigOptions {
             clients: _,
             tui,
             show_deprecated: _,
+            // Same reasoning as the three above: `[options.vendors]` carries
+            // no runtime default to substitute. `shared_skills` is `false`
+            // when a client has no entry, which is already the resting
+            // state — its consumer reads the table raw off `ConfigOptions`.
+            vendors: _,
         } = self;
         let TuiOptions {
             default_view,
@@ -118,6 +125,7 @@ mod tests {
         let options = ConfigOptions {
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
+            vendors: Default::default(),
             show_deprecated: true,
             tui: TuiOptions {
                 default_view: Some(DefaultView::Flat),

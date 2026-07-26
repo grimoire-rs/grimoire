@@ -26,7 +26,7 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::lock::file_lock::ConfigFileLock;
 
-use super::config_keys::{ConfigKey, KeySpec, RegistryField};
+use super::config_keys::{ConfigKey, KeySpec, RegistryField, VENDOR_FIELD_NAME, VENDOR_SHARED_SKILLS};
 use super::scope_resolution::{self, lockable_config_path};
 
 /// `grim config` arguments.
@@ -172,11 +172,41 @@ enum ParsedKey {
     RegistryAlias { alias: String },
     /// `registry.<alias>.<field>`.
     RegistryAliasField { alias: String, field: RegistryField },
+    /// `options.vendors.<name>.shared_skills` — the dynamic per-vendor key.
+    VendorField { vendor: String },
 }
 
 fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     if let Some(k) = ConfigKey::parse(key) {
         return Ok(ParsedKey::Fixed(k));
+    }
+    if let Some(rest) = key.strip_prefix("options.vendors.") {
+        // Dynamic key: one instance per client name, so it is parsed from the
+        // remainder after the fixed prefix rather than matched against
+        // `ConfigKey::ALL`. Split at the RIGHTMOST dot for the same reason the
+        // registry branch does — the field name is the last segment.
+        // Both messages quote a user-supplied segment, so both render it
+        // escaped — a raw ESC echoed to stderr is a control-sequence-injection
+        // vector, the same one `ClientsInvalid::ControlChar` guards against.
+        let Some((vendor, field)) = rest.rsplit_once('.') else {
+            return Err(super::config_usage(format!(
+                "no vendor field specified for '{}'; use options.vendors.<name>.{VENDOR_FIELD_NAME}",
+                rest.escape_debug()
+            )));
+        };
+        if field != VENDOR_FIELD_NAME {
+            return Err(super::config_usage(format!(
+                "unknown vendor field '{}'; valid fields: {VENDOR_FIELD_NAME}",
+                field.escape_debug()
+            )));
+        }
+        // The client name is part of the KEY, so an unknown one is an unknown
+        // key (exit 64) — not a bad value. Shares its accepted set with
+        // load-time validation via `check_vendor_name`.
+        crate::config::project_config::check_vendor_name(vendor).map_err(vendor_key_error)?;
+        return Ok(ParsedKey::VendorField {
+            vendor: vendor.to_string(),
+        });
     }
     if let Some(rest) = key.strip_prefix("registry.") {
         // FIX 2: split at the RIGHTMOST dot so aliases containing dots
@@ -274,6 +304,19 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
     }
 }
 
+/// The effective value of a per-vendor key, or `None` when unset.
+///
+/// `false` is the built-in default and indistinguishable from an absent
+/// table entry, so it collapses to unset across `get` / `list` / `unset` —
+/// the same rule `show_deprecated` and `tui.group_by_type` follow.
+fn vendor_value(vendor: &str, options: &ConfigOptions) -> Option<String> {
+    options
+        .vendors
+        .get(vendor)
+        .filter(|v| v.shared_skills)
+        .map(|_| "true".to_string())
+}
+
 fn get_value(
     parsed: &ParsedKey,
     options: &ConfigOptions,
@@ -281,6 +324,7 @@ fn get_value(
 ) -> anyhow::Result<Option<String>> {
     Ok(match parsed {
         ParsedKey::Fixed(k) => fixed_value(*k, options),
+        ParsedKey::VendorField { vendor } => vendor_value(vendor, options),
         ParsedKey::RegistryAlias { alias } => {
             return Err(super::config_usage(format!(
                 "no registry field specified for '{alias}'; use registry.<alias>.oci or registry.<alias>.default"
@@ -358,6 +402,20 @@ fn apply_set(
                 Ok(levels.to_string())
             }
         },
+        ParsedKey::VendorField { vendor } => {
+            let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
+            if enabled {
+                options.vendors.entry(vendor.clone()).or_default().shared_skills = true;
+            } else {
+                // `false` is the default, so it is stored as absence rather
+                // than as a table that means nothing — same collapse as
+                // `vendor_value` and `apply_unset`. `VendorOptions` carries a
+                // single field today; a second one would make this a
+                // field-level clear instead of an entry removal.
+                options.vendors.remove(vendor);
+            }
+            Ok(value_str.to_string())
+        }
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
             "cannot set registry '{alias}' without a field; \
              use registry.<alias>.oci or registry.<alias>.default"
@@ -426,6 +484,13 @@ fn apply_unset(
                 ConfigKey::TuiTreeSeparators => options.tui.tree_separators.clear(),
                 ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
             }
+            Ok(())
+        }
+        ParsedKey::VendorField { vendor } => {
+            // Single-field `VendorOptions`: clearing the field and removing
+            // the entry are the same thing, and an empty table would
+            // round-trip as an unset key anyway.
+            options.vendors.remove(vendor);
             Ok(())
         }
         ParsedKey::RegistryAlias { alias } => {
@@ -527,6 +592,20 @@ fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryCon
             ));
         }
     }
+    // Per-vendor rows exist only for a client the config actually names —
+    // the same rule the registry rows follow. `--all` widens a named entry
+    // to its unset (default-valued) row; it never enumerates the whole
+    // client set, which would change the row set of an existing command.
+    for name in options.vendors.keys() {
+        let value = vendor_value(name, options);
+        if value.is_some() || all {
+            entries.push(entry(
+                format!("options.vendors.{name}.{VENDOR_FIELD_NAME}"),
+                value,
+                &VENDOR_SHARED_SKILLS,
+            ));
+        }
+    }
     entries
 }
 
@@ -556,6 +635,39 @@ fn clients_set_error(reason: crate::config::project_config::ClientsInvalid) -> a
         )),
         ClientsInvalid::Duplicate(c) => super::config_value(format!(
             "options.clients: duplicate client '{c}'; each client may appear once"
+        )),
+    }
+}
+
+/// Render a shared [`crate::config::project_config::ClientsInvalid`] verdict
+/// as a key-parse usage error (exit 64).
+///
+/// In `options.vendors.<name>.…` the client name is part of the **key**, so
+/// an unknown one is an unknown key — not a bad value (65) and not a config
+/// error (78). Load-time validation renders its own message on the
+/// config-error class; the accepted set is shared via
+/// [`crate::config::project_config::check_vendor_name`] so the two cannot
+/// drift.
+fn vendor_key_error(reason: crate::config::project_config::ClientsInvalid) -> anyhow::Error {
+    use crate::config::project_config::ClientsInvalid;
+    match reason {
+        ClientsInvalid::Blank => super::config_usage(format!(
+            "empty client name in config key; use options.vendors.<name>.{VENDOR_FIELD_NAME}"
+        )),
+        // Renders the name escaped so no raw control byte reaches stderr.
+        ClientsInvalid::ControlChar(c) => super::config_usage(format!(
+            "client name in config key contains control characters: '{}'",
+            c.escape_debug()
+        )),
+        // `Duplicate` is unreachable for a single-name check; folded in for
+        // exhaustiveness rather than panicking on an impossible verdict.
+        // Escaped like the arm above: `char::is_control` does not cover the
+        // bidi and zero-width format characters, which a key segment can
+        // still carry into stderr.
+        ClientsInvalid::Unknown(c) | ClientsInvalid::Duplicate(c) => super::config_usage(format!(
+            "unknown config key: no client named '{}'; valid clients: {}",
+            c.escape_debug(),
+            ClientTarget::VALUE_NAMES.join(", ")
         )),
     }
 }
@@ -1533,6 +1645,7 @@ mod tests {
             default_registry: None,
             show_deprecated: false,
             tui: TuiOptions::default(),
+            vendors: Default::default(),
         };
         let mut registries = vec![];
         let result = apply_set(
@@ -1559,6 +1672,7 @@ mod tests {
             default_registry: None,
             show_deprecated: false,
             tui: TuiOptions::default(),
+            vendors: Default::default(),
         }
     }
 
@@ -1633,6 +1747,232 @@ mod tests {
             .expect("empty value must clear, not error");
         assert_eq!(stored, "");
         assert!(options.clients.is_empty());
+    }
+
+    // ── options.vendors.<name>.shared_skills: the dynamic per-vendor key ─────
+
+    #[test]
+    fn parse_key_vendor_field_for_every_known_client() {
+        // The key is dynamic: every name the closed client set accepts is
+        // addressable, with no per-client registration.
+        for name in ClientTarget::VALUE_NAMES {
+            let key = format!("options.vendors.{name}.shared_skills");
+            assert!(
+                matches!(parse_key(&key), Ok(ParsedKey::VendorField { vendor }) if vendor == *name),
+                "every known client must parse as a vendor key: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_key_unknown_vendor_name_is_a_usage_error() {
+        // The name is part of the KEY, so this is 64 (unknown key), not 65.
+        let msg = parse_key("options.vendors.vscode.shared_skills")
+            .expect_err("unknown vendor must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("vscode"),
+            "error must name the offending client; got: {msg}"
+        );
+        assert!(
+            msg.contains("valid clients: claude, opencode, copilot"),
+            "error must list the valid clients; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_key_unknown_vendor_field_is_a_usage_error() {
+        let msg = parse_key("options.vendors.cursor.bogus")
+            .expect_err("unknown vendor field must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("unknown vendor field 'bogus'") && msg.contains("shared_skills"),
+            "error must name the offending and the valid field; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_key_vendor_without_field_is_a_usage_error() {
+        let msg = parse_key("options.vendors.cursor")
+            .expect_err("a vendor key without a field must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("no vendor field specified"),
+            "error must explain the missing field; got: {msg}"
+        );
+        // The bare prefix falls through to the generic unknown-key message.
+        assert!(parse_key("options.vendors").is_err());
+
+        // An empty name reaches the shared checker's `Blank` verdict.
+        let msg = parse_key("options.vendors..shared_skills")
+            .expect_err("an empty client name must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("empty client name"),
+            "error must name the empty segment; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_key_vendor_messages_never_echo_a_raw_control_byte() {
+        // Every arm of the vendor key parse quotes a user-supplied segment
+        // back to stderr, so every arm must escape it — a raw ESC is a
+        // control-sequence-injection vector.
+        for key in [
+            "options.vendors.\u{1b}[2Jcursor.shared_skills",
+            "options.vendors.cursor.\u{1b}[2Jbogus",
+            "options.vendors.\u{1b}[2Jcursor",
+        ] {
+            let msg = parse_key(key)
+                .expect_err("a control character in the key must be rejected")
+                .to_string();
+            assert!(
+                !msg.contains('\u{1b}'),
+                "message for {key:?} must not embed the raw ESC byte: {msg:?}"
+            );
+        }
+
+        // U+202E is not `char::is_control`, so it lands in the unknown-client
+        // arm instead — which quotes the name and must escape it as well.
+        let msg = parse_key("options.vendors.cursor\u{202e}evil.shared_skills")
+            .expect_err("an unknown client name must be rejected")
+            .to_string();
+        assert!(
+            !msg.contains('\u{202e}'),
+            "message must not embed the raw override byte: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn parse_key_unknown_error_names_the_vendor_pattern_key() {
+        let msg = parse_key("bogus.key").unwrap_err().to_string();
+        assert!(
+            msg.contains("options.vendors.<name>.shared_skills"),
+            "the unknown-key message must advertise the vendor pattern; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn vendor_set_get_unset_round_trip() {
+        let key = parse_key("options.vendors.cursor.shared_skills").unwrap();
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+
+        // Unset by default → get returns None (so `get` exits 1, `list` omits).
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+
+        let stored = apply_set(&key, "true", &mut options, &mut registries).unwrap();
+        assert_eq!(stored, "true");
+        assert!(options.vendors["cursor"].shared_skills);
+        assert_eq!(
+            get_value(&key, &options, &registries).unwrap(),
+            Some("true".to_string())
+        );
+        assert!(
+            collect_entries(false, &options, &registries)
+                .iter()
+                .any(|e| e.key == "options.vendors.cursor.shared_skills" && e.value.as_deref() == Some("true")),
+            "list must surface a set vendor key"
+        );
+
+        // A bad value is rejected (config_value → exit 65), and the message
+        // names the fully-qualified key rather than the pattern.
+        let msg = apply_set(&key, "yes", &mut options, &mut registries)
+            .expect_err("a non-boolean must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("options.vendors.cursor.shared_skills") && msg.contains("true or false"),
+            "error must name the key and the accepted values; got: {msg}"
+        );
+
+        apply_unset(&key, &mut options, &mut registries).unwrap();
+        assert!(options.vendors.is_empty(), "unset must drop the entry");
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+    }
+
+    #[test]
+    fn vendor_set_false_collapses_to_unset() {
+        // `false` is the built-in default and indistinguishable from an
+        // absent entry — the same collapse `show_deprecated` performs.
+        let key = parse_key("options.vendors.cursor.shared_skills").unwrap();
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+
+        apply_set(&key, "true", &mut options, &mut registries).unwrap();
+        apply_set(&key, "false", &mut options, &mut registries).unwrap();
+
+        assert!(
+            options.vendors.is_empty(),
+            "a default-valued vendor entry must not be stored"
+        );
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+    }
+
+    #[test]
+    fn vendor_set_preserves_other_clients_entries() {
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+        apply_set(
+            &parse_key("options.vendors.cursor.shared_skills").unwrap(),
+            "true",
+            &mut options,
+            &mut registries,
+        )
+        .unwrap();
+        apply_set(
+            &parse_key("options.vendors.zed.shared_skills").unwrap(),
+            "true",
+            &mut options,
+            &mut registries,
+        )
+        .unwrap();
+        apply_unset(
+            &parse_key("options.vendors.cursor.shared_skills").unwrap(),
+            &mut options,
+            &mut registries,
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.vendors.keys().collect::<Vec<_>>(),
+            vec!["zed"],
+            "a per-client edit must not disturb another client's entry"
+        );
+    }
+
+    #[test]
+    fn collect_entries_vendor_rows_only_for_named_clients() {
+        // `--all` must not enumerate the whole client set: a dynamic key's
+        // rows follow the config's own entries, exactly like registry rows.
+        let options = fresh_options();
+        let registries: Vec<RegistryConfig> = vec![];
+        assert!(
+            !collect_entries(true, &options, &registries)
+                .iter()
+                .any(|e| e.key.starts_with("options.vendors.")),
+            "--all on a vendorless config must emit no vendor rows"
+        );
+
+        // A declared-but-default entry is an unset row: hidden without
+        // `--all`, present with it.
+        let mut options = fresh_options();
+        options.vendors.insert(
+            "cursor".to_string(),
+            crate::config::declaration::VendorOptions::default(),
+        );
+        assert!(
+            !collect_entries(false, &options, &registries)
+                .iter()
+                .any(|e| e.key.starts_with("options.vendors.")),
+            "a default-valued vendor row is omitted without --all"
+        );
+        let row = collect_entries(true, &options, &registries)
+            .into_iter()
+            .find(|e| e.key == "options.vendors.cursor.shared_skills")
+            .expect("--all must surface the declared entry");
+        assert_eq!(row.value, None, "a default-valued row is unset");
+        assert!(!row.set);
+        assert_eq!(row.title, VENDOR_SHARED_SKILLS.title);
     }
 
     #[test]

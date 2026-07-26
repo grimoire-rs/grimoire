@@ -19,7 +19,7 @@ use unicode_width::UnicodeWidthChar as _;
 use crate::config;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::config::declaration::DeclaredSource;
-use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
+use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig, VendorOptions};
 use crate::config::path_source::PathSource;
 use crate::install::client_target::ClientTarget;
 use crate::oci::Identifier;
@@ -192,6 +192,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     validate_registries(&raw.registries, &path)?;
     validate_tree_separators(&raw.options.tui.tree_separators, &path)?;
     validate_clients(&raw.options.clients, &path)?;
+    validate_vendors(&raw.options.vendors, &path)?;
     let skills = parse_artifact_map(&raw.skills, &path, PathValues::Allowed)?;
     let rules = parse_artifact_map(&raw.rules, &path, PathValues::Allowed)?;
     // Agent and bundle references validate exactly like skills/rules: a
@@ -458,6 +459,56 @@ fn validate_clients(clients: &[String], path: &Path) -> Result<(), ConfigError> 
         };
         ConfigError::new(path.to_path_buf(), ConfigErrorKind::ClientsInvalid { detail })
     })
+}
+
+/// Validate one `[options.vendors.<name>]` table key.
+///
+/// The table key is a client name, so it is checked against exactly the
+/// closed set `[options].clients` accepts — [`check_clients`] is reused on a
+/// single-entry slice rather than re-implemented, so the two surfaces can
+/// never accept different names. Shared by key-parse time (`config set`,
+/// exit 64 — the name is part of the *key*) and load time
+/// ([`validate_vendors`], exit 78).
+///
+/// `ClientsInvalid::Duplicate` is unreachable here: a TOML table cannot
+/// repeat a key, and the parsed form is a `BTreeMap`.
+pub(crate) fn check_vendor_name(name: &str) -> Result<(), ClientsInvalid> {
+    check_clients(std::slice::from_ref(&name.to_string()))
+}
+
+/// Validate the authored `[options.vendors]` table keys at load time.
+///
+/// A hand-edited `grimoire.toml` bypasses `config set`, so without this an
+/// unknown client name would load clean and its settings would silently
+/// never apply. Reuses [`check_vendor_name`] so the accepted set matches
+/// the setter exactly; classifies as a config error (exit 78), mirroring
+/// [`validate_clients`].
+fn validate_vendors(vendors: &BTreeMap<String, VendorOptions>, path: &Path) -> Result<(), ConfigError> {
+    for name in vendors.keys() {
+        check_vendor_name(name).map_err(|reason| {
+            let detail = match reason {
+                ClientsInvalid::Blank => "blank client name; each table key must name a client".to_string(),
+                // `escape_debug` renders the control byte as `\u{…}`; the raw
+                // byte never reaches stderr. See `ClientsInvalid::ControlChar`.
+                ClientsInvalid::ControlChar(c) => {
+                    format!("client name contains control characters: '{}'", c.escape_debug())
+                }
+                // Escaped like the arm above, and for a reason that arm does
+                // not cover: `char::is_control` is false for the bidi and
+                // zero-width format characters (U+202E, U+200B), so a hostile
+                // table key reaches this arm intact.
+                ClientsInvalid::Unknown(c) | ClientsInvalid::Duplicate(c) => {
+                    format!(
+                        "unknown client '{}'; valid values: {}",
+                        c.escape_debug(),
+                        ClientTarget::VALUE_NAMES.join(", ")
+                    )
+                }
+            };
+            ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail })
+        })?;
+    }
+    Ok(())
 }
 
 /// Catalog metadata authored at the top of a bundle source file
@@ -1638,6 +1689,108 @@ tree_separators = ["/", "::"]
             cfg.options.clients,
             vec!["claude".to_string(), "opencode".to_string(), "copilot".to_string()]
         );
+    }
+
+    // ── [options.vendors] load-time validation ───────────────────────────────
+
+    #[test]
+    fn vendors_unknown_name_rejected_at_load() {
+        // The client name is a TOML table KEY, so serde cannot reject it —
+        // without the load-time check the table would parse clean and its
+        // settings would silently never apply.
+        let err = ProjectConfig::from_toml_str("[options.vendors.vscode]\nshared_skills = true\n")
+            .expect_err("unknown authored vendor must be rejected");
+        let ConfigErrorKind::VendorsInvalid { detail } = &err.kind else {
+            panic!("expected VendorsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            detail.contains("vscode"),
+            "detail must name the offending client: {detail}"
+        );
+        // Pin the rendered message prefix — no other test asserts the
+        // variant's static `#[error]` text, so a typo would ship silently.
+        assert!(
+            err.kind.to_string().starts_with("invalid options.vendors: "),
+            "rendered kind must carry the VendorsInvalid prefix: {}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn vendors_control_char_rejected_without_echoing_raw_byte() {
+        // Same terminal-injection vector as `options.clients`, reached through
+        // a quoted TOML table key instead of an array entry.
+        let err = ProjectConfig::from_toml_str("[options.vendors.\"\\u001b[2Jvscode\"]\nshared_skills = true\n")
+            .expect_err("vendor name with a control character must be rejected");
+        let ConfigErrorKind::VendorsInvalid { detail } = &err.kind else {
+            panic!("expected VendorsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            !detail.contains('\u{1b}'),
+            "rendered detail must not embed the raw ESC byte: {detail:?}"
+        );
+        assert!(
+            !err.kind.to_string().contains('\u{1b}'),
+            "rendered kind must not embed the raw ESC byte: {:?}",
+            err.kind.to_string()
+        );
+    }
+
+    #[test]
+    fn vendors_format_char_rejected_without_echoing_raw_byte() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE is NOT `char::is_control`, so it
+        // reaches the unknown-client arm rather than the control-char one —
+        // and that arm quotes the name back. It must escape it too, or a
+        // hostile table key reorders the rest of the caller's terminal line.
+        let err = ProjectConfig::from_toml_str("[options.vendors.\"cursor\\u202Eevil\"]\nshared_skills = true\n")
+            .expect_err("an unknown client name must be rejected");
+        let ConfigErrorKind::VendorsInvalid { detail } = &err.kind else {
+            panic!("expected VendorsInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            !detail.contains('\u{202e}'),
+            "rendered detail must not embed the raw override byte: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn vendors_valid_entry_accepted_at_load() {
+        let cfg = ProjectConfig::from_toml_str("[options.vendors.cursor]\nshared_skills = true\n")
+            .expect("a valid authored vendor entry must parse");
+        assert!(
+            cfg.options.vendors["cursor"].shared_skills,
+            "the authored value must survive the parse"
+        );
+    }
+
+    #[test]
+    fn vendors_absent_leaves_an_empty_table() {
+        // The additive guarantee: a config written before this key existed
+        // parses unchanged and resolves to an empty table.
+        let cfg = ProjectConfig::from_toml_str("[options]\nclients = [\"claude\"]\n")
+            .expect("a config without [options.vendors] must still parse");
+        assert!(
+            cfg.options.vendors.is_empty(),
+            "an absent vendor table must resolve empty, not to a fabricated entry"
+        );
+    }
+
+    #[test]
+    fn vendor_name_check_shares_accepted_set_with_clients() {
+        // The single-validator contract: every name `options.clients` accepts
+        // is a valid vendor table key, and nothing else is. A future client
+        // added to `ClientTarget` is covered automatically.
+        for name in ClientTarget::VALUE_NAMES {
+            assert!(
+                check_vendor_name(name).is_ok(),
+                "every known client must be addressable as a vendor table key: {name}"
+            );
+        }
+        assert!(
+            check_vendor_name("vscode").is_err(),
+            "a name outside the closed client set must be rejected"
+        );
+        assert!(check_vendor_name("").is_err(), "a blank table key must be rejected");
     }
 
     #[test]
