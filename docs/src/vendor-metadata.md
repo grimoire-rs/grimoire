@@ -116,14 +116,17 @@ at both install time and publish-time validation.
 | Plain metadata key (non-tool prefix, e.g. `vendor.x`) | Passes through unchanged |
 | No tool-namespaced keys at all | Fast path: verbatim install, byte-identical to canonical |
 
-The ten recognized tool namespaces are `claude`, `opencode`, `copilot`,
-`codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, and `amp`. Any key
-whose prefix is not one of these ten is plain metadata and is never
-treated as a tool key.
+The eleven recognized tool namespaces are `claude`, `opencode`, `copilot`,
+`codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, and
+`antigravity`. Any key whose prefix is not one of these eleven is plain
+metadata and is never treated as a tool key. (The vendor-neutral `agents`
+target is deliberately excluded — it owns no namespace of its own.)
 
-`codex` joined the reserved set when Codex client support landed. A
-`codex.*` metadata key that was plain data under earlier grim versions
-is now a tool-namespaced key: consumed by Codex when Codex is a target
+`antigravity` is the most recent name to join the reserved set, and
+`codex` joined it when Codex client support landed. The consequence is the
+same in both cases, and is worth stating once: a `codex.*` — or now
+`antigravity.*` — metadata key that was plain data under earlier grim
+versions is now a tool-namespaced key: consumed by Codex when Codex is a target
 (unknown fields warn and are dropped, the typo guard), and dropped for
 other vendors per the projection table above. `grim build`/`grim
 publish` surface an affected key through the same unknown-key warning.
@@ -343,7 +346,7 @@ authors.
 grim installs skills into the directories each client scans for
 `SKILL.md` files.
 
-**Project scope** (per-workspace, discovered by all ten clients):
+**Project scope** (per-workspace, discovered by every client):
 
 | Client | Directory |
 |---|---|
@@ -353,7 +356,7 @@ grim installs skills into the directories each client scans for
 | [Cursor][cursor-subagents-docs] | `.cursor/skills/<name>/` |
 | [Kiro][kiro-docs] | `.kiro/skills/<name>/` |
 | [Junie][junie-docs] | `.junie/skills/<name>/` |
-| [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs] | `.agents/skills/<name>/` (shared pool) |
+| [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs], [Antigravity][antigravity-skills-docs] | `.agents/skills/<name>/` (shared pool) |
 
 **Global scope** (user-level; grim installs directly into each client's
 native discovery directory, honoring the client's own directory-override
@@ -371,6 +374,7 @@ environment variable):
 | [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no `GEMINI_CONFIG_DIR` exists upstream; skills always key on `$HOME` |
 | [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's `$XDG_CONFIG_HOME`-rooted settings root |
 | [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no such env var exists upstream; skills always key on `$HOME` |
+| [Antigravity][antigravity-skills-docs] | `~/.gemini/config/skills/<name>/` — **not** the shared pool: Antigravity pools only at project scope, and globally reads its own root | None found in current docs (`ANTIGRAVITY_API_KEY` / `ANTIGRAVITY_TOKEN` are auth credentials and relocate nothing) |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
 environments), grim falls back to the workspace layout under `$GRIM_HOME`
@@ -530,6 +534,7 @@ claude namespace to silence it and gain proper type conversion.
 [copilot-skills-docs]: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills
 [copilot-config-dir-docs]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
 [opencode-skills-docs]: https://opencode.ai/docs/skills
+[antigravity-skills-docs]: https://antigravity.google/docs/skills
 [opencode-rules-docs]: https://opencode.ai/docs/rules
 [opencode-config-docs]: https://opencode.ai/docs/config
 [codex-skills-docs]: https://developers.openai.com/codex/skills

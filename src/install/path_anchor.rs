@@ -26,8 +26,8 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir};
 use crate::install::{
-    vendor_amp, vendor_claude, vendor_codex, vendor_copilot, vendor_cursor, vendor_gemini, vendor_junie, vendor_kiro,
-    vendor_opencode, vendor_zed,
+    vendor_amp, vendor_antigravity, vendor_claude, vendor_codex, vendor_copilot, vendor_cursor, vendor_gemini,
+    vendor_junie, vendor_kiro, vendor_opencode, vendor_zed,
 };
 use crate::oci::ArtifactKind;
 
@@ -93,6 +93,10 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     // what is injected here — see `every_vendor_root_row_resolves_to_its_own_root`.
     ("zed", |env, home| vendor_zed::zed_root(xdg_config_from(env, home))),
     ("amp", |env, home| vendor_amp::amp_root(xdg_config_from(env, home))),
+    // `~/.gemini/config` — nested under, and distinct from, the `gemini`
+    // row's `~/.gemini`. Each client's candidate set holds only its own
+    // root, so the nesting never cross-classifies.
+    ("antigravity", |_, home| vendor_antigravity::antigravity_root(home)),
 ];
 
 /// `$XDG_CONFIG_HOME`, else `<home>/.config` — the injected-input twin of
@@ -741,6 +745,15 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // agents, and MCP are all declined (no vendor-neutral format).
                 (ClientTarget::Agents, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
 
+                // Antigravity: the ONE pool member whose global skills are not
+                // pooled. Project skills share `.agents/skills`, but globally
+                // all three kinds live under its own `~/.gemini/config` root —
+                // skills included. `AgentsSkills` here would write where
+                // Antigravity does not read (rules declined; handled above).
+                (ClientTarget::Antigravity, ArtifactKind::Skill)
+                | (ClientTarget::Antigravity, ArtifactKind::Agent)
+                | (ClientTarget::Antigravity, ArtifactKind::Mcp) => vendor_root(client),
+
                 // MCP config-entry anchors: Claude's user config file dir
                 // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
                 // config dir (`opencode.json`), Copilot's native root
@@ -767,7 +780,8 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Amp, ArtifactKind::Agent)
                 | (ClientTarget::Agents, ArtifactKind::Rule)
                 | (ClientTarget::Agents, ArtifactKind::Agent)
-                | (ClientTarget::Agents, ArtifactKind::Mcp) => None,
+                | (ClientTarget::Agents, ArtifactKind::Mcp)
+                | (ClientTarget::Antigravity, ArtifactKind::Rule) => None,
 
                 // Bundles are never materialized; they expand into members, so
                 // no (client, Bundle) pair has an anchor. A legacy/hand-edited
@@ -1049,6 +1063,7 @@ mod tests {
         "gemini-root",
         "zed-root",
         "amp-root",
+        "antigravity-root",
     ];
 
     /// Every shipped tag still loads from a LITERAL JSON string, and
@@ -1266,13 +1281,19 @@ mod tests {
     ///
     /// The gap this closes: the tag-vocabulary tests police tag *names*, and
     /// `arch2_from_target_and_resolve_are_coherent_for_all_scope_client_kind_triples`
-    /// builds its `AnchorRoots` from literal paths — so before this, nothing
-    /// anywhere called `AnchorRoots::resolve`. Swapping two rows' resolvers
+    /// builds its `AnchorRoots` from literal paths — so before this, no TEST
+    /// anywhere called `AnchorRoots::resolve` (production callers exist:
+    /// `command::scope_resolution`, `command::search`, `catalog_service`).
+    /// Swapping two rows' resolvers
     /// (`("cursor", |_, home| kiro_root(home))` and vice versa) anchored every
     /// global Cursor install under `~/.kiro` with the whole suite still green.
     ///
     /// Asserted as one map equality rather than per-row `contains`, so a row
-    /// that vanishes or is added without acknowledgement fails too.
+    /// that vanishes, or resolves to the wrong vendor's root, fails here. A
+    /// newly *added* row is not this test's job — `hermetic_vendor_roots`
+    /// filters it out; `vendor_root_rows_and_reachable_vendor_roots_agree` and
+    /// `every_reachable_anchor_tag_is_pinned` are what refuse an
+    /// unacknowledged one.
     ///
     #[test]
     fn every_vendor_root_row_resolves_to_its_own_root() {
@@ -1299,11 +1320,13 @@ mod tests {
             "each VENDOR_ROOTS row must resolve to its own vendor's root — a swapped resolver \
              silently anchors one vendor's global installs under another's directory"
         );
-        assert_eq!(
-            roots.vendor_roots.len(),
-            super::VENDOR_ROOTS.len(),
-            "every row resolves under a resolvable $HOME; a missing key means a row stopped resolving"
-        );
+        // No row-count assertion: `len() == VENDOR_ROOTS.len()` would
+        // additionally require `zed`, whose macOS/Windows arms read the real
+        // `$HOME` / `%APPDATA%` inside `vendor_zed`, making the test depend on
+        // the host env rather than the injected inputs. A row that stops
+        // resolving still fails the equality above; an UNACKNOWLEDGED new row
+        // is caught by `vendor_root_rows_and_reachable_vendor_roots_agree`,
+        // not here — the filter would drop it from `actual`.
         // The non-vendor roots resolve from the same injected inputs.
         assert_eq!(roots.agents_skills, Some(home.join(".agents").join("skills")));
         assert_eq!(roots.claude_user_dir, Some(home.clone()));
@@ -1334,6 +1357,7 @@ mod tests {
             ("junie", home.join(".junie")),
             ("gemini", home.join(".gemini")),
             ("amp", home.join(".config").join("amp")),
+            ("antigravity", home.join(".gemini").join("config")),
         ]
         .into();
         if cfg!(all(not(windows), not(target_os = "macos"))) {
@@ -2695,6 +2719,22 @@ mod tests {
                 (PathAnchor::AgentsSkills, name.to_string())
             }
 
+            // Antigravity: project skills join the shared pool and agents sit
+            // beside them under `.agents`; GLOBAL skills are its own, under
+            // `antigravity-root` (`~/.gemini/config`), NOT `AgentsSkills`.
+            (ConfigScope::Project, ClientTarget::Antigravity, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".agents/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Antigravity, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".agents/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Antigravity, ArtifactKind::Skill) => {
+                (PathAnchor::VendorRoot("antigravity"), format!("skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Antigravity, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot("antigravity"), format!("agents/{name}.md"))
+            }
+
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
             // MCP descriptors register into client configs, not files —
@@ -2712,7 +2752,8 @@ mod tests {
             | (_, ClientTarget::Amp, ArtifactKind::Rule)
             | (_, ClientTarget::Amp, ArtifactKind::Agent)
             | (_, ClientTarget::Agents, ArtifactKind::Rule)
-            | (_, ClientTarget::Agents, ArtifactKind::Agent) => {
+            | (_, ClientTarget::Agents, ArtifactKind::Agent)
+            | (_, ClientTarget::Antigravity, ArtifactKind::Rule) => {
                 unreachable!("declined (client, kind) pairs are skipped by the test loop before this call")
             }
         }
@@ -2752,10 +2793,18 @@ mod tests {
     /// cause assertion (3) to return `GrimHome` instead, failing this test.
     #[test]
     fn arch2_from_target_and_resolve_are_coherent_for_all_scope_client_kind_triples() {
-        // Hermetic roots: all fields set to fixed, non-overlapping paths so
-        // no env variable is consulted during classification or resolution.
+        // Hermetic roots: fixed paths, so no env variable is consulted
+        // during classification or resolution.
         // /oc is the OpenCode config root; /oc/skills is the skills root, so
         // OpenCodeRoot resolves to /oc (the parent of /oc/skills).
+        //
+        // Two pairs deliberately OVERLAP, mirroring the real layout: antigravity
+        // roots INSIDE gemini (`~/.gemini/config` under `~/.gemini`), and the
+        // OpenCode pair. This is fidelity, not extra detection strength — an
+        // arm handing one client the other's root fails either way (disjoint
+        // roots fail as `UnknownAnchor`, nested ones as an anchor mismatch).
+        // The nesting is here so the fixture cannot drift into asserting
+        // containment behaviour the real layout does not have.
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
@@ -2769,6 +2818,8 @@ mod tests {
                 ("gemini", PathBuf::from("/gemini")),
                 ("zed", PathBuf::from("/zed")),
                 ("amp", PathBuf::from("/amp")),
+                // Nested under gemini's root ON PURPOSE — see the note above.
+                ("antigravity", PathBuf::from("/gemini/config")),
             ]
             .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
@@ -2780,7 +2831,7 @@ mod tests {
 
         let name = "test-artifact";
         let scopes = [ConfigScope::Project, ConfigScope::Global];
-        let clients = ClientTarget::ALL; // all 10 wave-1 vendors
+        let clients = ClientTarget::ALL;
         let kinds = [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent];
         // ArtifactKind::Bundle is excluded — bundles are never materialised.
 
@@ -2856,15 +2907,15 @@ mod tests {
             }
         }
 
-        // Exhaustiveness guard: 2 scopes × 11 clients × 3 kinds = 66, minus the
-        // 11 declined (client, kind) pairs the `kind_support` gate skips
+        // Exhaustiveness guard: 2 scopes × 12 clients × 3 kinds = 72, minus the
+        // 12 declined (client, kind) pairs the `kind_support` gate skips
         // (Codex-Rule, Kiro-Agent, Junie-Rule/Agent, Gemini-Rule, Zed-Rule/Agent,
-        // Amp-Rule/Agent, Agents-Rule/Agent) × 2 scopes = 22 → 44 combos. If a
-        // new ClientTarget or ArtifactKind variant is added, this fails, forcing
-        // the table to be extended.
+        // Amp-Rule/Agent, Agents-Rule/Agent, Antigravity-Rule) × 2 scopes = 24 →
+        // 48 combos. If a new ClientTarget or ArtifactKind variant is added, this
+        // fails, forcing the table to be extended.
         assert_eq!(
-            combo_count, 44,
-            "expected 44 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 48,
+            "expected 48 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }

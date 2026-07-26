@@ -2,14 +2,17 @@
 # Copyright 2026 The Grimoire Authors
 """Shared ``.agents/skills`` pool refcount + Kiro global-scope inertness.
 
-Wave-1 vendor expansion introduces two guards that need end-to-end proof:
+Three guards that need end-to-end proof:
 
 1. **Refcount guard** (``prune::reap_dropped_clients``): Codex, Gemini, Zed,
-   and Amp all target the same ``.agents/skills/<name>`` directory. Removing
-   one client's record must NOT delete a directory another client's output
-   still references — the shared dir survives until the LAST referencing
-   client drops it (adr_vendor_wave_expansion.md §3).
-2. **Kiro global scoped rule** is written correctly at global scope but is
+   Amp, and Antigravity all target the same ``.agents/skills/<name>``
+   directory at project scope. Removing one client's record must NOT delete a
+   directory another client's output still references — the shared dir
+   survives until the LAST referencing client drops it
+   (adr_vendor_wave_expansion.md §3).
+2. **Antigravity is a PARTIAL pool member**: project skills pool, global
+   skills do not — they live under its own ``~/.gemini/config/skills``.
+3. **Kiro global scoped rule** is written correctly at global scope but is
    inert until upstream Kiro #9176 closes; grim emits a render-layer warning
    citing the issue (self-heals on the upstream fix, no grim change).
 """
@@ -83,6 +86,169 @@ def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
     # Full uninstall removes the last references and the shared dir with them.
     runner.json("uninstall", "skill", "shared-skill")
     assert not shared_dir.exists(), "uninstalling the last references must remove the shared dir"
+
+
+def test_antigravity_pools_project_skills_but_not_global_ones(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Antigravity is the one partial pool member. At PROJECT scope it shares
+    ``.agents/skills/<name>`` with codex — one physical dir, two outputs, and
+    the refcount guard keeps it alive when codex is dropped."""
+    sk = make_artifact(
+        f"{unique_repo}/agy-skill",
+        "skill",
+        {"agy-skill/SKILL.md": "---\nname: agy-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    shared_dir = bare_project_dir / ".agents/skills/agy-skill"
+    (bare_project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["antigravity", "codex"]\n\n'
+        f'[skills]\nagy-skill = "{sk.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    assert (shared_dir / "SKILL.md").is_file(), "project skills must land in the shared pool"
+    # NOT `.antigravity/` or `.gemini/` — Antigravity reads neither.
+    assert not (bare_project_dir / ".gemini").exists(), (
+        "Antigravity does not read .gemini/skills — nothing may be written there"
+    )
+    item = next(r for r in runner.json("status")["items"] if r["name"] == "agy-skill")
+    assert {o["client"] for o in item["outputs"]} == {"antigravity", "codex"}
+    assert len({o["path"] for o in item["outputs"]}) == 1, (
+        f"both clients must point at ONE shared dir: {item['outputs']}"
+    )
+
+    # Dropping codex leaves the dir alive: antigravity still references it.
+    (bare_project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["antigravity"]\n\n'
+        f'[skills]\nagy-skill = "{sk.fq}"\n'
+    )
+    row = next(r for r in runner.json("update")["items"] if r["name"] == "agy-skill")
+    assert "codex" in row.get("reaped_clients", []), row
+    assert (shared_dir / "SKILL.md").is_file(), (
+        "the shared dir must survive while antigravity still references it"
+    )
+
+
+def test_antigravity_global_skills_land_in_gemini_config_not_the_pool(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """THE trap this vendor exists to avoid. At GLOBAL scope Antigravity reads
+    ``~/.gemini/config/skills`` — its own root — not the ``$HOME/.agents/skills``
+    pool the other five members share, and not ``~/.gemini`` (Gemini CLI's
+    root). Getting this wrong installs to a path Antigravity never scans."""
+    sk = make_artifact(
+        f"{unique_repo}/agy-global",
+        "skill",
+        {"agy-global/SKILL.md": "---\nname: agy-global\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nagy-global = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "antigravity")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    assert (runner.home / ".gemini/config/skills/agy-global/SKILL.md").is_file(), (
+        "global Antigravity skills must land in ~/.gemini/config/skills"
+    )
+    assert not (runner.home / ".agents/skills/agy-global").exists(), (
+        "global Antigravity skills must NOT go to the shared $HOME/.agents/skills pool"
+    )
+    assert not (runner.home / ".gemini/skills").exists(), (
+        "Antigravity does not read ~/.gemini/skills"
+    )
+    # The recorded output resolves back to the same place (anchor round-trip).
+    item = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "agy-global")
+    assert item["outputs"][0]["path"].endswith("agy-global"), item
+    assert ".gemini/config/skills" in item["outputs"][0]["path"].replace("\\", "/"), item
+
+    runner.json("uninstall", "--global", "skill", "agy-global")
+    assert not (runner.home / ".gemini/config/skills/agy-global").exists()
+
+
+def test_antigravity_global_detection_needs_gemini_config_not_bare_gemini(
+    grim_binary: Path, grim_home: Path
+) -> None:
+    """Antigravity's global marker is ``~/.gemini/config`` — one level below
+    Gemini CLI's ``~/.gemini``. Every Gemini CLI user has the outer directory,
+    so detecting on it would make every one of them an Antigravity user. The
+    unit test cannot fabricate ``$HOME``; this can, via the isolated home."""
+    runner = GrimRunner(grim_binary, grim_home)
+
+    # A bare ~/.gemini is Gemini CLI's marker. Antigravity must stay silent.
+    (runner.home / ".gemini").mkdir(parents=True, exist_ok=True)
+    runner.json("init", "--global")
+    seeded = (grim_home / "grimoire.toml").read_text()
+    assert "gemini" in seeded, f"a bare ~/.gemini must still detect gemini: {seeded}"
+    assert "antigravity" not in seeded, (
+        f"a bare ~/.gemini must NOT detect antigravity — its root is ~/.gemini/config: {seeded}"
+    )
+
+    # One level deeper, it does.
+    (grim_home / "grimoire.toml").unlink()
+    (runner.home / ".gemini/config").mkdir(parents=True, exist_ok=True)
+    runner.json("init", "--global")
+    reseeded = (grim_home / "grimoire.toml").read_text()
+    assert "antigravity" in reseeded, (
+        f"~/.gemini/config must detect antigravity: {reseeded}"
+    )
+
+
+def test_antigravity_agent_and_mcp_install_at_both_scopes(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Agents are Antigravity's one generated transform and MCP is a brand-new
+    ``.agents/mcp_config.json`` splice target no other vendor writes. Both need
+    end-to-end proof, including renderer self-heal: re-installing an untouched
+    artifact must leave it byte-identical and unmodified."""
+    ag = make_artifact(
+        f"{unique_repo}/agy-agent",
+        "agent",
+        {"agy-agent.md": "---\nname: agy-agent\ndescription: d\nmodel: pro\ntools: view_file, grep_search\n---\nbody\n"},
+        tag="v1",
+    )
+    # MCP descriptors publish through `release --kind mcp`, not make_artifact.
+    descriptor = bare_project_dir / "src" / "mcp" / "agy-mcp.toml"
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+    )
+    mcp_ref = f"{registry}/{unique_repo}/mcp/agy-mcp:1.0.0"
+    (bare_project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["antigravity"]\n\n'
+        f'[agents]\nagy-agent = "{ag.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.json("release", str(descriptor), mcp_ref, "--kind", "mcp")
+    runner.json("add", "--no-install", mcp_ref)
+    runner.run("lock", check=False)
+    rows = runner.json("install")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    agent_file = bare_project_dir / ".agents/agents/agy-agent.md"
+    assert agent_file.is_file(), "agents land beside the pooled skills under .agents/agents"
+    text = agent_file.read_text()
+    # `tools` is `string[]` upstream — a comma string would read as one tool.
+    assert "- view_file" in text and "- grep_search" in text, f"tools must be a YAML list: {text}"
+    assert "generated by grim" in text, f"a transform carries provenance: {text}"
+
+    mcp_file = bare_project_dir / ".agents/mcp_config.json"
+    assert mcp_file.is_file(), "MCP registers into .agents/mcp_config.json"
+    entry = json.loads(mcp_file.read_text())["mcpServers"]["agy-mcp"]
+    assert entry["command"] == "grim", entry
+
+    # Self-heal: re-materializing an untouched artifact stays not-modified.
+    before = agent_file.read_bytes()
+    again = runner.json("install")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert agent_file.read_bytes() == before, "regeneration must be byte-identical"
+    assert not any(
+        o.get("modified") for r in runner.json("status")["items"] for o in r["outputs"]
+    ), "an untouched install must not report drift"
 
 
 # ---------------------------------------------------------------------------

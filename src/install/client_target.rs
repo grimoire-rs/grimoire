@@ -34,6 +34,7 @@ use super::install_error::{InstallError, InstallErrorKind};
 use super::vendor::Vendor;
 use super::vendor_agents::AgentsVendor;
 use super::vendor_amp::AmpVendor;
+use super::vendor_antigravity::AntigravityVendor;
 use super::vendor_claude::ClaudeVendor;
 use super::vendor_codex::CodexVendor;
 use super::vendor_copilot::CopilotVendor;
@@ -84,6 +85,13 @@ pub enum ClientTarget {
     /// request (`--client agents`, `[options].clients`). See
     /// [`AgentsVendor::detect`](super::vendor_agents::AgentsVendor).
     Agents,
+    /// Google Antigravity 2.0 — shared `.agents/skills` at project scope, its
+    /// own `~/.gemini/config` root globally, plus `.agents/agents` and
+    /// `.agents/mcp_config.json` (skills, agents, MCP; rules declined — the
+    /// global surface is a shared monolithic `GEMINI.md`). Targets the 2.0
+    /// desktop product; the Antigravity CLI and IDE variants read different
+    /// global directories and are not served by this name.
+    Antigravity,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -102,6 +110,7 @@ impl std::str::FromStr for ClientTarget {
             "zed" => Ok(Self::Zed),
             "amp" => Ok(Self::Amp),
             "agents" => Ok(Self::Agents),
+            "antigravity" => Ok(Self::Antigravity),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -134,6 +143,7 @@ impl ClientTarget {
             Self::Zed => "zed",
             Self::Amp => "amp",
             Self::Agents => "agents",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -153,6 +163,7 @@ impl ClientTarget {
         Self::Zed.as_str(),
         Self::Amp.as_str(),
         Self::Agents.as_str(),
+        Self::Antigravity.as_str(),
     ];
 }
 
@@ -191,7 +202,7 @@ pub struct MaterializeRequest<'a> {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 11] = [
+    pub const ALL: [ClientTarget; 12] = [
         Self::Claude,
         Self::OpenCode,
         Self::Copilot,
@@ -203,6 +214,7 @@ impl ClientTarget {
         Self::Zed,
         Self::Amp,
         Self::Agents,
+        Self::Antigravity,
     ];
 
     /// The per-vendor materialization strategy behind this identity.
@@ -219,6 +231,7 @@ impl ClientTarget {
             Self::Zed => &ZedVendor,
             Self::Amp => &AmpVendor,
             Self::Agents => &AgentsVendor,
+            Self::Antigravity => &AntigravityVendor,
         }
     }
 
@@ -534,6 +547,9 @@ mod tests {
             (ClientTarget::Zed, Native, Declined, Declined, true),
             (ClientTarget::Amp, Native, Declined, Declined, true),
             (ClientTarget::Agents, Native, Declined, Declined, false),
+            // Antigravity: rules declined (global rules are a monolithic
+            // ~/.gemini/GEMINI.md shared with Gemini CLI).
+            (ClientTarget::Antigravity, Native, Declined, Native, true),
         ];
         assert_eq!(
             grid.len(),
@@ -625,7 +641,8 @@ mod tests {
         rows
     }
 
-    /// Table-parity: reads `docs/src/clients.md` at compile time, parses the
+    /// Table-parity: reads `docs/src/clients.md` at TEST RUNTIME (not compile
+    /// time — `std::fs::read_to_string` below), parses the
     /// first markdown table, and asserts for every `(client, kind)` that a
     /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_path` is
     /// `None`), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
@@ -833,6 +850,7 @@ mod tests {
             ("zed", ClientTarget::Zed),
             ("amp", ClientTarget::Amp),
             ("agents", ClientTarget::Agents),
+            ("antigravity", ClientTarget::Antigravity),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
@@ -857,7 +875,7 @@ mod tests {
         let w = Path::new("/w");
         let project = crate::config::scope::ConfigScope::Project;
 
-        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 11] = [
+        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 12] = [
             (
                 ClientTarget::Claude,
                 ".claude/skills/x",
@@ -907,6 +925,14 @@ mod tests {
             (ClientTarget::Amp, ".agents/skills/x", None, None),
             // Generic client: the shared pool is its only surface.
             (ClientTarget::Agents, ".agents/skills/x", None, None),
+            // Antigravity: project skills join the pool, agents sit beside
+            // them under `.agents`; rules declined.
+            (
+                ClientTarget::Antigravity,
+                ".agents/skills/x",
+                None,
+                Some(".agents/agents/x.md"),
+            ),
         ];
         assert_eq!(
             table.len(),
@@ -973,6 +999,18 @@ mod tests {
             assert_eq!(
                 ClientTarget::Codex.path_for(w, g, ArtifactKind::Skill, "x"),
                 home.join(".agents/skills/x")
+            );
+            // Antigravity is the one pool member whose GLOBAL skills are its
+            // own: `~/.gemini/config/skills`, not `$HOME/.agents/skills` and
+            // not `~/.gemini` (Gemini CLI's root). Its project skills DO join
+            // the pool — asserted in `path_for_matches_each_client_layout`.
+            assert_eq!(
+                ClientTarget::Antigravity.path_for(w, g, ArtifactKind::Skill, "x"),
+                home.join(".gemini/config/skills/x")
+            );
+            assert_eq!(
+                ClientTarget::Antigravity.path_for(w, g, ArtifactKind::Agent, "rev"),
+                home.join(".gemini/config/agents/rev.md")
             );
             // Codex agents live under `$CODEX_HOME|~/.codex` + `agents/`; the
             // env-override order is unit-tested in vendor_codex, so only assert

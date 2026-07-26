@@ -151,6 +151,18 @@ const POOL_CAPABLE_VENDORS: &[&str] = &[
     "codex", "gemini", "zed", "amp", "agents", "cursor", "copilot", "opencode",
 ];
 
+/// [`Vendor::pool_capable`] with both inputs injected.
+///
+/// Split out so the `skill_fields` conjunct is *decidable* by a test. No
+/// shipped vendor is both on the roster and declaring skill fields — Claude is
+/// the only vendor with a registry and it is deliberately off the roster — so
+/// against real vendors alone the conjunct is invisible: delete it and every
+/// assertion still passes. That is exactly the drift it exists to catch, so it
+/// gets the injected-input seam `zed_root_from` established.
+fn pool_capable_from(name: &str, declares_skill_fields: bool) -> bool {
+    POOL_CAPABLE_VENDORS.contains(&name) && !declares_skill_fields
+}
+
 /// A supported AI client's materialization strategy.
 pub trait Vendor {
     /// The vendor name — the `metadata` namespace prefix and the
@@ -190,7 +202,7 @@ pub trait Vendor {
     /// here rather than asserting it in a test means a vendor that later
     /// declares a skill field cannot stay pool-capable by oversight.
     fn pool_capable(&self) -> bool {
-        POOL_CAPABLE_VENDORS.contains(&self.name()) && self.skill_fields().is_empty()
+        pool_capable_from(self.name(), !self.skill_fields().is_empty())
     }
 
     /// Known `<vendor>.*` rule metadata fields. Same semantics as
@@ -529,9 +541,20 @@ mod tests {
         use crate::install::client_target::ClientTarget;
 
         // The load-bearing rule: one physical pool tree cannot host two
-        // vendors that render different bytes into it. Enforced inside
-        // `pool_capable`, so this asserts the invariant holds today AND that
-        // the predicate is the thing enforcing it.
+        // vendors that render different bytes into it.
+        //
+        // Asserting it over the real vendors alone would be VACUOUS — Claude
+        // is the only vendor with a `skill_fields` registry and it is already
+        // off the roster, so deleting the conjunct changes no answer. Inject
+        // the input instead, so the conjunct is what decides.
+        assert!(pool_capable_from("cursor", false), "a roster member with no fields");
+        assert!(
+            !pool_capable_from("cursor", true),
+            "declaring skill_fields must remove a roster member from the pool"
+        );
+        assert!(!pool_capable_from("claude", false), "off the roster stays off it");
+
+        // …and the invariant holds for every vendor that actually ships.
         for client in ClientTarget::ALL {
             let vendor = client.vendor();
             assert!(
@@ -540,10 +563,10 @@ mod tests {
                 vendor.name()
             );
         }
-        // …and the conjunct is live, not vacuous: Claude is on neither side by
-        // accident — it declares fields, so even adding it to the roster
-        // could not make it capable.
-        assert!(!ClientTarget::Claude.vendor().skill_fields().is_empty());
+        assert!(
+            !ClientTarget::Claude.vendor().skill_fields().is_empty(),
+            "Claude is the live example the rule is written for"
+        );
     }
 
     #[test]

@@ -78,6 +78,7 @@ CLIENT_VALUE_NAMES = [
     # The vendor-neutral generic client — a target, not a product. Additive
     # under Principle 9: `options.clients` only ever gains accepted values.
     "agents",
+    "antigravity",
 ]
 
 
@@ -1143,7 +1144,7 @@ def test_list_json_entry_clients_is_string_set_with_canonical_values(
 ) -> None:
     """The ``config list`` JSON entry for ``options.clients`` carries
     ``type: "string-set"`` and ``values`` in the canonical
-    ``ClientTarget::ALL`` order (all ten clients) —
+    ``ClientTarget::ALL`` order (every client) —
     regardless of the order the user supplied to ``set``, and whether the
     key is unset or set. ``default`` stays ``null`` (no fixed default).
 

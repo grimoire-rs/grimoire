@@ -188,6 +188,7 @@ minor release (see [stability][stability-unstable]).
 | [Gemini CLI][gemini-docs] | project / global | `.gemini/settings.json` (both scopes) | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
 | [Zed][zed-docs] | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
+| [Antigravity][antigravity-docs] | project / global | `.agents/mcp_config.json` / `~/.gemini/config/mcp_config.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; remote (`sse`, `http`): `serverUrl` + `headers`; ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
 
 The vendor-neutral `agents` client is absent from the table because it has no
 MCP surface at all: there is no cross-vendor standard MCP config location, so
@@ -371,7 +372,12 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
   [Copilot][copilot-mcp-docs] (both scopes), and [Codex][codex-mcp-docs]
   document no WebSocket MCP transport; a `transport = "ws"` descriptor is
   skipped for them with a warning rather than registering a remote entry
-  they would try to speak HTTP to.
+  they would try to speak HTTP to. Every other client declines it for the
+  same reason. [Antigravity][antigravity-docs]'s MCP docs do name websocket
+  alongside sse and streamable HTTP under one `serverUrl` field, but that
+  single sentence could not be confirmed against raw upstream page text, and
+  support is additive to add later while removal would be breaking — so it
+  is declined there as well, pending confirmation.
 - **The `[server.oauth]` block is Claude-only.** A descriptor carrying
   one is skipped with a warning for [OpenCode][opencode-mcp-docs],
   [Copilot][copilot-mcp-docs], and [Codex][codex-mcp-docs] — OAuth is
@@ -429,6 +435,7 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [gemini-docs]: https://geminicli.com
 [zed-docs]: https://zed.dev
 [amp-docs]: https://ampcode.com
+[antigravity-docs]: https://antigravity.google/docs/mcp
 [ansible-blockinfile]: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
 [catalog-mcp-grim]: https://github.com/grimoire-rs/grimoire/blob/main/catalog/mcp/grim.toml
 [toml-edit-crate]: https://docs.rs/toml_edit/latest/toml_edit/

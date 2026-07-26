@@ -3307,9 +3307,15 @@ mod tests {
 
     #[test]
     fn reap_relocated_roots_skips_when_the_override_names_the_default_root() {
-        // Guard 1: `KIRO_HOME=$HOME/.kiro` sets the variable to the value the
+        // Guard 2: `KIRO_HOME=$HOME/.kiro` sets the variable to the value the
         // pre-override resolver already produced — nothing moved, and the live
         // output must survive.
+        //
+        // For a FILE output guard 5 would also save this (both paths
+        // canonicalize onto each other). The case where guard 2 is the only
+        // thing standing between grim and its own live output is the entry
+        // one, which returns before guard 5 — see
+        // `reap_relocated_roots_keeps_a_live_mcp_entry_when_the_override_names_the_default_root`.
         let dir = tempfile::tempdir().unwrap();
         let mut roots = roots(dir.path());
         roots.vendor_roots.insert("kiro", dir.path().join("legacy"));
@@ -3423,7 +3429,7 @@ mod tests {
         );
     }
 
-    /// Guard 4: the pre-override root is a symlink to the post-override one
+    /// Guard 5: the pre-override root is a symlink to the post-override one
     /// (`~/.kiro -> $KIRO_HOME`), so the "old" path canonicalizes onto the
     /// LIVE output. Reaping through the alias would delete the live file.
     #[cfg(unix)]
@@ -3490,6 +3496,44 @@ mod tests {
         assert!(
             text["mcpServers"].get("other").is_some(),
             "every byte outside the managed member survives: {text}"
+        );
+    }
+
+    /// Guard 2 is load-bearing exactly here. An entry output returns before
+    /// guard 5, so nothing else stands between `KIRO_HOME=$HOME/.kiro` and
+    /// grim un-splicing its own LIVE registration on every update.
+    #[test]
+    fn reap_relocated_roots_keeps_a_live_mcp_entry_when_the_override_names_the_default_root() {
+        use crate::install::install_state::entry_value_hash;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut roots = roots(dir.path());
+        roots.vendor_roots.insert("kiro", dir.path().join("legacy"));
+        let relocated = vec![("kiro", dir.path().join("legacy"))];
+        let live = dir.path().join("legacy/settings/mcp.json");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        std::fs::write(
+            &live,
+            serde_json::to_string(&serde_json::json!({"mcpServers": {"grim": value.clone()}})).unwrap(),
+        )
+        .unwrap();
+        let mut out = kiro_output("settings/mcp.json", entry_value_hash(&value).unwrap());
+        out.entry = Some("/mcpServers/grim".to_string());
+        let prior = reap_record(vec![out]);
+
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
+
+        let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+        assert!(
+            text["mcpServers"].get("grim").is_some(),
+            "an override naming the default root must not un-splice the LIVE registration: {text}"
         );
     }
 
