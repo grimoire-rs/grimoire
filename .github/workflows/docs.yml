@@ -43,6 +43,11 @@ jobs:
           # `external/docker_credential` is the [patch.crates-io] source; the
           # grim build (needed to generate the schemas) fails without it.
           submodules: recursive
+          # `.gitattributes` tracks `*.png` in LFS, and `docs/src/og-card.png`
+          # is the social preview every share link renders. Without this the
+          # checkout leaves a pointer file, mdBook copies the pointer text
+          # through, and the card 404s as an image everywhere it is unfurled.
+          lfs: true
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Setup Rust
