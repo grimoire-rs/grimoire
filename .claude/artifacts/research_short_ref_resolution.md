@@ -5,7 +5,9 @@
 - **Question:** *Does fixing short-ref expansion change resolution for any
   already-published reference?*
 - **Answer:** **Yes — and the obvious fix is a breaking change. It is
-  prohibited under Principle 9.**
+  prohibited under Principle 9.** The real finding is narrower: the kind
+  segment was never required (§5), and identity is name-keyed so adding flat
+  names is safe (§6).
 - **Binary under test:** `target/release/grim` @ `f2bc57a`
 - **Re-verify before citing:** 2027-01-26
 
@@ -105,6 +107,25 @@ ref, and ambiguous when two kinds share a name.
 
 ### Recommendation: **B + D**, with C recorded as the general fix
 
+> **Framing correction (2026-07-26, after review).** An earlier draft of this
+> section presented B as a workaround — "publish aliases so the broken short
+> ref starts working". That is backwards. **The kind segment was never
+> required, and flat is the correct default.** `ArtifactKind::subdir()` is
+> defined at `src/oci/artifact_kind.rs:55` as *"the `$GRIM_HOME`/**install**
+> subdirectory for this kind"* — a local filesystem-layout concept that also
+> became the registry-namespace default (`docs/src/publishing.md`, precedence
+> rule 3). The kind always travels on the wire, read back by
+> `kind_from_manifest` (`src/oci/annotations.rs:221`).
+>
+> So the segment is a **namespace partition, not a type tag**. It buys exactly
+> one thing: room for one name to exist as two kinds. No first-party name
+> collides across kinds, so the catalog pays a segment in every reference its
+> users type and gets nothing back — while breaking its own short-ref promise.
+>
+> B is therefore not a workaround but the correct layout, applied additively.
+> The segmented paths are frozen under Principle 9: going flat means **adding**
+> names, never moving or retiring them.
+
 B makes `grim add grim-usage` work with no code change and no resolution-
 semantics change — the strongest possible Principle-9 position. D makes
 `docs/src/quickstart.md:5-7` precise: it currently says grim "expands short
@@ -115,22 +136,50 @@ C is the correct general answer and the only one that helps third-party
 kind-segmented publishers, but it introduces a network-dependent resolution
 path, needs an ambiguity rule for a name present in several registries, and
 degrades under `GRIM_OFFLINE`. That is ADR-sized work for a problem only the
-first-party catalog currently has.
+first-party catalog currently has — and one that a flat default largely
+prevents from recurring.
 
-## 6. Open questions for the sub-plan
+## 6. Dual identity — tested, resolved
 
-1. **Dual identity.** If `grim-usage` is installed via a flat alias while
-   `grim-essentials` provides it via `../skills/grim-usage:0`, do `status`
-   and the effective-set logic (`adr_effective_set_mutations.md`) treat them
-   as one artifact or two? **This is the load-bearing risk in option B** and
-   must be tested before publishing any alias.
-2. Does an alias double the registry footprint, or does content-addressing
+**The load-bearing risk in option B was: would a flat alias plus a
+bundle-provided member read as one artifact or two?** Measured:
+
+```
+grim init
+grim add ghcr.io/grimoire-rs/skills/grim-usage@sha256:17115400…   # digest-pinned, direct
+grim add ghcr.io/grimoire-rs/bundles/grim-essentials:0            # provides ../skills/grim-usage:0
+grim status --format json
+  → 4 items: grim-essentials, grim-usage, ai-config-authoring, grim-authoring
+    grim-usage appears ONCE, state=installed
+```
+
+Two textually different references — one digest-pinned, one floating and
+deployment-relative — for the same binding name collapse into **one**
+artifact. Identity is keyed on **(kind, binding name)**, not on the
+repository path. The command surface agrees: `grim remove <kind> <name>`,
+`grim uninstall <kind> <name>`. `docs/src/configuration.md:97` states the
+resulting precedence: a direct declaration overrides a bundle member of the
+same name.
+
+A flat alias binds to the same last-path-segment name (`grim-usage`), so it
+lands in the same slot. **No dual identity. Option B is safe on this axis.**
+
+*Residual, untestable without publishing:* the true alias case differs from
+the tested case only in the repository path, and the evidence above says the
+path is not part of the key. Re-confirm on the first alias actually pushed.
+
+## 7. Remaining questions for the sub-plan
+
+1. Does an alias double the registry footprint, or does content-addressing
    dedupe it to extra tags?
-3. Do the cascade rules (`adr_unified_publish_version_cascade.md`) apply
+2. Do the cascade rules (`adr_unified_publish_version_cascade.md`) apply
    cleanly to a second repo name for the same content?
-4. Does `grim update` roll a flat-alias-installed artifact forward correctly?
+3. Does `grim update` roll a flat-alias-installed artifact forward correctly?
+4. Flat bundle members become `./grim-usage:0`; does the existing
+   `grim-essentials` keep its `../skills/…` members, or does a flat bundle
+   alias need its own member list?
 
-## 7. ADR
+## 8. ADR
 
 - **B / D: no ADR.** B is catalog policy (`catalog/README.md` + `publish.toml`);
   D is docs. Neither changes resolution semantics.
