@@ -11,6 +11,12 @@ permissions:
   checks: write
   pull-requests: write
 
+# Superseded pushes to a feature branch stop burning runners; main never
+# cancels, so every landed commit keeps a complete result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   conventional-commits:
     name: Conventional Commits
