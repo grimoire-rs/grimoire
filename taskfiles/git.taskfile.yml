@@ -19,3 +19,37 @@ tasks:
     cmds:
       - git switch main
       - git merge --ff-only {{.BRANCH}}
+
+  # Enforce the DCO term CONTRIBUTING.md promises: every non-merge commit in
+  # the range carries a Signed-off-by trailer whose email matches its author.
+  # Bot authors are exempt — dependabot cannot sign off, and its commits are
+  # not contributions in the DCO sense.
+  dco:
+    desc: Check Signed-off-by trailers on a commit range (default main..HEAD)
+    vars:
+      RANGE: '{{.RANGE | default "main..HEAD"}}'
+    cmds:
+      - |
+        missing=0
+        for sha in $(git rev-list --no-merges {{.RANGE}}); do
+          email=$(git show -s --format='%ae' "$sha")
+          name=$(git show -s --format='%an' "$sha")
+          case "$name$email" in *'[bot]'*) continue ;; esac
+          # -F, not a regex: real addresses carry '+' and '.', both of which
+          # are ERE metacharacters. Read trailers only, so a Signed-off-by
+          # quoted in a commit body cannot satisfy the check.
+          if ! git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" | grep -qF "<$email>"; then
+            echo "missing or mismatched sign-off: $(git show -s --format='%h %s' "$sha")"
+            echo "  author: $name <$email>"
+            missing=$((missing + 1))
+          fi
+        done
+        if [ "$missing" -gt 0 ]; then
+          echo ""
+          echo "$missing commit(s) without a matching Signed-off-by trailer."
+          echo "Sign off with 'git commit -s', or fix history with"
+          echo "  git rebase --signoff {{.RANGE}}"
+          echo "See the License section of CONTRIBUTING.md."
+          exit 1
+        fi
+        echo "DCO: all commits in {{.RANGE}} are signed off"

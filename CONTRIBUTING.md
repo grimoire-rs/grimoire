@@ -97,9 +97,16 @@ submit it under this license:
 git commit -s          # appends: Signed-off-by: Your Name <you@example.com>
 ```
 
-The name and email must be real and must match your git identity. If you are
-contributing work owned by an employer, make sure you have their permission
-before you sign off.
+The name and email must be real, and the sign-off address must match the one
+that authored the commit. If you are contributing work owned by an employer,
+make sure you have their permission before you sign off.
+
+CI checks this on every pull request. If you forget, `git rebase --signoff
+main..HEAD` fixes the whole branch at once. Run it yourself with:
+
+```sh
+task git:dco                       # checks main..HEAD
+```
 
 The copyright holder named in `LICENSE` is **The Grimoire Authors** — that is
 every person with a commit in this repository, as listed by:

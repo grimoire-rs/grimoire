@@ -28,6 +28,26 @@ jobs:
           command: check
           args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
+  dco:
+    name: DCO Sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Check sign-off
+        # SHAs via env, not inline interpolation — the repo-wide rule against
+        # expanding `${{ }}` straight into a shell command.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: task git:dco RANGE="$BASE_SHA..$HEAD_SHA"
+
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
