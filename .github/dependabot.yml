@@ -1,7 +1,11 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    # `/` covers .github/workflows only — composite actions need their own
+    # entry, or their pins rot silently (build-rust sat on upload-artifact v4).
+    directories:
+      - /
+      - /.github/actions/build-rust
     schedule:
       interval: weekly
     groups:
