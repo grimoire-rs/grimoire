@@ -22,8 +22,11 @@
 //!   maps **sse → `url`, http → `httpUrl`**, stdio → `command`; env refs
 //!   `${VAR}` native; oauth shape ≠ grim block → skip; `json_splice`.
 //!
-//! `GEMINI_CONFIG_DIR` does not exist upstream (FR #2815) — paths hardcode
-//! the `~/.gemini` default.
+//! `GEMINI_CONFIG_DIR` does not exist upstream (FR #2815); `GEMINI_CLI_HOME`
+//! does — it replaces Node's `os.homedir()` at the root, so the config dir is
+//! `$GEMINI_CLI_HOME/.gemini` (the `.gemini` segment is still appended — see
+//! [`gemini_root`]). Note this is the **opposite** shape to `$CODEX_HOME` /
+//! `$KIRO_HOME`, which replace the vendor root directory itself.
 
 use std::path::{Path, PathBuf};
 
@@ -33,7 +36,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, global_skills_root, home_dir, provenance};
+use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, global_skills_root, home_dir, provenance};
 
 /// Gemini CLI.
 pub struct GeminiVendor;
@@ -102,7 +105,7 @@ impl Vendor for GeminiVendor {
             // The shared `.agents/skills` dir is a weak cross-vendor marker
             // (like Codex), so it does NOT count alone — `.gemini` is the signal.
             ConfigScope::Project => workspace.join(".gemini").exists(),
-            ConfigScope::Global => gemini_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => gemini_root(env_dir("GEMINI_CLI_HOME"), home_dir()).is_some_and(|p| p.exists()),
         }
     }
 
@@ -261,16 +264,39 @@ impl Vendor for GeminiVendor {
 fn gemini_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".gemini"),
-        ConfigScope::Global => gemini_root(home_dir()).unwrap_or_else(|| workspace.join(".gemini")),
+        ConfigScope::Global => {
+            gemini_root(env_dir("GEMINI_CLI_HOME"), home_dir()).unwrap_or_else(|| workspace.join(".gemini"))
+        }
     }
 }
 
-/// Gemini's user-level config root `~/.gemini`. `GEMINI_CONFIG_DIR` does not
-/// exist upstream (FR #2815). The [`PathAnchor`](super::path_anchor)
-/// `GeminiRoot` anchor is rooted here. Skills follow the shared
-/// `$HOME/.agents/skills` (see [`super::vendor::global_skills_root`]).
-pub(crate) fn gemini_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|h| h.join(".gemini"))
+/// Gemini's user-level config root: `$GEMINI_CLI_HOME/.gemini` when the
+/// variable is set, else `~/.gemini`. `GEMINI_CONFIG_DIR` does not exist
+/// upstream (FR #2815). The [`PathAnchor`](super::path_anchor) `GeminiRoot`
+/// anchor is rooted here.
+///
+/// `GEMINI_CLI_HOME` replaces the **home directory**, not the config root:
+/// upstream `packages/core/src/utils/paths.ts` returns it from its own
+/// `homedir()` wrapper, and `Storage::getGlobalGeminiDir()` then joins the
+/// `.gemini` segment onto that. So the `.gemini` join below stays — this is
+/// the opposite shape to `$CODEX_HOME`/`$KIRO_HOME`, which replace the vendor
+/// root outright (upstream issue google-gemini/gemini-cli#23622 documents the
+/// same nesting surprising users).
+///
+/// **Skills deliberately do not follow this override.** Upstream's
+/// `Storage::getUserAgentSkillsDir()` derives the `.agents/skills` pool from
+/// the same overridden `homedir()`, so a `GEMINI_CLI_HOME` user's Gemini-side
+/// pool is `$GEMINI_CLI_HOME/.agents/skills` — but grim writes ONE physical
+/// pool tree shared by Codex, Gemini, Zed, and Amp, deduped to a single dest
+/// and released by a refcount guard (`installer.rs` `dedup`, `prune.rs`
+/// `refcount`). Honoring a Gemini-private home override there would fork that
+/// tree in two, move nothing for the other three vendors, and break the
+/// one-path/N-outputs shape the guard depends on. The pool therefore stays
+/// keyed on `$HOME` (see [`super::vendor::global_skills_root`]); a
+/// `GEMINI_CLI_HOME` user's pool skills land in the real `$HOME/.agents/skills`
+/// where the other three pool vendors read them.
+pub(crate) fn gemini_root(gemini_cli_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    gemini_cli_home.or(home).map(|h| h.join(".gemini"))
 }
 
 #[cfg(test)]
@@ -306,6 +332,54 @@ mod tests {
     }
 
     // ── detect: project scope follows the `.gemini` dot-dir ──
+
+    #[test]
+    fn gemini_root_honors_gemini_cli_home_as_a_home_replacement() {
+        // Regression: grim keyed the Gemini config root on `$HOME` alone, so a
+        // user with `GEMINI_CLI_HOME` set got agents and `settings.json`
+        // written under `~/.gemini` — a directory Gemini never reads.
+        // Upstream's `homedir()` wrapper returns the variable and
+        // `getGlobalGeminiDir()` joins `.gemini` onto it, so the override is a
+        // HOME replacement WITH the `.gemini` segment still appended — unlike
+        // `$CODEX_HOME`, which replaces `~/.codex` outright.
+        assert_eq!(
+            gemini_root(Some(PathBuf::from("/custom/gh")), Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/custom/gh/.gemini")),
+            "GEMINI_CLI_HOME replaces $HOME; the `.gemini` segment is still appended"
+        );
+        assert_eq!(
+            gemini_root(None, Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.gemini")),
+            "unset ⇒ ~/.gemini"
+        );
+        // The override alone is enough — an unresolvable `$HOME` does not
+        // sink the resolution when the variable supplies the root.
+        assert_eq!(
+            gemini_root(Some(PathBuf::from("/custom/gh")), None),
+            Some(PathBuf::from("/custom/gh/.gemini"))
+        );
+        assert_eq!(gemini_root(None, None), None);
+    }
+
+    #[test]
+    fn gemini_cli_home_does_not_relocate_the_shared_skills_pool() {
+        // The companion half of the decision above: `GEMINI_CLI_HOME` moves
+        // the Gemini-private root but must NOT move the cross-vendor
+        // `.agents/skills` pool, which Codex/Zed/Amp share as ONE physical
+        // tree under a refcount guard. Pinning this stops a future change
+        // from quietly forking the pool per vendor.
+        let ws = Path::new("/w");
+        assert_eq!(
+            GeminiVendor.skills_root(ws, ConfigScope::Global),
+            global_skills_root(home_dir()).unwrap_or_else(|| ws.join(".agents").join("skills")),
+            "the global pool stays keyed on $HOME, never on GEMINI_CLI_HOME"
+        );
+        assert_eq!(
+            GeminiVendor.skills_root(ws, ConfigScope::Project),
+            ws.join(".agents").join("skills"),
+            "GEMINI_CLI_HOME has no project-scope effect upstream either"
+        );
+    }
 
     #[test]
     fn detect_project_scope_follows_dot_gemini_dir() {

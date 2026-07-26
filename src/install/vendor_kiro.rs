@@ -21,8 +21,17 @@
 //!   (user), `mcpServers`; env refs `${VARIABLE_NAME}`; oauth shape ≠ grim
 //!   block → skip; `json_splice`.
 //!
-//! `KIRO_HOME` is **not** honored in wave 1 (CLI-only; the IDE hardcodes
-//! `~/.kiro` — bug #9148 — watchlisted).
+//! `KIRO_HOME` **is** honored: it replaces the `~/.kiro` root outright
+//! (kiro.dev/docs/cli/chat/configuration — "redirect the global `~/.kiro`
+//! directory to a different location. Agents, prompts, skills, steering,
+//! settings, and sessions all resolve against `KIRO_HOME`"), the same shape as
+//! `$CODEX_HOME`. grim follows the **CLI**, because grim is a CLI tool; the
+//! Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable (open bug
+//! kirodotdev/Kiro#9148 — watchlisted). One product, two behaviours: a user
+//! who sets `KIRO_HOME` and also uses the IDE gets grim's output where the CLI
+//! reads it, not the IDE. Serving both would mean writing every global
+//! artifact twice, which the refcount/state model has no shape for.
+//! Project scope is unaffected — `KIRO_HOME` relocates the global root only.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +41,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir, provenance};
+use super::vendor::{KindSupport, Vendor, env_dir, home_dir, provenance};
 
 /// Kiro (AWS).
 pub struct KiroVendor;
@@ -58,7 +67,7 @@ impl Vendor for KiroVendor {
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
         match scope {
             ConfigScope::Project => workspace.join(".kiro").exists(),
-            ConfigScope::Global => kiro_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => kiro_root(env_dir("KIRO_HOME"), home_dir()).is_some_and(|p| p.exists()),
         }
     }
 
@@ -205,15 +214,19 @@ impl Vendor for KiroVendor {
 fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".kiro"),
-        ConfigScope::Global => kiro_root(home_dir()).unwrap_or_else(|| workspace.join(".kiro")),
+        ConfigScope::Global => kiro_root(env_dir("KIRO_HOME"), home_dir()).unwrap_or_else(|| workspace.join(".kiro")),
     }
 }
 
-/// Kiro's user-level config root `~/.kiro`. `KIRO_HOME` is **not** honored in
-/// wave 1 (CLI-only; the IDE ignores it — bug #9148). The
-/// [`PathAnchor`](super::path_anchor) `KiroRoot` anchor is rooted here.
-pub(crate) fn kiro_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|h| h.join(".kiro"))
+/// Kiro's user-level config root: `$KIRO_HOME` when set, else `~/.kiro`. The
+/// variable replaces the root **outright** — global skills land at
+/// `$KIRO_HOME/skills`, never `$KIRO_HOME/.kiro/skills` — matching
+/// `$CODEX_HOME`/`$COPILOT_HOME` and the Kiro CLI's own documented behaviour
+/// (kiro.dev/docs/cli/chat/configuration). The Kiro IDE ignores it (#9148);
+/// grim follows the CLI. The [`PathAnchor`](super::path_anchor) `KiroRoot`
+/// anchor is rooted here.
+pub(crate) fn kiro_root(kiro_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    kiro_home.or_else(|| home.map(|h| h.join(".kiro")))
 }
 
 #[cfg(test)]
@@ -249,6 +262,53 @@ mod tests {
     }
 
     // ── detect: project scope follows the `.kiro` dot-dir ──
+
+    #[test]
+    fn kiro_root_honors_kiro_home_as_a_root_replacement() {
+        // Regression: grim honored `KIRO_HOME` nowhere, so a Kiro CLI user who
+        // set it got skills, steering, and `settings/mcp.json` written under
+        // `~/.kiro` — a directory that CLI no longer reads.
+        // `KIRO_HOME` replaces the `~/.kiro` root outright (the `$CODEX_HOME`
+        // shape), NOT `$HOME` (the `$GEMINI_CLI_HOME` shape) — so no `.kiro`
+        // segment is appended.
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/custom/kiro")), Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/custom/kiro")),
+            "KIRO_HOME replaces ~/.kiro outright — no `.kiro` segment appended"
+        );
+        assert_eq!(
+            kiro_root(None, Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.kiro")),
+            "unset ⇒ ~/.kiro"
+        );
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/custom/kiro")), None),
+            Some(PathBuf::from("/custom/kiro"))
+        );
+        assert_eq!(kiro_root(None, None), None);
+    }
+
+    #[test]
+    fn kiro_home_does_not_relocate_project_scope() {
+        // `KIRO_HOME` relocates the global root only. The global half — that
+        // skills, steering, and settings all follow the relocated root — is
+        // proven end-to-end against a real env read in
+        // `test/tests/test_global.py`, since asserting it here would only
+        // re-test `PathBuf::join`.
+        let ws = Path::new("/w");
+        assert_eq!(
+            KiroVendor.skills_root(ws, ConfigScope::Project),
+            ws.join(".kiro").join("skills")
+        );
+        assert_eq!(
+            KiroVendor.rule_path(ws, ConfigScope::Project, "r"),
+            ws.join(".kiro").join("steering").join("r.md")
+        );
+        assert_eq!(
+            KiroVendor.mcp_config_path(ws, ConfigScope::Project),
+            Some(ws.join(".kiro").join("settings").join("mcp.json"))
+        );
+    }
 
     #[test]
     fn detect_project_scope_follows_dot_kiro_dir() {

@@ -7,7 +7,22 @@
 //! `research_vendor_verification_zed_amp.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project
-//!   `<ws>/.agents/skills`, global `$HOME/.agents/skills`).
+//!   `<ws>/.agents/skills`, global `$HOME/.agents/skills`). Amp scans three
+//!   global skill dirs in precedence order — `~/.config/agents/skills`
+//!   (highest), `~/.agents/skills`, `~/.config/amp/skills` — and grim writes
+//!   the **middle** one. That directory is genuinely read; this is not a
+//!   visibility gap. It loses only a *name collision* against a skill the
+//!   user placed in `~/.config/agents/skills` by hand.
+//!
+//!   Deliberately **not** moved up. `~/.config/agents/skills` is a distinct
+//!   physical path, so writing there would take Amp out of the one shared
+//!   pool tree that Codex/Gemini/Zed/Amp dedup onto — breaking the
+//!   one-path/N-outputs shape the prune refcount guard depends on, and
+//!   needing a per-vendor pool root the `AnchorRoots` table has no field for.
+//!   It would also relocate every already-installed Amp skill to win a tie
+//!   that only a hand-placed duplicate can trigger. Documented instead;
+//!   revisit with the `shared_skills` opt-in, which is where a per-vendor
+//!   pool root belongs.
 //! - **Rules**: **declined**. AGENTS.md (→AGENT.md→CLAUDE.md) only; wave-2
 //!   adds `@`-mention + `globs:` frontmatter scoped injection.
 //! - **Agents**: **declined**. Subagents are runtime-spawned, no file format.
@@ -16,8 +31,47 @@
 //!   (literal dotted JSON key, pointer-safe); env refs `${VAR_NAME}`;
 //!   `json_splice`.
 //!
-//! `$AMP_SETTINGS_FILE` does **not** exist (CLI `--settings-file` flag only);
-//! global settings honor `$XDG_CONFIG_HOME` (falling back to `~/.config`).
+//! `$AMP_SETTINGS_FILE` is **contested, not confirmed wrong** (wave-0 V1,
+//! 2026-07-26). grim does not honor it, and that stays unchanged — but the
+//! statement above this line is "unresolved", NOT "the variable does not
+//! exist". Amp's Owner's Manual (ampcode.com/manual) omits it and gives
+//! `--settings-file <path>` as the documented mechanism, while documenting
+//! `AMP_SKIP_UPDATE_CHECK`, `AMP_FORCE_BEL`, `AMP_REMOTE_CONTROL_TERMINAL` and
+//! the proxy vars — so the silence carries weight. Against that, a third-party
+//! **string extraction from Amp's real shipped bundle** (`ben-vargas/ai-amp-cli`,
+//! build `0.0.1777185893-gae6d40`, 2026-04-26) lists `AMP_SETTINGS_FILE` among
+//! its env vars. That is existence-only evidence from the binary, not a doc
+//! claim, and it outranks the community guides.
+//!
+//! Not implemented because **no source addresses precedence** against
+//! `.amp/settings.json` and the global file, and file-vs-directory semantics
+//! are unaddressed everywhere — shipping a behaviour change on that is a coin
+//! flip. Two community sources (`ampcode/amp-examples-and-guides`,
+//! `lfglabs-dev/awesome-amp-code`) also assert it; two verification agents
+//! independently hit the same `export AMP_SETTINGS_FILE=…` line, which is one
+//! source found twice, not corroboration. Settling this needs a real `amp` run.
+//!
+//! Global settings honor `$XDG_CONFIG_HOME` (falling back to `~/.config`) on
+//! every platform — that describes **grim's** resolution, not a documented Amp
+//! behaviour. [`amp_root`] has no `%APPDATA%` arm, so on Windows the root is
+//! `$XDG_CONFIG_HOME|%USERPROFILE%\.config\amp` rather than a native Windows
+//! location. Pre-existing and untouched here.
+//!
+//! Whether Amp reads `$XDG_CONFIG_HOME` **at all, on any platform**, is
+//! **unresolved at every evidence tier** (wave-0 V3). Source-tier verification
+//! is *unachievable*: the CLI ships as a compiled binary, the npm package is a
+//! stub, and there is no public repo. The full 1724-line manual was grepped for
+//! "XDG" — zero matches — and it documents `~/.config/amp/` identically for
+//! macOS and Linux. Zed's macOS divergence is source-confirmed and fixed in
+//! [`super::vendor_zed::zed_root`]; Amp is deliberately left on the shared
+//! [`xdg_config_dir`](super::vendor::xdg_config_dir), because making that
+//! helper platform-aware would move Amp's macOS resolution on zero evidence.
+//! Settling it needs `XDG_CONFIG_HOME=/tmp/x amp …` on a Mac.
+//!
+//! **Noise flag:** search summaries circulate a phrase reading "(or
+//! `$XDG_CONFIG_HOME/amp/settings.json` if defined)" as though quoting Amp's
+//! docs. It appears in neither the raw manual nor the community README. Do not
+//! cite it as evidence.
 
 use std::path::{Path, PathBuf};
 

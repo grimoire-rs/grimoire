@@ -44,8 +44,22 @@ use super::vendor::{FieldType, KnownField, Vendor};
 /// automatically — the one non-compile-forced per-vendor edit the old literal
 /// required (`adr_vendor_wave_expansion.md` §4). A `dyn` trait call is not
 /// const-evaluable, so this is a [`LazyLock`] rather than a `const`.
-static KNOWN_NAMESPACES: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| ClientTarget::ALL.iter().map(|c| c.vendor().name()).collect());
+///
+/// **A client reserves a namespace only if it is a real vendor.**
+/// [`ClientTarget::Agents`] is excluded: the generic client is vendor-neutral
+/// by definition, owns no metadata namespace, and lifts nothing (all three of
+/// its field registries are empty). Reserving `agents.*` would retroactively
+/// reclassify a plain metadata key that already-published artifacts may carry
+/// — such a key installs verbatim today and would start being silently
+/// dropped, changing the rendered bytes of an already-installed skill. That is
+/// a renderer break under Principle 9, not additive evolution.
+static KNOWN_NAMESPACES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    ClientTarget::ALL
+        .iter()
+        .filter(|c| !matches!(c, ClientTarget::Agents))
+        .map(|c| c.vendor().name())
+        .collect()
+});
 
 /// A projection failure: a known namespaced key carries a literal that
 /// cannot convert to the field's native type. Hard error — publish fails
@@ -847,6 +861,37 @@ metadata:
     // ── D1a: universal skill renderer / shared-pool invariant ─────────────
 
     #[test]
+    fn generic_client_reserves_no_metadata_namespace() {
+        // Principle 9: an `agents.*` metadata key predates the generic client
+        // and must keep installing verbatim. If `agents` ever joined
+        // KNOWN_NAMESPACES, such a key would be reclassified as tool-namespaced
+        // and silently dropped, changing the rendered bytes of an already-
+        // installed skill.
+        assert!(
+            !KNOWN_NAMESPACES.contains(&"agents"),
+            "the generic client must not reserve a metadata namespace"
+        );
+        assert_eq!(
+            KNOWN_NAMESPACES.len(),
+            ClientTarget::ALL.len() - 1,
+            "every client except the generic one reserves its vendor namespace"
+        );
+        // End to end: a plain `agents.*` key leaves the doc on the verbatim
+        // fast path (no tool-namespaced metadata ⇒ `None` ⇒ install as-is).
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  agents.foo: bar\n---\nbody\n";
+        assert!(
+            render_universal_skill_doc(doc).is_none(),
+            "an `agents.*` key must stay plain metadata and install verbatim"
+        );
+        for client in ClientTarget::ALL {
+            assert!(
+                client.vendor().skill_index(doc).expect("no error").is_none(),
+                "{client} must leave a plain `agents.*` key on the verbatim path"
+            );
+        }
+    }
+
+    #[test]
     fn pool_vendors_declare_no_skill_fields() {
         // Codex/Gemini/Zed/Amp resolve every skill to the ONE shared
         // `$HOME/.agents/skills/<name>` pool, so the pooled SKILL.md must stay
@@ -856,9 +901,26 @@ metadata:
         // asserts the registry stays empty, failing loudly the day someone adds a
         // pool-vendor skill field (the render layer would otherwise hide it).
         use crate::config::scope::ConfigScope;
+
+        // The pool roster, named rather than counted. `checked` below is
+        // derived from `skills_root`, so deriving the expectation from
+        // `skills_root` too would make this assertion vacuous — a vendor
+        // silently LEAVING the pool would shrink both sides and still pass,
+        // which is precisely the drift the old `assert_eq!(checked, 4)`
+        // existed to catch. The roster is the independent anchor: it changes
+        // only when a human decides membership changed, and naming the members
+        // makes the failure say who joined or left instead of `5 != 4`.
+        const POOL_ROSTER: &[ClientTarget] = &[
+            ClientTarget::Codex,
+            ClientTarget::Gemini,
+            ClientTarget::Zed,
+            ClientTarget::Amp,
+            ClientTarget::Agents,
+        ];
+
         let ws = Path::new("/w");
         let pool = Path::new(".agents/skills");
-        let mut checked = 0;
+        let mut checked: Vec<&'static str> = Vec::new();
         for target in ClientTarget::ALL {
             let vendor = target.vendor();
             if vendor.skills_root(ws, ConfigScope::Project).ends_with(pool) {
@@ -867,12 +929,14 @@ metadata:
                     "pool vendor '{}' shares `.agents/skills` — it must declare no skill_fields (the shared SKILL.md is vendor-independent)",
                     vendor.name()
                 );
-                checked += 1;
+                checked.push(vendor.name());
             }
         }
+        let expected: Vec<&'static str> = POOL_ROSTER.iter().map(|c| c.vendor().name()).collect();
         assert_eq!(
-            checked, 4,
-            "expected exactly the 4 shared-pool vendors (Codex/Gemini/Zed/Amp) to resolve into .agents/skills"
+            checked, expected,
+            "the set of vendors resolving into .agents/skills must equal the declared pool roster — \
+             a vendor joining or leaving the pool is a deliberate change, not a silent one"
         );
     }
 
