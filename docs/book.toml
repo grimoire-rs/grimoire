@@ -10,6 +10,7 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/grimoire-rs/grimoire"
 edit-url-template = "https://github.com/grimoire-rs/grimoire/edit/main/docs/{path}"
+additional-css = ["theme/clients-matrix.css"]
 
 [output.html.fold]
 enable = true

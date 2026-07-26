@@ -1,0 +1,16 @@
+/* Client compatibility matrix (docs/src/clients.md, #matrix). mdBook's
+   stock theme centers every table (`table { margin: 0 auto }`); this one
+   reads better left-aligned with the surrounding prose. Scoped to the
+   `.matrix-table` wrapper so other doc tables keep the default centering
+   unless a later page makes the same case. */
+.matrix-table table {
+  margin: 0;
+}
+
+/* Reused client marks (see the attribution comment above the table):
+   nudge onto the text baseline and give the link text some breathing
+   room. */
+.matrix-table svg {
+  vertical-align: -3px;
+  margin-left: 6px;
+}
