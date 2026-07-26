@@ -4,7 +4,7 @@ This file guides Claude Code (claude.ai/code) when working in this repo.
 
 ## What is Grimoire
 
-Grimoire is an OCI-backed package manager for AI skills and rules — a CLI
+Grimoire is a package manager for AI-agent config — a CLI
 to install, maintain, and publish AI-agent configuration (skills, rules,
 prompts) distributed through standard OCI registries. The binary is named
 `grim`; the Rust crate/package is `grimoire`.

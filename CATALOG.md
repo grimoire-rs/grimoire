@@ -1,6 +1,6 @@
 ---
 title: Grimoire
-description: An OCI-backed package manager for AI skills and rules
+description: Package manager for AI-agent config — skills, rules, agents, and MCP servers, installed into every coding agent you use
 keywords: grimoire,grim,ai,skills,rules,oci,package-manager,rust
 ---
 

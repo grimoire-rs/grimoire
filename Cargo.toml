@@ -3,7 +3,7 @@ name = "grimoire"
 version = "0.11.1"
 edition = "2024"
 license = "Apache-2.0"
-description = "An OCI-backed package manager for AI skills and rules"
+description = "Package manager for AI-agent config — skills, rules, agents, and MCP servers, installed into every coding agent you use"
 repository = "https://github.com/grimoire-rs/grimoire"
 default-run = "grim"
 
