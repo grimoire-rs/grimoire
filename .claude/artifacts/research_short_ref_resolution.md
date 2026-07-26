@@ -4,10 +4,11 @@
 - **Gate:** meta-plan_promotion_1_0 → W1-B research gate
 - **Question:** *Does fixing short-ref expansion change resolution for any
   already-published reference?*
-- **Answer:** **Yes — and the obvious fix is a breaking change. It is
-  prohibited under Principle 9.** The real finding is narrower: the kind
-  segment was never required (§5), and identity is name-keyed so adding flat
-  names is safe (§6).
+- **Answer:** **Yes — and the obvious fix is a breaking change, prohibited
+  under Principle 9.** The resolution is narrower than the question implies:
+  grim never required the kind segment, so the fix is a **documentation
+  recommendation**, not an interface, a republish, or a migration (§5).
+  Published paths stay exactly as they are.
 - **Binary under test:** `target/release/grim` @ `f2bc57a`
 - **Re-verify before citing:** 2027-01-26
 
@@ -99,7 +100,7 @@ ref, and ambiguous when two kinds share a name.
 | | Change | Additive? | Fixes |
 |---|---|---|---|
 | **A** | Insert kind segment in expansion | **No — breaking** | ✗ prohibited |
-| **B** | Publish first-party catalog at flat aliases too | Yes, zero code | First-party only |
+| **B** | Publish first-party catalog at flat aliases too | Yes, zero code | First-party only — **dropped, see §5** |
 | **C** | On `NotFound`, retry via index lookup (index already holds each package's exact `repo`) | Yes — only refs that 404 today change | Every kind-segmented publisher |
 | **D** | Docs-only: stop implying a bare name resolves for first-party packages | Yes | Nothing; removes the false promise |
 
@@ -107,37 +108,45 @@ ref, and ambiguous when two kinds share a name.
 
 ### Recommendation: **B + D**, with C recorded as the general fix
 
-> **Framing correction (2026-07-26, after review).** An earlier draft of this
-> section presented B as a workaround — "publish aliases so the broken short
-> ref starts working". That is backwards. **The kind segment was never
-> required, and flat is the correct default.** `ArtifactKind::subdir()` is
-> defined at `src/oci/artifact_kind.rs:55` as *"the `$GRIM_HOME`/**install**
-> subdirectory for this kind"* — a local filesystem-layout concept that also
-> became the registry-namespace default (`docs/src/publishing.md`, precedence
-> rule 3). The kind always travels on the wire, read back by
-> `kind_from_manifest` (`src/oci/annotations.rs:221`).
->
-> So the segment is a **namespace partition, not a type tag**. It buys exactly
-> one thing: room for one name to exist as two kinds. No first-party name
-> collides across kinds, so the catalog pays a segment in every reference its
-> users type and gets nothing back — while breaking its own short-ref promise.
->
-> B is therefore not a workaround but the correct layout, applied additively.
-> The segmented paths are frozen under Principle 9: going flat means **adding**
-> names, never moving or retiring them.
+### Conclusion: **D only.** Nothing to build, publish, or migrate
 
-B makes `grim add grim-usage` work with no code change and no resolution-
-semantics change — the strongest possible Principle-9 position. D makes
-`docs/src/quickstart.md:5-7` precise: it currently says grim "expands short
-references against `ghcr.io/grimoire-rs`", which is literally true and
-practically misleading.
+Two framings in earlier drafts of this section were wrong in opposite
+directions, and the correct line sits between them:
 
-C is the correct general answer and the only one that helps third-party
-kind-segmented publishers, but it introduces a network-dependent resolution
-path, needs an ambiguity rule for a name present in several registries, and
-degrades under `GRIM_OFFLINE`. That is ADR-sized work for a problem only the
-first-party catalog currently has — and one that a flat default largely
-prevents from recurring.
+- **`grim` never required the kind segment.** `repository_prefix` and
+  per-entry `repository` have always made the layout the publisher's choice;
+  `{kind.subdir()}/{name}` is only the *default*. `ArtifactKind::subdir()` is
+  defined at `src/oci/artifact_kind.rs:55` as *"the `$GRIM_HOME`/**install**
+  subdirectory for this kind"* — an install-layout concept that also became
+  the publish default. The kind itself always travels on the wire, read back
+  by `kind_from_manifest` (`src/oci/annotations.rs:221`). So the segment is a
+  **namespace partition, not a type tag**: it buys room for one name to exist
+  as two kinds, and nothing else.
+- **The already-published paths are still frozen.** They are live references
+  that a `grimoire.lock` can pin. `ghcr.io/grimoire-rs/skills/grim-usage`
+  stays, and resolves today (§3). Flipping the catalog flat and retiring the
+  segmented names would break every consumer holding one — that is the
+  breaking change, not the guidance.
+
+**What is not frozen is the recommendation.** Changing which layout the docs
+advise touches no interface at all. That is the entire fix:
+
+- `docs/src/publishing.md` — new *"Do you need the kind segment?"* section:
+  usually not; publish flat unless names collide across kinds; the layout also
+  sets how short a reference users can type; choose before the first publish,
+  because lockfiles pin paths.
+- `docs/src/quickstart.md` — short refs expand verbatim, so the first-party
+  short form is `skills/grim-usage`.
+
+**B (flat aliases) is dropped.** It solves a problem the catalog does not
+have: `skills/grim-usage` resolves, is documented, and works. Adding a second
+permanent name for every package to save one path segment is not worth a
+permanent dual identity — even though §6 shows it would be safe.
+
+C stays recorded as the general fix for third-party kind-segmented
+publishers, but it is ADR-sized (network-dependent resolution, ambiguity
+rules, `GRIM_OFFLINE` degradation) and a flat *default recommendation*
+largely prevents the situation from recurring.
 
 ## 6. Dual identity — tested, resolved
 
@@ -168,20 +177,19 @@ lands in the same slot. **No dual identity. Option B is safe on this axis.**
 the tested case only in the repository path, and the evidence above says the
 path is not part of the key. Re-confirm on the first alias actually pushed.
 
-## 7. Remaining questions for the sub-plan
+## 7. Remaining questions
 
-1. Does an alias double the registry footprint, or does content-addressing
-   dedupe it to extra tags?
-2. Do the cascade rules (`adr_unified_publish_version_cascade.md`) apply
-   cleanly to a second repo name for the same content?
-3. Does `grim update` roll a flat-alias-installed artifact forward correctly?
-4. Flat bundle members become `./grim-usage:0`; does the existing
-   `grim-essentials` keep its `../skills/…` members, or does a flat bundle
-   alias need its own member list?
+None blocking. The alias questions this section used to carry (registry
+footprint, cascade across two repo names, `grim update` on an alias, flat
+bundle member lists) died with option B — no alias is being published.
+
+Open only if C is ever picked up: how a short id that matches packages in two
+configured registries is disambiguated, and how index-assisted resolution
+behaves under `GRIM_OFFLINE`.
 
 ## 8. ADR
 
-- **B / D: no ADR.** B is catalog policy (`catalog/README.md` + `publish.toml`);
-  D is docs. Neither changes resolution semantics.
+- **D (what shipped): no ADR.** A documentation recommendation changes no
+  interface, no resolution semantics, and no published path.
 - **C: ADR required** — it adds a resolution fallback with network and
   ambiguity semantics.

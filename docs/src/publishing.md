@@ -772,6 +772,12 @@ flat layout resolves from a bare `code-review`, while a kind-segmented one
 requires `skills/code-review`. Pick the segment when you need the partition,
 not by default.
 
+Choose before your first publish. A repository path is a public reference the
+moment someone pins it in a `grimoire.lock`, so changing the layout later
+means publishing under new names and keeping the old ones alive for everyone
+already on them — grim itself never requires either layout, but your users'
+lockfiles do.
+
 [kind-read]: https://github.com/grimoire-rs/grimoire/blob/main/src/oci/annotations.rs
 [relative-members]: ./artifacts.md#bundle-relative-refs
 
