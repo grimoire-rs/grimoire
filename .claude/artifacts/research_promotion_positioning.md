@@ -176,13 +176,47 @@ the differentiator, not delete the frame.
 > digest in a lockfile. Storage is any OCI registry; there is no service to
 > run.
 
-**Topics (20 = GitHub's maximum):**
+**Topics (20 = GitHub's maximum).** Corrected 2026-07-26 after checking every
+candidate's repo count via `gh api "search/repositories?q=topic:<t>"`. Three
+of the originally proposed topics were effectively dead and are dropped:
+`agent-config` (41 repos), `oci-registry` (20), `package-registry` (78);
+`devtools` (5.9k) is dropped as redundant against `developer-tools` (47.8k).
+Topics only pay off if people actually browse them.
+
+`grimoire`:
 ```
-ai, ai-agents, agent-skills, agent-config, claude-code, copilot, cursor,
-codex, mcp, model-context-protocol, oci, oci-registry, ghcr,
-package-manager, developer-tools, devtools, cli, rust, skills,
-prompt-engineering
+ai, ai-agents, agents, agent-skills, skills, claude, claude-code, anthropic,
+copilot, cursor, codex, mcp, model-context-protocol, llm, prompt-engineering,
+oci, package-manager, cli, rust, developer-tools
 ```
+
+`grimoire-vscode` (the extension is invisible without `vscode-extension`):
+```
+vscode-extension, vscode, typescript, ai, ai-agents, agent-skills, skills,
+claude, claude-code, anthropic, copilot, cursor, mcp,
+model-context-protocol, llm, marketplace, oci, package-manager,
+developer-tools, prompt-engineering
+```
+
+`setup-grimoire`:
+```
+github-actions, actions, ci, installer, shell, cli, ai, ai-agents,
+agent-skills, claude-code, mcp, oci, package-manager, developer-tools
+```
+
+`index`:
+```
+registry, search, oci, ai, ai-agents, agent-skills, skills, claude-code,
+mcp, package-manager, developer-tools
+```
+
+Counts as of 2026-07-26: `ai` 155k, `cli` 108k, `rust` 110k, `llm` 103k,
+`ai-agents` 59k, `mcp` 54k, `claude-code` 52k, `developer-tools` 48k,
+`claude` 40k, `github-actions` 35k, `shell` 27k, `vscode` 21k, `anthropic`
+19k, `codex` 19k, `model-context-protocol` 19k, `prompt-engineering` 14k,
+`agents` 14k, `vscode-extension` 13k, `agent-skills` 12k, `search` 11k,
+`cursor` 11k, `skills` 10k, `actions` 6.2k, `marketplace` 5.5k, `copilot`
+3.9k, `package-manager` 3.4k, `installer` 3.0k, `oci` 2.6k, `registry` 2.2k.
 
 **Verified quick start** (full refs deliberate — see D2):
 ```sh
