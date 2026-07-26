@@ -18,7 +18,12 @@ paths:
 
 # Grimoire Product Context
 
-> An OCI-backed package manager for AI skills and rules.
+> A package manager for AI-agent config — skills, rules, agents, and MCP
+> servers, installed into every coding agent you use.
+>
+> Sentence two, verbatim wherever the headline appears: *Storage is any OCI
+> registry — GHCR, Docker Hub, or your own. There is no Grimoire service to
+> sign up for.*
 
 > **Status: stabilizing — preparing 1.0.0.** Released surfaces are frozen;
 > breaking changes are prohibited (stability contract:

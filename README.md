@@ -4,7 +4,8 @@
 
 # grimoire
 
-**An OCI-backed package manager for AI skills and rules**
+**A package manager for AI-agent config — skills, rules, agents, and MCP
+servers, installed into every coding agent you use**
 
 [![CI][ci-badge]][ci]
 [![Release][release-badge]][releases]
@@ -13,10 +14,15 @@
 
 </div>
 
-`grim` installs, maintains, and publishes AI agent skills and rules using OCI
-registries (GHCR, Docker Hub, private registries) as storage — the same way
-container images are distributed. It is a backend tool: a building block for
-keeping agent configuration versioned, shareable, and reproducible.
+Declare a skill once and `grim` writes it into Claude Code, Copilot, Cursor,
+Codex, Gemini, Zed, Amp, Kiro, Junie, and opencode — each in the format that
+client actually reads, pinned by digest in a lockfile. Storage is any OCI
+registry — GHCR, Docker Hub, or your own. There is no Grimoire service to
+sign up for.
+
+Where a client has no honest surface for an artifact, grim says so and skips
+it rather than writing config that looks installed and does nothing. See the
+[client compatibility matrix][docs-clients].
 
 > **Status:** stabilizing toward 1.0 — released surfaces are frozen
 > contracts; pin a version when you depend on it.
@@ -80,6 +86,7 @@ Grimoire is licensed under the [Apache License, Version 2.0][license].
 [docs]: https://grimoire.rs/
 [docs-badge]: https://img.shields.io/badge/docs-grimoire-blue
 [docs-install]: https://grimoire.rs/installation.html
+[docs-clients]: https://grimoire.rs/clients.html
 [setup-grimoire]: https://github.com/grimoire-rs/setup-grimoire
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
