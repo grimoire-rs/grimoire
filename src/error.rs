@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn escaped_anchor_classifies_reason_as_anchor_escape() {
         let err: anyhow::Error = Error::from(AnchorError::EscapedAnchor {
-            anchor: crate::install::path_anchor::PathAnchor::ClaudeRoot,
+            anchor: crate::install::path_anchor::PathAnchor::VendorRoot("claude"),
             resolved: std::path::PathBuf::from("/elsewhere/skills/demo-skill"),
         })
         .into();
@@ -818,7 +818,7 @@ mod tests {
             ),
             (
                 AnchorError::AnchorRootAbsent {
-                    anchor: PathAnchor::ClaudeRoot,
+                    anchor: PathAnchor::VendorRoot("claude"),
                 },
                 ExitCode::Failure,
             ),

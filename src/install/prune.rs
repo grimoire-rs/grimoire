@@ -747,18 +747,10 @@ mod tests {
         AnchorRoots {
             workspace: workspace.to_path_buf(),
             grim_home: workspace.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         }
     }
 
@@ -1152,7 +1144,7 @@ mod tests {
         let mut state = InstallState::empty(&ws.join("state.json"));
 
         // Build a record anchored at ClaudeRoot, which resolves to None in the
-        // test `roots` (claude_root: None) → resolve() yields AnchorRootAbsent,
+        // test `roots` (no claude vendor root) → resolve() yields AnchorRootAbsent,
         // a resolution-absence (NOT security-class) failure.
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
@@ -1166,7 +1158,7 @@ mod tests {
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
-                    anchor: PathAnchor::ClaudeRoot,
+                    anchor: PathAnchor::VendorRoot("claude"),
                     relative: "rules/absent-root.md".to_string(),
                 },
                 content_hash: Digest::Sha256("d".repeat(64)),
@@ -1176,7 +1168,7 @@ mod tests {
         });
 
         let lock = lock_of(vec![]); // not in lock → orphan
-        let roots = roots(ws); // claude_root is None
+        let roots = roots(ws); // the claude vendor root is unresolvable
         // is_modified() + the uninstall interception absorb AnchorRootAbsent →
         // treat as absent → Pruned. prune_orphans MUST return Ok (the absence
         // case is reaped, never an Err — so the Err branch here is falsifiable).
@@ -1559,7 +1551,7 @@ mod tests {
 
         let mut roots = roots(&ws);
         roots.agents_skills = Some(pool.clone());
-        roots.claude_root = Some(claude_root);
+        roots.vendor_roots.insert("claude", claude_root);
 
         // codex resolves straight to `<pool>/s`; claude reaches the identical
         // directory via `<claude_root>/skills` -> `<pool>`, which escapes the
@@ -1568,7 +1560,7 @@ mod tests {
         let surviving = ClientOutput {
             client: "claude".to_string(),
             target: AnchoredPath {
-                anchor: PathAnchor::ClaudeRoot,
+                anchor: PathAnchor::VendorRoot("claude"),
                 relative: "skills/s".to_string(),
             },
             content_hash: Digest::Sha256("a".repeat(64)),

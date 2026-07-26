@@ -591,7 +591,7 @@ impl InstallState {
     /// This is the global-scope counterpart of [`Self::load_project`]: bare
     /// [`Self::load`] cannot anchor a V1 global file (it has no vendor roots),
     /// so a global V1 file would be rejected as `InvalidData`. Threading
-    /// `roots` lets the global vendor anchors (`ClaudeRoot` / `CopilotRoot` /
+    /// `roots` lets the global vendor anchors (`VendorRoot("claude")` /
     /// `OpenCodeSkills` / `GrimHome`) classify each legacy absolute target.
     ///
     /// # Errors
@@ -731,24 +731,16 @@ impl InstallState {
         let new_path = Self::project_state_path(workspace);
 
         // Project-scope anchoring only ever uses the `Workspace` root, so the
-        // vendor roots stay `None` (a V1 client target outside the workspace
+        // vendor roots stay unresolvable (a V1 client target outside the workspace
         // is correctly classified as unanchorable and dropped). `grim_home`
         // is supplied for completeness / future global threading.
         let roots = AnchorRoots {
             workspace: workspace.to_path_buf(),
             grim_home: grim_home.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let convert = (ConfigScope::Project, &roots);
 
@@ -1278,7 +1270,7 @@ mod tests {
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
-                    anchor: PathAnchor::ClaudeRoot,
+                    anchor: PathAnchor::VendorRoot("claude"),
                     relative: "skills/my-skill".to_string(),
                 },
                 content_hash: Algorithm::Sha256.hash(b"v2test"),
@@ -1293,7 +1285,7 @@ mod tests {
             .get(ArtifactKind::Skill, "my-skill")
             .expect("present after round-trip");
         assert_eq!(got.outputs.len(), 1);
-        assert_eq!(got.outputs[0].target.anchor, PathAnchor::ClaudeRoot);
+        assert_eq!(got.outputs[0].target.anchor, PathAnchor::VendorRoot("claude"));
         assert_eq!(got.outputs[0].target.relative, "skills/my-skill");
         assert_eq!(got.outputs[0].content_hash, Algorithm::Sha256.hash(b"v2test"));
     }
@@ -1792,7 +1784,11 @@ mod tests {
             name: "trap".to_string(),
             source: crate::lock::locked_source::LockedSource::Registry(pinned("trap", '5')),
             dev: false,
-            outputs: vec![client_output_anchored("claude", PathAnchor::ClaudeRoot, "skills/trap")],
+            outputs: vec![client_output_anchored(
+                "claude",
+                PathAnchor::VendorRoot("claude"),
+                "skills/trap",
+            )],
         });
         st.save().unwrap();
 
@@ -1949,7 +1945,7 @@ mod tests {
     fn f01_load_global_v1_converts_in_memory_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         // Use the grim_home itself as the Claude root so the global target
-        // is anchored to ClaudeRoot (simplest resolvable global anchor).
+        // is anchored to the claude vendor root (simplest resolvable global anchor).
         let grim_home = dir.path().join("grim");
         let claude_root = dir.path().join("claude");
         let state_dir = grim_home.join("state");
@@ -1970,18 +1966,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/unused"),
             grim_home: grim_home.clone(),
-            claude_root: Some(claude_root.clone()),
-            copilot_root: None,
+            vendor_roots: [("claude", claude_root.clone())].into(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
 
         let st = InstallState::load_global(&global_path, &roots).unwrap();
@@ -1999,8 +1987,8 @@ mod tests {
             Digest::Sha256(hash),
             "content_hash must be UNCHANGED (drift baseline preserved)"
         );
-        // The target was under claude_root → anchored to ClaudeRoot.
-        assert_eq!(rec.outputs[0].target.anchor, PathAnchor::ClaudeRoot);
+        // The target was under the claude root → anchored to that vendor root.
+        assert_eq!(rec.outputs[0].target.anchor, PathAnchor::VendorRoot("claude"));
     }
 
     // ── C3.2: V1 global state carrying a Codex RULE record ───────────────────
@@ -2035,18 +2023,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/unused"),
             grim_home: grim_home.clone(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: [("codex", PathBuf::from("/home/u/.codex"))].into(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: Some(PathBuf::from("/home/u/.codex")),
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
 
         // Must not panic (the historical bug: `unreachable!()` in
@@ -2095,18 +2075,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/unused"),
             grim_home: grim_home.clone(),
-            claude_root: Some(PathBuf::from("/home/u/.claude")),
-            copilot_root: None,
+            vendor_roots: [("claude", PathBuf::from("/home/u/.claude"))].into(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
 
         // Must not panic (the historical bug: `unreachable!("bundles are never
@@ -2633,18 +2605,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: tmp.to_path_buf(),
             grim_home: tmp.join("grim-home"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let out = ClientOutput {
             client: client.to_string(),

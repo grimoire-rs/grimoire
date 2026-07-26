@@ -1583,18 +1583,10 @@ mod tests {
         AnchorRoots {
             workspace: workspace.to_path_buf(),
             grim_home: workspace.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         }
     }
 
@@ -2555,7 +2547,7 @@ mod tests {
         // CopilotRoot is None in `roots()` — resolve fails; must not panic
         // and must not error the install (best-effort).
         let prior = reap_record(vec![reap_output(
-            PathAnchor::CopilotRoot,
+            PathAnchor::VendorRoot("copilot"),
             "instructions/r.instructions.md",
             Digest::Sha256("f".repeat(64)),
         )]);
@@ -2781,7 +2773,11 @@ mod tests {
     fn output_at_current_layout_true_when_root_unresolvable() {
         let dir = tempfile::tempdir().unwrap();
         let target = InstallTarget::new(dir.path(), ConfigScope::Global, vec![ClientTarget::Claude]);
-        let out = reap_output(PathAnchor::ClaudeRoot, "rules/r.md", Digest::Sha256("a".repeat(64)));
+        let out = reap_output(
+            PathAnchor::VendorRoot("claude"),
+            "rules/r.md",
+            Digest::Sha256("a".repeat(64)),
+        );
         let rec = reap_record(vec![]);
         assert!(output_at_current_layout(
             &out,
@@ -2822,13 +2818,13 @@ mod tests {
         let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
         let access = arc(BlobMock { blob: blob.clone() });
         let m = DefaultMaterializer;
-        let roots = roots(dir.path()); // copilot_root = None
+        let roots = roots(dir.path()); // the copilot vendor root is unresolvable
 
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         // Seed a prior desync record: a claude workspace output whose file is
         // absent on disk (so the install proceeds past the gate) + a copilot
         // output anchored to CopilotRoot, which is unresolvable here because
-        // roots.copilot_root is None.
+        // roots has no copilot vendor root.
         let prior_pin = PinnedIdentifier::try_from(
             Identifier::new_registry("rust-style", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
         )
@@ -2852,7 +2848,7 @@ mod tests {
                 ClientOutput {
                     client: "copilot".to_string(),
                     target: AnchoredPath {
-                        anchor: PathAnchor::CopilotRoot,
+                        anchor: PathAnchor::VendorRoot("copilot"),
                         relative: "rules/rust-style.md".to_string(),
                     },
                     content_hash: Digest::Sha256("c".repeat(64)),

@@ -141,18 +141,10 @@ mod tests {
         AnchorRoots {
             workspace: ws.to_path_buf(),
             grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         }
     }
 
@@ -361,7 +353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path();
 
-        // Build state with ClaudeRoot anchor but roots has claude_root = None.
+        // Build state anchored to the claude vendor root, which roots does not resolve.
         let mut st = InstallState::empty(std::path::Path::new("/tmp/s.json"));
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
@@ -375,7 +367,7 @@ mod tests {
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
-                    anchor: PathAnchor::ClaudeRoot,
+                    anchor: PathAnchor::VendorRoot("claude"),
                     relative: "skills/x".to_string(),
                 },
                 content_hash: Digest::Sha256("a".repeat(64)),
@@ -384,22 +376,14 @@ mod tests {
             }],
         });
 
-        // Roots with no claude_root: resolved_target → AnchorRootAbsent.
+        // Roots with no claude vendor root: resolved_target → AnchorRootAbsent.
         let no_claude_roots = AnchorRoots {
             workspace: ws.to_path_buf(),
             grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
 
         let lk = lock_with("acme/x", 'a');

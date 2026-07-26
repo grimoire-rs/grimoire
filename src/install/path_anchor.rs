@@ -14,104 +14,255 @@
 //! through a two-layer containment guard ([`AnchoredPath::resolve`]) that
 //! never lets a tampered `relative` escape its anchor root.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir, xdg_config_dir};
+use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir};
 use crate::install::{
     vendor_amp, vendor_claude, vendor_codex, vendor_copilot, vendor_cursor, vendor_gemini, vendor_junie, vendor_kiro,
     vendor_opencode, vendor_zed,
 };
 use crate::oci::ArtifactKind;
 
+/// How a row reads the environment. Injected rather than called ambiently so
+/// [`AnchorRoots::resolve_from`] is a pure function of its arguments and the
+/// table's wiring can be asserted without mutating process env —
+/// `std::env::set_var` is `unsafe` under Rust 2024 and this crate forbids
+/// `unsafe_code` (the `vendor_codex` / `vendor_zed` precedent).
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
+
+/// One [`VENDOR_ROOTS`] row: the vendor's name — which is also its
+/// `<name>-root` anchor tag — and the resolver for its root, as a pure
+/// function of the injected environment and home directory.
+type VendorRootRow = (&'static str, fn(EnvLookup<'_>, Option<PathBuf>) -> Option<PathBuf>);
+
+/// Every vendor whose global anchor root is a plain, self-contained
+/// `Option<PathBuf>`, keyed by the vendor's
+/// [`name`](crate::install::vendor::Vendor::name).
+///
+/// **A row's name is an on-disk contract**: the serialized anchor tag is
+/// `<name>-root`, so `("cursor", …)` *is* the `cursor-root` that shipped
+/// `state.json` files already carry. Rows may be appended; a name may never be
+/// changed or removed (Principle 9).
+///
+/// Each resolver runs exactly once, inside [`AnchorRoots::resolve`] — the
+/// single place ambient env is read — so [`PathAnchor::root`] stays a pure
+/// lookup with no I/O and no env.
+///
+/// **Adding a vendor** costs one row here plus its `(client, kind)` arms in
+/// [`candidate_anchors`]: no enum variant, no `AnchorRoots` field, no fixture
+/// churn anywhere in the tree.
+///
+/// **Never add a row whose `<name>-root` tag collides with a fixed one.** The
+/// fixed arms of [`PathAnchor::from_serde_tag`] are matched first, so a
+/// colliding row would be written under its own name and silently read back as
+/// the *other* anchor, resolving against a different root — e.g. a row named
+/// `open-code`. `vendor_root_rows_and_reachable_vendor_roots_agree` is the
+/// guard; it fails on any row that does not read back as itself.
+///
+/// `opencode` is excluded for a second, independent reason: OpenCode's config
+/// root is already addressed by the derived [`PathAnchor::OpenCodeRoot`], so
+/// such a row would be a second anchor for one root — two spellings of the
+/// same location in `state.json`, which the reaper and the prune refcount
+/// treat as distinct outputs. (It would additionally render identically to
+/// `OpenCodeRoot` under `Display`.)
+const VENDOR_ROOTS: &[VendorRootRow] = &[
+    ("claude", |env, home| {
+        vendor_claude::global_root(env("CLAUDE_CONFIG_DIR"), home)
+    }),
+    ("copilot", |env, home| {
+        vendor_copilot::global_native_root(env("COPILOT_HOME"), home)
+    }),
+    ("codex", |env, home| vendor_codex::codex_root(env("CODEX_HOME"), home)),
+    ("cursor", |_, home| vendor_cursor::cursor_root(home)),
+    ("kiro", |env, home| vendor_kiro::kiro_root(env("KIRO_HOME"), home)),
+    ("junie", |_, home| vendor_junie::junie_root(home)),
+    ("gemini", |env, home| {
+        vendor_gemini::gemini_root(env("GEMINI_CLI_HOME"), home)
+    }),
+    // Zed and Amp root under an XDG config dir, not `$HOME` directly. Note
+    // `vendor_zed::zed_root` reads `$HOME` / `%APPDATA%` itself on its macOS
+    // and Windows arms, so only the Linux/FreeBSD arm is a pure function of
+    // what is injected here — see `every_vendor_root_row_resolves_to_its_own_root`.
+    ("zed", |env, home| vendor_zed::zed_root(xdg_config_from(env, home))),
+    ("amp", |env, home| vendor_amp::amp_root(xdg_config_from(env, home))),
+];
+
+/// `$XDG_CONFIG_HOME`, else `<home>/.config` — the injected-input twin of
+/// [`xdg_config_dir`], so a [`VENDOR_ROOTS`] row that needs an XDG dir stays a
+/// pure function of `(env, home)`. Identical to `xdg_config_dir()` when fed
+/// [`env_dir`] and [`home_dir`], which is what [`AnchorRoots::resolve`] does.
+fn xdg_config_from(env: EnvLookup<'_>, home: Option<PathBuf>) -> Option<PathBuf> {
+    env("XDG_CONFIG_HOME").or_else(|| home.map(|h| h.join(".config")))
+}
+
+/// The interned [`VENDOR_ROOTS`] key equal to `name`, or `None` when no vendor
+/// owns it.
+///
+/// An unrecognized name is **refused, never interned** — that is what stops a
+/// hand-edited `state.json` from minting an anchor grim knows nothing about,
+/// and it is why [`PathAnchor::VendorRoot`] can hold a `&'static str` at all.
+fn vendor_root_name(name: &str) -> Option<&'static str> {
+    VENDOR_ROOTS.iter().find(|(n, _)| *n == name).map(|(n, _)| *n)
+}
+
 /// A logical root an install target is stored relative to.
 ///
 /// Serialized as a kebab-case string tag (human-readable, forward-additive
-/// JSON). Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// JSON) — see [`PathAnchor::serde_tag`], which is the `state.json` contract.
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+///
+/// Most anchors are just "a vendor's own config root" and live in the
+/// [`VENDOR_ROOTS`] table as [`Self::VendorRoot`]. The variants spelled out
+/// below are the ones that genuinely resist that shape — each documents why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathAnchor {
     /// Project scope: `<workspace>/…` (project state only).
+    ///
+    /// Not a vendor root: it is every client's project-scope anchor at once,
+    /// and it is rooted at the workspace, not at anything vendor-derived.
     Workspace,
-    /// Global Claude skills + rules: `$CLAUDE_CONFIG_DIR` else `~/.claude`.
-    ClaudeRoot,
-    /// Global Copilot skills and rules: `$COPILOT_HOME` else `~/.copilot`.
-    CopilotRoot,
     /// Global OpenCode skills: `$OPENCODE_CONFIG_DIR/skills` else
     /// `$XDG_CONFIG_HOME`|`~/.config`/opencode/skills.
+    ///
+    /// Not a vendor root: this is a *skills* dir one level below the config
+    /// root, and [`Self::OpenCodeRoot`] is derived back out of it.
     OpenCodeSkills,
     /// Global OpenCode config dir (the parent of [`Self::OpenCodeSkills`]):
     /// hosts the sibling `agents/` dir, so a global OpenCode agent lands at
     /// `<opencode-root>/agents/<name>.md`. Derived as the parent of the
-    /// resolved skills root — no separate `AnchorRoots` field.
+    /// resolved skills root — no separate `AnchorRoots` field, and so no
+    /// [`VENDOR_ROOTS`] row either.
     OpenCodeRoot,
     /// `$GRIM_HOME`: the global OpenCode rules dir; also the pre-move
     /// fallback anchor for global Copilot rules (the layout-migration
     /// reaper collects old workspace-layout outputs there).
+    ///
+    /// Not a vendor root: it is grim's own directory and the **universal**
+    /// fallback appended to every candidate list in [`candidate_anchors`].
     GrimHome,
     /// The directory holding Claude Code's user config file `.claude.json`
     /// (global-scope MCP registrations): `$CLAUDE_CONFIG_DIR` else `$HOME`.
-    /// NOT derivable from [`Self::ClaudeRoot`] — with the override set the
+    /// NOT derivable from Claude's own root — with the override set the
     /// file lives *inside* that dir, without it the file is a *sibling* of
-    /// `~/.claude`.
+    /// `~/.claude`. A second, differently-shaped root for one vendor, which
+    /// the one-row-per-vendor table cannot express.
     ClaudeUserDir,
-    /// Global Codex skills: the cross-vendor open standard `$HOME/.agents/skills`
-    /// (keyed on `$HOME`, **not** relocated by `$CODEX_HOME`).
+    /// The cross-vendor open standard `$HOME/.agents/skills`, shared by
+    /// Codex, Gemini, Zed, Amp and the generic `agents` client.
+    ///
+    /// Not a vendor root on three counts: it belongs to no single vendor, the
+    /// root already ends in `/skills` (so `relative` is the bare skill name),
+    /// and it is keyed on the real `$HOME` — deliberately NOT relocated by
+    /// `$CODEX_HOME` or `$GEMINI_CLI_HOME`, because grim writes one physical
+    /// pool tree whose prune refcount guard depends on that one-path shape.
     AgentsSkills,
-    /// Global Codex config root: `$CODEX_HOME` else `~/.codex`. Hosts the
-    /// `agents/` dir, so a global Codex agent lands at
-    /// `<codex-root>/agents/<name>.toml`.
-    CodexRoot,
-    /// Global Cursor config root `~/.cursor` (skills, rules `.mdc`, agents,
-    /// `mcp.json`). `CURSOR_CONFIG_DIR` not honored in wave 1.
-    CursorRoot,
-    /// Global Kiro config root: `$KIRO_HOME` else `~/.kiro` (skills,
-    /// `steering/`, `settings/mcp.json`). The variable replaces the root
-    /// outright, per the Kiro CLI; the IDE ignores it (#9148).
-    KiroRoot,
-    /// Global Junie config root `~/.junie` (skills, `mcp/mcp.json`).
-    JunieRoot,
-    /// Global Gemini config root: `$GEMINI_CLI_HOME/.gemini` else `~/.gemini`
-    /// (agents, `settings.json`). The variable replaces `$HOME`, so the
-    /// `.gemini` segment still applies. Gemini skills follow the shared
-    /// [`Self::AgentsSkills`] pool, not this root — and that pool stays keyed
-    /// on the real `$HOME` even when `$GEMINI_CLI_HOME` is set.
-    GeminiRoot,
-    /// Global Zed config root (`settings.json`), platform-divergent:
-    /// `$XDG_CONFIG_HOME|~/.config` + `zed` on Linux/FreeBSD, a hardcoded
-    /// `~/.config/zed` on macOS (upstream never reads XDG there), and
-    /// `%APPDATA%\Zed` on Windows. Zed skills follow the shared
-    /// [`Self::AgentsSkills`] pool.
-    ZedRoot,
-    /// Global Amp config root `$XDG_CONFIG_HOME|~/.config/amp` (`settings.json`).
-    /// Amp skills follow the shared [`Self::AgentsSkills`] pool.
-    AmpRoot,
+    /// A vendor's own global config root, named by its [`VENDOR_ROOTS`] key —
+    /// e.g. `VendorRoot("cursor")`, serialized `cursor-root`.
+    ///
+    /// The payload is always an interned `&'static str` from that table:
+    /// [`Self::from_serde_tag`] refuses any other name, so this cannot carry
+    /// an arbitrary string read off disk.
+    VendorRoot(&'static str),
+}
+
+impl PathAnchor {
+    /// The serialized tag — **the `state.json` on-disk contract**.
+    ///
+    /// Borrowed for every fixed anchor; owned only for a composed
+    /// `<name>-root`.
+    fn serde_tag(self) -> Cow<'static, str> {
+        match self {
+            Self::Workspace => Cow::Borrowed("workspace"),
+            // `open-code-*`, not `opencode-*`: these two tags were minted by
+            // `#[serde(rename_all = "kebab-case")]`, which split the variant
+            // name on the internal capital. Shipped state files carry that
+            // spelling, so it is frozen — `Display` renders it verbatim.
+            Self::OpenCodeSkills => Cow::Borrowed("open-code-skills"),
+            Self::OpenCodeRoot => Cow::Borrowed("open-code-root"),
+            Self::GrimHome => Cow::Borrowed("grim-home"),
+            Self::ClaudeUserDir => Cow::Borrowed("claude-user-dir"),
+            Self::AgentsSkills => Cow::Borrowed("agents-skills"),
+            Self::VendorRoot(name) => Cow::Owned(format!("{name}-root")),
+        }
+    }
+
+    /// Every anchor that is not a [`Self::VendorRoot`], i.e. the fixed arms of
+    /// [`Self::from_serde_tag`]. Their tag strings are derived through
+    /// [`Self::serde_tag`] rather than restated, so the two cannot drift;
+    /// `vendor_root_rows_and_reachable_vendor_roots_agree` proves each one
+    /// still parses back to itself.
+    const FIXED_ANCHORS: &'static [Self] = &[
+        Self::Workspace,
+        Self::OpenCodeSkills,
+        Self::OpenCodeRoot,
+        Self::GrimHome,
+        Self::ClaudeUserDir,
+        Self::AgentsSkills,
+    ];
+
+    /// Parse a serialized tag. `None` for any tag grim does not know — the
+    /// fail-closed read path.
+    fn from_serde_tag(tag: &str) -> Option<Self> {
+        Some(match tag {
+            // Fixed tags first: a `VENDOR_ROOTS` row must never shadow one.
+            "workspace" => Self::Workspace,
+            "open-code-skills" => Self::OpenCodeSkills,
+            "open-code-root" => Self::OpenCodeRoot,
+            "grim-home" => Self::GrimHome,
+            "claude-user-dir" => Self::ClaudeUserDir,
+            "agents-skills" => Self::AgentsSkills,
+            _ => Self::VendorRoot(vendor_root_name(tag.strip_suffix("-root")?)?),
+        })
+    }
+}
+
+impl Serialize for PathAnchor {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.serde_tag())
+    }
+}
+
+impl<'de> Deserialize<'de> for PathAnchor {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Owned `String`, not a borrowed `&str`: the latter would fail on any
+        // non-borrowing deserializer (`from_reader`, `from_value`).
+        let tag = String::deserialize(deserializer)?;
+        Self::from_serde_tag(&tag).ok_or_else(|| {
+            // Name the vocabulary, as the derived impl's "unknown variant,
+            // expected one of …" did: this surfaces on a corrupt or
+            // hand-edited state.json, where the valid set is the whole answer.
+            let known = Self::FIXED_ANCHORS
+                .iter()
+                .map(|a| a.serde_tag().into_owned())
+                .chain(VENDOR_ROOTS.iter().map(|(name, _)| format!("{name}-root")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            serde::de::Error::custom(format!("unknown path anchor '{tag}', expected one of {known}"))
+        })
+    }
 }
 
 impl std::fmt::Display for PathAnchor {
+    /// Renders the serde tag verbatim, so the anchor an error names is the
+    /// literal string a user can grep for in their `state.json`.
+    ///
+    /// This used to hand-write `opencode-skills` / `opencode-root` for the two
+    /// OpenCode anchors while serde wrote `open-code-*` — an error pointed at a
+    /// tag that appears in no state file. The fix could only go this direction:
+    /// the serde tag is on-disk state and can never move, whereas `Display` is
+    /// human-readable error text, which `docs/src/stability.md` puts outside
+    /// the compatibility promise. Pinned by
+    /// `display_agrees_with_the_serde_tag_for_every_anchor`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Workspace => "workspace",
-            Self::ClaudeRoot => "claude-root",
-            Self::CopilotRoot => "copilot-root",
-            Self::OpenCodeSkills => "opencode-skills",
-            Self::OpenCodeRoot => "opencode-root",
-            Self::GrimHome => "grim-home",
-            Self::ClaudeUserDir => "claude-user-dir",
-            Self::AgentsSkills => "agents-skills",
-            Self::CodexRoot => "codex-root",
-            Self::CursorRoot => "cursor-root",
-            Self::KiroRoot => "kiro-root",
-            Self::JunieRoot => "junie-root",
-            Self::GeminiRoot => "gemini-root",
-            Self::ZedRoot => "zed-root",
-            Self::AmpRoot => "amp-root",
-        })
+        f.write_str(&self.serde_tag())
     }
 }
 
@@ -119,77 +270,80 @@ impl std::fmt::Display for PathAnchor {
 /// time so [`PathAnchor::root`] is a pure lookup (no ambient env reads, no
 /// I/O at resolve time).
 ///
-/// `claude_root` / `copilot_root` / `opencode_skills` are `None` when the
-/// vendor root is unresolvable (neither the vendor env override nor `$HOME`
-/// / `$XDG_CONFIG_HOME`).
+/// A field is `None` (or a `vendor_roots` key absent) when that root is
+/// unresolvable — neither the vendor env override nor `$HOME` /
+/// `$XDG_CONFIG_HOME` yielded a path.
 ///
-/// **`OpenCodeRoot` has NO field here.** It is derived at lookup time as
+/// **`OpenCodeRoot` has NO entry here.** It is derived at lookup time as
 /// `opencode_skills.as_ref().and_then(|s| s.parent())` — a structurally
 /// derivable relationship that does not need its own stored root.
 /// New anchors whose root is derivable from an existing field (e.g. a
 /// parent or sibling of a stored path) should follow this pattern rather
 /// than adding a new `Option<PathBuf>` field to this struct.
+///
+/// A plain vendor config root needs neither: it belongs in the
+/// [`VENDOR_ROOTS`] table and lands in [`Self::vendor_roots`], so adding a
+/// vendor never edits this struct or any fixture that builds it.
 #[derive(Default)]
 pub struct AnchorRoots {
     /// The workspace root project-scope targets are rooted at.
     pub workspace: PathBuf,
     /// `$GRIM_HOME`.
     pub grim_home: PathBuf,
-    /// The global Claude root, when resolvable.
-    pub claude_root: Option<PathBuf>,
-    /// The global Copilot native root, when resolvable.
-    pub copilot_root: Option<PathBuf>,
     /// The global OpenCode skills root, when resolvable. The OpenCode config
     /// root ([`PathAnchor::OpenCodeRoot`]) is derived as the parent of this
     /// path — no separate field is needed.
     pub opencode_skills: Option<PathBuf>,
     /// The dir holding Claude Code's user config file (`.claude.json`),
     /// when resolvable: `$CLAUDE_CONFIG_DIR` else `$HOME`. Not derivable
-    /// from [`Self::claude_root`] (see [`PathAnchor::ClaudeUserDir`]).
+    /// from Claude's own root (see [`PathAnchor::ClaudeUserDir`]).
     pub claude_user_dir: Option<PathBuf>,
-    /// The global Codex skills root (`$HOME/.agents/skills`), when resolvable.
+    /// The shared cross-vendor skills pool (`$HOME/.agents/skills`), when
+    /// resolvable.
     pub agents_skills: Option<PathBuf>,
-    /// The global Codex config root (`$CODEX_HOME` else `~/.codex`), when
-    /// resolvable. Hosts the sibling `agents/` dir.
-    pub codex_root: Option<PathBuf>,
-    /// The global Cursor config root (`~/.cursor`), when resolvable.
-    pub cursor_root: Option<PathBuf>,
-    /// The global Kiro config root (`$KIRO_HOME` else `~/.kiro`), when resolvable.
-    pub kiro_root: Option<PathBuf>,
-    /// The global Junie config root (`~/.junie`), when resolvable.
-    pub junie_root: Option<PathBuf>,
-    /// The global Gemini config root (`$GEMINI_CLI_HOME/.gemini` else
-    /// `~/.gemini`), when resolvable.
-    pub gemini_root: Option<PathBuf>,
-    /// The global Zed config root, when resolvable — see
-    /// [`PathAnchor::ZedRoot`] for the three platform cases (XDG on
-    /// Linux/FreeBSD, hardcoded `~/.config/zed` on macOS, `%APPDATA%\Zed` on
-    /// Windows).
-    pub zed_root: Option<PathBuf>,
-    /// The global Amp config root (`$XDG_CONFIG_HOME|~/.config/amp`), when resolvable.
-    pub amp_root: Option<PathBuf>,
+    /// Every [`PathAnchor::VendorRoot`] root, keyed by its [`VENDOR_ROOTS`]
+    /// name. A missing key means that vendor's root is unresolvable — exactly
+    /// what a `None` field meant before.
+    pub vendor_roots: BTreeMap<&'static str, PathBuf>,
 }
 
 impl AnchorRoots {
     /// Resolve every anchor root once, calling the vendor helpers with the
     /// same env inputs the materializer uses (single source of truth). The
     /// resolved set is then a pure lookup table for [`PathAnchor::root`].
+    ///
+    /// This is the **only** place ambient environment is read; the work is
+    /// delegated to [`Self::resolve_from`] with the real lookups so the
+    /// mapping itself stays assertable.
     pub fn resolve(workspace: PathBuf, ctx: &Context) -> Self {
+        Self::resolve_from(workspace, ctx.grim_home().to_path_buf(), &env_dir, home_dir())
+    }
+
+    /// [`Self::resolve`] with the environment injected — a pure function of
+    /// its arguments.
+    ///
+    /// The seam exists because the wiring is otherwise untestable and a
+    /// one-line mistake: swapping two [`VENDOR_ROOTS`] resolvers anchors one
+    /// vendor's global installs under another's root, and every tag-vocabulary
+    /// test still passes (they police tag *names*, not what a name resolves
+    /// to). `std::env::set_var` cannot stand in — Rust 2024 makes it `unsafe`
+    /// and this crate forbids `unsafe_code` — so the established pattern here
+    /// is to inject the values instead (`vendor_codex::codex_root`,
+    /// `vendor_zed::zed_root_from`).
+    fn resolve_from(workspace: PathBuf, grim_home: PathBuf, env: EnvLookup<'_>, home: Option<PathBuf>) -> Self {
         Self {
             workspace,
-            grim_home: ctx.grim_home().to_path_buf(),
-            claude_root: vendor_claude::global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
-            copilot_root: vendor_copilot::global_native_root(env_dir("COPILOT_HOME"), home_dir()),
-            opencode_skills: vendor_opencode::global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()),
-            claude_user_dir: vendor_claude::user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir()),
-            agents_skills: global_skills_root(home_dir()),
-            codex_root: vendor_codex::codex_root(env_dir("CODEX_HOME"), home_dir()),
-            cursor_root: vendor_cursor::cursor_root(home_dir()),
-            kiro_root: vendor_kiro::kiro_root(env_dir("KIRO_HOME"), home_dir()),
-            junie_root: vendor_junie::junie_root(home_dir()),
-            gemini_root: vendor_gemini::gemini_root(env_dir("GEMINI_CLI_HOME"), home_dir()),
-            zed_root: vendor_zed::zed_root(xdg_config_dir()),
-            amp_root: vendor_amp::amp_root(xdg_config_dir()),
+            grim_home,
+            opencode_skills: vendor_opencode::global_skills_root(
+                env("OPENCODE_CONFIG_DIR"),
+                xdg_config_from(env, home.clone()),
+            ),
+            claude_user_dir: vendor_claude::user_config_dir(env("CLAUDE_CONFIG_DIR"), home.clone()),
+            agents_skills: global_skills_root(home.clone()),
+            vendor_roots: VENDOR_ROOTS
+                .iter()
+                .filter_map(|(name, resolve_root)| resolve_root(env, home.clone()).map(|root| (*name, root)))
+                .collect(),
         }
     }
 }
@@ -202,8 +356,6 @@ impl PathAnchor {
         match self {
             Self::Workspace => Some(roots.workspace.clone()),
             Self::GrimHome => Some(roots.grim_home.clone()),
-            Self::ClaudeRoot => roots.claude_root.clone(),
-            Self::CopilotRoot => roots.copilot_root.clone(),
             Self::OpenCodeSkills => roots.opencode_skills.clone(),
             // The OpenCode config dir is the parent of the skills root; the
             // sibling `agents/` dir lives directly under it.
@@ -214,13 +366,7 @@ impl PathAnchor {
                 .map(std::path::Path::to_path_buf),
             Self::ClaudeUserDir => roots.claude_user_dir.clone(),
             Self::AgentsSkills => roots.agents_skills.clone(),
-            Self::CodexRoot => roots.codex_root.clone(),
-            Self::CursorRoot => roots.cursor_root.clone(),
-            Self::KiroRoot => roots.kiro_root.clone(),
-            Self::JunieRoot => roots.junie_root.clone(),
-            Self::GeminiRoot => roots.gemini_root.clone(),
-            Self::ZedRoot => roots.zed_root.clone(),
-            Self::AmpRoot => roots.amp_root.clone(),
+            Self::VendorRoot(name) => roots.vendor_roots.get(name).cloned(),
         }
     }
 }
@@ -504,6 +650,18 @@ impl AnchoredPath {
 /// a graceful lossy drop, never a panic. Project scope is untouched — it is
 /// unconditionally `[Workspace]` for every `(client, kind)` pair.
 fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
+    /// `client`'s own global config root — the [`VENDOR_ROOTS`] row keyed by
+    /// the vendor's name.
+    ///
+    /// Deriving the key from the vendor instead of spelling it at each arm
+    /// makes a typo impossible. It does tie the on-disk tag to
+    /// [`Vendor::name`](crate::install::vendor::Vendor::name), which is why
+    /// `every_reachable_anchor_tag_is_pinned` exists: renaming a vendor would
+    /// silently re-point its anchor tag, and that test refuses it.
+    fn vendor_root(client: ClientTarget) -> Option<PathAnchor> {
+        Some(PathAnchor::VendorRoot(client.vendor().name()))
+    }
+
     match scope {
         ConfigScope::Project => vec![PathAnchor::Workspace],
         ConfigScope::Global if is_declined_global_pair(client, kind) => Vec::new(),
@@ -512,11 +670,11 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // Claude: all three materializable kinds live under the Claude root.
                 (ClientTarget::Claude, ArtifactKind::Skill)
                 | (ClientTarget::Claude, ArtifactKind::Rule)
-                | (ClientTarget::Claude, ArtifactKind::Agent) => Some(PathAnchor::ClaudeRoot),
+                | (ClientTarget::Claude, ArtifactKind::Agent) => vendor_root(client),
 
                 // Copilot: skills and agents live under the native $COPILOT_HOME root.
                 (ClientTarget::Copilot, ArtifactKind::Skill) | (ClientTarget::Copilot, ArtifactKind::Agent) => {
-                    Some(PathAnchor::CopilotRoot)
+                    vendor_root(client)
                 }
 
                 // Copilot: rules live under the native $COPILOT_HOME root
@@ -524,7 +682,7 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // pre-move records (workspace layout under $GRIM_HOME) still
                 // classify — the layout-migration reaper collects them on the
                 // next re-install.
-                (ClientTarget::Copilot, ArtifactKind::Rule) => Some(PathAnchor::CopilotRoot),
+                (ClientTarget::Copilot, ArtifactKind::Rule) => vendor_root(client),
 
                 // OpenCode: skills live under the OpenCode skills root.
                 (ClientTarget::OpenCode, ArtifactKind::Skill) => Some(PathAnchor::OpenCodeSkills),
@@ -542,42 +700,42 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
 
                 // Codex: agents live in the sibling `agents/` dir under the Codex
                 // config root ($CODEX_HOME|~/.codex).
-                (ClientTarget::Codex, ArtifactKind::Agent) => Some(PathAnchor::CodexRoot),
+                (ClientTarget::Codex, ArtifactKind::Agent) => vendor_root(client),
 
                 // ── Wave-1 vendors (adr_vendor_wave_expansion mapping table) ──
                 // Cursor: all four kinds native under `~/.cursor`.
                 (ClientTarget::Cursor, ArtifactKind::Skill)
                 | (ClientTarget::Cursor, ArtifactKind::Rule)
                 | (ClientTarget::Cursor, ArtifactKind::Agent)
-                | (ClientTarget::Cursor, ArtifactKind::Mcp) => Some(PathAnchor::CursorRoot),
+                | (ClientTarget::Cursor, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Kiro: skills, steering rules, MCP under `~/.kiro` (agents
                 // declined — handled by the guard above).
                 (ClientTarget::Kiro, ArtifactKind::Skill)
                 | (ClientTarget::Kiro, ArtifactKind::Rule)
-                | (ClientTarget::Kiro, ArtifactKind::Mcp) => Some(PathAnchor::KiroRoot),
+                | (ClientTarget::Kiro, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Junie: skills + MCP under `~/.junie` (rules + agents declined).
                 (ClientTarget::Junie, ArtifactKind::Skill) | (ClientTarget::Junie, ArtifactKind::Mcp) => {
-                    Some(PathAnchor::JunieRoot)
+                    vendor_root(client)
                 }
 
                 // Gemini: skills via the shared `.agents/skills` pool; agents +
                 // MCP under `~/.gemini` (rules declined).
                 (ClientTarget::Gemini, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
                 (ClientTarget::Gemini, ArtifactKind::Agent) | (ClientTarget::Gemini, ArtifactKind::Mcp) => {
-                    Some(PathAnchor::GeminiRoot)
+                    vendor_root(client)
                 }
 
                 // Zed: skills via the shared pool; MCP under `~/.config/zed`
                 // (rules + agents declined).
                 (ClientTarget::Zed, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
-                (ClientTarget::Zed, ArtifactKind::Mcp) => Some(PathAnchor::ZedRoot),
+                (ClientTarget::Zed, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Amp: skills via the shared pool; MCP under `~/.config/amp`
                 // (rules + agents declined).
                 (ClientTarget::Amp, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
-                (ClientTarget::Amp, ArtifactKind::Mcp) => Some(PathAnchor::AmpRoot),
+                (ClientTarget::Amp, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Generic client: the shared pool is its ONLY surface — rules,
                 // agents, and MCP are all declined (no vendor-neutral format).
@@ -590,8 +748,8 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // alongside the `agents/` dir — same root as the agent anchor).
                 (ClientTarget::Claude, ArtifactKind::Mcp) => Some(PathAnchor::ClaudeUserDir),
                 (ClientTarget::OpenCode, ArtifactKind::Mcp) => Some(PathAnchor::OpenCodeRoot),
-                (ClientTarget::Copilot, ArtifactKind::Mcp) => Some(PathAnchor::CopilotRoot),
-                (ClientTarget::Codex, ArtifactKind::Mcp) => Some(PathAnchor::CodexRoot),
+                (ClientTarget::Copilot, ArtifactKind::Mcp) => vendor_root(client),
+                (ClientTarget::Codex, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Declined (client, kind) pairs — normally short-circuited by
                 // the `is_declined_global_pair` guard above; kept as explicit
@@ -810,18 +968,346 @@ mod tests {
         AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: Some(PathBuf::from("/claude")),
-            copilot_root: Some(PathBuf::from("/copilot")),
+            vendor_roots: [
+                ("claude", PathBuf::from("/claude")),
+                ("copilot", PathBuf::from("/copilot")),
+                ("codex", PathBuf::from("/codex")),
+            ]
+            .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
             agents_skills: Some(PathBuf::from("/agents/skills")),
-            codex_root: Some(PathBuf::from("/codex")),
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
+        }
+    }
+
+    // ── The on-disk anchor-tag contract ───────────────────────────────────
+
+    /// Every anchor tag a shipped `grim` has ever written into `state.json` —
+    /// i.e. the **serde** vocabulary, which is what reaches disk.
+    ///
+    /// **This list is an on-disk contract, not an inventory.** A tag may be
+    /// APPENDED when a new anchor ships; a tag may never be removed, renamed,
+    /// or re-pointed, because a `state.json` written by an older grim must keep
+    /// deserializing forever (Principle 9, `docs/src/stability.md`).
+    ///
+    /// `open-code-*` is not a typo: `rename_all = "kebab-case"` split those two
+    /// variant names on their internal capital, and what reached disk is frozen
+    /// — see [`display_agrees_with_the_serde_tag_for_every_anchor`].
+    const SHIPPED_ANCHOR_TAGS: &[&str] = &[
+        "workspace",
+        "claude-root",
+        "copilot-root",
+        "open-code-skills",
+        "open-code-root",
+        "grim-home",
+        "claude-user-dir",
+        "agents-skills",
+        "codex-root",
+        "cursor-root",
+        "kiro-root",
+        "junie-root",
+        "gemini-root",
+        "zed-root",
+        "amp-root",
+    ];
+
+    /// Every shipped tag still loads from a LITERAL JSON string, and
+    /// re-serializes to the identical bytes.
+    ///
+    /// This is deliberately a literal-fixture test, not a serialize-then-parse
+    /// round-trip: the latter passes even if the whole tag vocabulary is
+    /// renamed in lockstep, which is precisely the break this guards. Asserting
+    /// only through `serde` (never through variant names) is what lets it
+    /// survive a refactor of the enum's internal shape unmodified — a test that
+    /// has to be edited alongside the code it guards proves nothing.
+    #[test]
+    fn every_shipped_anchor_tag_round_trips_from_literal_json() {
+        for tag in SHIPPED_ANCHOR_TAGS {
+            let literal = format!("\"{tag}\"");
+            let anchor: PathAnchor = serde_json::from_str(&literal)
+                .unwrap_or_else(|e| panic!("shipped anchor tag {literal} no longer deserializes: {e}"));
+            assert_eq!(
+                serde_json::to_string(&anchor).unwrap(),
+                literal,
+                "re-serializing {literal} must reproduce the identical on-disk bytes"
+            );
+        }
+    }
+
+    /// `Display` renders exactly what serde writes, for **every** anchor —
+    /// the anchor an error names is the literal string in `state.json`.
+    ///
+    /// This replaces a characterization of the inverse: `Display` used to
+    /// hand-write `opencode-skills` / `opencode-root` while
+    /// `rename_all = "kebab-case"` had minted `open-code-*`, so a user grepping
+    /// their state file for the anchor an error just named found nothing. Only
+    /// `Display` could move — the serde tag is on-disk state, and aligning it
+    /// the other way would have broken every shipped `state.json`.
+    ///
+    /// Asserted over the whole vocabulary rather than the two former offenders,
+    /// so a future anchor cannot reintroduce the split.
+    #[test]
+    fn display_agrees_with_the_serde_tag_for_every_anchor() {
+        let every = PathAnchor::FIXED_ANCHORS
+            .iter()
+            .copied()
+            .chain(super::VENDOR_ROOTS.iter().map(|(name, _)| PathAnchor::VendorRoot(name)));
+        for anchor in every {
+            let on_disk: String = serde_json::from_value(serde_json::to_value(anchor).unwrap()).unwrap();
+            assert_eq!(
+                anchor.to_string(),
+                on_disk,
+                "Display must render the on-disk tag verbatim so an error message is greppable in state.json"
+            );
+        }
+        // The two that used to diverge, spelled out: a regression here is the
+        // whole point of the fix.
+        assert_eq!(PathAnchor::OpenCodeSkills.to_string(), "open-code-skills");
+        assert_eq!(PathAnchor::OpenCodeRoot.to_string(), "open-code-root");
+    }
+
+    /// No anchor reachable from `candidate_anchors` may carry a tag that is not
+    /// pinned above. Adding a vendor mints a new `<name>-root` tag — a new
+    /// on-disk literal — and this fails until it is appended to
+    /// `SHIPPED_ANCHOR_TAGS`, so the contract is acknowledged rather than
+    /// discovered later in a user's state file.
+    #[test]
+    fn every_reachable_anchor_tag_is_pinned() {
+        let kinds = [
+            ArtifactKind::Skill,
+            ArtifactKind::Rule,
+            ArtifactKind::Agent,
+            ArtifactKind::Mcp,
+            ArtifactKind::Bundle,
+        ];
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            for client in ClientTarget::ALL {
+                for kind in kinds {
+                    for anchor in super::candidate_anchors(scope, client, kind) {
+                        // The SERDE tag, not `Display` — only serde reaches disk.
+                        let tag = serde_json::to_value(anchor).unwrap();
+                        let tag = tag.as_str().unwrap();
+                        assert!(
+                            SHIPPED_ANCHOR_TAGS.contains(&tag),
+                            "({scope:?}, {client:?}, {kind:?}) anchors to the unpinned tag '{tag}' — \
+                             append it to SHIPPED_ANCHOR_TAGS: it is now written into state.json forever"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every [`VENDOR_ROOTS`] row resolves to **its own** vendor's root.
+    ///
+    /// The gap this closes: the tag-vocabulary tests police tag *names*, and
+    /// `arch2_from_target_and_resolve_are_coherent_for_all_scope_client_kind_triples`
+    /// builds its `AnchorRoots` from literal paths — so before this, nothing
+    /// anywhere called `AnchorRoots::resolve`. Swapping two rows' resolvers
+    /// (`("cursor", |_, home| kiro_root(home))` and vice versa) anchored every
+    /// global Cursor install under `~/.kiro` with the whole suite still green.
+    ///
+    /// Asserted as one map equality rather than per-row `contains`, so a row
+    /// that vanishes or is added without acknowledgement fails too.
+    ///
+    #[test]
+    fn every_vendor_root_row_resolves_to_its_own_root() {
+        let home = PathBuf::from("/fake/home");
+        // No variable is set: every row falls back to its `$HOME`-derived
+        // default, which is where the per-vendor differences live.
+        let no_env = |_: &str| None;
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &no_env,
+            Some(home.clone()),
+        );
+
+        let expected = hermetic_vendor_roots(&home);
+        let actual: std::collections::BTreeMap<&'static str, PathBuf> = roots
+            .vendor_roots
+            .iter()
+            .filter(|(name, _)| expected.contains_key(**name))
+            .map(|(name, root)| (*name, root.clone()))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "each VENDOR_ROOTS row must resolve to its own vendor's root — a swapped resolver \
+             silently anchors one vendor's global installs under another's directory"
+        );
+        assert_eq!(
+            roots.vendor_roots.len(),
+            super::VENDOR_ROOTS.len(),
+            "every row resolves under a resolvable $HOME; a missing key means a row stopped resolving"
+        );
+        // The non-vendor roots resolve from the same injected inputs.
+        assert_eq!(roots.agents_skills, Some(home.join(".agents").join("skills")));
+        assert_eq!(roots.claude_user_dir, Some(home.clone()));
+        assert_eq!(
+            roots.opencode_skills,
+            Some(home.join(".config").join("opencode").join("skills"))
+        );
+        assert_eq!(roots.workspace, PathBuf::from("/ws"));
+        assert_eq!(roots.grim_home, PathBuf::from("/grim"));
+    }
+
+    /// The [`VENDOR_ROOTS`] rows whose root is a pure function of the injected
+    /// `(env, home)` **on this target**, with the value each must produce
+    /// under a resolvable home and no variable set.
+    ///
+    /// `zed` is the one exception, and only off Linux: `vendor_zed::zed_root`
+    /// reads the real `$HOME` on macOS and `%APPDATA%` on Windows internally.
+    /// Injecting through those arms means reshaping `vendor_zed`, which this
+    /// change does not own — its own `zed_root_from` tests cover them. `cfg!`
+    /// rather than `#[cfg]` so every arm keeps type-checking on every host.
+    fn hermetic_vendor_roots(home: &std::path::Path) -> std::collections::BTreeMap<&'static str, PathBuf> {
+        let mut expected: std::collections::BTreeMap<&'static str, PathBuf> = [
+            ("claude", home.join(".claude")),
+            ("copilot", home.join(".copilot")),
+            ("codex", home.join(".codex")),
+            ("cursor", home.join(".cursor")),
+            ("kiro", home.join(".kiro")),
+            ("junie", home.join(".junie")),
+            ("gemini", home.join(".gemini")),
+            ("amp", home.join(".config").join("amp")),
+        ]
+        .into();
+        if cfg!(all(not(windows), not(target_os = "macos"))) {
+            expected.insert("zed", home.join(".config").join("zed"));
+        }
+        expected
+    }
+
+    /// Each row reads **its own** environment override, and no other's.
+    ///
+    /// The map-equality test above runs with no variable set, so a row that
+    /// consulted the wrong variable name would still land on the right `$HOME`
+    /// default and pass. This feeds one variable at a time and asserts that
+    /// only the vendor owning it moves.
+    #[test]
+    fn each_vendor_root_row_reads_only_its_own_env_override() {
+        let home = PathBuf::from("/fake/home");
+        let hermetic = hermetic_vendor_roots(&home);
+        for (var, name, expected) in [
+            ("CLAUDE_CONFIG_DIR", "claude", PathBuf::from("/ovr")),
+            ("COPILOT_HOME", "copilot", PathBuf::from("/ovr")),
+            ("CODEX_HOME", "codex", PathBuf::from("/ovr")),
+            ("KIRO_HOME", "kiro", PathBuf::from("/ovr")),
+            // `GEMINI_CLI_HOME` replaces the home, not the root: the `.gemini`
+            // segment is still appended (the opposite shape to CODEX/KIRO).
+            ("GEMINI_CLI_HOME", "gemini", PathBuf::from("/ovr/.gemini")),
+        ] {
+            let one = |v: &str| (v == var).then(|| PathBuf::from("/ovr"));
+            let roots =
+                AnchorRoots::resolve_from(PathBuf::from("/ws"), PathBuf::from("/grim"), &one, Some(home.clone()));
+            assert_eq!(
+                roots.vendor_roots.get(name),
+                Some(&expected),
+                "${var} must relocate the '{name}' root"
+            );
+            for (other, unmoved) in hermetic.iter().filter(|(other, _)| **other != name) {
+                assert_eq!(
+                    roots.vendor_roots.get(other),
+                    Some(unmoved),
+                    "${var} must move only '{name}', but it also moved '{other}'"
+                );
+            }
+        }
+    }
+
+    /// An unknown tag is refused, not silently coerced. A hand-edited or
+    /// future-version `state.json` must fail to load loudly.
+    #[test]
+    fn an_unknown_anchor_tag_is_refused() {
+        assert!(serde_json::from_str::<PathAnchor>("\"not-a-real-anchor\"").is_err());
+        assert!(serde_json::from_str::<PathAnchor>("\"nosuchvendor-root\"").is_err());
+        // The derived impl additionally accepted serde's externally-tagged map
+        // encoding of a unit variant; the hand-written one takes strings only.
+        // A deliberate narrowing, pinned rather than left incidental: grim's
+        // writer has only ever emitted the plain string, so no state.json grim
+        // produced can carry this form.
+        assert!(serde_json::from_str::<PathAnchor>("{\"claude-root\":null}").is_err());
+    }
+
+    /// The write path, the table, and the read path agree.
+    ///
+    /// Two failure modes, both invisible to the tag-vocabulary tests above:
+    ///
+    /// 1. A [`VENDOR_ROOTS`] row whose `<name>-root` tag collides with a fixed
+    ///    tag would be written under its own name and read back as the *other*
+    ///    anchor, resolving against a different root. `from_serde_tag` matches
+    ///    the fixed arms first, so the collision is silent.
+    /// 2. A `candidate_anchors` arm that mints `VendorRoot(name)` for a vendor
+    ///    with no table row. Its root never resolves, so `from_target` filters
+    ///    the candidate out entirely — the target then anchors to the appended
+    ///    `GrimHome` fallback, or fails as `UnknownAnchor`. Silently
+    ///    misanchored or dropped output, not a bad tag on disk.
+    /// 3. A [`PathAnchor::FIXED_ANCHORS`] that has fallen out of step with the
+    ///    variants `serde_tag` actually knows: the exhaustive match forces a
+    ///    new variant to gain a tag, but nothing forces it into that const, and
+    ///    the omission would silently drop a valid tag from the deserialize
+    ///    error's vocabulary.
+    #[test]
+    fn vendor_root_rows_and_reachable_vendor_roots_agree() {
+        // A duplicate name would split the table's truth in two: `resolve`
+        // collects into a map so the LAST row's root wins, while
+        // `vendor_root_name` returns the FIRST row's key. The anchor would
+        // still round-trip its tag, so nothing else below would notice.
+        let unique: std::collections::BTreeSet<_> = super::VENDOR_ROOTS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            unique.len(),
+            super::VENDOR_ROOTS.len(),
+            "VENDOR_ROOTS has a duplicate name; its anchor would resolve against one row's \
+             root while being named by another's"
+        );
+        for (name, _) in super::VENDOR_ROOTS {
+            let anchor = PathAnchor::VendorRoot(name);
+            let tag = anchor.serde_tag();
+            assert_eq!(
+                PathAnchor::from_serde_tag(&tag),
+                Some(anchor),
+                "the '{name}' row's tag '{tag}' does not read back as its own anchor — \
+                 it collides with a fixed tag and would silently resolve elsewhere"
+            );
+        }
+        // The vocabulary the deserialize error offers must be the whole pinned
+        // contract — no missing tag, no invented one. Set equality is what
+        // catches a FIXED_ANCHORS that lost a member: a per-tag round-trip
+        // cannot, because it only ever visits the tags the const already lists.
+        let vocabulary: std::collections::BTreeSet<String> = PathAnchor::FIXED_ANCHORS
+            .iter()
+            .map(|a| a.serde_tag().into_owned())
+            .chain(super::VENDOR_ROOTS.iter().map(|(name, _)| format!("{name}-root")))
+            .collect();
+        let pinned: std::collections::BTreeSet<String> = SHIPPED_ANCHOR_TAGS.iter().map(|t| (*t).to_string()).collect();
+        assert_eq!(
+            vocabulary, pinned,
+            "FIXED_ANCHORS + VENDOR_ROOTS must name exactly the pinned tag contract; \
+             a variant that gained a serde_tag arm but no FIXED_ANCHORS entry drops \
+             silently out of the deserialize error's vocabulary"
+        );
+        let kinds = [
+            ArtifactKind::Skill,
+            ArtifactKind::Rule,
+            ArtifactKind::Agent,
+            ArtifactKind::Mcp,
+            ArtifactKind::Bundle,
+        ];
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            for client in ClientTarget::ALL {
+                for kind in kinds {
+                    for anchor in super::candidate_anchors(scope, client, kind) {
+                        if let PathAnchor::VendorRoot(name) = anchor {
+                            assert!(
+                                super::vendor_root_name(name).is_some(),
+                                "({scope:?}, {client:?}, {kind:?}) mints VendorRoot(\"{name}\") but \
+                                 VENDOR_ROOTS has no such row: its root would never resolve and the \
+                                 tag it writes would not deserialize"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -843,19 +1329,19 @@ mod tests {
         assert_eq!(got, Some(PathBuf::from("/grim")));
     }
 
-    /// ClaudeRoot anchor returns exactly the value stored in claude_root.
+    /// The claude vendor-root anchor returns exactly its stored vendor_roots value.
     #[test]
     fn t2_claude_root_returns_claude_root_field() {
         let roots = all_roots();
-        let got = PathAnchor::ClaudeRoot.root(&roots);
+        let got = PathAnchor::VendorRoot("claude").root(&roots);
         assert_eq!(got, Some(PathBuf::from("/claude")));
     }
 
-    /// CopilotRoot anchor returns the copilot_root field.
+    /// The copilot vendor-root anchor returns its stored vendor_roots value.
     #[test]
     fn t2_copilot_root_returns_copilot_root_field() {
         let roots = all_roots();
-        let got = PathAnchor::CopilotRoot.root(&roots);
+        let got = PathAnchor::VendorRoot("copilot").root(&roots);
         assert_eq!(got, Some(PathBuf::from("/copilot")));
     }
 
@@ -867,27 +1353,19 @@ mod tests {
         assert_eq!(got, Some(PathBuf::from("/oc/skills")));
     }
 
-    /// When claude_root is None, ClaudeRoot::root returns None.
+    /// With no "claude" key in vendor_roots, the anchor's root is None.
     #[test]
     fn t2_anchor_root_absent_when_option_is_none() {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
-        assert!(PathAnchor::ClaudeRoot.root(&roots).is_none());
-        assert!(PathAnchor::CopilotRoot.root(&roots).is_none());
+        assert!(PathAnchor::VendorRoot("claude").root(&roots).is_none());
+        assert!(PathAnchor::VendorRoot("copilot").root(&roots).is_none());
         assert!(PathAnchor::OpenCodeSkills.root(&roots).is_none());
     }
 
@@ -899,18 +1377,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         assert!(
             PathAnchor::OpenCodeRoot.root(&roots).is_none(),
@@ -1018,21 +1488,13 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
-            anchor: PathAnchor::ClaudeRoot,
+            anchor: PathAnchor::VendorRoot("claude"),
             relative: "skills/foo".to_string(),
         };
         let err = ap.resolve(&roots, Containment::Strict).unwrap_err();
@@ -1040,10 +1502,10 @@ mod tests {
             matches!(
                 err,
                 AnchorError::AnchorRootAbsent {
-                    anchor: PathAnchor::ClaudeRoot
+                    anchor: PathAnchor::VendorRoot("claude")
                 }
             ),
-            "expected AnchorRootAbsent(ClaudeRoot), got {err:?}"
+            "expected AnchorRootAbsent(claude vendor root), got {err:?}"
         );
     }
 
@@ -1053,7 +1515,7 @@ mod tests {
     fn t2_forward_slash_relative_resolves_cross_platform() {
         let roots = all_roots();
         let ap = AnchoredPath {
-            anchor: PathAnchor::ClaudeRoot,
+            anchor: PathAnchor::VendorRoot("claude"),
             relative: "skills/my-skill".to_string(),
         };
         let result = ap.resolve(&roots, Containment::Strict).unwrap();
@@ -1083,7 +1545,7 @@ mod tests {
         assert_eq!(ap.relative, ".claude/rules/x.md");
     }
 
-    /// Global Claude skill → `(ClaudeRoot, "skills/<name>")`.
+    /// Global Claude skill → `(VendorRoot("claude"), "skills/<name>")`.
     #[test]
     fn t4_global_claude_skill_classifies_to_claude_root() {
         let roots = all_roots();
@@ -1097,7 +1559,7 @@ mod tests {
             &roots,
         );
         let ap = result.unwrap();
-        assert_eq!(ap.anchor, PathAnchor::ClaudeRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("claude"));
         assert_eq!(ap.relative, "skills/my-skill");
     }
 
@@ -1139,7 +1601,7 @@ mod tests {
         assert_eq!(ap.relative, ".opencode/rules/my-rule.md");
     }
 
-    /// Global Copilot skill → `(CopilotRoot, "skills/<name>")`.
+    /// Global Copilot skill → `(VendorRoot("copilot"), "skills/<name>")`.
     #[test]
     fn t4_global_copilot_skill_classifies_to_copilot_root() {
         let roots = all_roots();
@@ -1152,11 +1614,11 @@ mod tests {
             &roots,
         );
         let ap = result.unwrap();
-        assert_eq!(ap.anchor, PathAnchor::CopilotRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("copilot"));
         assert_eq!(ap.relative, "skills/my-skill");
     }
 
-    /// Global Copilot agent → `(CopilotRoot, "agents/<name>.md")` — agents
+    /// Global Copilot agent → `(VendorRoot("copilot"), "agents/<name>.md")` — agents
     /// live under the native `$COPILOT_HOME` root beside `skills/`.
     #[test]
     fn t4_global_copilot_agent_classifies_to_copilot_root() {
@@ -1170,7 +1632,7 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert_eq!(ap.anchor, PathAnchor::CopilotRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("copilot"));
         assert_eq!(ap.relative, "agents/my-agent.md");
     }
 
@@ -1193,7 +1655,7 @@ mod tests {
         assert_eq!(ap.relative, "agents/my-agent.md");
     }
 
-    /// AgentsSkills / CodexRoot anchors return their stored fields verbatim.
+    /// The AgentsSkills and codex vendor-root anchors return their stored roots verbatim.
     #[test]
     fn t2_codex_anchors_return_their_fields() {
         let roots = all_roots();
@@ -1201,7 +1663,10 @@ mod tests {
             PathAnchor::AgentsSkills.root(&roots),
             Some(PathBuf::from("/agents/skills"))
         );
-        assert_eq!(PathAnchor::CodexRoot.root(&roots), Some(PathBuf::from("/codex")));
+        assert_eq!(
+            PathAnchor::VendorRoot("codex").root(&roots),
+            Some(PathBuf::from("/codex"))
+        );
     }
 
     /// Global Codex skill → `(AgentsSkills, "<name>")` — the root already
@@ -1222,7 +1687,7 @@ mod tests {
         assert_eq!(ap.relative, "my-skill");
     }
 
-    /// Global Codex agent → `(CodexRoot, "agents/<name>.toml")`.
+    /// Global Codex agent → `(VendorRoot("codex"), "agents/<name>.toml")`.
     #[test]
     fn t4_global_codex_agent_classifies_to_codex_root() {
         let roots = all_roots();
@@ -1235,7 +1700,7 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert_eq!(ap.anchor, PathAnchor::CodexRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("codex"));
         assert_eq!(ap.relative, "agents/my-agent.toml");
     }
 
@@ -1333,7 +1798,7 @@ mod tests {
     fn t4_non_canonicalized_abs_path_classifies_correctly() {
         let roots = all_roots();
         // Build abs as root.join(relative) — the caller invariant.
-        let root = roots.claude_root.as_ref().unwrap();
+        let root = &roots.vendor_roots["claude"];
         let abs = root.join("skills").join("my-skill");
         let ap = AnchoredPath::from_target(
             &abs,
@@ -1343,7 +1808,7 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert_eq!(ap.anchor, PathAnchor::ClaudeRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("claude"));
         assert_eq!(ap.relative, "skills/my-skill");
     }
 
@@ -1357,18 +1822,14 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/a"),
-            claude_root: Some(PathBuf::from("/a/claude")),
-            copilot_root: Some(PathBuf::from("/a/copilot")),
+            vendor_roots: [
+                ("claude", PathBuf::from("/a/claude")),
+                ("copilot", PathBuf::from("/a/copilot")),
+            ]
+            .into(),
             opencode_skills: Some(PathBuf::from("/a/skills")),
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let abs = PathBuf::from("/a/skills/my-skill");
         let ap = AnchoredPath::from_target(
@@ -1384,17 +1845,13 @@ mod tests {
         assert_eq!(ap.relative, "my-skill");
     }
 
-    /// Global Copilot rule → `(CopilotRoot, "instructions/…")` — the native
+    /// Global Copilot rule → `(VendorRoot("copilot"), "instructions/…")` — the native
     /// `$COPILOT_HOME|~/.copilot/instructions/` layout (the render-layout
     /// move away from the inert `$GRIM_HOME` workspace layout).
     #[test]
     fn t4_global_copilot_rule_classifies_to_copilot_root() {
         let roots = all_roots();
-        let abs = roots
-            .copilot_root
-            .clone()
-            .unwrap()
-            .join("instructions/my-rule.instructions.md");
+        let abs = roots.vendor_roots["copilot"].join("instructions/my-rule.instructions.md");
         let ap = AnchoredPath::from_target(
             &abs,
             ConfigScope::Global,
@@ -1403,7 +1860,7 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert_eq!(ap.anchor, PathAnchor::CopilotRoot);
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot("copilot"));
         assert_eq!(ap.relative, "instructions/my-rule.instructions.md");
     }
 
@@ -1437,18 +1894,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         // When there is no opencode_skills root, the vendor falls back to
         // the workspace layout under grim_home.
@@ -1492,18 +1941,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1539,18 +1980,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1595,18 +2028,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1645,18 +2070,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1698,18 +2115,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1747,18 +2156,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: anchor_root.clone(),
             grim_home: PathBuf::from("/unused"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let ap = AnchoredPath {
             anchor: PathAnchor::Workspace,
@@ -1793,18 +2194,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/definitely/not/on/disk/ws"),
             grim_home: PathBuf::from("/definitely/not/on/disk/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let abs = PathBuf::from("/definitely/not/on/disk/ws/.claude/rules/gone.md");
         let ap = AnchoredPath::from_target(
@@ -1829,18 +2222,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/Users/Alice/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         // abs uses a different case for the "Users"/"Alice"/"ws" segments —
         // on macOS (case-insensitive FS) this is the same path.
@@ -1870,18 +2255,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         // Build /ws/<non-utf8> by appending a non-UTF-8 component.
         let mut abs = PathBuf::from("/ws");
@@ -1908,18 +2285,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         // abs equals the workspace root exactly.
         let abs = PathBuf::from("/ws");
@@ -2015,23 +2384,23 @@ mod tests {
             }
 
             // ── Global scope ───────────────────────────────────────────────
-            // Claude: all three kinds → ClaudeRoot.
+            // Claude: all three kinds → the claude vendor root.
             (ConfigScope::Global, ClientTarget::Claude, ArtifactKind::Skill) => {
-                (PathAnchor::ClaudeRoot, format!("skills/{name}"))
+                (PathAnchor::VendorRoot("claude"), format!("skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Claude, ArtifactKind::Rule) => {
-                (PathAnchor::ClaudeRoot, format!("rules/{name}.md"))
+                (PathAnchor::VendorRoot("claude"), format!("rules/{name}.md"))
             }
             (ConfigScope::Global, ClientTarget::Claude, ArtifactKind::Agent) => {
-                (PathAnchor::ClaudeRoot, format!("agents/{name}.md"))
+                (PathAnchor::VendorRoot("claude"), format!("agents/{name}.md"))
             }
 
-            // Copilot skill / agent → CopilotRoot.
+            // Copilot skill / agent → the copilot vendor root.
             (ConfigScope::Global, ClientTarget::Copilot, ArtifactKind::Skill) => {
-                (PathAnchor::CopilotRoot, format!("skills/{name}"))
+                (PathAnchor::VendorRoot("copilot"), format!("skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Copilot, ArtifactKind::Agent) => {
-                (PathAnchor::CopilotRoot, format!("agents/{name}.md"))
+                (PathAnchor::VendorRoot("copilot"), format!("agents/{name}.md"))
             }
 
             // Copilot rule (inert) → GrimHome.
@@ -2063,12 +2432,12 @@ mod tests {
                 (PathAnchor::Workspace, format!(".codex/agents/{name}.toml"))
             }
             // Codex global: skill → AgentsSkills (root ends in /skills);
-            // agent → CodexRoot + `agents/<name>.toml`.
+            // agent → the codex vendor root + `agents/<name>.toml`.
             (ConfigScope::Global, ClientTarget::Codex, ArtifactKind::Skill) => {
                 (PathAnchor::AgentsSkills, name.to_string())
             }
             (ConfigScope::Global, ClientTarget::Codex, ArtifactKind::Agent) => {
-                (PathAnchor::CodexRoot, format!("agents/{name}.toml"))
+                (PathAnchor::VendorRoot("codex"), format!("agents/{name}.toml"))
             }
             // Codex rules are unsupported — excluded from the loop below.
             (_, ClientTarget::Codex, ArtifactKind::Rule) => {
@@ -2090,13 +2459,13 @@ mod tests {
                 (PathAnchor::Workspace, format!(".cursor/agents/{name}.md"))
             }
             (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Skill) => {
-                (PathAnchor::CursorRoot, format!("skills/{name}"))
+                (PathAnchor::VendorRoot("cursor"), format!("skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Rule) => {
-                (PathAnchor::CursorRoot, format!("rules/{name}.mdc"))
+                (PathAnchor::VendorRoot("cursor"), format!("rules/{name}.mdc"))
             }
             (ConfigScope::Global, ClientTarget::Cursor, ArtifactKind::Agent) => {
-                (PathAnchor::CursorRoot, format!("agents/{name}.md"))
+                (PathAnchor::VendorRoot("cursor"), format!("agents/{name}.md"))
             }
 
             // Kiro: skills + steering rules native (agents declined — skipped
@@ -2108,10 +2477,10 @@ mod tests {
                 (PathAnchor::Workspace, format!(".kiro/steering/{name}.md"))
             }
             (ConfigScope::Global, ClientTarget::Kiro, ArtifactKind::Skill) => {
-                (PathAnchor::KiroRoot, format!("skills/{name}"))
+                (PathAnchor::VendorRoot("kiro"), format!("skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Kiro, ArtifactKind::Rule) => {
-                (PathAnchor::KiroRoot, format!("steering/{name}.md"))
+                (PathAnchor::VendorRoot("kiro"), format!("steering/{name}.md"))
             }
 
             // Junie: skills only (rules + agents declined).
@@ -2119,7 +2488,7 @@ mod tests {
                 (PathAnchor::Workspace, format!(".junie/skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Junie, ArtifactKind::Skill) => {
-                (PathAnchor::JunieRoot, format!("skills/{name}"))
+                (PathAnchor::VendorRoot("junie"), format!("skills/{name}"))
             }
 
             // Gemini: skills via the shared `.agents/skills` pool; agents
@@ -2134,7 +2503,7 @@ mod tests {
                 (PathAnchor::AgentsSkills, name.to_string())
             }
             (ConfigScope::Global, ClientTarget::Gemini, ArtifactKind::Agent) => {
-                (PathAnchor::GeminiRoot, format!("agents/{name}.md"))
+                (PathAnchor::VendorRoot("gemini"), format!("agents/{name}.md"))
             }
 
             // Zed: skills via the shared pool only (rules + agents declined).
@@ -2214,8 +2583,8 @@ mod tests {
     /// adding a new client or kind without updating the table also fails.
     ///
     /// This locks `from_target` / `candidate_anchors` / `resolve` coherence,
-    /// and — for project scope — `path_for` too. In particular, dropping
-    /// `ClaudeRoot` from `candidate_anchors(Global, Claude, Skill)` would
+    /// and — for project scope — `path_for` too. In particular, dropping the
+    /// claude vendor root from `candidate_anchors(Global, Claude, Skill)` would
     /// cause assertion (3) to return `GrimHome` instead, failing this test.
     #[test]
     fn arch2_from_target_and_resolve_are_coherent_for_all_scope_client_kind_triples() {
@@ -2226,20 +2595,23 @@ mod tests {
         let roots = AnchorRoots {
             workspace: PathBuf::from("/ws"),
             grim_home: PathBuf::from("/grim"),
-            claude_root: Some(PathBuf::from("/claude")),
-            copilot_root: Some(PathBuf::from("/copilot")),
+            vendor_roots: [
+                ("claude", PathBuf::from("/claude")),
+                ("copilot", PathBuf::from("/copilot")),
+                ("codex", PathBuf::from("/codex")),
+                ("cursor", PathBuf::from("/cursor")),
+                ("kiro", PathBuf::from("/kiro")),
+                ("junie", PathBuf::from("/junie")),
+                ("gemini", PathBuf::from("/gemini")),
+                ("zed", PathBuf::from("/zed")),
+                ("amp", PathBuf::from("/amp")),
+            ]
+            .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
             // /agents/skills is the shared skills root (Codex/Gemini/Zed/Amp);
             // the rest are each vendor's own config root.
             agents_skills: Some(PathBuf::from("/agents/skills")),
-            codex_root: Some(PathBuf::from("/codex")),
-            cursor_root: Some(PathBuf::from("/cursor")),
-            kiro_root: Some(PathBuf::from("/kiro")),
-            junie_root: Some(PathBuf::from("/junie")),
-            gemini_root: Some(PathBuf::from("/gemini")),
-            zed_root: Some(PathBuf::from("/zed")),
-            amp_root: Some(PathBuf::from("/amp")),
         };
 
         let name = "test-artifact";
