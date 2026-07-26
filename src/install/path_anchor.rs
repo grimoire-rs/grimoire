@@ -777,9 +777,36 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
             // `GrimHome` is the universal fallback; deduplicate when the
             // primary already is `GrimHome`. An anchorless pair (declined /
             // bundle) yields the empty set → `UnknownAnchor` at the caller.
+            //
+            // `AgentsSkills` is appended for a pool-capable client whose
+            // native skills root is NOT already the pool: that client can be
+            // opted into `.agents/skills` with
+            // `[options.vendors.<name>].shared_skills`, and this function
+            // cannot see the config — so the triple must classify BOTH
+            // layouts, or a pooled dest would return `UnknownAnchor` and fail
+            // the install *after* the files are on disk. It is additive, never
+            // a replacement: the longest-root-first loop still lands a native
+            // dest on the vendor's own root, because `$HOME/.agents/skills`
+            // does not prefix `$HOME/.cursor/skills/<name>`.
+            //
+            // It goes AFTER the native anchor, not before. `from_target` sorts
+            // by component count with a *stable* sort, so insertion order is
+            // what breaks a tie — and the two roots do tie when a vendor
+            // override points at the pool's parent (`OPENCODE_CONFIG_DIR=
+            // $HOME/.agents` makes the OpenCode skills root the pool itself).
+            // Native-first keeps that user's recorded anchor tag exactly where
+            // it was; pool-first would silently re-anchor it on upgrade for
+            // someone who never opted in. Where the roots genuinely nest
+            // rather than tie, length decides and this order is irrelevant.
+            //
+            // Derived from [`Vendor::pool_capable`] rather than a literal
+            // client list so a vendor joining the roster cannot forget this.
             match primary {
                 None => Vec::new(),
                 Some(PathAnchor::GrimHome) => vec![PathAnchor::GrimHome],
+                Some(anchor) if anchor != PathAnchor::AgentsSkills && pool_opt_in_capable(client, kind) => {
+                    vec![anchor, PathAnchor::AgentsSkills, PathAnchor::GrimHome]
+                }
                 Some(anchor) => vec![anchor, PathAnchor::GrimHome],
             }
         }
@@ -795,6 +822,19 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
 /// list to drift.
 fn is_declined_global_pair(client: ClientTarget, kind: ArtifactKind) -> bool {
     client.vendor().kind_support(kind) == KindSupport::Declined
+}
+
+/// Whether `(client, kind)` can be moved into the shared `.agents/skills`
+/// pool by `[options.vendors.<name>].shared_skills`, and therefore needs
+/// [`PathAnchor::AgentsSkills`] among its candidates in addition to its
+/// native anchor.
+///
+/// Only skills pool, and only for a client
+/// [`pool_capable`](crate::install::vendor::Vendor::pool_capable) reports as a
+/// verified reader of the pool — the same predicate the config gate uses, so
+/// the accepted set and the classifiable set cannot drift apart.
+fn pool_opt_in_capable(client: ClientTarget, kind: ArtifactKind) -> bool {
+    kind == ArtifactKind::Skill && client.vendor().pool_capable()
 }
 
 /// Lexically subtract `root` from `abs` and return the forward-slash,
@@ -1096,6 +1136,130 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Hermetic roots for the `shared_skills` anchor tests: fixed, disjoint,
+    /// and with the vendor rows derived from [`VENDOR_ROOTS`] so a vendor W-G
+    /// adds is covered without touching this fixture.
+    fn pool_test_roots() -> AnchorRoots {
+        AnchorRoots {
+            workspace: PathBuf::from("/ws"),
+            grim_home: PathBuf::from("/grim"),
+            opencode_skills: Some(PathBuf::from("/oc/skills")),
+            claude_user_dir: Some(PathBuf::from("/claude-user")),
+            agents_skills: Some(PathBuf::from("/agents/skills")),
+            vendor_roots: super::VENDOR_ROOTS
+                .iter()
+                .map(|(name, _)| (*name, PathBuf::from(format!("/vendor-{name}"))))
+                .collect(),
+        }
+    }
+
+    /// Every client the `shared_skills` opt-in accepts must be able to
+    /// classify a **pooled** global skill destination. Without it the opt-in
+    /// silently does nothing at an unchanged pin — `output_at_current_layout`
+    /// reads `from_target`'s `Err(_)` as "already at the current layout", so
+    /// the integrity gate short-circuits to `AlreadyInstalled` and the skill
+    /// never moves. Change the pin as well and the same `UnknownAnchor` is
+    /// propagated with `?` from the materialize loop instead, **after the
+    /// files are already on disk**. Silent no-op or hard failure, depending on
+    /// the pin: neither is shippable.
+    ///
+    /// Adding a vendor to `POOL_CAPABLE_VENDORS` widens the set of configs
+    /// `grim config set` accepts; this asserts the anchor table widened with
+    /// it. It is not vacuous — the assertion fails for any pool-capable client
+    /// whose global skill arm is reachable but whose candidate set omits
+    /// `AgentsSkills`.
+    #[test]
+    fn every_pool_capable_client_can_anchor_a_pooled_global_skill() {
+        let roots = pool_test_roots();
+        let pool = PathAnchor::AgentsSkills.root(&roots).expect("hermetic pool root");
+        let mut checked = 0usize;
+        for client in ClientTarget::ALL {
+            if !client.vendor().pool_capable() {
+                continue;
+            }
+            checked += 1;
+            let candidates = super::candidate_anchors(ConfigScope::Global, client, ArtifactKind::Skill);
+            assert!(
+                candidates.contains(&PathAnchor::AgentsSkills),
+                "{client} is pool-capable, so `[options.vendors.{client}].shared_skills = true` is \
+                 accepted — but its global skill candidates {candidates:?} cannot classify a pooled \
+                 destination, which fails the install AFTER writing the files"
+            );
+            let ap = AnchoredPath::from_target(
+                &pool.join("demo"),
+                ConfigScope::Global,
+                client,
+                ArtifactKind::Skill,
+                &roots,
+            )
+            .unwrap_or_else(|e| panic!("{client}: a pooled global skill must classify, got {e:?}"));
+            assert_eq!(ap.anchor, PathAnchor::AgentsSkills, "{client}");
+            assert_eq!(ap.relative, "demo", "{client}");
+        }
+        assert!(
+            checked >= 8,
+            "the capability roster shrank unexpectedly ({checked} clients)"
+        );
+    }
+
+    /// The opt-in must be **additive**: appending `AgentsSkills` to a
+    /// pool-capable client's candidates may not steal its NATIVE destination
+    /// away from its own vendor root. The longest-root-first loop is what
+    /// makes that hold, and it holds only while the two roots are disjoint.
+    #[test]
+    fn appending_the_pool_anchor_leaves_native_skill_dests_on_their_own_root() {
+        let roots = pool_test_roots();
+        // The three clients the opt-in actually moves: pool-capable, but with
+        // a native skills root of their own.
+        for (client, expected, relative) in [
+            (ClientTarget::Cursor, PathAnchor::VendorRoot("cursor"), "skills/demo"),
+            (ClientTarget::Copilot, PathAnchor::VendorRoot("copilot"), "skills/demo"),
+            (ClientTarget::OpenCode, PathAnchor::OpenCodeSkills, "demo"),
+        ] {
+            let native = expected.root(&roots).unwrap().join(relative);
+            let ap =
+                AnchoredPath::from_target(&native, ConfigScope::Global, client, ArtifactKind::Skill, &roots).unwrap();
+            assert_eq!(
+                ap.anchor, expected,
+                "{client}'s native skill dest must still anchor at its own root, not the pool"
+            );
+            assert_eq!(ap.relative, relative, "{client}");
+        }
+    }
+
+    /// When the two roots are not disjoint but **equal**, the tie decides the
+    /// recorded tag — and it must keep falling to the client's own anchor.
+    ///
+    /// `OPENCODE_CONFIG_DIR=$HOME/.agents` makes the OpenCode skills root the
+    /// pool itself. Both candidates then have the same component count, so
+    /// only the stable sort in [`AnchoredPath::from_target`] plus this
+    /// function's native-first ordering keeps that user's existing
+    /// `open-code-skills` record from being silently re-anchored on upgrade,
+    /// for a feature they never enabled. The sibling test above uses disjoint
+    /// roots, where length decides and the ordering is untested.
+    #[test]
+    fn a_root_tie_keeps_the_clients_own_anchor_not_the_pool() {
+        let mut roots = pool_test_roots();
+        let pool = PathBuf::from("/agents/skills");
+        roots.opencode_skills = Some(pool.clone());
+        let ap = AnchoredPath::from_target(
+            &pool.join("demo"),
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Skill,
+            &roots,
+        )
+        .expect("a tied root must still classify");
+        assert_eq!(
+            ap.anchor,
+            PathAnchor::OpenCodeSkills,
+            "a root tie must resolve to the client's own anchor — re-anchoring an \
+             existing record to 'agents-skills' would rewrite state.json for a user \
+             who never enabled shared_skills"
+        );
+        assert_eq!(ap.relative, "demo");
     }
 
     /// Every [`VENDOR_ROOTS`] row resolves to **its own** vendor's root.

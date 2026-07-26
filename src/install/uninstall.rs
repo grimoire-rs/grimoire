@@ -60,18 +60,23 @@ pub struct UninstallResult {
     pub outcome: UninstallOutcome,
     /// The on-disk targets actually deleted.
     pub removed: Vec<PathBuf>,
-    /// The on-disk targets deliberately left in place — a footprint the
-    /// containment guard refuses to delete (a relocated ancestor) while the
-    /// record is dropped anyway. Reported so the divergence between state and
-    /// filesystem is visible instead of silent. Sorted and deduplicated
-    /// (multiple outputs can share one escaping target). Empty on every
-    /// normal uninstall. Never carries an `entry` output's config file — see
+    /// The on-disk targets deliberately left in place while the record is
+    /// dropped anyway. Two producers: the containment guard refusing to delete
+    /// a footprint that resolves outside its anchor root (a relocated
+    /// ancestor), and the legacy-root reaper preserving a locally-modified
+    /// copy stranded at a vendor root this release relocated. Reported so the
+    /// divergence between state and filesystem is visible instead of silent.
+    /// Sorted and deduplicated (multiple outputs can share one escaping
+    /// target). Empty unless something was deliberately left behind. Never
+    /// carries an `entry` output's config file — see
     /// [`Self::abandoned_entries`].
     pub retained: Vec<PathBuf>,
-    /// The managed config-file entries (`entry` outputs) an escaping
-    /// resolve left un-spliced while the record was dropped anyway — the
-    /// `entry` counterpart of `retained`. Sorted and deduplicated. Empty on
-    /// every normal uninstall.
+    /// The managed config-file entries (`entry` outputs) left un-spliced while
+    /// the record was dropped anyway — the `entry` counterpart of `retained`,
+    /// with the same two producers: an escaping resolve, and the legacy-root
+    /// reaper preserving a member the user edited inside a config file at a
+    /// vendor root this release relocated. Sorted and deduplicated. Empty
+    /// unless something was deliberately left behind.
     pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
@@ -225,12 +230,15 @@ pub fn uninstall(
         .iter()
         .filter_map(|out| out.client.parse().ok())
         .collect();
-    super::installer::reap_relocated_roots(
+    let (stranded_files, stranded_entries) = super::installer::reap_relocated_roots(
         &record,
         roots,
         &super::installer::relocated_vendor_roots_from_env(),
         &handled,
+        super::installer::ReapContext::Uninstalled,
     );
+    retained.extend(stranded_files);
+    abandoned_entries.extend(stranded_entries);
 
     state.remove(kind, name);
     // Several outputs (one per client) can share a single escaping

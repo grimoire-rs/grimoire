@@ -125,6 +125,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         scope.scope,
         &args.client,
         &scope.options.clients,
+        &scope.options.vendors,
     ))?;
     let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
@@ -188,6 +189,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             scope.scope,
             &[],
             &scope.options.clients,
+            &scope.options.vendors,
         ))?;
         reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force).map_err(map_prune_err)?
     };

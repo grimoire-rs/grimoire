@@ -80,6 +80,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         scope.scope,
         &args.client,
         &scope.options.clients,
+        &scope.options.vendors,
     ))?;
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
@@ -284,6 +285,7 @@ async fn dev_install(
         scope.scope,
         &args.client,
         &scope.options.clients,
+        &scope.options.vendors,
     ))?;
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;

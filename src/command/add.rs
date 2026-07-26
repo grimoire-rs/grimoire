@@ -535,6 +535,7 @@ async fn install_added(
         scope.scope,
         &[],
         &scope.options.clients,
+        &scope.options.vendors,
     ))?;
     let mut state = super::grim(
         super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),

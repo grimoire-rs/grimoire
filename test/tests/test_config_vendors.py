@@ -6,14 +6,21 @@ The per-vendor table is a DYNAMIC config key family: one addressable key
 per client name (``options.vendors.<name>.shared_skills``), parsed from the
 remainder after a fixed prefix, exactly like ``registry.<alias>.<field>``.
 
-Three distinct failure modes, three distinct exit codes:
+Four distinct failure modes across three exit codes:
 
   - unknown vendor NAME (it is part of the key path)  → 64 (unknown key)
   - bad VALUE on a valid key                          → 65 (data error)
-  - unknown vendor in a hand-written ``grimoire.toml``→ 78 (config error)
+  - ``shared_skills = true`` on a client that does not
+    read the shared ``.agents/skills`` pool, set via
+    ``config set``                                    → 65 (data error)
+  - anything wrong in a hand-written ``grimoire.toml``
+    (unknown vendor, or the same non-pool opt-in)     → 78 (config error)
 
-This worktree ships the surface only — no consumer reads ``shared_skills``
-yet, so these tests assert the config plumbing, never install layout.
+The last two are one checker with two exit mappings — the same split
+``check_vendor_name`` already has (64 at the key boundary, 78 at load).
+
+No consumer reads ``shared_skills`` yet, so these tests assert the config
+plumbing and the capability gate, never install layout.
 """
 from __future__ import annotations
 
@@ -356,6 +363,104 @@ def test_invalid_bool_value_exits_65(grim_at: object, project_dir: Path) -> None
     as_json = runner.run("--format", "json", "config", "set", VENDOR_KEY, "yes", check=False)
     assert as_json.returncode == 65
     _assert_error_envelope(as_json, "data", 65)
+
+
+def test_shared_skills_on_a_non_pool_client_exits_65(grim_at: object, project_dir: Path) -> None:
+    """Enabling ``shared_skills`` for a client that does not read the shared
+    ``.agents/skills`` pool is a bad VALUE on a valid key — exit 65.
+
+    Claude is the case that matters: it is both a verified non-reader AND the
+    only vendor declaring ``skill_fields``, so pooling it would rewrite a
+    directory three siblings already record."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "options.vendors.claude.shared_skills", "true", check=False
+    )
+    assert result.returncode == 65, (
+        f"a non-pool client must exit 65 (DataError), got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    # Discriminating: 65 is also the bad-boolean code, so pin the phrase only
+    # this branch produces.
+    assert "does not read the shared .agents/skills pool" in result.stderr, (
+        f"the rejection must come from the pool-capability check; got: {result.stderr!r}"
+    )
+    assert "cursor" in result.stderr, (
+        f"the error must list the clients that DO read it; got: {result.stderr!r}"
+    )
+
+    as_json = runner.run(
+        "--format",
+        "json",
+        "config",
+        "set",
+        "options.vendors.claude.shared_skills",
+        "true",
+        check=False,
+    )
+    assert as_json.returncode == 65
+    _assert_error_envelope(as_json, "data", 65)
+
+    # Nothing was written: the refusal is total, not partial.
+    body = (project_dir / "grimoire.toml").read_text()
+    assert "vendors" not in body, f"a refused set must persist nothing; config was:\n{body}"
+
+
+def test_shared_skills_false_on_a_non_pool_client_is_accepted(
+    grim_at: object, project_dir: Path
+) -> None:
+    """Only *enabling* is refused. ``false`` is every client's resting state,
+    so setting it explicitly must stay a no-op success — otherwise a user
+    could not clear a key they were allowed to reach."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "set", "options.vendors.claude.shared_skills", "false", check=False
+    )
+    assert result.returncode == 0, (
+        f"setting the default on any known client must succeed, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+def test_authored_shared_skills_on_a_non_pool_client_exits_78(
+    grim_at: object, project_dir: Path
+) -> None:
+    """The load-time half of the same checker: a hand-written opt-in on a
+    non-pool client fails at LOAD with 78 (an invalid ``[options.vendors]``
+    table), the same class as an authored unknown client name.
+
+    One checker, two exit codes — exactly the split ``check_vendor_name``
+    already has (64 at the key boundary, 78 at load)."""
+    _write_config_with_vendor(project_dir, "claude", shared_skills=True)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 78, (
+        f"an authored non-pool opt-in must exit 78 (ConfigError), got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert "does not read the shared .agents/skills pool" in result.stderr, (
+        f"the rejection must come from the pool-capability check; got: {result.stderr!r}"
+    )
+
+
+def test_authored_shared_skills_false_on_a_non_pool_client_loads(
+    grim_at: object, project_dir: Path
+) -> None:
+    """An authored ``false`` on a non-pool client is pointless but valid, and
+    must not turn a previously-loading config into an error."""
+    _write_config_with_vendor(project_dir, "claude", shared_skills=False)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("config", "list", check=False)
+    assert result.returncode == 0, (
+        f"an authored default must still load, got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
 
 
 def test_authored_unknown_vendor_exits_78(grim_at: object, project_dir: Path) -> None:

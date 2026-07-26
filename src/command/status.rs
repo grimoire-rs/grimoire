@@ -169,6 +169,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 scope.scope,
                 &[],
                 &scope.options.clients,
+                &scope.options.vendors,
             ))?
             .clients()
             .to_vec(),

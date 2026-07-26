@@ -102,11 +102,28 @@ shared_skills = true
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `shared_skills` | boolean | `false` | When `true`, this client's skills install into the cross-vendor `.agents/skills` pool ([Codex, Gemini, Zed, and Amp](./clients.md) already read it) instead of the client's own skills directory. Absent or `false`, the client keeps its native layout. |
+| `shared_skills` | boolean | `false` | When `true`, this client's skills install into the cross-vendor `.agents/skills` pool instead of the client's own skills directory. Absent or `false`, the client keeps its native layout. |
 
-**Reserved — not yet honoured.** The key parses, validates, and stores today,
-but [`grim install`](./commands.md#install) does not read it yet: setting it
-changes no client's layout until the renderer opt-in ships.
+Only a client that actually reads the pool may be opted into it — grim never
+writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`
+and the generic `agents` client (which already render there), plus `cursor`,
+`copilot` and `opencode` (which scan it alongside their own skills directory).
+Setting `true` on any other client is refused: exit 65 (`EX_DATAERR`) from
+[`grim config set`](./commands.md#config), exit 78 (`EX_CONFIG`) at load when
+the value was hand-authored. `false` stays accepted for every client — it is
+their resting state.
+
+Flipping the value moves the skill: the next [`grim install`](./commands.md#install)
+or [`grim update`](./commands.md#update) writes it at the new location and
+removes the old copy. A copy you edited by hand is **never** deleted — it is
+kept and grim warns, naming both paths, because the client would otherwise
+see the same skill twice (skill scanning is additive everywhere).
+
+If the new location is already occupied by a file grim did not write — a skill
+you curated in `.agents/skills` by hand — the move is refused with exit 65
+(`EX_DATAERR`) and nothing is touched, the same
+[untracked-destination guard](./json-interface.md#error-reason) that protects any install.
+Pass `--force` to overwrite it.
 
 An entry set to `true` round-trips through every `grim` write. One left at the
 default — `shared_skills = false`, or a bare `[options.vendors.<name>]` header —

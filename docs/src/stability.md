@@ -134,7 +134,8 @@ paths may change in a minor release with automatic migration.
 That migration is mechanical: the first install or update after an
 upgrade that moved a layout re-materializes the artifact at its new
 path, re-anchors the install record, and reaps the unmodified old
-output. A locally modified old file is never deleted — the same
+output. `uninstall` collects the same old output, so removing an
+artifact before ever re-installing it does not strand a copy either. A locally modified old file is never deleted — the same
 preservation rule the [untracked-destination guard](#unstable) applies.
 This layout-migration reaper has no `--force` override: it always
 preserves a modified file. (The distinct dropped-client reaper on

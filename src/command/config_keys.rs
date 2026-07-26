@@ -257,8 +257,8 @@ pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
     value_type: ValueType::Bool { default: false },
     title: "Shared skills pool",
     description: "Controls whether this client's skills install into the shared `.agents/skills` \
-                   pool instead of its own directory — reserved, `grim install` does not read it \
-                   yet. Disabled by default, keeping the native layout.",
+                   pool instead of its own directory. Disabled by default, keeping the native \
+                   layout. Enabling it is refused for a client that does not read the pool.",
     constraints: None,
 };
 

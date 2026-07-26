@@ -166,10 +166,10 @@ impl TuiOptions {
 #[serde(deny_unknown_fields)]
 pub struct VendorOptions {
     /// Controls whether this client's skills install into the shared
-    /// `.agents/skills` pool instead of its own directory — reserved,
-    /// `grim install` does not read it yet. Disabled by default, keeping
-    /// the native layout. There is no `--client` flag and no
-    /// `[options]`-level equivalent, so the resolved scope's value is the
+    /// `.agents/skills` pool instead of its own directory. Disabled by
+    /// default, keeping the native layout. Enabling it is refused for a
+    /// client that does not read the pool. There is no `--client` flag and
+    /// no `[options]`-level equivalent, so the resolved scope's value is the
     /// only source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared_skills: bool,

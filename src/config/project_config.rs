@@ -496,6 +496,43 @@ pub(crate) fn check_vendor_name(name: &str) -> Result<(), ClientsInvalid> {
     check_clients(std::slice::from_ref(&name.to_string()))
 }
 
+/// Refuse `shared_skills = true` on a client that does not read the shared
+/// `$HOME/.agents/skills` pool.
+///
+/// Never write where nothing reads — the same philosophy as `kind_support`'s
+/// honest declines. The capability roster lives with the vendors
+/// ([`Vendor::pool_capable`](crate::install::vendor::Vendor::pool_capable));
+/// this is only its config-surface adapter.
+///
+/// One checker, two paths, exactly as [`check_clients`] already is: the setter
+/// maps it to **exit 65** (a bad *value* on a valid key) and load-time
+/// validation to **exit 78** (an invalid `[options.vendors]` table). The caller
+/// owns the exit code; the reason string is shared so the two can never
+/// disagree about which clients are accepted.
+///
+/// `name` must already have passed [`check_vendor_name`] — an unknown client
+/// is a *name* error and is reported before this runs.
+///
+/// # Errors
+///
+/// The reason, ready to render after `invalid options.vendors: ` or on its
+/// own. `name` is escaped: it reaches here from a config key or a table key.
+pub(crate) fn check_pool_capable(name: &str) -> Result<(), String> {
+    if name.parse::<ClientTarget>().is_ok_and(|c| c.vendor().pool_capable()) {
+        return Ok(());
+    }
+    let capable: Vec<&str> = ClientTarget::ALL
+        .iter()
+        .filter(|c| c.vendor().pool_capable())
+        .map(|c| c.vendor().name())
+        .collect();
+    Err(format!(
+        "client '{}' does not read the shared .agents/skills pool, so shared_skills would write where nothing reads; clients that do: {}",
+        name.escape_debug(),
+        capable.join(", ")
+    ))
+}
+
 /// Validate the authored `[options.vendors]` table keys at load time.
 ///
 /// A hand-edited `grimoire.toml` bypasses `config set`, so without this an
@@ -504,7 +541,7 @@ pub(crate) fn check_vendor_name(name: &str) -> Result<(), ClientsInvalid> {
 /// the setter exactly; classifies as a config error (exit 78), mirroring
 /// [`validate_clients`].
 fn validate_vendors(vendors: &BTreeMap<String, VendorOptions>, path: &Path) -> Result<(), ConfigError> {
-    for name in vendors.keys() {
+    for (name, opts) in vendors {
         check_vendor_name(name).map_err(|reason| {
             let detail = match reason {
                 ClientsInvalid::Blank => "blank client name; each table key must name a client".to_string(),
@@ -527,6 +564,14 @@ fn validate_vendors(vendors: &BTreeMap<String, VendorOptions>, path: &Path) -> R
             };
             ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail })
         })?;
+        // Name accepted; now the value. A hand-authored `shared_skills = true`
+        // on a client that never reads the pool is refused here for the same
+        // reason `config set` refuses it — otherwise grim would write where
+        // nothing reads, silently.
+        if opts.shared_skills {
+            check_pool_capable(name)
+                .map_err(|detail| ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail }))?;
+        }
     }
     Ok(())
 }
@@ -1819,6 +1864,50 @@ tree_separators = ["/", "::"]
             cfg.options.vendors["cursor"].shared_skills,
             "the authored value must survive the parse"
         );
+    }
+
+    #[test]
+    fn vendors_shared_skills_on_a_non_pool_client_rejected_at_load() {
+        // Claude does not scan `.agents/skills`, so an authored opt-in would
+        // make grim write where nothing reads. Refused at load, not silently
+        // ignored — the same honesty as `kind_support`'s declines.
+        let err = ProjectConfig::from_toml_str("[options.vendors.claude]\nshared_skills = true\n")
+            .expect_err("shared_skills on a non-pool client must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not read the shared .agents/skills pool"),
+            "the reason must name the actual problem: {msg}"
+        );
+        assert!(
+            msg.contains("cursor"),
+            "the message must list the clients that DO read it: {msg}"
+        );
+    }
+
+    #[test]
+    fn vendors_shared_skills_false_on_a_non_pool_client_stays_accepted() {
+        // Only enabling it is refused. `false` is the resting state for every
+        // client, so an authored `false` — however pointless — must not error.
+        let cfg = ProjectConfig::from_toml_str("[options.vendors.claude]\nshared_skills = false\n")
+            .expect("an explicit default must still parse");
+        assert!(!cfg.options.vendors["claude"].shared_skills);
+    }
+
+    #[test]
+    fn pool_capable_check_accepts_exactly_the_vendor_roster() {
+        // The config surface must not carry its own copy of the roster.
+        for client in ClientTarget::ALL {
+            let name = client.vendor().name();
+            assert_eq!(
+                check_pool_capable(name).is_ok(),
+                client.vendor().pool_capable(),
+                "the config check must mirror `Vendor::pool_capable` for '{name}'"
+            );
+        }
+        assert!(check_pool_capable("cursor").is_ok());
+        assert!(check_pool_capable("claude").is_err());
+        assert!(check_pool_capable("kiro").is_err());
+        assert!(check_pool_capable("junie").is_err());
     }
 
     #[test]
