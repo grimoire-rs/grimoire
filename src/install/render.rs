@@ -916,6 +916,10 @@ metadata:
             ClientTarget::Zed,
             ClientTarget::Amp,
             ClientTarget::Agents,
+            // Antigravity pools at PROJECT scope only — its global skills live
+            // under its own `~/.gemini/config/skills`. The invariant below
+            // probes the project root, which is what makes it a member here.
+            ClientTarget::Antigravity,
         ];
 
         let ws = Path::new("/w");

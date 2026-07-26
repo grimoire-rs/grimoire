@@ -13,8 +13,8 @@ fidelity, and declines (warn, skip, zero files) where no ownable surface exists
 at all.
 
 This page is the enforced source of truth. A table-parity test in
-`src/install/client_target.rs` reads this matrix at build time and fails the
-build if any cell drifts from the `Vendor` implementations, so the
+`src/install/client_target.rs` reads this matrix when the test suite runs and
+fails if any cell drifts from the `Vendor` implementations, so the
 documentation cannot silently lie about what is supported.
 
 Legend:
@@ -47,6 +47,7 @@ Legend:
 | [Zed] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z"/></svg> | ✓ | ✗ | ✗ | ◐ |
 | [Amp] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg> | ✓ | ✗ | ✗ | ◐ |
 | agents | ✓ | ✗ | ✗ | ✗ |
+| [Antigravity] | ✓ | ✗ | ✓ | ◐ |
 
 </div>
 
@@ -54,7 +55,8 @@ Bundles decompose into their member kinds and are not a column.
 
 `agents` is not a product — it is the vendor-neutral target. Selecting it
 installs one copy of each skill into the cross-vendor `.agents/skills` pool
-that Codex, Gemini, Zed, and Amp all scan, rather than into any one client's
+that Codex, Gemini, Zed, Amp, and (at project scope) Antigravity all scan —
+making it the pool's sixth writer — rather than into any one client's
 directory. Rules, agents, and MCP have no vendor-neutral format, so it declines
 all three. It is never detected, only selected: request it explicitly with
 `--client agents` or in `[options].clients`.
@@ -75,6 +77,13 @@ structured `oauth` block. No surveyed client other than [Claude] documents a
 native config surface for either, so grim skips a ws- or oauth-bearing server
 for that client with a warning rather than writing an entry the client cannot
 honor. Every other transport (stdio, sse, http) registers normally.
+
+[Antigravity] is the one close call. Its MCP docs name websocket alongside sse
+and streamable HTTP as taking the same `serverUrl` field, which read literally
+would make it a second `ws` target — but that rests on a single sentence grim
+could not confirm against raw upstream page text, and adding support later is
+additive while withdrawing it would be a breaking change. grim therefore
+declines `ws` there too, and revisits it on confirmation.
 
 ### Copilot: global MCP environment references {#gap-copilot-env}
 
@@ -148,10 +157,14 @@ targets that surface, verified against the still-served enterprise docs.
 
 ### Shared skills pool visibility {#gap-shared-pool}
 
-[Codex], [Gemini], [Zed], and [Amp] all read the cross-vendor `.agents/skills`
-directory. A skill installed for any one of them is physically the same file
-every other pool member reads, so it is discoverable by all four even when only
-one was selected. This is upstream scan behavior, not a grim choice; grim
+[Codex], [Gemini], [Zed], [Amp], and — at project scope — [Antigravity] all
+read the cross-vendor `.agents/skills` directory. A skill installed for any one
+of them is physically the same file every other pool member reads, so it is
+discoverable by all of them even when only one was selected. [Antigravity] is
+the one partial member: its *global* skills live under its own
+`~/.gemini/config/skills`, so a global install for it is a separate copy.
+
+This is upstream scan behavior, not a grim choice; grim
 refcounts the shared directory so removing one client never deletes a skill
 another client still records.
 
@@ -169,6 +182,43 @@ server with a warning.
 `CLAUDE.md`) with no per-file scoping, so rules are declined. [Amp] subagents are
 spawned at runtime with no installable file format, so agents are declined.
 
+### Antigravity: rules declined, project detection is opt-in {#gap-antigravity}
+
+[Antigravity] documents a workspace `.agents/rules` folder, but grim declines
+rules for it on two counts. Global rules are a single `~/.gemini/GEMINI.md` —
+not a per-file surface, and a file [Gemini] writes to as well
+([gemini-cli #16058][antigravity-rules-collision]), so grim cannot own it. And
+no rule-file frontmatter key was found for the workspace folder: scoping is
+described as a glob-based "activation mode" configured in the product, so a
+rule written there would silently lose its `paths`. grim declines rather than
+install a rule that looks scoped and is not.
+
+[Antigravity] is also never auto-detected in a workspace. All of its
+project-scope surfaces live under `.agents/`, which [Codex], [Gemini], [Zed],
+[Amp] and `agents` also use — detecting on it would install [Antigravity] files
+into every workspace that has ever used any pool client. Upstream documents no
+product-specific project marker, so grim reports none: request it explicitly
+with `--client antigravity` or in `[options].clients`. Global scope is detected
+normally, from `~/.gemini/config`.
+
+One consequence of that root worth knowing: `~/.gemini/config` sits *inside*
+`~/.gemini`, which is [Gemini]'s own global marker. A global install for
+[Antigravity] therefore creates a directory that makes [Gemini] detected too,
+so a later autodetected global command will target both. Pass `--client` (or
+set `[options].clients`) if you want only one of them.
+
+Uninstalling does not undo it. grim removes the files it installed but leaves
+the now-empty directories, so `~/.gemini` survives and [Gemini] stays detected.
+Remove the empty tree by hand if you want that signal gone. The reverse never
+happens: a global [Gemini] install creates `~/.gemini/agents`, never
+`~/.gemini/config`, so [Gemini] alone never makes [Antigravity] detected.
+
+This client targets the **Antigravity 2.0** desktop product. The Antigravity
+CLI (`agy`) and the Antigravity IDE read *different* global skill directories
+(`~/.gemini/antigravity-cli/skills/` and `~/.gemini/antigravity/skills/`), so
+their users are not served by this client name; both can be added later under
+their own names.
+
 ## The `compatibility:` frontmatter field {#compatibility-disclaimer}
 
 An artifact may carry a free-text `compatibility:` frontmatter field. It is an
@@ -176,7 +226,7 @@ editor and runtime *hint* only — a note for humans and tools that read the
 source. It has **zero effect** on how grim renders or gates an artifact per
 client. A `compatibility: codex` line does not make a rule install for [Codex],
 and it never overrides the matrix above. This matrix — enforced by the
-build-time parity test — is the authoritative statement of what grim installs
+parity test — is the authoritative statement of what grim installs
 where.
 
 <!-- external -->
@@ -190,6 +240,8 @@ where.
 [gemini]: https://geminicli.com
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[antigravity]: https://antigravity.google
+[antigravity-rules-collision]: https://github.com/google-gemini/gemini-cli/issues/16058
 [cursor-glob-split]: https://forum.cursor.com/t/76648
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040

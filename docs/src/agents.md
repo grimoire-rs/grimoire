@@ -87,7 +87,8 @@ OpenCode needs.
 
 On install, grim projects the canonical agent file into each client's native
 format, or declines it where the client ships no ownable agent surface. Agents
-are the least uniform kind — only six clients have a file format grim can own.
+are the least uniform kind — only seven clients have a file format grim can
+own.
 
 | Client | Output | What grim projects |
 |---|---|---|
@@ -101,6 +102,7 @@ are the least uniform kind — only six clients have a file format grim can own.
 | [Junie][junie-docs] | not supported | agents declined — the `.junie/agents/` format is early-access-preview only |
 | [Zed][zed-docs] | not supported | agents declined — external agents run over ACP with no installable file |
 | [Amp][amp-docs] | not supported | agents declined — subagents are spawned at runtime with no file format |
+| [Antigravity][antigravity-subagents-docs] | `.md` + YAML frontmatter | `tools` emitted as a YAML **list** (upstream types it `string[]`); nothing lifted — no `antigravity.*` registry yet |
 
 The canonical format **is** Claude Code's native subagent format, so a plain
 agent — one with no `<vendor>.<field>` metadata keys — installs for Claude
@@ -126,6 +128,7 @@ layout may change in any minor release (see [stability][stability-unstable]).
 | [Codex][codex-subagents-docs] | `.codex/agents/<name>.toml` |
 | [Cursor][cursor-subagents-docs] | `.cursor/agents/<name>.md` |
 | [Gemini CLI][gemini-subagents-docs] | `.gemini/agents/<name>.md` |
+| [Antigravity][antigravity-subagents-docs] | `.agents/agents/<name>.md` |
 
 **Global scope** (native user-level discovery directories, honoring each
 client's directory-override variable — the same resolution as
@@ -139,6 +142,7 @@ client's directory-override variable — the same resolution as
 | [Codex][codex-subagents-docs] | `~/.codex/agents/<name>.toml` | `$CODEX_HOME/agents/` |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/agents/<name>.md` | None — `CURSOR_CONFIG_DIR` is not honored |
 | [Gemini CLI][gemini-subagents-docs] | `~/.gemini/agents/<name>.md` | None — no `GEMINI_CONFIG_DIR` exists upstream |
+| [Antigravity][antigravity-subagents-docs] | `~/.gemini/config/agents/<name>.md` | None found in current docs |
 
 Unlike global rules, Copilot agents have a real user-level home — no
 inert-install warning applies.
@@ -217,6 +221,7 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
 [cursor-subagents-docs]: https://cursor.com/docs/context/subagents
 [gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
+[antigravity-subagents-docs]: https://antigravity.google/docs/subagents
 [kiro-docs]: https://kiro.dev
 [junie-docs]: https://www.jetbrains.com/junie/
 [zed-docs]: https://zed.dev
