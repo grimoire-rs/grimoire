@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /print.html
+
+Sitemap: https://grimoire.rs/sitemap.xml

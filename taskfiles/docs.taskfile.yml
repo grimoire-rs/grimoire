@@ -8,12 +8,16 @@ tasks:
     summary: |
       Regenerates the JSON Schemas (via :schema:generate) and then builds
       the mdBook site. The schema step runs first so the published site
-      always carries schemas that match the current parser. This is the
-      task CI runs to produce the GitHub Pages artifact.
+      always carries schemas that match the current parser. Afterwards,
+      docs/seo.py post-processes docs/book: it injects per-page canonical
+      and OG/Twitter meta tags (mdBook's Handlebars context can't compute
+      these itself) and writes sitemap.xml from the pages it just tagged.
+      This is the task CI runs to produce the GitHub Pages artifact.
     deps:
       - :schema:generate
     cmds:
       - mdbook build {{.ROOT_DIR}}/docs
+      - python3 {{.ROOT_DIR}}/docs/seo.py
 
   serve:
     desc: Generate schemas and serve the mdBook site locally (pass flags after --)
