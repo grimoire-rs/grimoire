@@ -30,7 +30,7 @@ use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
-use super::path_anchor::{AnchorError, AnchorRoots, Containment};
+use super::path_anchor::{AnchorError, AnchorRoots, Containment, PathAnchor};
 use super::progress::{InstallProgress, SilentProgress};
 use super::target::InstallTarget;
 
@@ -773,6 +773,11 @@ async fn install_one<M: ArtifactMaterializer>(
     // record is replaced.
     if let Some(rec) = &recorded {
         reap_moved_outputs(rec, &outputs, roots);
+        // …and the outputs stranded at a vendor root this release relocated,
+        // which the pair-keyed reaper above cannot see. `materialize_set` is
+        // exactly the set that got a fresh output above, so a client this pass
+        // skipped keeps its only copy.
+        reap_relocated_roots(rec, roots, &relocated_vendor_roots_from_env(), &materialize_set);
     }
 
     // `outputs` is the single source of truth — no denormalized top-level
@@ -1087,6 +1092,275 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
             && let Err(e) = remove_path(dir)
         {
             tracing::warn!("could not reap moved support dir '{}': {e}", dir.display());
+        }
+    }
+}
+
+/// Vendor roots **this release** moved, each paired with the root the previous
+/// release wrote under. Three rows, and the set is deliberately closed:
+///
+/// - `kiro` / `gemini` — grim started honoring `$KIRO_HOME` /
+///   `$GEMINI_CLI_HOME`. Before that, a global install with the variable set
+///   still landed under `~/.kiro` / `~/.gemini`.
+/// - `zed` — macOS only. Zed's root came from the shared
+///   [`xdg_config_dir`](super::vendor::xdg_config_dir), which honors
+///   `$XDG_CONFIG_HOME` on every non-Windows target; upstream reads it on
+///   Linux/FreeBSD only and hardcodes `~/.config/zed` on macOS. Linux and
+///   Windows resolution is unchanged, so their legacy root *is* their current
+///   one and guard 1 of [`reap_relocated_roots`] drops the row for free — the
+///   same reason an override set to the default path reaps nothing.
+///
+/// In every case the record names the *same* `(anchor, relative)` pair the
+/// current layout produces; only the root resolution moved.
+///
+/// **Never add a row for a variable grim always honored** (`CLAUDE_CONFIG_DIR`,
+/// `COPILOT_HOME`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`). Those roots never
+/// moved, and the pre-override location is not empty — it is the *default*
+/// root, which grim itself very likely populated in an earlier session before
+/// the user set the variable. Those copies hash-match, so a row would delete
+/// them. A row is minted only by a release that *changes* how a root resolves.
+///
+/// Pure in its inputs, platform included, so every arm is exercised on every
+/// host — the macOS row cannot rot unnoticed on a Linux dev box. Same reason
+/// `zed_root_from` takes its `ZedRootKind` as a parameter, and the same reason
+/// this takes env values rather than reading them: `std::env::set_var` is
+/// `unsafe` in edition 2024 and this crate is `forbid(unsafe_code)`.
+fn relocated_vendor_roots(
+    kiro_home: Option<PathBuf>,
+    gemini_cli_home: Option<PathBuf>,
+    zed_legacy_root: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut rows = Vec::new();
+    if kiro_home.is_some()
+        && let Some(legacy) = super::vendor_kiro::kiro_root(None, home.clone())
+    {
+        rows.push(("kiro", legacy));
+    }
+    if gemini_cli_home.is_some()
+        && let Some(legacy) = super::vendor_gemini::gemini_root(None, home)
+    {
+        rows.push(("gemini", legacy));
+    }
+    if let Some(legacy) = zed_legacy_root {
+        rows.push(("zed", legacy));
+    }
+    rows
+}
+
+/// [`relocated_vendor_roots`] resolved against the ambient environment — the
+/// single place this reaper reads env, mirroring the installer's existing
+/// `COPILOT_HOME` probe.
+pub(crate) fn relocated_vendor_roots_from_env() -> Vec<(&'static str, PathBuf)> {
+    use super::vendor::{env_dir, home_dir, xdg_config_dir};
+    // `cfg!`, not `#[cfg]`: the row is macOS-only but the expression must
+    // type-check and stay reachable on every target (the `zed_root_from`
+    // precedent). Off macOS this is `None` and no row is minted.
+    let zed_legacy_root = cfg!(target_os = "macos")
+        .then(xdg_config_dir)
+        .flatten()
+        .map(|c| c.join("zed"));
+    relocated_vendor_roots(
+        env_dir("KIRO_HOME"),
+        env_dir("GEMINI_CLI_HOME"),
+        zed_legacy_root,
+        home_dir(),
+    )
+}
+
+/// `roots` with every relocated vendor root replaced by its pre-override
+/// value — the view a grim that predates the override resolved under.
+///
+/// Field-exhaustive on purpose: a new [`AnchorRoots`] field must be a
+/// conscious decision here, not a silent default that would make the legacy
+/// view diverge from the live one on an anchor this reaper does not own.
+fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, PathBuf)]) -> AnchorRoots {
+    let mut vendor_roots = roots.vendor_roots.clone();
+    for (name, legacy) in relocated {
+        vendor_roots.insert(name, legacy.clone());
+    }
+    AnchorRoots {
+        workspace: roots.workspace.clone(),
+        grim_home: roots.grim_home.clone(),
+        opencode_skills: roots.opencode_skills.clone(),
+        claude_user_dir: roots.claude_user_dir.clone(),
+        agents_skills: roots.agents_skills.clone(),
+        vendor_roots,
+    }
+}
+
+/// Legacy-root reaper (Principle 9's layout-move duty): collect what a record
+/// left stranded at a vendor root this release **relocated**.
+///
+/// [`reap_moved_outputs`] is structurally blind to this case. It keys on the
+/// stored `(anchor, relative)` pair, and honoring `$KIRO_HOME` /
+/// `$GEMINI_CLI_HOME` did not move the render *layout* — the pair is
+/// byte-identical before and after — it moved the **root resolution**, which
+/// the pair cannot express. Hence a separate probe against the pre-override
+/// root, not a sixth guard bolted onto that function.
+///
+/// Guards, in order:
+/// 1. `written` did not *handle* this client's output **this run** ⇒ the
+///    pre-override root holds the ONLY copy, and reaping it would destroy the
+///    artifact with nothing put in its place. On the install path `written` is
+///    the set materialized this pass; on the uninstall path
+///    ([`super::uninstall::uninstall`]) it is the set whose new-root footprint
+///    was just removed — in both cases "grim has already dealt with this
+///    client's live copy, so the old one is genuinely stranded". This is the
+///    counterpart of
+///    [`reap_moved_outputs`]'s guard 2, which gets the same protection for
+///    free by comparing against the new output set. It matters whenever the
+///    record carries a client this pass did not touch — a narrower `--client`,
+///    or a vendor no longer detected (`$KIRO_HOME` pointing at a directory the
+///    CLI has not created yet makes Kiro undetected, so the *first* run after
+///    the upgrade is exactly this case);
+/// 2. the root did not actually move for this output (an override naming the
+///    default path) ⇒ nothing to reap;
+/// 3. absent, or unresolvable, at the old root ⇒ nothing to reap;
+/// 4. hash-match: an old footprint that drifted from the recorded hash is a
+///    user edit — **preserved and warned about, never deleted**. That is the
+///    kept-modified promise at `docs/src/stability.md`, and it has no `--force`
+///    override here, exactly as in [`reap_moved_outputs`];
+/// 5. resolved-identity: an old component that canonicalizes onto the new
+///    footprint is a symlink alias of the live output, not an orphan.
+///
+/// The one deliberate divergence from [`reap_moved_outputs`] is its guard 1:
+/// an `entry` output is **not** skipped here. Its old location is a shared,
+/// user-owned config file grim spliced a managed member into (`~/.kiro/
+/// settings/mcp.json`, `~/.gemini/settings.json`), and uninstall now resolves
+/// the *new* root — so without this the member is permanently unreachable,
+/// durable junk in a file grim may not delete. It is un-spliced through the
+/// same seam uninstall uses; the file itself always survives.
+///
+/// Best-effort throughout: never fails the install (the
+/// [`reap_moved_outputs`] precedent).
+///
+/// **Sibling:** guards 3–5 and the delete tail are near-identical to
+/// [`reap_moved_outputs`]'s, against a different root set. A correctness fix
+/// to either one is almost certainly a fix to both — check before you land it.
+/// They are kept separate because the two guard *sets* invert: that one skips
+/// `entry` outputs and keys on the stored pair, this one must do neither.
+pub(crate) fn reap_relocated_roots(
+    prior: &InstallRecord,
+    roots: &AnchorRoots,
+    relocated: &[(&'static str, PathBuf)],
+    written: &[crate::install::client_target::ClientTarget],
+) {
+    if relocated.is_empty() {
+        return;
+    }
+    let legacy = roots_before_relocation(roots, relocated);
+    for out in &prior.outputs {
+        // Only an output anchored at a relocated vendor root can be stranded.
+        // Project-scope outputs anchor at `Workspace` and are untouched.
+        let PathAnchor::VendorRoot(name) = out.target.anchor else {
+            continue;
+        };
+        if !relocated.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        // Guard 1: no migrated copy was written this run ⇒ do not touch the
+        // only one that exists. Deliberately NOT "does the new path exist" —
+        // a release that moves the pair AND the root in one go would then
+        // never reap, because the pair-keyed reaper already deleted the new
+        // path before this runs.
+        if !written.iter().any(|c| c.as_str() == out.client) {
+            continue;
+        }
+        let (Ok(old), Ok(new)) = (
+            out.target.resolve(&legacy, Containment::Strict),
+            out.target.resolve(roots, Containment::Strict),
+        ) else {
+            continue;
+        };
+        // Guard 2: the override names the default root — nothing moved.
+        if old == new {
+            continue;
+        }
+        // Guard 3: tolerant probe of the old location.
+        if !matches!(out.is_present(&legacy, Containment::Strict), Ok(true)) {
+            continue;
+        }
+        // Guard 4: preserve — and announce — anything the user edited. The
+        // warning is mandatory: the preserved footprint drops out of the
+        // record, so this is the only moment the user is told it exists. The
+        // remedy differs by output shape — an `entry` is a managed member
+        // inside a config file the user owns, so "delete the old copy" would
+        // be advice to delete their own `mcp.json`.
+        let intact = out
+            .current_hash(&legacy, Containment::Strict)
+            .is_ok_and(|actual| actual == out.content_hash);
+        if !intact {
+            let remedy = if out.entry.is_some() {
+                "remove the stale entry from that file by hand if you do not want both"
+            } else {
+                "remove the old copy by hand if you do not want both"
+            };
+            tracing::warn!(
+                "'{}' at '{}' was edited since grim wrote it; it is preserved, but {} now reads '{}' instead — {remedy}",
+                prior.name,
+                old.display(),
+                out.client,
+                new.display()
+            );
+            continue;
+        }
+        // An entry output: splice the managed member out of the OLD config
+        // file. Never delete the file — it is the user's, not grim's.
+        if let Some(pointer) = &out.entry {
+            match super::uninstall::remove_entry(&old, pointer, out.mcp_format()) {
+                Ok(()) => tracing::info!(
+                    "removed the '{}' entry stranded in '{}' ({} now reads '{}')",
+                    prior.name,
+                    old.display(),
+                    out.client,
+                    new.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "could not remove the stale '{}' entry from '{}': {e}",
+                    prior.name,
+                    old.display()
+                ),
+            }
+            continue;
+        }
+        let old_support = out.resolved_support_dir(&legacy, Containment::Strict).ok().flatten();
+        // Guard 5: an old footprint component that canonicalizes onto the new
+        // one is a symlink alias of the live output (same inode ⇒ same content,
+        // so guard 3 passed); deleting through it would destroy the live copy.
+        let new_footprint: Vec<PathBuf> = [
+            Some(new.clone()),
+            out.resolved_support_dir(roots, Containment::Strict).ok().flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+        let aliases_live_output = [Some(&old), old_support.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .any(|canon_old| new_footprint.contains(&canon_old));
+        if aliases_live_output {
+            continue;
+        }
+        // Deleting across a root boundary the user never named deserves a
+        // line: `reap_moved_outputs` stays inside one root, this does not.
+        tracing::info!(
+            "reaping '{}' stranded at '{}' ({} now reads '{}')",
+            prior.name,
+            old.display(),
+            out.client,
+            new.display()
+        );
+        if let Err(e) = remove_path(&old) {
+            tracing::warn!("could not reap relocated output '{}': {e}", old.display());
+        }
+        if let Some(dir) = &old_support
+            && dir.exists()
+            && let Err(e) = remove_path(dir)
+        {
+            tracing::warn!("could not reap relocated support dir '{}': {e}", dir.display());
         }
     }
 }
@@ -1420,6 +1694,24 @@ async fn install_mcp(
             )))
             .into(),
         );
+    }
+
+    // A registration spliced into a vendor config file under a root this
+    // release relocated is unreachable by uninstall (which now resolves the
+    // new root) — un-splice it from the old file before the record is
+    // replaced. Entry outputs are the sharpest case: no file delete can
+    // recover them, and `reap_moved_outputs` skips them by design.
+    //
+    // `client_records` — not `register_set`: a client can be skipped at four
+    // points above (no MCP surface, unrepresentable descriptor, unanchorable
+    // config path, malformed pointer), and one whose new entry was never
+    // written must keep the old one, which is its only working registration.
+    if let Some(rec) = &recorded {
+        let registered: Vec<crate::install::client_target::ClientTarget> = client_records
+            .iter()
+            .filter_map(|out| out.client.parse().ok())
+            .collect();
+        reap_relocated_roots(rec, roots, &relocated_vendor_roots_from_env(), &registered);
     }
 
     // Merge with the prior record (same-pin additive `--client` installs) —
@@ -2713,6 +3005,306 @@ mod tests {
         );
     }
 
+    // ── reap_relocated_roots (legacy-root reaper) ───────────────────────────
+    //
+    // Honoring `$KIRO_HOME` / `$GEMINI_CLI_HOME` moved a render ROOT while
+    // leaving the stored `(anchor, relative)` pair identical, so
+    // `reap_moved_outputs` cannot see the orphan it leaves behind. These
+    // exercise the separate probe: `roots` carries the post-override root,
+    // `relocated` names the pre-override one.
+
+    /// `(roots, relocated)` for a `kiro-root` output whose root moved from
+    /// `<dir>/legacy` to `<dir>/current`.
+    fn relocated_kiro(dir: &std::path::Path) -> (AnchorRoots, Vec<(&'static str, PathBuf)>) {
+        let mut roots = roots(dir);
+        roots.vendor_roots.insert("kiro", dir.join("current"));
+        (roots, vec![("kiro", dir.join("legacy"))])
+    }
+
+    fn kiro_output(relative: &str, hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: "kiro".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::VendorRoot("kiro"),
+                relative: relative.to_string(),
+            },
+            content_hash: hash,
+            support_dir: None,
+            entry: None,
+        }
+    }
+
+    #[test]
+    fn relocated_vendor_roots_lists_only_the_roots_that_moved() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert!(
+            relocated_vendor_roots(None, None, None, home.clone()).is_empty(),
+            "nothing moved ⇒ nothing to probe"
+        );
+        assert_eq!(
+            relocated_vendor_roots(Some(PathBuf::from("/opt/kiro")), None, None, home.clone()),
+            vec![("kiro", PathBuf::from("/home/u/.kiro"))],
+            "the legacy root is the pre-override one, NOT the override value"
+        );
+        assert_eq!(
+            relocated_vendor_roots(None, Some(PathBuf::from("/opt/g")), None, home.clone()),
+            vec![("gemini", PathBuf::from("/home/u/.gemini"))],
+            "GEMINI_CLI_HOME replaces $HOME, so the legacy root still appends `.gemini`"
+        );
+        // The macOS Zed row: the caller supplies the pre-move root, so the
+        // arm is exercised on every host (the `zed_root_from` precedent).
+        assert_eq!(
+            relocated_vendor_roots(None, None, Some(PathBuf::from("/xdg/zed")), home.clone()),
+            vec![("zed", PathBuf::from("/xdg/zed"))]
+        );
+        assert_eq!(
+            relocated_vendor_roots(
+                Some(PathBuf::from("/opt/kiro")),
+                Some(PathBuf::from("/opt/g")),
+                Some(PathBuf::from("/xdg/zed")),
+                home
+            )
+            .len(),
+            3
+        );
+        // No `$HOME` ⇒ no pre-override root exists to probe.
+        assert!(relocated_vendor_roots(Some(PathBuf::from("/opt/kiro")), None, None, None).is_empty());
+    }
+
+    #[test]
+    fn reap_relocated_roots_deletes_an_unmodified_output_at_the_pre_override_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/steering/r.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"body\n").unwrap();
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&old, None).unwrap())]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(
+            !old.exists(),
+            "the output stranded at the pre-override root must be reaped"
+        );
+    }
+
+    #[test]
+    fn reap_relocated_roots_preserves_a_user_edited_old_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/steering/r.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"user-edited\n").unwrap();
+        // Recorded hash deliberately differs from the on-disk bytes.
+        let prior = reap_record(vec![kiro_output("steering/r.md", Digest::Sha256("d".repeat(64)))]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(
+            old.exists(),
+            "kept_modified: a user-edited old output is preserved, never deleted"
+        );
+    }
+
+    #[test]
+    fn reap_relocated_roots_deletes_a_moved_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old_index = dir.path().join("legacy/steering/r.md");
+        let old_support = dir.path().join("legacy/steering/r");
+        std::fs::create_dir_all(&old_support).unwrap();
+        std::fs::write(&old_index, b"body\n").unwrap();
+        std::fs::write(old_support.join("extra.md"), b"more\n").unwrap();
+        let hash = footprint_hash(&old_index, Some(&old_support)).unwrap();
+        let mut out = kiro_output("steering/r.md", hash);
+        out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::VendorRoot("kiro"),
+            relative: "steering/r".to_string(),
+        });
+        let prior = reap_record(vec![out]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(!old_index.exists(), "the stranded index must be reaped");
+        assert!(!old_support.exists(), "the stranded support dir must be reaped too");
+    }
+
+    #[test]
+    fn reap_relocated_roots_skips_when_the_override_names_the_default_root() {
+        // Guard 1: `KIRO_HOME=$HOME/.kiro` sets the variable to the value the
+        // pre-override resolver already produced — nothing moved, and the live
+        // output must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let mut roots = roots(dir.path());
+        roots.vendor_roots.insert("kiro", dir.path().join("legacy"));
+        let relocated = vec![("kiro", dir.path().join("legacy"))];
+        let live = dir.path().join("legacy/steering/r.md");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, b"body\n").unwrap();
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&live, None).unwrap())]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(live.exists(), "an override naming the default root deletes nothing");
+    }
+
+    #[test]
+    fn reap_relocated_roots_ignores_outputs_anchored_elsewhere() {
+        // A workspace-anchored (project-scope) output is not affected by a
+        // vendor-root relocation and must never be probed.
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let project = dir.path().join(".kiro/steering/r.md");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, b"body\n").unwrap();
+        let prior = reap_record(vec![reap_output(
+            PathAnchor::Workspace,
+            ".kiro/steering/r.md",
+            footprint_hash(&project, None).unwrap(),
+        )]);
+
+        // `reap_output` records client `copilot`, so pass it as written: the
+        // anchor filter must be what saves this file, not the written guard.
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Copilot]);
+
+        assert!(project.exists(), "a workspace-anchored output is out of scope");
+    }
+
+    /// Guard 1, the one `reap_moved_outputs` gets for free by comparing
+    /// against the new output set. A client this pass did not materialize has
+    /// nothing at the new root, so the pre-override copy is the ONLY one —
+    /// reaping it destroys the artifact.
+    ///
+    /// Reachable without any user error: `$KIRO_HOME` pointing at a directory
+    /// the Kiro CLI has not created yet leaves Kiro undetected, so the first
+    /// run after the upgrade takes exactly this path.
+    #[test]
+    fn reap_relocated_roots_keeps_the_only_copy_when_the_client_was_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/steering/r.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"body\n").unwrap();
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&old, None).unwrap())]);
+
+        // This pass wrote Claude, not Kiro — nothing was migrated.
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Claude]);
+
+        assert!(
+            old.exists(),
+            "the only copy must survive when no migrated copy was written this run"
+        );
+    }
+
+    #[test]
+    fn reap_relocated_roots_keeps_the_only_stranded_mcp_entry_when_not_re_registered() {
+        use crate::install::install_state::entry_value_hash;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/settings/mcp.json");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        std::fs::write(
+            &old,
+            serde_json::to_string(&serde_json::json!({"mcpServers": {"grim": value.clone()}})).unwrap(),
+        )
+        .unwrap();
+        let mut out = kiro_output("settings/mcp.json", entry_value_hash(&value).unwrap());
+        out.entry = Some("/mcpServers/grim".to_string());
+        let prior = reap_record(vec![out]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Claude]);
+
+        let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
+        assert!(
+            text["mcpServers"].get("grim").is_some(),
+            "un-splicing the only working registration would silently drop the server: {text}"
+        );
+    }
+
+    /// Guard 4: the pre-override root is a symlink to the post-override one
+    /// (`~/.kiro -> $KIRO_HOME`), so the "old" path canonicalizes onto the
+    /// LIVE output. Reaping through the alias would delete the live file.
+    #[cfg(unix)]
+    #[test]
+    fn reap_relocated_roots_skips_a_symlink_alias_of_the_live_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let live = dir.path().join("current/steering/r.md");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, b"body\n").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("current"), dir.path().join("legacy")).unwrap();
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&live, None).unwrap())]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(live.exists(), "a symlink alias of the live output must never be reaped");
+    }
+
+    /// The sharpest case in the escalation: an MCP member spliced into the
+    /// user's own `~/.kiro/settings/mcp.json` before the upgrade. Uninstall now
+    /// resolves `$KIRO_HOME`, so without this the member is permanently
+    /// un-removable. It must be un-spliced — and the file must survive.
+    #[test]
+    fn reap_relocated_roots_unsplices_a_stranded_mcp_entry() {
+        use crate::install::install_state::entry_value_hash;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/settings/mcp.json");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let value = serde_json::json!({"command": "grim", "args": ["mcp"]});
+        std::fs::write(
+            &old,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": {"grim": value.clone(), "other": {"command": "keep"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut out = kiro_output("settings/mcp.json", entry_value_hash(&value).unwrap());
+        out.entry = Some("/mcpServers/grim".to_string());
+        let prior = reap_record(vec![out]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        assert!(old.is_file(), "the user's config file must never be deleted");
+        let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
+        assert!(
+            text["mcpServers"].get("grim").is_none(),
+            "the stranded managed member must be spliced out: {text}"
+        );
+        assert!(
+            text["mcpServers"].get("other").is_some(),
+            "every byte outside the managed member survives: {text}"
+        );
+    }
+
+    #[test]
+    fn reap_relocated_roots_preserves_a_user_edited_mcp_entry() {
+        use crate::install::install_state::entry_value_hash;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, relocated) = relocated_kiro(dir.path());
+        let old = dir.path().join("legacy/settings/mcp.json");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, r#"{"mcpServers": {"grim": {"command": "hand-edited"}}}"#).unwrap();
+        // Recorded value differs from what is on disk ⇒ the user edited it.
+        let recorded = serde_json::json!({"command": "grim"});
+        let mut out = kiro_output("settings/mcp.json", entry_value_hash(&recorded).unwrap());
+        out.entry = Some("/mcpServers/grim".to_string());
+        let prior = reap_record(vec![out]);
+
+        reap_relocated_roots(&prior, &roots, &relocated, &[ClientTarget::Kiro]);
+
+        let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
+        assert_eq!(
+            text["mcpServers"]["grim"]["command"], "hand-edited",
+            "kept_modified applies to entry outputs too: {text}"
+        );
+    }
+
     // ── output_at_current_layout (S5) ───────────────────────────────────────
     //
     // `output_at_current_layout` reads only `out.entry`, `out.target`,
@@ -3608,7 +4200,14 @@ mod tests {
         let rules_only = lock_of(vec![locked_rule("rust-style", &blob)]);
 
         // A bare workspace: nothing detected ⇒ the generic-client fallback.
-        let fallback = InstallTarget::parse(dir.path(), ConfigScope::Project, &[], &[]).unwrap();
+        let fallback = InstallTarget::parse(
+            dir.path(),
+            ConfigScope::Project,
+            &[],
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         assert!(fallback.is_generic_fallback());
 
         let empty = InstallState::load(&dir.path().join("state.json")).unwrap();
@@ -3659,7 +4258,14 @@ mod tests {
             .expect("a still-resolvable recorded client keeps the install viable");
 
         // An explicit selection is never refused, whatever the artifact set.
-        let explicit = InstallTarget::parse(dir.path(), ConfigScope::Project, &["agents".to_string()], &[]).unwrap();
+        let explicit = InstallTarget::parse(
+            dir.path(),
+            ConfigScope::Project,
+            &["agents".to_string()],
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!explicit.is_generic_fallback());
         refuse_uninstallable_fallback(&rules_only, &explicit, &empty, &roots)
             .expect("`--client agents` is a choice: warn and skip, exit 0");
