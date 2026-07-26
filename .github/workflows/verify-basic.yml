@@ -54,6 +54,37 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: task git:dco RANGE="$BASE_SHA..$HEAD_SHA"
 
+  supply-chain:
+    name: Supply Chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2.83.1
+        with:
+          tool: cargo-deny
+      # Its own job, not a step in smoke: neither check needs the compiled
+      # binary, both finish in well under a minute, and a dependency-licence
+      # failure should not be reported as "the build broke".
+      - name: Dependency licences
+        id: licenses
+        run: task rust:license:deps
+        continue-on-error: true
+      - name: RUSTSEC advisories
+        id: advisories
+        run: task rust:audit
+        continue-on-error: true
+      - name: Check supply-chain results
+        if: ${{ !cancelled() }}
+        run: |
+          if [[ "${{ steps.licenses.outcome }}" == "failure" || "${{ steps.advisories.outcome }}" == "failure" ]]; then
+            echo "::error::Supply-chain checks failed (licenses=${{ steps.licenses.outcome }}, advisories=${{ steps.advisories.outcome }})"
+            exit 1
+          fi
+
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
