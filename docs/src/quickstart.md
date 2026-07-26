@@ -6,6 +6,12 @@ Nothing else needs configuring: out of the box `grim` browses the public
 [package index][index] and expands short references against
 `ghcr.io/grimoire-rs` — point it at your own registry only when you have one.
 
+A short reference expands to `<default-registry>/<what-you-typed>`, verbatim.
+The first-party packages are published under a kind segment, so the short form
+of `grim-usage` is `skills/grim-usage`, not `grim-usage` — a bare name would
+expand to `ghcr.io/grimoire-rs/grim-usage`, which does not exist. Registries
+that publish flat (no kind segment) resolve from a bare name directly.
+
 ## 1. Create a project config
 
 `grim init` writes a fresh `grimoire.toml` in the current directory:
