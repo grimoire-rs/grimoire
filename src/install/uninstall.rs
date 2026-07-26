@@ -208,6 +208,30 @@ pub fn uninstall(
         }
     }
 
+    // Legacy-root sweep: a record written before this release relocated a
+    // vendor root also left a copy (or a spliced MCP member) at the
+    // pre-override root, and the loop above resolved only the NEW root — so
+    // without this an upgrade→uninstall strands it permanently, with the
+    // record gone and nothing left to find it by. The install path runs the
+    // same reaper; this closes the case where uninstall comes first.
+    //
+    // `written` is every client the record names: each one's live footprint
+    // was just handled above, which is exactly what that reaper's guard 1
+    // asks. An output the loop skipped (absent or escaping anchor root) is
+    // skipped there too — the reaper needs both the legacy and the current
+    // resolve to succeed before it touches anything.
+    let handled: Vec<crate::install::client_target::ClientTarget> = record
+        .outputs
+        .iter()
+        .filter_map(|out| out.client.parse().ok())
+        .collect();
+    super::installer::reap_relocated_roots(
+        &record,
+        roots,
+        &super::installer::relocated_vendor_roots_from_env(),
+        &handled,
+    );
+
     state.remove(kind, name);
     // Several outputs (one per client) can share a single escaping
     // `AnchoredPath` under the shared-pool dedup (see `installer.rs`), each

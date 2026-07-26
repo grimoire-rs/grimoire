@@ -1131,6 +1131,175 @@ def test_global_gemini_cli_home_relocates_config_root_but_not_the_shared_pool(
     )
 
 
+# ---------------------------------------------------------------------------
+# Legacy-root reaper: upgrading into a release that honors the override
+# ---------------------------------------------------------------------------
+
+
+def test_global_kiro_home_upgrade_reaps_the_pre_override_root(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Principle 9 upgrade fixture for the legacy-root reaper.
+
+    A grim that did not yet honor ``KIRO_HOME`` wrote under ``~/.kiro`` while
+    the variable was set. The record it left names the SAME ``kiro-root``
+    anchor and the SAME relative path the current layout produces — only the
+    root *resolution* moved — so the pair-keyed ``reap_moved_outputs`` is blind
+    to it. Setting the variable on an existing install reproduces exactly that
+    on-disk state.
+
+    ``update`` must re-materialize under the override, reap the pre-override
+    copies, keep the record anchored at ``kiro-root``, and round-trip
+    ``status``/``uninstall``."""
+    sk = make_artifact(
+        f"{unique_repo}/kmig-skill",
+        "skill",
+        {"kmig-skill/SKILL.md": "---\nname: kmig-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    ru = make_artifact(
+        f"{unique_repo}/kmig-rule",
+        "rule",
+        {"kmig-rule.md": "# steering\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\nkmig-skill = "{sk.fq}"\n[rules]\nkmig-rule = "{ru.fq}"\n'
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    # Pre-upgrade: KIRO_HOME unset, so everything lands under ~/.kiro.
+    rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    old_skill = runner.home / ".kiro/skills/kmig-skill"
+    old_rule = runner.home / ".kiro/steering/kmig-rule.md"
+    assert (old_skill / "SKILL.md").is_file()
+    assert old_rule.is_file()
+
+    # The upgrade: the same record, now resolved against the honored override.
+    kiro_home = grim_home.parent / "kiro_home_upgrade"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    runner.json("update", "--global", "--client", "kiro")
+
+    assert (kiro_home / "skills/kmig-skill/SKILL.md").is_file(), (
+        "update must re-materialize the skill under the honored override"
+    )
+    assert (kiro_home / "steering/kmig-rule.md").is_file(), (
+        "update must re-materialize the rule under the honored override"
+    )
+    assert not old_skill.exists(), "the unmodified pre-override skill must be reaped"
+    assert not old_rule.exists(), "the unmodified pre-override rule must be reaped"
+
+    # The anchor never moved — only its root did. That is the whole point.
+    state = json.loads((grim_home / "state/global.json").read_text())
+    anchors = {
+        o["target"]["anchor"] for r in state["records"] if r["name"].startswith("kmig-") for o in r["outputs"]
+    }
+    assert anchors == {"kiro-root"}, f"the recorded anchor must be unchanged, got {anchors}"
+
+    status = runner.json("status", "--global")["items"]
+    assert all(r["state"] == "installed" for r in status), status
+
+    runner.json("uninstall", "skill", "kmig-skill", "--global")
+    assert not (kiro_home / "skills/kmig-skill").exists(), (
+        "uninstall must remove the migrated output"
+    )
+
+
+def test_global_kiro_home_upgrade_keeps_the_only_copy_when_kiro_is_not_written(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """The legacy-root reaper must never delete the *only* copy.
+
+    A pass that does not materialize Kiro writes nothing under the override,
+    so ``~/.kiro`` still holds the artifact. Reaping it there would destroy it
+    with nothing put in its place. Reachable with no user error at all:
+    ``$KIRO_HOME`` pointing at a directory the Kiro CLI has not created yet
+    leaves Kiro undetected, so the first run after the upgrade is this case."""
+    sk = make_artifact(
+        f"{unique_repo}/kkeep-skill",
+        "skill",
+        {"kkeep-skill/SKILL.md": "---\nname: kkeep-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkkeep-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "kiro")
+
+    old_skill = runner.home / ".kiro/skills/kkeep-skill"
+    assert (old_skill / "SKILL.md").is_file()
+
+    # KIRO_HOME set, but this pass targets a different client entirely.
+    kiro_home = grim_home.parent / "kiro_home_untouched"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    runner.json("update", "--global", "--client", "claude")
+
+    assert not (kiro_home / "skills/kkeep-skill").exists(), (
+        "a pass that does not target Kiro must not write under the override"
+    )
+    assert (old_skill / "SKILL.md").is_file(), (
+        "the only copy must survive a pass that migrated nothing"
+    )
+
+
+def test_global_kiro_home_upgrade_unsplices_the_stranded_mcp_entry(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """The sharp case: an MCP member spliced into the user's own
+    ``~/.kiro/settings/mcp.json`` before the upgrade.
+
+    A file delete cannot fix this — the config file is the user's, and
+    ``uninstall`` now resolves ``$KIRO_HOME``, so the stranded member would be
+    permanently un-removable. It must be spliced out of the OLD file, and every
+    byte the user owns must survive."""
+    descriptor_dir = tmp_path / "kiro_mig_src"
+    descriptor = descriptor_dir / "mcp" / "kmig-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/kmig-mcp:1.0.0"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkmig-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    old_config = runner.home / ".kiro/settings/mcp.json"
+    assert json.loads(old_config.read_text())["mcpServers"]["kmig-mcp"]["command"] == "grim"
+    # A foreign member the user owns, which must survive the un-splice.
+    parsed = json.loads(old_config.read_text())
+    parsed["mcpServers"]["user-server"] = {"command": "keep-me"}
+    old_config.write_text(json.dumps(parsed, indent=2))
+
+    kiro_home = grim_home.parent / "kiro_home_mcp_upgrade"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    runner.json("update", "--global", "--client", "kiro")
+
+    new_config = kiro_home / "settings/mcp.json"
+    assert json.loads(new_config.read_text())["mcpServers"]["kmig-mcp"]["command"] == "grim", (
+        "the registration must move to the honored override"
+    )
+    assert old_config.is_file(), "the user's config file must NEVER be deleted"
+    left = json.loads(old_config.read_text())
+    assert "kmig-mcp" not in left["mcpServers"], (
+        f"the stranded managed member must be spliced out of the old file: {left}"
+    )
+    assert left["mcpServers"]["user-server"]["command"] == "keep-me", (
+        f"every byte the user owns must survive: {left}"
+    )
+
+
 # ── Junie ─────────────────────────────────────────────────────────────────
 
 
@@ -1302,3 +1471,89 @@ def test_global_install_amp_mcp_lands_in_config_amp_settings(
     doc = json.loads(cfg.read_text())
     assert "amp.mcpServers" in doc, f"Amp global container key must be 'amp.mcpServers': {list(doc)}"
     assert doc["amp.mcpServers"]["grim-mcp"]["command"] == "grim"
+
+
+def test_global_kiro_home_upgrade_uninstall_reaps_the_pre_override_root(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Ruling R8: the legacy-root reaper must also run on the **uninstall**
+    path. Before this, a user who upgraded into a release honoring
+    ``$KIRO_HOME`` and then ran ``grim uninstall`` *before* ever re-installing
+    stranded the pre-override copy permanently — uninstall resolved only the
+    new root, deleted nothing there, and dropped the record that was the only
+    way left to find the old file."""
+    sk = make_artifact(
+        f"{unique_repo}/kuni-skill",
+        "skill",
+        {"kuni-skill/SKILL.md": "---\nname: kuni-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkuni-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "kiro")
+
+    old_skill = runner.home / ".kiro/skills/kuni-skill"
+    assert (old_skill / "SKILL.md").is_file()
+
+    # The upgrade, with NO intervening install/update — straight to uninstall.
+    kiro_home = grim_home.parent / "kiro_home_uninstall"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    runner.json("uninstall", "--global", "skill", "kuni-skill")
+
+    assert not old_skill.exists(), (
+        "uninstall must reap the copy stranded at the pre-override root, "
+        "not leave it unreachable with the record gone"
+    )
+
+
+def test_global_kiro_home_upgrade_uninstall_preserves_a_hand_edited_stray(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """The kept-modified promise holds on the uninstall path too: the reaper
+    has no ``--force`` override, so a stranded copy the user edited is
+    preserved. ``stability.md`` promises a modified file always survives, and
+    that promise is what makes "a layout move is not a compatibility break"
+    legitimate.
+
+    Two skills, so the assertion is decidable: the untouched one proves the
+    reaper actually ran on this pass, and the edited one proves it declined."""
+    edited = make_artifact(
+        f"{unique_repo}/kedit-skill",
+        "skill",
+        {"kedit-skill/SKILL.md": "---\nname: kedit-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    control = make_artifact(
+        f"{unique_repo}/kctrl-skill",
+        "skill",
+        {"kctrl-skill/SKILL.md": "---\nname: kctrl-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\nkedit-skill = "{edited.fq}"\nkctrl-skill = "{control.fq}"\n'
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "kiro")
+
+    edited_doc = runner.home / ".kiro/skills/kedit-skill/SKILL.md"
+    control_dir = runner.home / ".kiro/skills/kctrl-skill"
+    assert edited_doc.is_file() and (control_dir / "SKILL.md").is_file()
+    edited_doc.write_text("---\nname: kedit-skill\ndescription: d\n---\n# MINE\n")
+
+    kiro_home = grim_home.parent / "kiro_home_uninstall_edit"
+    kiro_home.mkdir()
+    runner.env["KIRO_HOME"] = str(kiro_home)
+
+    runner.json("uninstall", "--global", "skill", "kedit-skill")
+    runner.json("uninstall", "--global", "skill", "kctrl-skill")
+
+    assert not control_dir.exists(), (
+        "the control proves the uninstall-path reaper ran: an unmodified stray is reaped"
+    )
+    assert edited_doc.read_text().endswith("# MINE\n"), (
+        "a hand-edited stranded copy must be preserved, never deleted"
+    )
