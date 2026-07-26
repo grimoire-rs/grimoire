@@ -5561,7 +5561,7 @@ mod tests {
     fn failure_line_spells_out_a_containment_refusal_and_offers_no_override() {
         let escape = anyhow::Error::from(crate::error::Error::from(
             crate::install::path_anchor::AnchorError::EscapedAnchor {
-                anchor: crate::install::path_anchor::PathAnchor::ClaudeRoot,
+                anchor: crate::install::path_anchor::PathAnchor::VendorRoot("claude"),
                 resolved: std::path::PathBuf::from("/elsewhere/rules/x.md"),
             },
         ));

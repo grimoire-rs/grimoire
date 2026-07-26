@@ -1140,7 +1140,8 @@ mod tests {
         let roots = roots(ws);
 
         let mut st = InstallState::load(&ws.join("s.json")).unwrap();
-        // Record a rule with ClaudeRoot anchor but roots.claude_root = None.
+        // Record a rule anchored to the claude vendor root, with no "claude"
+        // key in roots.vendor_roots.
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
@@ -1149,7 +1150,7 @@ mod tests {
             outputs: vec![ClientOutput {
                 client: "claude".to_string(),
                 target: AnchoredPath {
-                    anchor: PathAnchor::ClaudeRoot,
+                    anchor: PathAnchor::VendorRoot("claude"),
                     relative: "rules/x.md".to_string(),
                 },
                 content_hash: Digest::Sha256("a".repeat(64)),
@@ -1158,7 +1159,7 @@ mod tests {
             }],
         });
 
-        // Roots with claude_root = None → resolved_target returns AnchorRootAbsent.
+        // No "claude" vendor root → resolved_target returns AnchorRootAbsent.
         // Contract: must return Missing via match, NOT propagate the error.
         // Until T8 this panics with unimplemented!; after T8 it must return Missing.
         let state = derive_state(
@@ -1189,7 +1190,7 @@ mod tests {
     fn unresolved_clients_names_every_failing_client_not_just_the_first() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path();
-        // claude_root and copilot_root are both None, so BOTH outputs fail to
+        // Neither vendor root resolves, so BOTH outputs fail to
         // resolve with `AnchorRootAbsent`; the workspace-anchored codex output
         // resolves fine and must not be named.
         let roots = roots(ws);
@@ -1206,7 +1207,7 @@ mod tests {
                 ClientOutput {
                     client: "claude".to_string(),
                     target: AnchoredPath {
-                        anchor: PathAnchor::ClaudeRoot,
+                        anchor: PathAnchor::VendorRoot("claude"),
                         relative: "rules/x.md".to_string(),
                     },
                     content_hash: Digest::Sha256("a".repeat(64)),
@@ -1216,7 +1217,7 @@ mod tests {
                 ClientOutput {
                     client: "copilot".to_string(),
                     target: AnchoredPath {
-                        anchor: PathAnchor::CopilotRoot,
+                        anchor: PathAnchor::VendorRoot("copilot"),
                         relative: "instructions/x.instructions.md".to_string(),
                     },
                     content_hash: Digest::Sha256("b".repeat(64)),

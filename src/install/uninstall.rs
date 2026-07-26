@@ -329,18 +329,10 @@ mod tests {
         AnchorRoots {
             workspace: workspace.to_path_buf(),
             grim_home: workspace.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         }
     }
 
@@ -526,7 +518,7 @@ mod tests {
         let st_path = ws.join("s.json");
 
         // claude file present (workspace-anchored); copilot output anchored to
-        // CopilotRoot, which is unresolvable here (copilot_root = None).
+        // the copilot vendor root, which is unresolvable here.
         let claude_file = ws.join(".claude/rules/orphan.md");
         std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
         std::fs::write(&claude_file, b"# rule\n").unwrap();
@@ -551,7 +543,7 @@ mod tests {
                 ClientOutput {
                     client: "copilot".to_string(),
                     target: AnchoredPath {
-                        anchor: PathAnchor::CopilotRoot,
+                        anchor: PathAnchor::VendorRoot("copilot"),
                         relative: "rules/orphan.md".to_string(),
                     },
                     content_hash: Digest::Sha256("c".repeat(64)),
@@ -563,18 +555,10 @@ mod tests {
         let roots = AnchorRoots {
             workspace: ws.to_path_buf(),
             grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
+            vendor_roots: Default::default(),
             opencode_skills: None,
             claude_user_dir: None,
             agents_skills: None,
-            codex_root: None,
-            cursor_root: None,
-            kiro_root: None,
-            junie_root: None,
-            gemini_root: None,
-            zed_root: None,
-            amp_root: None,
         };
         let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots)
             .expect("an unresolvable client anchor must be tolerated, not error");
