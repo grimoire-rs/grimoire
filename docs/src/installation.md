@@ -31,11 +31,11 @@ Then add `grim` to your global ocx toolchain:
 ocx --global add grim
 ```
 
-Upgrading later is one command — it re-resolves every tool in the global
+Updating later is one command — it re-resolves every tool in the global
 toolchain to its newest release, `grim` included:
 
 ```sh
-ocx --global upgrade
+ocx --global update
 ```
 
 The [grim package page][ocx-grim] lists every published version.
