@@ -65,6 +65,9 @@ ci: add verify step to release workflow
 
 Scopes are optional. cocogitto validates commit messages in CI.
 
+Every commit also needs a `Signed-off-by` line — see [License](#license).
+`git commit -s` adds it for you.
+
 ## Branch Model
 
 - Branch from `main` — never commit directly to `main`.
@@ -77,3 +80,32 @@ task verify    # fmt check + clippy + build + unit tests + acceptance tests
 ```
 
 All checks must pass before opening a pull request.
+
+## License
+
+Grimoire is licensed under the [Apache License, Version 2.0](LICENSE), and
+contributions are accepted under that same license — inbound matches outbound,
+as Apache-2.0 §5 already presumes. Nothing you contribute is relicensed, and
+you keep the copyright in your own work.
+
+**There is no CLA.** Instead, sign off your commits under the
+[Developer Certificate of Origin](https://developercertificate.org/) — a
+one-line statement that you wrote the patch, or otherwise have the right to
+submit it under this license:
+
+```sh
+git commit -s          # appends: Signed-off-by: Your Name <you@example.com>
+```
+
+The name and email must be real and must match your git identity. If you are
+contributing work owned by an employer, make sure you have their permission
+before you sign off.
+
+The copyright holder named in `LICENSE` is **The Grimoire Authors** — that is
+every person with a commit in this repository, as listed by:
+
+```sh
+git shortlog -sne
+```
+
+No separate contributor list is maintained; git history is the record.
