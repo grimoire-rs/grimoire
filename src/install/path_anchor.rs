@@ -70,17 +70,23 @@ pub enum PathAnchor {
     /// Global Cursor config root `~/.cursor` (skills, rules `.mdc`, agents,
     /// `mcp.json`). `CURSOR_CONFIG_DIR` not honored in wave 1.
     CursorRoot,
-    /// Global Kiro config root `~/.kiro` (skills, `steering/`, `settings/mcp.json`).
-    /// `KIRO_HOME` not honored in wave 1.
+    /// Global Kiro config root: `$KIRO_HOME` else `~/.kiro` (skills,
+    /// `steering/`, `settings/mcp.json`). The variable replaces the root
+    /// outright, per the Kiro CLI; the IDE ignores it (#9148).
     KiroRoot,
     /// Global Junie config root `~/.junie` (skills, `mcp/mcp.json`).
     JunieRoot,
-    /// Global Gemini config root `~/.gemini` (agents, `settings.json`). Gemini
-    /// skills follow the shared [`Self::AgentsSkills`] pool, not this root.
+    /// Global Gemini config root: `$GEMINI_CLI_HOME/.gemini` else `~/.gemini`
+    /// (agents, `settings.json`). The variable replaces `$HOME`, so the
+    /// `.gemini` segment still applies. Gemini skills follow the shared
+    /// [`Self::AgentsSkills`] pool, not this root — and that pool stays keyed
+    /// on the real `$HOME` even when `$GEMINI_CLI_HOME` is set.
     GeminiRoot,
-    /// Global Zed config root `$XDG_CONFIG_HOME|~/.config/zed` on unix,
-    /// `%APPDATA%\Zed` on Windows (`settings.json`).
-    /// Zed skills follow the shared [`Self::AgentsSkills`] pool.
+    /// Global Zed config root (`settings.json`), platform-divergent:
+    /// `$XDG_CONFIG_HOME|~/.config` + `zed` on Linux/FreeBSD, a hardcoded
+    /// `~/.config/zed` on macOS (upstream never reads XDG there), and
+    /// `%APPDATA%\Zed` on Windows. Zed skills follow the shared
+    /// [`Self::AgentsSkills`] pool.
     ZedRoot,
     /// Global Amp config root `$XDG_CONFIG_HOME|~/.config/amp` (`settings.json`).
     /// Amp skills follow the shared [`Self::AgentsSkills`] pool.
@@ -148,14 +154,17 @@ pub struct AnchorRoots {
     pub codex_root: Option<PathBuf>,
     /// The global Cursor config root (`~/.cursor`), when resolvable.
     pub cursor_root: Option<PathBuf>,
-    /// The global Kiro config root (`~/.kiro`), when resolvable.
+    /// The global Kiro config root (`$KIRO_HOME` else `~/.kiro`), when resolvable.
     pub kiro_root: Option<PathBuf>,
     /// The global Junie config root (`~/.junie`), when resolvable.
     pub junie_root: Option<PathBuf>,
-    /// The global Gemini config root (`~/.gemini`), when resolvable.
+    /// The global Gemini config root (`$GEMINI_CLI_HOME/.gemini` else
+    /// `~/.gemini`), when resolvable.
     pub gemini_root: Option<PathBuf>,
-    /// The global Zed config root (`$XDG_CONFIG_HOME|~/.config/zed` on unix,
-    /// `%APPDATA%\Zed` on Windows), when resolvable.
+    /// The global Zed config root, when resolvable — see
+    /// [`PathAnchor::ZedRoot`] for the three platform cases (XDG on
+    /// Linux/FreeBSD, hardcoded `~/.config/zed` on macOS, `%APPDATA%\Zed` on
+    /// Windows).
     pub zed_root: Option<PathBuf>,
     /// The global Amp config root (`$XDG_CONFIG_HOME|~/.config/amp`), when resolvable.
     pub amp_root: Option<PathBuf>,
@@ -176,9 +185,9 @@ impl AnchorRoots {
             agents_skills: global_skills_root(home_dir()),
             codex_root: vendor_codex::codex_root(env_dir("CODEX_HOME"), home_dir()),
             cursor_root: vendor_cursor::cursor_root(home_dir()),
-            kiro_root: vendor_kiro::kiro_root(home_dir()),
+            kiro_root: vendor_kiro::kiro_root(env_dir("KIRO_HOME"), home_dir()),
             junie_root: vendor_junie::junie_root(home_dir()),
-            gemini_root: vendor_gemini::gemini_root(home_dir()),
+            gemini_root: vendor_gemini::gemini_root(env_dir("GEMINI_CLI_HOME"), home_dir()),
             zed_root: vendor_zed::zed_root(xdg_config_dir()),
             amp_root: vendor_amp::amp_root(xdg_config_dir()),
         }

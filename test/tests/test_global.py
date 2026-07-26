@@ -836,10 +836,12 @@ def test_global_no_client_flag_installs_to_detected_clients_only(
 # ---------------------------------------------------------------------------
 # Wave-1 vendor global-scope roots
 #
-# Global paths are HARDCODED defaults derived from $HOME — no new vendor
-# config-dir env override (CURSOR_CONFIG_DIR, KIRO_HOME, JUNIE_*_LOCATIONS,
-# GEMINI_CONFIG_DIR) is honored in wave 1 (adr_vendor_wave_expansion.md §1),
-# so no env-override tests exist for the new vendors by design.
+# Global paths default to $HOME-derived layouts. Two vendor overrides ARE
+# honored and are covered by the env-override tests further below:
+# ``KIRO_HOME`` (replaces ~/.kiro outright) and ``GEMINI_CLI_HOME`` (replaces
+# $HOME, so the ``.gemini`` segment still applies). The rest
+# (CURSOR_CONFIG_DIR, JUNIE_*_LOCATIONS) are not honored — CURSOR_CONFIG_DIR is
+# watchlisted and GEMINI_CONFIG_DIR does not exist upstream.
 # Client-native skill dirs: Cursor/Kiro/Junie. Shared $HOME/.agents/skills
 # pool: Gemini/Zed/Amp (+ Codex).
 # ---------------------------------------------------------------------------
@@ -966,6 +968,144 @@ def test_global_install_kiro_rule_lands_in_home_dot_kiro_steering(
     assert rows[0]["status"] == "installed"
     assert (runner.home / ".kiro/steering/kiro-rule.md").is_file(), (
         "global Kiro rule must land in $HOME/.kiro/steering/<name>.md"
+    )
+
+
+def test_global_kiro_home_relocates_the_whole_kiro_root(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """``KIRO_HOME`` replaces ``~/.kiro`` **outright** — no ``.kiro`` segment is
+    appended — so skills and steering both hang off the relocated root and
+    nothing lands in the ``~/.kiro`` default.
+
+    This is the only test that pins the env variable's *name*; the unit tests
+    inject values into the pure resolver and would pass with a typo'd name."""
+    sk = make_artifact(
+        f"{unique_repo}/kh-skill",
+        "skill",
+        {"kh-skill/SKILL.md": "---\nname: kh-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    ru = make_artifact(
+        f"{unique_repo}/kh-rule",
+        "rule",
+        {"kh-rule.md": "---\npaths: ['**/*.rs']\n---\n# Kiro steering\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\nkh-skill = "{sk.fq}"\n[rules]\nkh-rule = "{ru.fq}"\n'
+    )
+    kiro_home = grim_home.parent / "kiro_home"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["KIRO_HOME"] = str(kiro_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+
+    assert (kiro_home / "skills/kh-skill/SKILL.md").is_file(), (
+        "KIRO_HOME must relocate global Kiro skills to $KIRO_HOME/skills/"
+    )
+    assert (kiro_home / "steering/kh-rule.md").is_file(), (
+        "KIRO_HOME must relocate global Kiro steering to $KIRO_HOME/steering/"
+    )
+    # The root is replaced outright — never nested under a `.kiro` segment.
+    assert not (kiro_home / ".kiro").exists(), (
+        "KIRO_HOME replaces ~/.kiro outright; no `.kiro` segment is appended"
+    )
+    assert not (runner.home / ".kiro/skills/kh-skill").exists(), (
+        "with KIRO_HOME set, nothing may land in the ~/.kiro default"
+    )
+    assert not (runner.home / ".kiro/steering/kh-rule.md").exists(), (
+        "with KIRO_HOME set, nothing may land in the ~/.kiro default"
+    )
+
+
+def test_global_kiro_home_relocates_mcp_config_too(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """``KIRO_HOME`` also relocates the Kiro MCP registration target:
+    ``settings/mcp.json`` shares the ``KiroRoot`` anchor with skills and
+    steering, so a Kiro-scoped MCP install must follow it too (mirrors
+    ``test_global_codex_home_relocates_mcp_config_too``)."""
+    descriptor_dir = tmp_path / "kiro_src"
+    descriptor = descriptor_dir / "mcp" / "kh-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/kh-mcp:1.0.0"
+    kiro_home = grim_home.parent / "kiro_home_mcp"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["KIRO_HOME"] = str(kiro_home)
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkh-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    install_rows = runner.json("install", "--global", "--client", "kiro")["items"]
+    assert install_rows[0]["status"] == "installed", install_rows
+
+    config = kiro_home / "settings/mcp.json"
+    assert config.is_file(), (
+        f"KIRO_HOME must relocate the Kiro MCP config target; nothing at {config}"
+    )
+    assert not (runner.home / ".kiro/settings/mcp.json").exists(), (
+        "with KIRO_HOME set, the MCP config must NOT land in the ~/.kiro default"
+    )
+    parsed = json.loads(config.read_text())
+    assert parsed["mcpServers"]["kh-mcp"]["command"] == "grim"
+
+
+def test_global_gemini_cli_home_relocates_config_root_but_not_the_shared_pool(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """``GEMINI_CLI_HOME`` replaces ``$HOME``, so the Gemini config root becomes
+    ``$GEMINI_CLI_HOME/.gemini`` — the ``.gemini`` segment IS still appended
+    (the opposite shape to ``KIRO_HOME``/``CODEX_HOME``).
+
+    Skills deliberately do NOT follow it: the ``.agents/skills`` pool is one
+    physical tree shared with Codex/Zed/Amp under the prune refcount guard, so
+    it stays keyed on the real ``$HOME``."""
+    sk = make_artifact(
+        f"{unique_repo}/gch-skill",
+        "skill",
+        {"gch-skill/SKILL.md": "---\nname: gch-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    ag = make_artifact(
+        f"{unique_repo}/gch-agent",
+        "agent",
+        {"gch-agent.md": "---\nname: gch-agent\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\ngch-skill = "{sk.fq}"\n[agents]\ngch-agent = "{ag.fq}"\n'
+    )
+    gemini_cli_home = grim_home.parent / "gemini_cli_home"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["GEMINI_CLI_HOME"] = str(gemini_cli_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "gemini")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+
+    # The `.gemini` segment survives the override — this is the single most
+    # error-prone part of the resolution and the reason this test exists.
+    assert (gemini_cli_home / ".gemini/agents/gch-agent.md").is_file(), (
+        "GEMINI_CLI_HOME replaces $HOME; the agent lands in $GEMINI_CLI_HOME/.gemini/agents/"
+    )
+    assert not (gemini_cli_home / "agents/gch-agent.md").exists(), (
+        "GEMINI_CLI_HOME is a $HOME replacement, not a config-root replacement"
+    )
+    assert not (runner.home / ".gemini/agents/gch-agent.md").exists(), (
+        "with GEMINI_CLI_HOME set, the agent must NOT land in the ~/.gemini default"
+    )
+    # The shared pool stays on the real $HOME.
+    assert (runner.home / ".agents/skills/gch-skill/SKILL.md").is_file(), (
+        "the cross-vendor pool stays keyed on $HOME, never on GEMINI_CLI_HOME"
+    )
+    assert not (gemini_cli_home / ".agents/skills/gch-skill").exists(), (
+        "GEMINI_CLI_HOME must not fork the shared .agents/skills pool"
     )
 
 

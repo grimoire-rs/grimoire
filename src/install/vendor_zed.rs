@@ -17,8 +17,11 @@
 //!   (global, JSONC), key `context_servers`, **flat entry shape**; **no
 //!   env-ref support upstream → skip ref-bearing descriptors**; `json_splice`.
 //!
-//! No config-dir env override upstream; global settings honor
-//! `$XDG_CONFIG_HOME` (falling back to `~/.config`).
+//! No config-dir env override upstream. Global settings honor
+//! `$XDG_CONFIG_HOME` on **Linux/FreeBSD only** — upstream `config_dir()`
+//! (`crates/paths/src/paths.rs`) reads it on that branch alone; macOS falls
+//! through to a hardcoded `~/.config/zed` and Windows uses `%APPDATA%\Zed`.
+//! See [`zed_root`].
 
 use std::path::{Path, PathBuf};
 
@@ -167,9 +170,10 @@ impl Vendor for ZedVendor {
 }
 
 /// Zed's config root for a scope (hosts `settings.json`): the project `.zed`
-/// dir, or the native `$XDG_CONFIG_HOME|~/.config/zed` root (falling back to
-/// the workspace layout when neither resolves). Skills do NOT root here — they
-/// follow the shared `.agents/skills`.
+/// dir, or the platform-native global root from [`zed_root`] — which honors
+/// `$XDG_CONFIG_HOME` on Linux/FreeBSD only, never on macOS. Falls back to the
+/// workspace layout when that root does not resolve. Skills do NOT root here —
+/// they follow the shared `.agents/skills`.
 fn zed_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".zed"),
@@ -177,35 +181,97 @@ fn zed_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     }
 }
 
-/// Zed's user-level config root. On Unix `$XDG_CONFIG_HOME|~/.config/zed`; on
-/// Windows `%APPDATA%\Zed` (`research_vendor_verification_zed_amp.md:33` — Zed
-/// stores its `settings.json` there, never under an XDG-style path). No
-/// config-dir env override upstream. The [`PathAnchor`](super::path_anchor)
+/// Which directory family Zed derives its user-level config root from — the
+/// three cases upstream's `config_dir()` actually has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZedRootKind {
+    /// Windows: `%APPDATA%\Zed`.
+    Appdata,
+    /// macOS: `~/.config/zed`, hardcoded — `$XDG_CONFIG_HOME` is never read.
+    HomeDotConfig,
+    /// Linux / FreeBSD: `$XDG_CONFIG_HOME|~/.config` + `zed`.
+    Xdg,
+}
+
+/// This target's [`ZedRootKind`]. `cfg!` rather than `#[cfg]` so every arm
+/// type-checks on every host — the macOS branch cannot rot unnoticed on a
+/// Linux dev box.
+fn zed_root_kind() -> ZedRootKind {
+    if cfg!(windows) {
+        ZedRootKind::Appdata
+    } else if cfg!(target_os = "macos") {
+        ZedRootKind::HomeDotConfig
+    } else {
+        ZedRootKind::Xdg
+    }
+}
+
+/// Zed's user-level config root — **platform-divergent, verified against
+/// upstream source** (`zed-industries/zed`, `crates/paths/src/paths.rs`,
+/// `config_dir()`):
+///
+/// - Windows → `%APPDATA%\Zed`;
+/// - **macOS → `~/.config/zed`, hardcoded.** Upstream reads an XDG variable
+///   only on the `cfg!(any(target_os = "linux", target_os = "freebsd"))`
+///   branch; macOS falls through to a literal `home_dir().join(".config")`
+///   join. A macOS user with `$XDG_CONFIG_HOME` set therefore gets Zed
+///   settings written where Zed does not read them if we honor it;
+/// - Linux / FreeBSD → `$XDG_CONFIG_HOME|~/.config` + `zed`.
+///
+/// This is why the root does **not** simply consume the shared
+/// [`xdg_config_dir`](super::vendor::xdg_config_dir), which honors the
+/// variable on every non-Windows target.
+///
+/// **The branch is Zed-local by ruling, not by discovery** (wave-0 V3,
+/// 2026-07-26). Read that precisely: it does *not* mean Amp was verified to
+/// behave differently. Whether Amp reads `$XDG_CONFIG_HOME` on any platform is
+/// unresolved at every evidence tier, and source-tier verification is
+/// *unachievable* — Amp ships as a compiled binary with no public repo. The
+/// shared helper is left alone because changing it would move Amp's macOS
+/// resolution on **zero** evidence; both readings of the Amp evidence agree
+/// that is the wrong move. If Amp's behaviour is ever established, revisit
+/// whether this belongs in the shared helper after all.
+///
+/// No config-dir env override upstream. The [`PathAnchor`](super::path_anchor)
 /// `ZedRoot` anchor is rooted here. Skills follow the shared
 /// `$HOME/.agents/skills`.
 ///
+/// One disclosed resolvability change, macOS only: the root used to come from
+/// [`xdg_config_dir`](super::vendor::xdg_config_dir), so it resolved when
+/// *either* `$XDG_CONFIG_HOME` or `$HOME` did; it now resolves only when
+/// `$HOME` does. With `$HOME` unset on macOS this returns `None` where it
+/// previously returned `Some($XDG_CONFIG_HOME/zed)` — and `None` is the
+/// correct answer, because that path is one Zed never reads. Callers degrade
+/// as they already do for any unresolvable root (workspace-layout fallback, or
+/// `AnchorRootAbsent`). Every platform other than macOS is unaffected.
+///
 /// `zed_root` is only ever called from env-touching entry points
-/// (`AnchorRoots::resolve`, `detect`, `zed_scope_root`), so the Windows arm's
-/// `%APPDATA%` read is consistent with resolving XDG for the Unix arm — the
-/// pure `PathAnchor::root` lookup never calls this.
+/// (`AnchorRoots::resolve`, `detect`, `zed_scope_root`), so reading
+/// `%APPDATA%` / `$HOME` here is consistent with resolving XDG for the Linux
+/// arm — the pure `PathAnchor::root` lookup never calls this.
 pub(crate) fn zed_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
-    zed_root_from(xdg_config, super::vendor::env_dir("APPDATA"))
+    zed_root_from(
+        zed_root_kind(),
+        xdg_config,
+        home_dir(),
+        super::vendor::env_dir("APPDATA"),
+    )
 }
 
-/// Pure per-platform join with both directory inputs injected, so it is
-/// testable on any target without mutating process env. Unix appends `zed` to
-/// the XDG dir; Windows appends `Zed` to `%APPDATA%` and ignores the XDG arg
-/// (no XDG layout there). The env read lives only in [`zed_root`].
-fn zed_root_from(xdg_config: Option<PathBuf>, appdata: Option<PathBuf>) -> Option<PathBuf> {
-    #[cfg(not(windows))]
-    {
-        let _ = appdata;
-        xdg_config.map(|c| c.join("zed"))
-    }
-    #[cfg(windows)]
-    {
-        let _ = xdg_config;
-        appdata.map(|c| c.join("Zed"))
+/// Pure per-platform join with the platform *and* every directory input
+/// injected, so all three arms are testable on any host without mutating
+/// process env (`std::env::set_var` is `unsafe` under Rust 2024 and this crate
+/// forbids `unsafe_code`). The env reads live only in [`zed_root`].
+fn zed_root_from(
+    kind: ZedRootKind,
+    xdg_config: Option<PathBuf>,
+    home: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match kind {
+        ZedRootKind::Appdata => appdata.map(|c| c.join("Zed")),
+        ZedRootKind::HomeDotConfig => home.map(|h| h.join(".config").join("zed")),
+        ZedRootKind::Xdg => xdg_config.map(|c| c.join("zed")),
     }
 }
 
@@ -369,35 +435,86 @@ mod tests {
 
     // ── zed_root: native settings dir per platform ──
     //
-    // With `XDG_CONFIG_HOME` unset the resolved config dir is `~/.config`, so
-    // the Unix root is `~/.config/zed`. On Windows Zed lives at `%APPDATA%\Zed`
-    // regardless of any XDG-style value
-    // (`research_vendor_verification_zed_amp.md:33`).
+    // Upstream `config_dir()` (zed-industries/zed, crates/paths/src/paths.rs)
+    // has three branches: Windows `%APPDATA%\Zed`, Linux/FreeBSD XDG, and a
+    // fallthrough `home_dir().join(".config")` that macOS lands on. Every arm
+    // is exercised here on every host by injecting the platform, so the macOS
+    // branch cannot rot unnoticed on a Linux or Windows dev box.
 
-    #[cfg(not(windows))]
     #[test]
-    fn zed_root_is_xdg_zed_on_unix() {
-        // `Some("~/.config")` models `xdg_config_dir()` with XDG_CONFIG_HOME
-        // unset (it falls back to `$HOME/.config`); the root appends `/zed`.
-        let got = zed_root(Some(PathBuf::from("/home/u/.config")));
-        assert_eq!(got, Some(PathBuf::from("/home/u/.config/zed")));
-        // No resolvable config dir → no root.
-        assert_eq!(zed_root(None), None);
+    fn zed_root_macos_ignores_xdg_config_home() {
+        // Regression: grim resolved Zed's root through the shared
+        // `xdg_config_dir()`, which honors `$XDG_CONFIG_HOME` on every
+        // non-Windows target. Zed's macOS branch never reads it, so a macOS
+        // user with the variable set had `settings.json` written where Zed
+        // does not look.
+        let xdg = Some(PathBuf::from("/custom/xdg"));
+        let home = Some(PathBuf::from("/Users/u"));
+        assert_eq!(
+            zed_root_from(ZedRootKind::HomeDotConfig, xdg.clone(), home.clone(), None),
+            Some(PathBuf::from("/Users/u/.config/zed")),
+            "macOS hardcodes ~/.config/zed and must ignore $XDG_CONFIG_HOME"
+        );
+        // Linux/FreeBSD is the arm that DOES honor it — same inputs, different
+        // answer, which is the whole point of the split.
+        assert_eq!(
+            zed_root_from(ZedRootKind::Xdg, xdg, home, None),
+            Some(PathBuf::from("/custom/xdg/zed")),
+            "Linux/FreeBSD honors $XDG_CONFIG_HOME"
+        );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn zed_root_is_appdata_zed_on_windows() {
-        // The XDG argument is ignored on Windows — the injected `%APPDATA%`
-        // drives the root. Exercising the pure `zed_root_from` keeps this
-        // hermetic without mutating process env: `std::env::set_var` now
-        // requires `unsafe` under edition 2024, and this crate forbids it.
-        let got = zed_root_from(
-            Some(PathBuf::from(r"C:\ignored")),
-            Some(PathBuf::from(r"C:\Users\u\AppData\Roaming")),
+    fn zed_root_from_covers_every_platform_arm_and_unresolvable_inputs() {
+        let xdg = Some(PathBuf::from("/home/u/.config"));
+        let home = Some(PathBuf::from("/home/u"));
+        // Separator-neutral stand-in for `%APPDATA%`: a literal `C:\…` fixture
+        // is one opaque component on Unix, so the join would not round-trip.
+        let appdata = Some(PathBuf::from("/appdata"));
+
+        assert_eq!(
+            zed_root_from(ZedRootKind::Appdata, xdg.clone(), home.clone(), appdata.clone()),
+            Some(PathBuf::from("/appdata").join("Zed")),
+            "Windows uses %APPDATA%\\Zed (capital Z) and ignores both unix inputs"
         );
-        assert_eq!(got, Some(PathBuf::from(r"C:\Users\u\AppData\Roaming\Zed")));
-        // No resolvable APPDATA → no root.
-        assert_eq!(zed_root_from(Some(PathBuf::from(r"C:\ignored")), None), None);
+        assert_eq!(
+            zed_root_from(ZedRootKind::Xdg, xdg, home.clone(), appdata.clone()),
+            Some(PathBuf::from("/home/u/.config/zed"))
+        );
+
+        // Each arm yields None only when ITS own input is unresolvable.
+        assert_eq!(zed_root_from(ZedRootKind::Appdata, None, home, None), None);
+        assert_eq!(
+            zed_root_from(ZedRootKind::HomeDotConfig, None, None, appdata.clone()),
+            None
+        );
+        assert_eq!(zed_root_from(ZedRootKind::Xdg, None, None, appdata), None);
+    }
+
+    // The two tests above pin what each ARM computes. These pin the WIRING —
+    // that `zed_root` hands this host's arm the right inputs. Without them,
+    // reverting `zed_root` to feed `ZedRootKind::Xdg` on macOS (the original
+    // bug) would leave every other test in this file green.
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zed_root_ignores_the_xdg_argument_on_this_host() {
+        let bogus = Some(PathBuf::from("/definitely/not/home/.config"));
+        assert_eq!(
+            zed_root(bogus),
+            home_dir().map(|h| h.join(".config").join("zed")),
+            "macOS must resolve from $HOME and discard the XDG argument entirely"
+        );
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[test]
+    fn zed_root_honors_the_xdg_argument_on_this_host() {
+        assert_eq!(
+            zed_root(Some(PathBuf::from("/custom/xdg"))),
+            Some(PathBuf::from("/custom/xdg/zed")),
+            "Linux/FreeBSD must resolve from the XDG argument"
+        );
+        assert_eq!(zed_root(None), None, "no resolvable XDG dir ⇒ no root");
     }
 }
