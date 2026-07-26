@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Grimoire — A lockfile for your AI-agent config.</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 1280px;
+    height: 640px;
+    overflow: hidden;
+    background: #161826;
+    font-family: -apple-system, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+  }
+  .card {
+    position: relative;
+    width: 1280px;
+    height: 640px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 76px 92px;
+  }
+  /* faint violet glow behind the mark — accent stays a hairline/glow, never a filled panel */
+  .glow {
+    position: absolute;
+    top: -160px;
+    left: -160px;
+    width: 560px;
+    height: 560px;
+    background: radial-gradient(circle, rgba(145, 132, 217, 0.28) 0%, rgba(145, 132, 217, 0) 70%);
+    pointer-events: none;
+  }
+  .brand {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+  }
+  .brand svg { width: 68px; height: 68px; flex-shrink: 0; }
+  .wordmark {
+    font-size: 34px;
+    font-weight: 700;
+    color: #d2cefd;
+    letter-spacing: 0.01em;
+  }
+  .headline {
+    position: relative;
+    font-size: 92px;
+    font-weight: 800;
+    line-height: 1.12;
+    letter-spacing: -0.02em;
+    color: #e9e9ed;
+    max-width: 1060px;
+    text-wrap: balance;
+  }
+  .foot {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .foot span {
+    font-size: 24px;
+    font-weight: 600;
+    color: #9184d9;
+    letter-spacing: 0.03em;
+  }
+  /* hairline, not a panel */
+  .hairline {
+    position: absolute;
+    left: 92px;
+    right: 92px;
+    bottom: 132px;
+    height: 1px;
+    background: rgba(145, 132, 217, 0.25);
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="glow"></div>
+    <div class="brand">
+      <svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Grimoire logo">
+        <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
+          <path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z" />
+          <path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z" />
+          <path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z" />
+          <path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z" />
+          <path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z" />
+          <path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none" />
+        </g>
+      </svg>
+      <span class="wordmark">Grimoire</span>
+    </div>
+    <div class="headline">A lockfile for your AI-agent config.</div>
+    <div class="hairline"></div>
+    <div class="foot"><span>grimoire.rs</span></div>
+  </div>
+</body>
+</html>
