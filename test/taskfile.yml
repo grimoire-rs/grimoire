@@ -50,13 +50,17 @@ tasks:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
 
   demo:
-    desc: Record the landing-page demo cast (init/add/status against a live registry)
+    desc: Record the landing-page demo cast (init/add/status against the real registry)
     summary: |
       Runs test/recordings/test_record_demo.py against a real grim binary and
-      a real OCI registry (reusing the acceptance suite's own fixtures), and
-      writes docs/src/demo.cast. Outside `testpaths`, so `task test` never
-      collects it -- explicit invocation only. Follow with `task demo:gif` to
-      render docs/src/demo.gif, the asset the landing page actually embeds.
+      the real, published ghcr.io/grimoire-rs/skills/grim-usage package, and
+      overwrites docs/src/demo.cast -- the asset the landing page plays
+      through the vendored asciinema-player (docs/theme/index.hbs "see it
+      run"). Outside `testpaths`, so `task test` never collects it --
+      explicit invocation only. Unlike the schema/GIF assets this replaced,
+      demo.cast is committed: review the diff (`git diff docs/src/demo.cast`)
+      after re-running this and commit it deliberately, the same as any
+      other tracked doc asset.
     cmds:
       - task: build
         vars:
@@ -64,17 +68,3 @@ tasks:
       - uv run pytest recordings/ -v
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
-
-  demo:gif:
-    desc: Convert docs/src/demo.cast to docs/src/demo.gif (requires agg)
-    preconditions:
-      - sh: command -v agg
-        msg: "agg not found -- install from https://github.com/asciinema/agg (cargo install --locked agg)"
-      - sh: test -f {{.ROOT_DIR}}/docs/src/demo.cast
-        msg: "docs/src/demo.cast missing -- run `task demo` first"
-    cmds:
-      # "Adwaita Mono" is a common Linux system font (fontconfig-resolved, no
-      # --font-dir needed); font-size 13 keeps the rendered GIF's width sane
-      # against the recording's 180-column PTY (see cast_recorder.py). No
-      # --theme flag: agg auto-picks up the cast's own embedded theme.
-      - agg --font-family "Adwaita Mono" --font-size 13 {{.ROOT_DIR}}/docs/src/demo.cast {{.ROOT_DIR}}/docs/src/demo.gif
