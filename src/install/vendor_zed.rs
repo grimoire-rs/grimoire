@@ -147,10 +147,14 @@ impl Vendor for ZedVendor {
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Shared-pool skills (`.agents/skills`, with Codex/Gemini/Amp) are
-        // vendor-independent: route through the vendor-less universal renderer
-        // so no per-vendor field can ever leak into the shared file (D1a).
-        Ok(render::render_universal_skill_doc(doc))
+        // Vendor-aware renderer against an EMPTY registry: byte-identical to
+        // the vendor-less universal render, so the shared `.agents/skills` file
+        // stays vendor-independent (pinned by
+        // `pool_vendors_render_byte_identical_skill_bytes`, which compares
+        // `.document`). What the universal renderer cannot do is warn: it
+        // returns `warnings: Vec::new()` unconditionally, so an unknown `zed.*`
+        // key would vanish with no diagnostic. Warnings never reach disk.
+        render::render_skill_doc(doc, self)
     }
 
     fn rule_index(

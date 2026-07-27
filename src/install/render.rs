@@ -142,6 +142,17 @@ pub fn has_tool_namespaced_metadata(fm: &SkillFrontmatter) -> bool {
     fm.metadata.keys().any(|k| split_namespaced(k).is_some())
 }
 
+/// Whether `vendor_name` reserves a `<name>.` metadata prefix. False only for
+/// the vendor-neutral `agents` client — see [`KNOWN_NAMESPACES`] for why.
+///
+/// Test-only: production code asks the question through [`split_namespaced`],
+/// which needs the field half too. This exists so an invariant test can derive
+/// its client set from the reservation policy instead of restating it.
+#[cfg(test)]
+pub fn reserves_namespace(vendor_name: &str) -> bool {
+    KNOWN_NAMESPACES.contains(&vendor_name)
+}
+
 /// Split a metadata key into `(known_namespace, field)`; `None` when the
 /// key has no known tool prefix (plain metadata).
 fn split_namespaced(key: &str) -> Option<(&str, &str)> {
@@ -485,16 +496,23 @@ pub fn render_skill_doc(doc: &str, vendor: &dyn Vendor) -> Result<Option<Rendere
 /// when the canonical bytes install verbatim (no tool-namespaced metadata, or
 /// the document does not parse as a skill).
 ///
-/// Vendor-independent **by construction**. The four shared-pool vendors
-/// (Codex, Gemini, Zed, Amp) install a skill to the ONE
-/// `$HOME/.agents/skills/<name>` directory, so its `SKILL.md` must not carry
-/// any single vendor's projected fields. Routing their `skill_index` through
-/// this vendor-less renderer makes divergent pool bytes structurally
-/// impossible: even a `skill_fields()` entry mistakenly added to a pool vendor
-/// cannot leak in, because no vendor field registry is consulted here. The
-/// output is byte-identical to what an empty-registry vendor emits through
-/// [`render_skill_doc`] today — only the per-vendor typo warnings are absent
-/// (the publish gate in [`validate_namespaced_metadata`] still catches those).
+/// Vendor-independent **by construction**: no vendor field registry is
+/// consulted here, so nothing per-vendor can leak into the ONE
+/// `$HOME/.agents/skills/<name>` file every pool member writes.
+///
+/// **Its one production caller is [`ClientTarget::Agents`]**, the vendor-neutral
+/// client that reserves no metadata namespace. Every other vendor — pool member
+/// or not — routes `skill_index` through [`render_skill_doc`], because a vendor
+/// that reserves a namespace must drop an unknown own-namespace key **by name**
+/// and this renderer returns `warnings: Vec::new()` unconditionally, having no
+/// vendor to attribute a warning to. That is a diagnostic difference only: with
+/// an empty `skill_fields()` registry the two emit byte-identical documents
+/// (`append_lifted` is a no-op on an empty lift list, and both keep exactly the
+/// keys `split_namespaced` calls plain), and warnings never reach disk.
+///
+/// So this function is also the pool's **independent byte anchor**: the pool
+/// identity tests compare each member's `.document` against it rather than
+/// against each other, which is what keeps those assertions non-vacuous.
 ///
 /// Infallible: with no vendor context and no field registry, no metadata
 /// value is ever converted, so there is no [`RenderError`] path — the result
@@ -905,11 +923,13 @@ metadata:
     fn pool_vendors_declare_no_skill_fields() {
         // Codex/Gemini/Zed/Amp resolve every skill to the ONE shared
         // `$HOME/.agents/skills/<name>` pool, so the pooled SKILL.md must stay
-        // vendor-independent. Their `skill_index` routes through the vendor-less
-        // `render_universal_skill_doc`, which lifts NOTHING — so a `skill_fields()`
-        // entry added to a pool vendor would be silently ignored at render. This
-        // asserts the registry stays empty, failing loudly the day someone adds a
-        // pool-vendor skill field (the render layer would otherwise hide it).
+        // vendor-independent. Every pool vendor but `agents` routes `skill_index`
+        // through the vendor-AWARE `render_skill_doc` (so an unknown
+        // own-namespace key is dropped by name rather than silently), which means
+        // a `skill_fields()` entry added to a pool vendor really would lift — and
+        // that member's bytes would diverge from its siblings', invalidating
+        // every recorded `content_hash` for the one shared file. This asserts the
+        // registry stays empty, so that divergence cannot be introduced at all.
         use crate::config::scope::ConfigScope;
 
         // The pool roster, named rather than counted. `checked` below is
@@ -1000,6 +1020,19 @@ metadata:
             "no tool-namespaced key survives: {universal}"
         );
         assert!(universal.contains("keywords: a,b"), "plain metadata kept: {universal}");
+        // THE GOLDEN LITERAL. Every assertion above is relative — each renderer
+        // is compared against another renderer, and both sides share
+        // `SkillFrontmatter::split`, `from_yaml`, `to_mapping`,
+        // `serialize_mapping` and the fence concat. A change to any one of those
+        // moves BOTH sides together, so every relative assertion still passes
+        // while the pool file's bytes silently change and every member's
+        // recorded `content_hash` is invalidated. This literal is the only
+        // tripwire for that class. Update it only when the byte change is
+        // intended, and treat an "unrelated" edit that trips it as the finding.
+        assert_eq!(
+            universal, "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n---\n# body\n",
+            "the shared-pool document bytes changed"
+        );
     }
 
     #[test]
@@ -1027,6 +1060,12 @@ metadata:
         let universal = render_universal_skill_doc(doc)
             .expect("namespaced metadata ⇒ rendered")
             .document;
+        //
+        // `agents` is on the roster and its assertion is a TAUTOLOGY — its
+        // `skill_index` IS `render_universal_skill_doc`, so it compares a
+        // function to itself. Named rather than skipped: a reader who spots it
+        // and "fixes" the test by dropping the member removes the guard that
+        // catches the day `AgentsVendor` stops delegating.
         let mut checked = 0usize;
         for client in ClientTarget::ALL {
             if !client.vendor().pool_capable() {
@@ -1052,6 +1091,94 @@ metadata:
         assert!(
             checked >= 8,
             "the capability roster shrank unexpectedly ({checked} clients)"
+        );
+    }
+
+    #[test]
+    fn switching_to_the_vendor_aware_renderer_moved_no_document_bytes() {
+        // These five shipped with `skill_index` calling `render_universal_skill_doc`
+        // directly, which cannot warn — an own-namespace key vanished with no
+        // diagnostic. They now call `render_skill_doc`, and this is the proof
+        // that the switch changed diagnostics ONLY: for every document shape,
+        // the vendor-aware render must equal what the universal renderer emits,
+        // which is byte-for-byte what these vendors wrote before the switch.
+        //
+        // It matters more here than for any other renderer change: all five
+        // write the ONE shared `.agents/skills/<name>/SKILL.md`, and a single
+        // byte of drift invalidates every sibling client's recorded
+        // `content_hash` for that file. The named list is historical — it is the
+        // set that switched, not a set derived from any current predicate — so
+        // it is deliberately not derived from `pool_capable` (which does not
+        // even reach Antigravity).
+        const SWITCHED: &[ClientTarget] = &[
+            ClientTarget::Amp,
+            ClientTarget::Antigravity,
+            ClientTarget::Codex,
+            ClientTarget::Gemini,
+            ClientTarget::Zed,
+        ];
+        // Chosen for the boundaries a divergence could hide behind, not for
+        // volume. The one that earned its place: entry 1 puts a PLAIN dotted key
+        // (`vendor.x` — unknown prefix, so not a tool key) beside a reserved one.
+        // A mutation that drifts only on `doc.contains("agents.")` passed the
+        // whole install suite before this entry existed, because nothing
+        // exercised the line between "dotted but plain" and "dotted and
+        // reserved". Entry 2 routes an unknown top-level key through the
+        // `extra` bucket, the one part of the frontmatter neither renderer
+        // touches but both re-serialize.
+        let corpus = [
+            // Own-namespace key: the ONLY place the two renderers differ at all
+            // (one warns, one does not), so the byte claim rests here.
+            "---\nname: s\ndescription: d\nmetadata:\n  codex.made-up: x\n---\n# body\n",
+            // Plain dotted keys + a reserved one + an undotted plain key,
+            // together. `agents.foo` is the sharp case: `agents` IS a client
+            // name, deliberately left unreserved, so it must survive while
+            // `codex.made-up` next to it is dropped.
+            "---\nname: s\ndescription: d\nmetadata:\n  agents.foo: keep-me\n  vendor.x: keep-me-too\n  codex.made-up: drop-me\n  keywords: a,b\n---\n# body\n",
+            // Unknown top-level frontmatter key ⇒ `extra`, re-emitted by both.
+            "---\nname: s\ndescription: d\nfuture_field: kept\nmetadata:\n  zed.made-up: x\n---\n# body\n",
+            // Several reserved namespaces at once, and key ordering: `zzz`/`aaa`
+            // prove the emitted order comes from the map, not from input order.
+            "---\nname: s\ndescription: d\nmetadata:\n  zzz: last\n  amp.a: 1\n  antigravity.b: 2\n  gemini.c: 3\n  aaa: first\n---\nbody\n",
+            // Unicode in key and value, and a body with no trailing newline.
+            "---\nname: s\ndescription: d\nmetadata:\n  gemini.wränkel: „quoted“ ✓\n---\n# ünïcode body",
+            // Foreign namespace only — dropped silently by both, no warning.
+            "---\nname: s\ndescription: d\nmetadata:\n  claude.model: opus\n---\n# body\n",
+            // Verbatim fast path (no tool key) and a non-skill document: both
+            // renderers must agree on `None` too, since `None` installs the
+            // canonical bytes and `Some` installs generated ones.
+            "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n---\n# body\n",
+            "# not a skill at all\n",
+        ];
+        let mut rendered_shapes = 0usize;
+        for doc in corpus {
+            let expected = render_universal_skill_doc(doc).map(|d| d.document);
+            rendered_shapes += usize::from(expected.is_some());
+            for client in SWITCHED {
+                let vendor = client.vendor();
+                let actual = vendor
+                    .skill_index(doc)
+                    .map(|o| o.map(|d| d.document))
+                    // Not `unwrap`: with an empty `skill_fields()` registry the
+                    // only fallible call in `render_skill_doc` is unreachable.
+                    // If a registry is ever populated this must be revisited,
+                    // not silently unwrapped.
+                    .unwrap_or_else(|e| panic!("'{}' must not error on an empty registry: {e}", vendor.name()));
+                assert_eq!(
+                    actual,
+                    expected,
+                    "'{}' must emit the universal pool bytes unchanged — this is the \
+                     shared `.agents/skills` file, and one byte of drift invalidates every \
+                     sibling's content_hash. Document:\n{doc}",
+                    vendor.name()
+                );
+            }
+        }
+        // A corpus of `None == None` pairs would assert nothing. Only the
+        // entries that actually render carry signal, so their count is pinned.
+        assert!(
+            rendered_shapes >= 6,
+            "too few corpus entries reach the render path ({rendered_shapes}) — the rest compare None to None"
         );
     }
 
