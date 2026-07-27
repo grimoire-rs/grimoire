@@ -38,6 +38,12 @@ durable; update the numbers, keep the spine.
 - `gemini cli subagents enableAgents GEMINI.md site:geminicli.com`
 - `zed rules precedence agent client protocol site:zed.dev`
 - `amp AGENTS.md skills subagents site:ampcode.com`
+- `antigravity subagents mcp agents rules site:antigravity.google`
+- `cline clinerules skills directories site:cline.bot`
+- `goose skills .agents/skills recommended location site:block.github.io`
+- `warp skills directory site:warp.dev`
+- `kilo modes skills site:kilo.ai`
+- `agents skills shared pool which clients scan`
 - `AGENTS.md standard adoption nearest file precedence`
 - `skills not activating subagent headless`
 - `anthropic effective context engineering attention budget`
@@ -59,6 +65,14 @@ durable; update the numbers, keep the spine.
   the enterprise-vs-individual serving status.
 - [Junie][junie] / [Zed][zed] / [Amp][amp] — currently skills-only targets;
   re-check whether a rule or agent surface has shipped.
+- The skills-first wave — [Antigravity][ag] (the one with a subagent
+  file), [Cline][cline] (the one with real `.clinerules/` `paths:`
+  scoping), [Droid][droid], [Goose][goose], [Warp][warp],
+  [OpenClaw][openclaw], [Kilo][kilo]. Re-check two things specifically:
+  whether any has since shipped a rule or agent surface, and **which of
+  them read `.agents/skills`** — pool membership is the fastest-moving
+  claim in this package, and reading the pool is not the same as writing
+  to it.
 - [Skill authoring best practices][bp] and the
   [official example skills][repo] — re-measure body-length norms there.
 
@@ -81,5 +95,12 @@ durable; update the numbers, keep the spine.
 [junie]: https://www.jetbrains.com/junie/
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[ag]: https://antigravity.google
+[cline]: https://cline.bot
+[droid]: https://factory.ai
+[goose]: https://block.github.io/goose
+[warp]: https://warp.dev
+[openclaw]: https://github.com/openclaw/openclaw
+[kilo]: https://kilo.ai
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [repo]: https://github.com/anthropics/skills

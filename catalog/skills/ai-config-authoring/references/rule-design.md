@@ -95,9 +95,9 @@ first and rules later, if ever.
 
 | Per-file rule surface | Clients | What you get |
 |---|---|---|
-| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list | Content loads only when a matching file is in play |
+| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list; [Cline][cline] `.clinerules/*.md` + `paths:` | Content loads only when a matching file is in play |
 | Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array; [Junie][junie] — `.junie/rules/*.md`, every Markdown file in the directory concatenated automatically, project scope only (no user-level rules directory exists) | The body loads, the scope does not: permanent cost |
-| None | [Codex][cx-skills], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | Nothing to install — route the content to the always-on file |
+| None | [Codex][cx-skills], [Gemini CLI][gem], [Zed][zed], [Amp][amp], and most of the newer skills-first clients | Nothing to install — route the content to the always-on file |
 
 Per-client caveats worth knowing before you write a glob:
 
@@ -179,6 +179,7 @@ session and merely lives in another file.
 [gem]: https://geminicli.com
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[cline]: https://cline.bot
 [vsc-ci]: https://code.visualstudio.com/docs/agent-customization/custom-instructions
 [gh-blog]: https://github.blog/ai-and-ml/github-copilot/unlocking-the-full-power-of-copilot-code-review-master-your-instructions-files/
 [humanlayer]: https://humanlayer.dev/blog/writing-a-good-claude-md

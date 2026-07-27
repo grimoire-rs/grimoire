@@ -1,8 +1,8 @@
 ---
 name: grim-authoring
-description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, or amp vendor keys; or when grim build fails validation with exit code 65.
+description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.11
+compatibility: grim>=0.12
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,bundle,packaging

@@ -48,6 +48,19 @@ Environment variables that matter here (full table:
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries (local/in-cluster) |
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
 
+Separately, grim honors each **client's own** directory-override variable
+(`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIRO_HOME`, `GEMINI_CLI_HOME`,
+`COPILOT_HOME`, `OPENCODE_CONFIG_DIR`, …) so a global-scope install lands
+where that client actually reads. Their shapes are **not** uniform — some
+replace the client's config dir outright, others replace the home
+directory with the vendor segment still appended — so read the exact one
+you set in [Configuration][envvars] rather than reasoning by analogy.
+Two things follow. Setting one relocates that client's render root, and
+grim reaps the copy stranded at the old root on the next `install`,
+`update`, or `uninstall` (a copy you hand-edited is kept and warned about,
+never deleted). And they drive global-scope client *detection*: a client
+counts as present when its overridden root exists.
+
 ## Multiple Registries {#multiple-registries}
 
 When a project draws from more than one registry, declare them in a

@@ -102,6 +102,14 @@ until its own docs say otherwise:
 | Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI | Kiro, Junie, Zed, Amp — no installable format |
 | Hook | — | Claude Code, OpenCode, Copilot | unsurveyed for the other seven |
 
+The skills-only assumption above is not a hedge — it is the observed
+pattern. A later survey of seven more clients (Antigravity, Cline, Droid,
+Goose, Warp, OpenClaw, Kilo, as of 2026; re-verify) found **every one of
+them hosting skills**, only Antigravity adding a packageable subagent
+file, and only Cline documenting a per-file rules surface with real
+`paths:` scoping (`.clinerules/`). Assume the same of the next client you
+meet, and confirm before you author anything other than a skill for it.
+
 The two outliers worth memorizing: **rules are the least portable prose
 type** (half the clients cannot host one — route that content to the
 always-on file instead), and **skills are the only universally installable
@@ -120,11 +128,13 @@ type** — which is why cross-client packaging defaults to skills.
   conversation message that persists; OpenCode returns it as a native
   `skill` tool result; Copilot uses dual activation (semantic + slash).
   Same standard, different delivery — never depend on the delivery.
-- **A group of clients share one skills directory.** Codex, Gemini CLI, Zed
-  and Amp all scan the cross-vendor `.agents/skills/`, and the group keeps
-  growing as newer clients adopt the convention, so one copy there is read
-  by every member — and a name collision there collides for every member.
-  See [skill-design.md](skill-design.md).
+- **A group of clients share one skills directory.** Codex, Gemini CLI,
+  Zed, Amp and Goose treat the cross-vendor `.agents/skills/` as their own
+  location; OpenCode, Copilot, Cursor and Warp scan it *alongside* a
+  first-class directory of their own; and adoption is not universal —
+  Cline's docs name three skill directories and not that one. One copy in
+  the pool is read by every member, so a name collision there collides for
+  every member. See [skill-design.md](skill-design.md).
 - **Hooks are three technologies.** Shell + exit codes (Claude Code),
   JS/TS plugins that can cancel tool calls (OpenCode), declarative JSON
   command/http/prompt hooks (Copilot). Hooks must be re-implemented per

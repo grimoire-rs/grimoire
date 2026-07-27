@@ -4,6 +4,7 @@ You loaded this file because a grim command failed and you need to read
 the exit code, diagnose the cause, or get past an integrity gate.
 
 Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
+[Exit 78](#exit-78-no-client-can-host-it) ·
 [Integrity Gates](#integrity-gates) ·
 [Containment Refusals](#containment-refusals) ·
 [Kind Inference](#the-kind-inference-gotcha) ·
@@ -19,13 +20,13 @@ no stderr parsing needed:
 |---|---|---|
 | 0 | Success | — |
 | 1 | Failure | unclassified fall-through |
-| 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace |
+| 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace; a dotted config key naming a client that does not exist (`options.vendors.<typo>.shared_skills` is an *unknown key*, not a bad value) |
 | 65 | Data error | validation failures of any kind — see below |
 | 69 | Unavailable | registry unreachable, resolve timeout |
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
-| 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, unsupported client, credential helper missing |
+| 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, unsupported client, credential helper missing; **no client can host what you are installing** (see below); a hand-authored `options.vendors.<name>.shared_skills = true` on a client that does not read the shared pool |
 | 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing; a missing description companion on `grim fetch --description` |
 | 80 | Auth error | registry authentication failed |
 | 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) — includes `fetch`/`describe` against an uncached reference, which is 81, not 79 |
@@ -85,6 +86,13 @@ Common causes, roughly in order of frequency:
 - **Release tag errors.** Reference with no tag; invalid version
   string; exact-version tag already exists at a different digest
   (re-release with `--force` only if you mean to rewrite it).
+- **Shared-pool opt-in on a non-reader.** `grim config set
+  options.vendors.<name>.shared_skills true` for a client that does not
+  read the cross-vendor `.agents/skills` pool is refused here (a
+  hand-authored one fails later, at load, with 78). Flipping the flag on
+  a legitimate pool reader can also hit 65 when the pool already holds a
+  same-named skill grim has no record of writing — the ordinary
+  untracked-destination gate; `--force` overwrites it.
 - **Integrity mismatch** on installed content (see below).
 - **Oversize blob.** A registry serving more bytes than its manifest
   declared for a layer aborts the download mid-transfer rather than
@@ -101,6 +109,33 @@ Common causes, roughly in order of frequency:
 
 Fix the named input and re-run `grim build` until it exits 0 before
 trying `grim release` again.
+
+## Exit 78: No Client Can Host It
+
+A confusing 78 with an intact `grimoire.toml` usually means grim resolved
+a client set that cannot host the kinds you asked for. It happens when
+**nothing is detected**: grim then targets the generic `agents` client —
+one copy into the shared `.agents/skills` pool — and `agents` renders
+**skills only**. A lock holding nothing but rules, agents, or MCP servers
+has nowhere to go, so `grim install` (and `grim add` of such an artifact)
+exits 78 naming both ways to pick a client.
+
+```sh
+grim install --client claude            # one run
+grim config set options.clients claude  # or record it for good
+```
+
+`grim add` writes the declaration and lock entry *before* the install
+fails, so the follow-up `grim install --client <name>` finishes the job
+without re-adding. `grim context` reports the client set that actually
+resolved for your scope — run it first when the target set surprises you.
+
+The other 78 in this family is a **hand-authored**
+`options.vendors.<name>.shared_skills = true` on a client that does not
+read the shared pool: refused at config *load*, so every command in that
+scope fails until it is removed. The same value through `grim config set`
+is refused earlier, at 65. Only a verified pool reader may be opted in —
+grim never writes where nothing reads.
 
 ## Integrity Gates
 
