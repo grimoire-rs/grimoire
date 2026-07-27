@@ -89,3 +89,27 @@ Overlap detection in `test_path_overlaps_declared_or_absent` compares
 no declared-overlap group is required — but they *semantically* overlap
 `src/**` and `**/*.rs`. If another rule ever adopts these exact strings, a
 declared group in `.claude/rules.md` becomes mandatory.
+
+## Wave-2 skills-only batch watchlist
+
+All rows `verified 2026-07-27` (Cline, Droid, Goose, Warp, OpenClaw, Kilo
+landed as skills-only clients). Every one of these six declines Rule, Agent
+and MCP; the rows below record only the declines with a real flip condition,
+not the uniform ones.
+
+| Capability | Vendor | Current grim behavior | Upstream status | Action when shipped |
+|---|---|---|---|---|
+| Rule kind | Cline | declined | **Capability EXISTS** — `.clinerules/` documents genuine per-file `paths:` frontmatter scoping, the mechanism whose absence forces a decline for every other vendor in this batch. Declined only because the batch shipped skills-only; widening scope mid-wave risks shipping a permanent name wrong | **strongest decline→support candidate in the batch.** Enable Rule + scoped render, no upstream change needed |
+| `CLINE_DATA_DIR` override | Cline | not honored | evidenced only for Cline's MCP data directory, never for skill discovery | honor for skills once a first-party source ties it to skill paths |
+| MCP kind | Goose | declined | upstream is capable (Goose is extension/MCP-heavy) — the blocker is **grim-side**: its config is YAML (`config.yaml`) and grim splices JSON and TOML only | needs a YAML splicer that can add/remove one `extensions:` key without clobbering surrounding provider config |
+| macOS config root | Goose | unresolved; detection ORs `~/.config/goose/` and the macOS Application Support path | docs and source disagree; `$GOOSE_PATH_ROOT` relocates both | only matters if a *write* path (MCP/agents) is ever enabled — a write needs exactly one location |
+| Rule + Agent kinds | Goose, Warp, Droid, OpenClaw, Kilo | declined | monolithic instruction files with no in-file scoping key (Goose `.goosehints`/`AGENTS.md`, Droid `AGENTS.md`-style hierarchical-by-location, OpenClaw fixed-name files with only `title`/`summary`/`read_when`); agents runtime- or UI-only everywhere | enable per vendor when a documented per-file scoping key or an installable agent file format ships |
+| Rules on disk | Warp | declined | global rules are UI/cloud-managed with **no on-disk path at all** — nothing for grim to own | enable if Warp ships a filesystem rules surface |
+| Global pool support | Kilo | NOT pool-capable (partial member: project `.agents/skills` loads by default, no global support) | open, unmerged upstream feature request [Kilo-Org/kilocode#10569](https://github.com/Kilo-Org/kilocode/issues/10569) | add `kilo` to `POOL_CAPABLE_VENDORS` when global pool support merges — membership is scope-blind, so it must be full |
+| `~/.config/kilo/` vs `~/.kilo/` | Kilo | write root is `~/.kilo` (**source-confirmed** via `globalDirs()` in `paths.ts`, which governs directory resources); detection ORs both | conflict is confined to the **config file** (`kilo.jsonc`, docs-only at `~/.config/kilo/`), a separate resolver from the directory one — orthogonal to our write root, and grim never writes it while MCP is declined | **recheck after 2026-07-31**, when the legacy `.kilocode` codebase reaches EOL and the surface stops moving |
+| `.kilocode` legacy dir | Kilo | never written; accepted for detection only | deprecated upstream, EOL 2026-07-31 | none — do not add a second write path |
+| MCP env-ref form | Kilo | n/a (MCP declined) | substitution form is **`{env:VAR}`**, *not* the `${VAR}` shape grim's renderer assumes by default | translate on the way in if MCP is ever enabled — assuming `${VAR}` would write a broken literal |
+| Shared-pool membership | OpenClaw | NOT pool-capable — deliberate deferral | it **does** scan `$HOME/.agents/skills` at priority 3, first-party confirmed | flip in one line once a global-only client's interaction with `shared_skills` is proven; adding is additive, removing is breaking |
+| MCP kind | OpenClaw | declined | `openclaw.json` mixes strict JSON and JSON5 (unquoted keys, a `--strict-json` flag) | needs JSON5 tolerance in the splice engine before any write |
+| `$OPENCLAW_HOME` | OpenClaw | not honored | referenced but **never defined** on any page fetched | honor once upstream documents it |
+| opencode lineage | Kilo | separate client from `opencode` | Kilo's current codebase is built on opencode, which grim supports independently | watch for directory convergence — a shared dir would make two clients contend for one path |

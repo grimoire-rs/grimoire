@@ -116,16 +116,19 @@ at both install time and publish-time validation.
 | Plain metadata key (non-tool prefix, e.g. `vendor.x`) | Passes through unchanged |
 | No tool-namespaced keys at all | Fast path: verbatim install, byte-identical to canonical |
 
-The eleven recognized tool namespaces are `claude`, `opencode`, `copilot`,
-`codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, and
-`antigravity`. Any key whose prefix is not one of these eleven is plain
-metadata and is never treated as a tool key. (The vendor-neutral `agents`
-target is deliberately excluded — it owns no namespace of its own.)
+The seventeen recognized tool namespaces are `claude`, `opencode`, `copilot`,
+`codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, `antigravity`,
+`cline`, `droid`, `goose`, `warp`, `openclaw`, and `kilo`. Any key whose prefix
+is not one of these seventeen is plain metadata and is never treated as a tool
+key. (The vendor-neutral `agents` target is deliberately excluded — it owns no
+namespace of its own.)
 
-`antigravity` is the most recent name to join the reserved set, and
-`codex` joined it when Codex client support landed. The consequence is the
-same in both cases, and is worth stating once: a `codex.*` — or now
-`antigravity.*` — metadata key that was plain data under earlier grim
+The set is derived from the client list, so **every new client reserves its
+namespace automatically**. `cline`, `droid`, `goose`, `warp`, `openclaw` and
+`kilo` are the most recent names to join; `antigravity` joined before them, and
+`codex` when Codex client support landed. The consequence is the same every
+time, and is worth stating once: a `codex.*` — or now a `goose.*` —
+metadata key that was plain data under earlier grim
 versions is now a tool-namespaced key: consumed by Codex when Codex is a target
 (unknown fields warn and are dropped, the typo guard), and dropped for
 other vendors per the projection table above. `grim build`/`grim
@@ -143,6 +146,14 @@ of vendor (see [Empty skill registries](#empty-registries)) — and
 dropped for other vendors per the projection table above. `grim
 build`/`grim publish` surface an affected key through the same
 unknown-key warning.
+
+`cline`, `droid`, `goose`, `warp`, `openclaw` and `kilo` joined together when
+the skills-only batch landed, and their case is the simplest of the three: all
+six carry **empty registries for every kind**, because none of them documents a
+`<vendor>.*` frontmatter field grim could lift. So a metadata key using one of
+these six prefixes warns and drops for *every* target, including its own
+client — there is nothing for it to lift into. If one of these vendors later
+documents a native field, adding it to that vendor's registry is additive.
 
 When a namespaced key collides with a top-level key of the same name,
 the namespaced key wins and a warning is emitted. This situation arises
@@ -356,7 +367,12 @@ grim installs skills into the directories each client scans for
 | [Cursor][cursor-subagents-docs] | `.cursor/skills/<name>/` |
 | [Kiro][kiro-docs] | `.kiro/skills/<name>/` |
 | [Junie][junie-docs] | `.junie/skills/<name>/` |
-| [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs], [Antigravity][antigravity-skills-docs] | `.agents/skills/<name>/` (shared pool) |
+| [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs], [Antigravity][antigravity-skills-docs], [Goose][goose-docs] | `.agents/skills/<name>/` (shared pool) |
+| [Cline][cline-docs] | `.cline/skills/<name>/` — first in Cline's own precedence (`.cline/` → `.clinerules/` → `.claude/`); **not** a pool client |
+| [Droid][droid-docs] | `.factory/skills/<name>/` — the client is `droid`, the directory is `.factory` |
+| [Warp][warp-docs] | `.warp/skills/<name>/` — native by default; pool-capable via `[options.vendors.warp].shared_skills` |
+| [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/` |
+| [OpenClaw][openclaw-docs] | *(none — no project scope; see the global table)* |
 
 **Global scope** (user-level; grim installs directly into each client's
 native discovery directory, honoring the client's own directory-override
@@ -375,6 +391,12 @@ environment variable):
 | [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's `$XDG_CONFIG_HOME`-rooted settings root |
 | [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no such env var exists upstream; skills always key on `$HOME` |
 | [Antigravity][antigravity-skills-docs] | `~/.gemini/config/skills/<name>/` — **not** the shared pool: Antigravity pools only at project scope, and globally reads its own root | None found in current docs (`ANTIGRAVITY_API_KEY` / `ANTIGRAVITY_TOKEN` are auth credentials and relocate nothing) |
+| [Cline][cline-docs] | `~/.cline/skills/<name>/` (`%USERPROFILE%\.cline\skills\` on Windows) | None — `CLINE_DATA_DIR` is evidenced only for the MCP data directory, never for skill discovery, so grim does not honor it |
+| [Droid][droid-docs] | `~/.factory/skills/<name>/` | None — no `FACTORY_HOME` or `DROID_HOME` appears in current docs |
+| [Goose][goose-docs] | `$HOME/.agents/skills/<name>/` (shared pool) — Goose's own `.goose/skills/` is labelled backward-compatibility upstream, and `.agents/skills` the recommended location | None — skills always key on `$HOME`. `$GOOSE_PATH_ROOT` relocates Goose's *config* root, which grim only reads for detection |
+| [Warp][warp-docs] | `~/.warp/skills/<name>/` — the same path on macOS, Linux and Windows | None found in current docs |
+| [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` is referenced but never defined upstream, so grim does not honor it |
+| [Kilo][kilo-docs] | `~/.kilo/skills/<name>/` | None found in current docs |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
 environments), grim falls back to the workspace layout under `$GRIM_HOME`
@@ -552,3 +574,10 @@ claude namespace to silence it and gain proper type conversion.
 [publishing-metadata]: ./publishing.md#metadata
 [concepts-clients]: ./concepts.md#clients
 [agents-doc]: ./agents.md
+
+[cline-docs]: https://cline.bot
+[droid-docs]: https://factory.ai
+[goose-docs]: https://block.github.io/goose
+[warp-docs]: https://warp.dev
+[openclaw-docs]: https://github.com/openclaw/openclaw
+[kilo-docs]: https://kilo.ai

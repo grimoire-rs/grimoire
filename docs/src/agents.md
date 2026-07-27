@@ -103,6 +103,12 @@ own.
 | [Zed][zed-docs] | not supported | agents declined — external agents run over ACP with no installable file |
 | [Amp][amp-docs] | not supported | agents declined — subagents are spawned at runtime with no file format |
 | [Antigravity][antigravity-subagents-docs] | `.md` + YAML frontmatter | `tools` emitted as a YAML **list** (upstream types it `string[]`); nothing lifted — no `antigravity.*` registry yet |
+| [Cline][cline-docs] | not supported | agents declined — no installable subagent file format |
+| [Droid][droid-docs] | not supported | agents declined — no installable subagent file format |
+| [Goose][goose-docs] | not supported | agents declined — subagents are runtime-only, nothing on disk |
+| [Warp][warp-docs] | not supported | agents declined — agent profiles are Settings-UI-only |
+| [OpenClaw][openclaw-docs] | not supported | agents declined — subagents are runtime-only, nothing on disk |
+| [Kilo][kilo-docs] | not supported | agents declined — custom "modes" are not an installable agent format |
 
 The canonical format **is** Claude Code's native subagent format, so a plain
 agent — one with no `<vendor>.<field>` metadata keys — installs for Claude
@@ -235,3 +241,10 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [vendor-drift]: ./vendor-metadata.md#drift
 [clients-matrix]: ./clients.md
 [stability-unstable]: ./stability.md#unstable
+
+[cline-docs]: https://cline.bot
+[droid-docs]: https://factory.ai
+[goose-docs]: https://block.github.io/goose
+[warp-docs]: https://warp.dev
+[openclaw-docs]: https://github.com/openclaw/openclaw
+[kilo-docs]: https://kilo.ai

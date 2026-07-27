@@ -114,8 +114,21 @@ pub struct KnownField {
 /// - `cursor`, `copilot`, `opencode` scan it **additively**, alongside their
 ///   own native skills dir — verified 2026-07-26. They are the members the
 ///   opt-in actually buys anything for.
+/// - `goose` and `warp` scan it at **both** scopes, verified 2026-07-27
+///   against each vendor's own docs. They differ in what grim writes by
+///   default: Goose renders *into* the pool (its own `.goose/skills` is
+///   labelled back-compat upstream, and `.agents/skills` the recommended
+///   location), while Warp renders natively to `.warp/skills` and reaches the
+///   pool only through the opt-in. Membership here is about what a client
+///   **reads**, not where grim writes — those are separate questions.
 /// - Absent, deliberately: `claude` (does not scan the pool), `kiro` and
-///   `junie` (not evidenced either way), and `antigravity` — which **does**
+///   `junie` (not evidenced either way), `cline` and `droid` (confirmed
+///   *absent* from their own documented scan lists, not merely unevidenced),
+///   `openclaw` (it does scan the pool at priority 3, but it is global-only
+///   and the interaction between a scope-gapped client and `shared_skills` is
+///   unproven — a deliberate deferral, since adding is additive and removing
+///   is breaking), `kilo` (**partial**: project pool only, no global support)
+///   and `antigravity` — which **does**
 ///   read the project pool but not the global one (its global skills live
 ///   under its own `~/.gemini/config/skills`). Membership here is scope-blind,
 ///   so adding it would make `shared_skills = true` write global skills where
@@ -148,7 +161,7 @@ pub struct KnownField {
 /// Both have the same fix, and it is not a guard in the installer: keep a
 /// fields-declaring vendor out of the pool.
 const POOL_CAPABLE_VENDORS: &[&str] = &[
-    "codex", "gemini", "zed", "amp", "agents", "cursor", "copilot", "opencode",
+    "codex", "gemini", "zed", "amp", "agents", "cursor", "copilot", "opencode", "goose", "warp",
 ];
 
 /// [`Vendor::pool_capable`] with both inputs injected.
@@ -552,7 +565,7 @@ mod tests {
         assert_eq!(
             capable,
             vec![
-                "opencode", "copilot", "codex", "cursor", "gemini", "zed", "amp", "agents"
+                "opencode", "copilot", "codex", "cursor", "gemini", "zed", "amp", "agents", "goose", "warp"
             ],
             "the pool-capable set is an evidence roster; a client joining or leaving it is a deliberate change"
         );
@@ -561,6 +574,13 @@ mod tests {
         assert!(!ClientTarget::Claude.vendor().pool_capable());
         assert!(!ClientTarget::Kiro.vendor().pool_capable());
         assert!(!ClientTarget::Junie.vendor().pool_capable());
+        // Confirmed absences from their own scan lists, not evidence gaps.
+        assert!(!ClientTarget::Cline.vendor().pool_capable());
+        assert!(!ClientTarget::Droid.vendor().pool_capable());
+        // Partial members / deliberate deferrals — the shape that silently
+        // writes global skills where the client never scans if let in.
+        assert!(!ClientTarget::Kilo.vendor().pool_capable());
+        assert!(!ClientTarget::OpenClaw.vendor().pool_capable());
     }
 
     #[test]
@@ -601,6 +621,9 @@ mod tests {
     const SCOPE_GAPS: &[(&str, ArtifactKind, ConfigScope)] = &[
         // `.junie/rules/` is ownable; no global `~/.junie/rules/` exists.
         ("junie", ArtifactKind::Rule, ConfigScope::Global),
+        // OpenClaw has no per-repository scope: its "project" path is a fixed
+        // daemon home that does not track the repo grim was invoked in.
+        ("openclaw", ArtifactKind::Skill, ConfigScope::Project),
     ];
 
     #[test]

@@ -33,13 +33,19 @@ pub mod vendor_agents;
 pub mod vendor_amp;
 pub mod vendor_antigravity;
 pub mod vendor_claude;
+pub mod vendor_cline;
 pub mod vendor_codex;
 pub mod vendor_copilot;
 pub mod vendor_cursor;
+pub mod vendor_droid;
 pub mod vendor_gemini;
+pub mod vendor_goose;
 pub mod vendor_junie;
+pub mod vendor_kilo;
 pub mod vendor_kiro;
+pub mod vendor_openclaw;
 pub mod vendor_opencode;
+pub mod vendor_warp;
 pub mod vendor_zed;
 
 #[allow(unused_imports)]

@@ -190,10 +190,17 @@ minor release (see [stability][stability-unstable]).
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 | [Antigravity][antigravity-docs] | project / global | `.agents/mcp_config.json` / `~/.gemini/config/mcp_config.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; remote (`sse`, `http`): `serverUrl` + `headers`; ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
 
-The vendor-neutral `agents` client is absent from the table because it has no
-MCP surface at all: there is no cross-vendor standard MCP config location, so
-it declines the kind — grim warns, skips, and writes nothing. It is the one
-target with no row here.
+Seven clients are absent from the table because grim writes no MCP config for
+them at all — they decline the kind, so grim warns, skips, and writes nothing.
+
+The vendor-neutral `agents` client has no MCP surface to write: there is no
+cross-vendor standard MCP config location. `cline`, `droid`, `goose`, `warp`,
+`openclaw` and `kilo` ship as skills-only clients. Two of those declines are
+grim-side rather than upstream gaps, and are worth naming: `goose` keeps its
+MCP servers in a **YAML** `config.yaml`, and `openclaw` in a file mixing strict
+JSON with JSON5 — grim's config splicer handles JSON and TOML only, and
+editing either format without a matching engine risks corrupting settings the
+user did not ask grim to touch.
 
 Codex is the one **TOML** target — every other client above writes
 JSON/JSONC — so its splice runs through a separate span-preserving

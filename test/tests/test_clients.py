@@ -533,7 +533,10 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("client", ["gemini", "zed", "amp"])
+@pytest.mark.parametrize(
+    "client",
+    ["gemini", "zed", "amp", "cline", "droid", "goose", "warp", "kilo"],
+)
 def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
     grim_at, project_dir: Path, registry: str, unique_repo: str, client: str
 ) -> None:
@@ -570,7 +573,10 @@ def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
     assert not any(r["name"] == "rust-style" for r in after), after
 
 
-@pytest.mark.parametrize("client", ["kiro", "junie", "zed", "amp"])
+@pytest.mark.parametrize(
+    "client",
+    ["kiro", "junie", "zed", "amp", "cline", "droid", "goose", "warp", "kilo"],
+)
 def test_declined_agent_vendor_warns_skips_and_uninstalls_clean(
     grim_at, project_dir: Path, registry: str, unique_repo: str, client: str
 ) -> None:
@@ -603,3 +609,118 @@ def test_declined_agent_vendor_warns_skips_and_uninstalls_clean(
     assert out["status"] in ("uninstalled", "removed"), out
     after = runner.json("status")["items"]
     assert not any(r["name"] == "my-agent" for r in after), after
+
+
+# ---------------------------------------------------------------------------
+# Wave-2 skills-only batch: one skill, six clients, three different layouts.
+#
+# OpenClaw is absent from the project-scope table on purpose — it has no
+# per-repository scope at all and is covered by its own pair of tests below.
+# ---------------------------------------------------------------------------
+
+
+def _skill_only(unique_repo: str):
+    return make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="v1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("client", "expected", "forbidden"),
+    [
+        ("cline", ".cline/skills/code-review", ".agents/skills/code-review"),
+        # The client is `droid`; the directory is `.factory`. Both frozen.
+        ("droid", ".factory/skills/code-review", ".droid/skills/code-review"),
+        # Goose is the one that renders INTO the pool.
+        ("goose", ".agents/skills/code-review", ".goose/skills/code-review"),
+        # Warp is pool-capable but renders natively by default.
+        ("warp", ".warp/skills/code-review", ".agents/skills/code-review"),
+        # Never the deprecated `.kilocode`.
+        ("kilo", ".kilo/skills/code-review", ".kilocode/skills/code-review"),
+    ],
+)
+def test_skills_only_client_installs_to_its_own_layout(
+    grim_at, project_dir: Path, registry: str, unique_repo: str,
+    client: str, expected: str, forbidden: str,
+) -> None:
+    """Each wave-2 client writes exactly one layout and nothing else. The
+    ``forbidden`` column is the mistake each one is most likely to make:
+    rendering into the shared pool when it is not a pool client, using the
+    client name as the directory, or resurrecting a deprecated dir."""
+    sk = _skill_only(unique_repo)
+    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    rows = runner.json("install", "--client", client)["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    assert_path_exists(project_dir / expected / "SKILL.md")
+    assert_not_exists(project_dir / forbidden)
+
+
+def test_openclaw_project_scope_writes_nothing_and_warns(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """OpenClaw has no per-repository scope: the path its docs call "project"
+    is a fixed daemon home shared by every repo on the machine. A project
+    install must record zero outputs and touch nothing, rather than anchor a
+    record at ``Workspace`` while the file lands outside the workspace."""
+    sk = _skill_only(unique_repo)
+    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", "openclaw", format="json")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert rows[0]["target"] is None, rows
+    assert_not_exists(project_dir / ".openclaw")
+    assert_not_exists(project_dir / ".agents/skills/code-review")
+    assert "openclaw" in result.stderr.lower(), result.stderr
+
+    status = runner.json("status")["items"]
+    assert status[0]["outputs"] == [], f"zero outputs required: {status}"
+
+
+def test_openclaw_global_scope_installs_to_its_own_root(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """The scope that does work: ``--global`` lands in ``~/.openclaw/skills``,
+    OpenClaw's own root rather than the shared pool it also reads."""
+    from src.runner import GrimRunner
+
+    sk = _skill_only(unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "openclaw")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    assert_path_exists(runner.home / ".openclaw/skills/code-review/SKILL.md")
+    assert_not_exists(runner.home / ".agents/skills/code-review")
+
+
+def test_goose_global_skill_lands_in_the_shared_pool(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Goose is a full pool member at BOTH scopes, unlike Antigravity and Kilo.
+    Its global skill must land in ``$HOME/.agents/skills`` — the same physical
+    tree Codex/Gemini/Zed/Amp read — and never under a ``~/.goose`` root, which
+    grim deliberately does not define an anchor for."""
+    from src.runner import GrimRunner
+
+    sk = _skill_only(unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "goose")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    assert_path_exists(runner.home / ".agents/skills/code-review/SKILL.md")
+    assert_not_exists(runner.home / ".goose/skills/code-review")

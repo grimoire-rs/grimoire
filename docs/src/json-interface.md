@@ -158,7 +158,7 @@ list — any value is accepted (e.g. `options.tui.tree_separators`), and its
 values, each drawn from the closed `values` list — the same non-null
 shape `enum` rows carry. `options.clients` is the one `string-set` key
 today, so it is the one non-`enum` row whose `values` is a list
-(`["claude","opencode","copilot","codex","cursor","kiro","junie","gemini","zed","amp","agents","antigravity"]`)
+(`["claude","opencode","copilot","codex","cursor","kiro","junie","gemini","zed","amp","agents","antigravity","cline","droid","goose","warp","openclaw","kilo"]`)
 rather than `null`.
 
 `constraints` is `{item_pattern, item_width}` or `null`, present only on a
