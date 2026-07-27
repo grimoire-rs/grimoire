@@ -46,13 +46,23 @@ use super::vendor::{FieldType, KnownField, Vendor};
 /// const-evaluable, so this is a [`LazyLock`] rather than a `const`.
 ///
 /// **A client reserves a namespace only if it is a real vendor.**
-/// [`ClientTarget::Agents`] is excluded: the generic client is vendor-neutral
-/// by definition, owns no metadata namespace, and lifts nothing (all three of
-/// its field registries are empty). Reserving `agents.*` would retroactively
-/// reclassify a plain metadata key that already-published artifacts may carry
-/// — such a key installs verbatim today and would start being silently
-/// dropped, changing the rendered bytes of an already-installed skill. That is
-/// a renderer break under Principle 9, not additive evolution.
+/// [`ClientTarget::Agents`] is excluded, and the reason is specific to that
+/// name rather than general: the generic client is vendor-neutral by
+/// definition, owns no metadata namespace, and lifts nothing (all three of its
+/// field registries are empty) — and `agents` is an ordinary English word
+/// likely to appear in skill metadata that has nothing to do with a vendor, so
+/// reserving `agents.*` would strip genuine user data broadly. A name like
+/// `cline.*` or `kilo.*` carries no such risk.
+///
+/// Reservation itself is **additive, not a break**: it is the shipped
+/// behaviour every client already follows (`codex` and `antigravity` are the
+/// released precedent), it is documented as policy in
+/// `docs/src/vendor-metadata.md`, and the newly-reserved key is dropped with a
+/// **warning that names it**, never silently. Drift is measured by hashing the
+/// installed file against its recorded `content_hash`, never by re-rendering,
+/// and grim only re-renders on force, a pin change, or a newly added client —
+/// re-recording the hash in the same pass. So an untouched install never
+/// falsely reports `Modified`.
 static KNOWN_NAMESPACES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     ClientTarget::ALL
         .iter()

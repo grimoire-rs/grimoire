@@ -67,8 +67,10 @@ pub enum ClientTarget {
     /// Kiro (AWS) — `.kiro/{skills,steering,settings/mcp.json}` (skills,
     /// rules, MCP; agents declined — CLI/IDE schema collision).
     Kiro,
-    /// JetBrains Junie — `.junie/{skills,mcp/mcp.json}` (skills + MCP;
-    /// rules and agents declined — no ownable per-file surface / EAP-only).
+    /// JetBrains Junie — `.junie/{skills,rules,mcp/mcp.json}` (skills + MCP
+    /// native; rules **degraded and project-only** — `.junie/rules/` is
+    /// ownable but concatenated wholesale, so `paths` is dropped, and no
+    /// global `~/.junie/rules/` exists; agents declined — EAP-only).
     Junie,
     /// Gemini CLI — shared `.agents/skills` + `.gemini/{agents,settings.json}`
     /// (skills, agents, MCP; rules declined — GEMINI.md hierarchy only).
@@ -542,7 +544,10 @@ mod tests {
             (ClientTarget::Codex, Native, Declined, Native, true),
             (ClientTarget::Cursor, Native, Native, Native, true),
             (ClientTarget::Kiro, Native, Native, Declined, true),
-            (ClientTarget::Junie, Native, Declined, Declined, true),
+            // Junie: rules Degraded — `.junie/rules/*.md` is ownable but every
+            // file in it is concatenated, so `paths` is dropped. Project scope
+            // only; the global half is gated by `Vendor::kind_surface`.
+            (ClientTarget::Junie, Native, Degraded, Declined, true),
             (ClientTarget::Gemini, Native, Declined, Native, true),
             (ClientTarget::Zed, Native, Declined, Declined, true),
             (ClientTarget::Amp, Native, Declined, Declined, true),
@@ -911,8 +916,8 @@ mod tests {
             ),
             // Kiro: rules render as steering docs; agents declined.
             (ClientTarget::Kiro, ".kiro/skills/x", Some(".kiro/steering/x.md"), None),
-            // Junie: skills only — rules and agents declined.
-            (ClientTarget::Junie, ".junie/skills/x", None, None),
+            // Junie: skills + project-scope rules (degraded); agents declined.
+            (ClientTarget::Junie, ".junie/skills/x", Some(".junie/rules/x.md"), None),
             // Gemini: skills via the shared pool; agents native; rules declined.
             (
                 ClientTarget::Gemini,

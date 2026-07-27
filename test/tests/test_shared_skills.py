@@ -292,6 +292,114 @@ def test_kiro_global_scoped_rule_writes_file_and_warns_upstream_inertness(
 
 
 # ---------------------------------------------------------------------------
+# Junie rules: Degraded at project scope, no surface at all globally
+# ---------------------------------------------------------------------------
+
+
+def _junie_rule(unique_repo: str):
+    """A path-scoped rule — scoped so the dropped-``paths`` warning is live."""
+    return make_artifact(
+        f"{unique_repo}/junie-scoped",
+        "rule",
+        {"junie-scoped.md": "---\npaths: ['**/*.rs']\n---\n# Junie scoped\nbody\n"},
+        tag="v1",
+    )
+
+
+def test_junie_project_rule_installs_with_paths_dropped_and_warns(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``.junie/rules/`` IS grim-ownable, so a project-scope rule installs —
+    but Junie concatenates every file in that directory unconditionally, so
+    ``paths`` has no on-disk target. The file must land with its scoping
+    dropped AND a warning saying so; silently installing a rule that looks
+    scoped and is not is the outcome this guards against."""
+    ru = _junie_rule(unique_repo)
+    (bare_project_dir / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", "junie", format="json", log_level="warn")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    rule = bare_project_dir / ".junie/rules/junie-scoped.md"
+    assert rule.is_file(), "a project-scope Junie rule must install to .junie/rules/"
+    text = rule.read_text()
+    assert "body" in text, f"the rule body must survive: {text!r}"
+    assert "paths:" not in text, (
+        f"Junie reads the file verbatim — canonical frontmatter must not leak: {text!r}"
+    )
+    assert "path scoping" in result.stderr, (
+        f"dropping `paths` must be warned, not silent; got: {result.stderr!r}"
+    )
+
+
+def test_junie_global_rule_writes_nothing_and_warns(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """There is no ``~/.junie/rules/`` upstream. A global Junie rule must
+    record ZERO outputs and leave the filesystem untouched — writing a warned,
+    reapable file to a path nothing reads would be worse than declining. The
+    warning has to name the client and the scope, because the compat matrix
+    tells the user Junie supports rules."""
+    ru = _junie_rule(unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    result = runner.run(
+        "install", "--global", "--client", "junie", format="json", log_level="warn"
+    )
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert rows[0]["target"] is None, rows
+    assert not (runner.home / ".junie/rules").exists(), (
+        "grim must not create ~/.junie/rules/ — Junie never reads it"
+    )
+    assert "junie" in result.stderr.lower(), (
+        f"the skip must name the client; got: {result.stderr!r}"
+    )
+
+    status = runner.json("status", "--global")["items"]
+    assert status[0]["outputs"] == [], (
+        f"a global Junie rule must record zero outputs: {status}"
+    )
+
+
+def test_junie_global_rule_skips_while_a_sibling_client_still_installs(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """The gate that actually runs at materialize time. With a *supporting*
+    client also selected, the install proceeds — so Junie is dropped by the
+    per-client retain rather than by the whole-artifact short-circuit. Claude
+    must get its file, Junie must get nothing, and the warning must name Junie
+    and say why. Without the scope-aware gate Junie would silently write
+    ``~/.junie/rules/<name>.md`` here."""
+    ru = _junie_rule(unique_repo)
+    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    result = runner.run(
+        "install", "--global", "--client", "claude,junie", format="json", log_level="warn"
+    )
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    assert (runner.home / ".claude/rules/junie-scoped.md").is_file(), (
+        "the supporting client must still install"
+    )
+    assert not (runner.home / ".junie/rules").exists(), (
+        "Junie must write nothing at global scope even when the install proceeds"
+    )
+
+    clients = {out["client"] for out in runner.json("status", "--global")["items"][0]["outputs"]}
+    assert clients == {"claude"}, f"Junie must record no output: {clients}"
+    assert "junie" in result.stderr.lower(), result.stderr
+
+
+# ---------------------------------------------------------------------------
 # `[options.vendors.<name>].shared_skills` — the rendering opt-in
 # ---------------------------------------------------------------------------
 

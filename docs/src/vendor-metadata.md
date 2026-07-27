@@ -411,6 +411,7 @@ The mapping table for rules:
 | [Cursor][cursor-subagents-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `alwaysApply: false`; unscoped (no `paths`) emits no `globs` and `alwaysApply: true` instead (`src/install/vendor_cursor.rs`) |
 | [Kiro][kiro-docs] | `paths` | top-level | `fileMatchPattern` | YAML array (not comma-joined), plus a computed `inclusion: fileMatch`; unscoped emits `inclusion: always` instead, no `fileMatchPattern` (`src/install/vendor_kiro.rs`) |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
+| [Junie][junie-docs] | `paths` | top-level | — | **Dropped with a warning.** `.junie/rules/*.md` is ownable, but every file in the directory is concatenated automatically with no per-file activation key, so the rule loads unconditionally. Project scope only — no `~/.junie/rules/` exists, and a global rule is skipped with zero outputs (`src/install/vendor_junie.rs`) |
 | [Codex][codex-subagents-docs] | — | — | — | **Rules are unsupported.** Codex uses an always-on, directory-granular `AGENTS.md` with no path-glob or `applyTo` mechanism. Installing a rule with `--client codex` emits a warning and writes no file. |
 
 A rule's `paths` list is native [Claude Code][claude-memory-docs]
