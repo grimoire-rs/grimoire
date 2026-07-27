@@ -105,10 +105,19 @@ impl Vendor for GooseVendor {
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Shared-pool skills are vendor-independent: route through the
-        // vendor-less universal renderer so no per-vendor field can leak into
-        // the one physical file every pool member records against.
-        Ok(render::render_universal_skill_doc(doc))
+        // Vendor-aware renderer, NOT `render_universal_skill_doc`, even though
+        // Goose renders into the shared pool. With an empty registry the two
+        // emit byte-identical documents — pinned by
+        // `every_pool_capable_vendor_renders_the_universal_skill_bytes`, which
+        // compares `.document` — so nothing can leak into the shared file.
+        //
+        // The difference is warnings: the universal renderer drops every
+        // namespaced key SILENTLY, so a `goose.*` key would vanish with no
+        // diagnostic. Adding this client reserved the `goose.` prefix, which
+        // means a key that used to be plain pass-through data now disappears —
+        // silently doing that is the defect, so Goose takes the path that
+        // names the key and the client.
+        render::render_skill_doc(doc, self)
     }
 
     fn rule_index(
@@ -211,13 +220,52 @@ mod tests {
     }
 
     #[test]
-    fn skill_index_matches_the_universal_render() {
-        // Byte-identical to what the other pool members write — they all share
-        // one physical file, so any divergence would be a write conflict.
+    fn skill_index_bytes_match_the_universal_render() {
+        // Byte-identical DOCUMENT to what the other pool members write — they
+        // all share one physical file, so any divergence would be a write
+        // conflict. Only `.document` is compared: warnings are advisory and
+        // never reach disk, which is what lets Goose take the vendor-aware
+        // renderer for its diagnostics without leaving the pool.
         let doc = "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n  claude.model: opus\n---\n# body\n";
-        assert_eq!(
-            GooseVendor.skill_index(doc).expect("no registry ⇒ no render error"),
+        let mine = GooseVendor
+            .skill_index(doc)
+            .expect("no registry ⇒ no render error")
+            .expect("namespaced metadata ⇒ rendered");
+        let universal = render::render_universal_skill_doc(doc).expect("namespaced metadata ⇒ rendered");
+        assert_eq!(mine.document, universal.document);
+    }
+
+    #[test]
+    fn an_own_namespace_skill_key_warns_by_name_instead_of_vanishing() {
+        // Adding this client reserved the `goose.` prefix, so a key that was
+        // plain pass-through data under earlier grim versions now drops. The
+        // drop is unavoidable; doing it silently is not — a user would read it
+        // as a bug. The universal pool renderer emits no warnings at all, which
+        // is exactly why Goose does not use it.
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  goose.made-up: x\n---\n# body\n";
+        let out = GooseVendor
+            .skill_index(doc)
+            .expect("empty registry ⇒ no render error")
+            .expect("namespaced metadata ⇒ rendered");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("goose.made-up") && w.contains("goose")),
+            "the warning must name the dropped key and the client: {:?}",
+            out.warnings
+        );
+        assert!(
+            !out.document.contains("goose.made-up"),
+            "and the key must still be dropped: {}",
+            out.document
+        );
+        // The silent path, for contrast — this is what the switch avoids.
+        assert!(
             render::render_universal_skill_doc(doc)
+                .expect("rendered")
+                .warnings
+                .is_empty(),
+            "pool renderer is silent by construction; that is the defect Goose sidesteps"
         );
     }
 

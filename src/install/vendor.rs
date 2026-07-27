@@ -652,6 +652,74 @@ mod tests {
     }
 
     #[test]
+    fn reserving_a_namespace_never_drops_a_key_silently() {
+        use crate::install::client_target::ClientTarget;
+
+        // Adding a client reserves its `<name>.` metadata prefix, so a key that
+        // was plain pass-through data under an earlier grim starts being
+        // dropped. The drop is unavoidable and additive; doing it SILENTLY is
+        // not — a user would read the vanished key as a bug.
+        //
+        // The trap is real, not theoretical: `render_universal_skill_doc`
+        // returns `warnings: Vec::new()` unconditionally, so any vendor routing
+        // its `skill_index` through it drops own-namespace keys with no
+        // diagnostic at all. Goose was written that way first, since it renders
+        // into the shared pool; `amp`, `antigravity`, `codex`, `gemini` and
+        // `zed` shipped that way and were the defect this test first found.
+        //
+        // Derived from `ClientTarget::ALL` rather than a hand-kept list, so a
+        // new vendor is covered the day it lands instead of the day someone
+        // remembers to add it — a per-client message names the offender.
+        // The exclusion is structural, not a backlog: a client that reserves no
+        // namespace cannot drop an own-namespace key, because it has none. It is
+        // read off `KNOWN_NAMESPACES` — the same list the renderer consults —
+        // rather than hardcoding `ClientTarget::Agents`, so this test and the
+        // reservation policy cannot drift apart by convention.
+        let mut silent: Vec<&'static str> = Vec::new();
+        let mut unrendered: Vec<&'static str> = Vec::new();
+        for client in ClientTarget::ALL
+            .iter()
+            .filter(|c| crate::install::render::reserves_namespace(c.vendor().name()))
+        {
+            let vendor = client.vendor();
+            let name = vendor.name();
+            let doc = format!("---\nname: s\ndescription: d\nmetadata:\n  {name}.made-up-key: x\n---\n# body\n");
+            let Ok(Some(out)) = vendor.skill_index(&doc) else {
+                // Recorded, never skipped past. The key IS tool-namespaced for
+                // every client here, so `None` (verbatim install) or `Err` means
+                // this vendor answers the question some other way — which may be
+                // defensible, but it is a deliberate exemption someone must
+                // write down, not something the loop should quietly tolerate.
+                // A bare `continue` here would reopen the exact hole deriving
+                // this list from `ClientTarget::ALL` was meant to close.
+                unrendered.push(name);
+                continue;
+            };
+            assert!(
+                !out.document.contains("made-up-key"),
+                "'{name}' must drop an unknown own-namespace key: {}",
+                out.document
+            );
+            // Collected rather than asserted in place so one run names every
+            // SILENT-DROP offender: fixing this defect meant auditing five
+            // vendors at once, and a fail-fast assert would have reported them
+            // one per run. (The document-leak assert above stays fail-fast — a
+            // key that survives is a different, louder bug.)
+            if !out.warnings.iter().any(|w| w.contains("made-up-key")) {
+                silent.push(name);
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "these clients dropped an own-namespace key SILENTLY — the warning must name key and client: {silent:?}"
+        );
+        assert!(
+            unrendered.is_empty(),
+            "these clients neither rendered nor errored on an own-namespace key, so this test never judged them: {unrendered:?}"
+        );
+    }
+
+    #[test]
     fn global_skills_root_is_home_agents_skills() {
         assert_eq!(
             global_skills_root(Some(PathBuf::from("/home/u"))),

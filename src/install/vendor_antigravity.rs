@@ -247,11 +247,15 @@ impl Vendor for AntigravityVendor {
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         // Project-scope skills land in the shared `.agents/skills` pool with
-        // Codex/Gemini/Zed/Amp — ONE physical file. Route through the
-        // vendor-less universal renderer so no per-vendor field can ever leak
-        // into it, and so every pool member emits byte-identical bytes. The
-        // empty `skill_fields` registry is the other half of that contract.
-        Ok(render::render_universal_skill_doc(doc))
+        // every other pool member — ONE physical file. The vendor-aware
+        // renderer against an EMPTY registry is byte-identical to the
+        // vendor-less universal render, so nothing per-vendor can leak in
+        // (pinned by `skill_index_matches_the_universal_render_and_lifts_nothing`,
+        // and the empty `skill_fields` registry is the other half of that
+        // contract). What the universal renderer cannot do is warn: it returns
+        // `warnings: Vec::new()` unconditionally, so an unknown `antigravity.*`
+        // key would vanish with no diagnostic. Warnings never reach disk.
+        render::render_skill_doc(doc, self)
     }
 
     fn rule_index(
@@ -498,14 +502,16 @@ mod tests {
         let doc = "---\nname: s\ndescription: d\nmetadata:\n  keywords: a,b\n  claude.model: opus\n---\n# body\n";
         // Compared against Codex, a SIBLING writer of the same physical
         // `.agents/skills/<name>/SKILL.md` at project scope — a byte divergence
-        // between two writers of one file is the hazard.
+        // between two writers of one file is the hazard — and against the
+        // vendor-less universal render, which re-derives the expected bytes
+        // independently of any vendor body.
         //
-        // Honest about its reach: both bodies call `render_universal_skill_doc`
-        // today, so this does NOT independently re-derive the expected bytes.
-        // What it adds over comparing against that function directly is that a
-        // change to EITHER vendor's body breaks it. The structural guard that a
-        // pool member cannot lift vendor fields is the `skill_fields().is_empty()`
-        // assertion below, plus `render.rs`'s pool invariant.
+        // That second anchor is load-bearing here in a way it is not for the
+        // other pool members: Antigravity is NOT on `POOL_CAPABLE_VENDORS`, so
+        // `every_pool_capable_vendor_renders_the_universal_skill_bytes` does not
+        // reach it. Without this line its only tie to the pool bytes would be
+        // Codex, and both bodies moved together when the pool members switched
+        // to the vendor-aware renderer.
         let mine = AntigravityVendor
             .skill_index(doc)
             .expect("no registry ⇒ no render error");
@@ -515,6 +521,13 @@ mod tests {
                 .skill_index(doc)
                 .expect("no render error"),
             "pool members share one physical file — their bytes must be identical"
+        );
+        assert_eq!(
+            mine.as_ref().map(|d| d.document.as_str()),
+            super::super::render::render_universal_skill_doc(doc)
+                .as_ref()
+                .map(|d| d.document.as_str()),
+            "an empty registry must render the universal pool bytes exactly"
         );
         assert!(mine.is_some(), "namespaced metadata ⇒ a rendered doc, not verbatim");
         assert!(

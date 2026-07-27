@@ -354,6 +354,48 @@ def test_config_clients_array_includes_codex_skill_and_skips_rule(
     assert "codex" in result.stderr.lower()
 
 
+def test_reserved_namespace_key_dropped_for_own_client_warns_by_name(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A ``codex.*`` metadata key installed **for Codex** is dropped, and says so.
+
+    Codex reserves the ``codex.`` prefix but declares no skill fields, so an
+    own-namespace key can only ever be dropped.  Doing that silently is the
+    defect: the key was plain pass-through data before the namespace was
+    reserved, so a user reads its disappearance as a bug.  The warning has to
+    name the key and the client, and this is the only test that proves the
+    warning actually reaches the user rather than dying in the renderer.
+    """
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {
+            "code-review/SKILL.md": (
+                "---\nname: code-review\ndescription: d\n"
+                "metadata:\n  codex.made-up-key: x\n---\n# CR\n"
+            )
+        },
+        tag="stable",
+    )
+    (project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["codex"]\n\n[skills]\ncode-review = "{sk.fq}"\n'
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", format="json")
+
+    installed = project_dir / ".agents/skills/code-review/SKILL.md"
+    assert_path_exists(installed)
+    assert "made-up-key" not in installed.read_text(), (
+        "an unknown own-namespace key must not survive into the installed file"
+    )
+    assert "codex.made-up-key" in result.stderr, (
+        f"the drop must name the key on stderr; got: {result.stderr!r}"
+    )
+    assert "codex" in result.stderr.lower()
+
+
 def test_client_codex_rule_only_warns_and_writes_nothing(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
