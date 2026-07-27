@@ -1116,10 +1116,11 @@ fn output_at_current_layout(
 ///    "a layout move is not a compatibility break" legitimate). The warning
 ///    names the old path, the new one, and the client, because under additive
 ///    scanning that client now sees the artifact twice;
-/// 5. resolved-identity: no old footprint component (index target OR
-///    support dir) may canonicalize onto any new output's footprint
-///    component — a symlink alias of a live output is never reaped
-///    (guard 2 compares stored pairs, not resolved identity).
+/// 5. resolved-overlap ([`overlaps_live_footprint`]): no old footprint
+///    component (index target OR support dir) may canonicalize onto — or
+///    nest with — any new output's footprint component. A symlink alias of a
+///    live output is never reaped (guard 2 compares stored pairs, not
+///    resolved identity), and neither is a directory containing one.
 ///
 /// **Sibling:** [`reap_relocated_roots`] carries a near-identical guard
 /// 3/4/5-plus-delete tail against a *different* root set. A correctness fix to
@@ -1184,15 +1185,17 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
             continue;
         };
         let old_support = out.resolved_support_dir(roots, Containment::Strict).ok().flatten();
-        // Guard 5: resolved-identity across the FULL footprint. A symlink at
+        // Guard 5: resolved-overlap across the FULL footprint. A symlink at
         // any old footprint component — the index target OR the support dir —
         // can canonicalize onto a live NEW output's real file or directory
         // (same inode ⇒ same content, so guard 4 passed); deleting through the
-        // alias would destroy the live output. Skip the whole reap when any old
-        // component canonicalizes onto any new output's footprint component. A
-        // component that fails to canonicalize (absent / dangling) is not an
-        // alias of a live output and falls through to the delete below — the
-        // prior guards already gated this entry as a hash-matching orphan.
+        // alias would destroy the live output. So can an old *directory* that
+        // contains one. Skip the whole reap when any old component overlaps
+        // any new footprint component in either direction
+        // ([`overlaps_live_footprint`]). A component that fails to canonicalize
+        // (absent / dangling) is not an alias of a live output and falls
+        // through to the delete below — the prior guards already gated this
+        // entry as a hash-matching orphan.
         let new_footprint: Vec<PathBuf> = new_outputs
             .iter()
             .flat_map(|new| {
@@ -1204,12 +1207,22 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
             .flatten()
             .filter_map(|p| std::fs::canonicalize(p).ok())
             .collect();
-        let aliases_live_output = [Some(&target), old_support.as_ref()]
+        let old_footprint: Vec<PathBuf> = [Some(&target), old_support.as_ref()]
             .into_iter()
             .flatten()
             .filter_map(|p| std::fs::canonicalize(p).ok())
-            .any(|canon_old| new_footprint.contains(&canon_old));
-        if aliases_live_output {
+            .collect();
+        if overlaps_live_footprint(&old_footprint, &new_footprint) {
+            // Guard 4's doctrine applies here too: the record entry drops
+            // either way, so this is the only moment the user is told the old
+            // copy survived. `grim status` walks recorded outputs and will
+            // never mention it again.
+            tracing::warn!(
+                "'{}' at '{}' overlaps what {} now reads and was left in place — remove it by hand if you do not want both",
+                prior.name,
+                target.display(),
+                out.client
+            );
             continue;
         }
         if let Err(e) = remove_path(&target) {
@@ -1222,6 +1235,49 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
             tracing::warn!("could not reap moved support dir '{}': {e}", dir.display());
         }
     }
+}
+
+/// Guard 5's overlap test, shared verbatim by both reapers: does any
+/// canonicalized OLD footprint component touch any canonicalized LIVE one?
+///
+/// **Ancestry in either direction, not equality.** `remove_path` on a **real**
+/// directory is `remove_dir_all` (it stats with `symlink_metadata`, so a
+/// symlink-to-directory takes the `remove_file` arm), so:
+///
+/// - an old *directory* that merely **contains** a live component takes it
+///   along recursively — the reproduced data-loss case
+///   (`..._skips_an_old_dir_containing_the_live_output`, both reapers);
+/// - an old component **inside** a live one would carve a hole in the tree
+///   grim just materialized.
+///
+/// Equality saw neither. It surfaced in [`reap_relocated_roots`] first because
+/// that is the only reaper crossing a root boundary, and only there can the
+/// two roots nest ($KIRO_HOME pointing inside `~/.kiro/skills/<name>/`) — but
+/// [`reap_moved_outputs`] carries the same shape, so both call this.
+///
+/// **The deleted set is a subset of the pre-fix one under every input.**
+/// [`Path::starts_with`] is reflexive, so `old == new` implies
+/// `new.starts_with(old)`: this predicate is a *superset* of equality, and
+/// guard-true means `continue` means no delete. Weakly more skipping — never
+/// more deleting.
+///
+/// Every deletion it prevents would have damaged the live tree. The cost is
+/// that a disjoint orphan sharing a record entry with an overlapping component
+/// is leaked too, because the guard skips the whole entry — which is why the
+/// callers warn about the path they leave behind.
+///
+/// [`Path::starts_with`] matches whole components, so `.../r-old` is not a
+/// prefix of `.../r`.
+///
+/// **Preconditions:** both slices hold already-canonicalized paths. Ancestry on
+/// unresolved paths is silently wrong (`a/../b` is not `b`), and nothing here
+/// enforces it — both call sites `filter_map(canonicalize)` first.
+fn overlaps_live_footprint(old_footprint: &[PathBuf], new_footprint: &[PathBuf]) -> bool {
+    old_footprint.iter().any(|old| {
+        new_footprint
+            .iter()
+            .any(|new| new.starts_with(old) || old.starts_with(new))
+    })
 }
 
 /// Vendor roots **this release** moved, each paired with the root the previous
@@ -1347,8 +1403,10 @@ fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, Path
 ///    user edit — **preserved and warned about, never deleted**. That is the
 ///    kept-modified promise at `docs/src/stability.md`, and it has no `--force`
 ///    override here, exactly as in [`reap_moved_outputs`];
-/// 5. resolved-identity: an old component that canonicalizes onto the new
-///    footprint is a symlink alias of the live output, not an orphan.
+/// 5. resolved-overlap ([`overlaps_live_footprint`]): an old component that
+///    canonicalizes onto the new footprint is a symlink alias of the live
+///    output, not an orphan — and an old *directory* the live output nests
+///    inside is not one either.
 ///
 /// The one deliberate divergence from [`reap_moved_outputs`] is its guard 1:
 /// an `entry` output is **not** skipped here. Its old location is a shared,
@@ -1503,6 +1561,9 @@ pub(crate) fn reap_relocated_roots(
         // Guard 5: an old footprint component that canonicalizes onto the new
         // one is a symlink alias of the live output (same inode ⇒ same content,
         // so guard 3 passed); deleting through it would destroy the live copy.
+        // So would deleting an old directory the live output nests *inside* —
+        // reachable here and only here, because this is the one reaper that
+        // crosses a root boundary ([`overlaps_live_footprint`]).
         let new_footprint: Vec<PathBuf> = [
             Some(new.clone()),
             out.resolved_support_dir(roots, Containment::Strict).ok().flatten(),
@@ -1511,12 +1572,21 @@ pub(crate) fn reap_relocated_roots(
         .flatten()
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
-        let aliases_live_output = [Some(&old), old_support.as_ref()]
+        let old_footprint: Vec<PathBuf> = [Some(&old), old_support.as_ref()]
             .into_iter()
             .flatten()
             .filter_map(|p| std::fs::canonicalize(p).ok())
-            .any(|canon_old| new_footprint.contains(&canon_old));
-        if aliases_live_output {
+            .collect();
+        if overlaps_live_footprint(&old_footprint, &new_footprint) {
+            // Same reason as the sibling reaper: the record entry drops, so
+            // this is the only moment the leaked path is named.
+            tracing::warn!(
+                "'{}' at '{}' overlaps what {} now reads at '{}' and was left in place — remove it by hand if you do not want both",
+                prior.name,
+                old.display(),
+                out.client,
+                new.display()
+            );
             continue;
         }
         // Deleting across a root boundary the user never named deserves a
@@ -3199,6 +3269,46 @@ mod tests {
         );
     }
 
+    /// F1 (must fail on pre-fix code): the old SUPPORT DIR *contains* the live
+    /// new index — a layout move that renders the index inside what used to be
+    /// the support directory. Guard 5 tested canonical **equality**, which
+    /// cannot see an ancestor, and `remove_path` on a directory is
+    /// `remove_dir_all`, so reaping the old support dir took the live index
+    /// with it. The fix widens guard 5 to overlap in either direction.
+    #[test]
+    fn reap_moved_outputs_skips_an_old_dir_containing_the_live_output() {
+        let dir = tempfile::tempdir().unwrap();
+        // OLD footprint: index + support dir, the classic multi-file rule.
+        let old_index = dir.path().join(".claude/rules/r.md");
+        let old_support = dir.path().join(".claude/rules/r");
+        std::fs::create_dir_all(&old_support).unwrap();
+        std::fs::write(&old_index, b"body\n").unwrap();
+        // NEW index: produced by the current layout INSIDE the old support dir.
+        let new_index = old_support.join("RULE.md");
+        std::fs::write(&new_index, b"live\n").unwrap();
+
+        // Hashed after both exist, so guard 4 sees an intact old footprint.
+        let hash = footprint_hash(&old_index, Some(&old_support)).unwrap();
+        let mut out = reap_output(PathAnchor::Workspace, ".claude/rules/r.md", hash);
+        out.support_dir = Some(AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".claude/rules/r".to_string(),
+        });
+        let prior = reap_record(vec![out]);
+        let new_outputs = vec![reap_output(
+            PathAnchor::Workspace,
+            ".claude/rules/r/RULE.md",
+            Digest::Sha256("b".repeat(64)),
+        )];
+
+        reap_moved_outputs(&prior, &new_outputs, &roots(dir.path()));
+
+        assert!(
+            new_index.is_file(),
+            "the live output nested under the old support dir must survive (guard 5)"
+        );
+    }
+
     // ── reap_relocated_roots (legacy-root reaper) ───────────────────────────
     //
     // Honoring `$KIRO_HOME` / `$GEMINI_CLI_HOME` moved a render ROOT while
@@ -3339,6 +3449,48 @@ mod tests {
 
         assert!(!old_index.exists(), "the stranded index must be reaped");
         assert!(!old_support.exists(), "the stranded support dir must be reaped too");
+    }
+
+    /// F1 (must fail on pre-fix code): `$KIRO_HOME` points *inside* a
+    /// grim-installed output at the legacy root, so the live copy nests under
+    /// the stranded directory. This reaper is the first that crosses a root
+    /// boundary, and only there can the two roots nest. Guard 5 tested
+    /// canonical **equality**, which cannot see an ancestor, so
+    /// `remove_dir_all` on the stranded directory took the live copy with it.
+    #[test]
+    fn reap_relocated_roots_skips_an_old_dir_containing_the_live_output() {
+        let dir = tempfile::tempdir().unwrap();
+        // `KIRO_HOME=<legacy>/skills/r/nested`: the current root resolves
+        // *below* the skill directory stranded at the pre-override root.
+        let mut roots = roots(dir.path());
+        roots
+            .vendor_roots
+            .insert("kiro", dir.path().join("legacy/skills/r/nested"));
+        let relocated = vec![("kiro", dir.path().join("legacy"))];
+
+        let old = dir.path().join("legacy/skills/r");
+        let new = dir.path().join("legacy/skills/r/nested/skills/r");
+        // `old` explicitly, not as a side effect of creating `new` below — a
+        // reordering would otherwise fail with an opaque ENOENT.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("SKILL.md"), b"live\n").unwrap();
+        std::fs::write(old.join("SKILL.md"), b"stranded\n").unwrap();
+        // Hashed after both exist, so guard 4 sees an intact old footprint.
+        let prior = reap_record(vec![kiro_output("skills/r", footprint_hash(&old, None).unwrap())]);
+
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+        );
+
+        assert!(
+            new.join("SKILL.md").is_file(),
+            "the live output nested under the stranded directory must survive (guard 5)"
+        );
     }
 
     #[test]

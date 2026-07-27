@@ -77,7 +77,14 @@ static KNOWN_NAMESPACES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 #[derive(thiserror::Error, Debug)]
 pub enum RenderError {
     /// A known `<vendor>.<field>` key with an unconvertible value.
-    #[error("invalid value '{value}' for metadata key '{key}': expected {expected}")]
+    ///
+    /// Escaped on the attribute rather than at the four construction sites:
+    /// `value` is unconstrained registry-fetched text and this reaches a
+    /// terminal through `SkillErrorKind::MetadataInvalid`'s `#[source]` chain.
+    /// `key` is a closed-set `<vendor>.<field>` today — escaped anyway, so a
+    /// future field lookup that stops matching exactly cannot silently reopen
+    /// the hole (the `ClientsInvalid::Duplicate` precedent).
+    #[error("invalid value '{}' for metadata key '{}': expected {expected}", .value.escape_debug(), .key.escape_debug())]
     InvalidValue {
         /// The full namespaced metadata key (`claude.effort`).
         key: String,
@@ -254,8 +261,16 @@ fn partition_metadata(
                         lifted.push((known.native, converted));
                     }
                     None => {
+                        // `escape_debug` renders the control byte as `\u{…}`;
+                        // the raw byte never reaches stderr. Escaped for a
+                        // reason `char::is_control` does not cover either: the
+                        // bidi and zero-width format characters (U+202E,
+                        // U+200B) are not control chars, so a hostile
+                        // registry-published key reaches here intact.
+                        // `vendor_name` is a closed-set `&'static str`.
                         warnings.push(format!(
-                            "unknown metadata key '{key}' for client '{vendor_name}': dropped (typo?)"
+                            "unknown metadata key '{}' for client '{vendor_name}': dropped (typo?)",
+                            key.escape_debug()
                         ));
                     }
                 }
@@ -691,8 +706,12 @@ pub fn validate_agent_metadata(fm: &AgentFrontmatter) -> Result<Vec<String>, Ren
     // agent frontmatter is never projected — it belongs inside `metadata`.
     for key in fm.extra.keys() {
         if split_namespaced(key).is_some() {
+            // Escaped: `split_namespaced` constrains only the namespace half,
+            // so the field half is arbitrary frontmatter text. Unlike the skill
+            // nudge above, whose key must equal a registry field name.
             warnings.push(format!(
-                "top-level agent frontmatter key '{key}' is not projected; author it inside 'metadata' instead"
+                "top-level agent frontmatter key '{}' is not projected; author it inside 'metadata' instead",
+                key.escape_debug()
             ));
         }
     }
@@ -721,8 +740,10 @@ pub fn validate_rule_metadata(fm: &RuleFrontmatter) -> Result<Vec<String>, Rende
     // rule frontmatter is never projected — it belongs inside `metadata`.
     for key in fm.extra.keys() {
         if split_namespaced(key).is_some() {
+            // Escaped for the same reason as the agent nudge above.
             warnings.push(format!(
-                "top-level rule frontmatter key '{key}' is not projected; author it inside 'metadata' instead"
+                "top-level rule frontmatter key '{}' is not projected; author it inside 'metadata' instead",
+                key.escape_debug()
             ));
         }
     }
@@ -863,6 +884,56 @@ metadata:
         assert!(!r.frontmatter_yaml.contains("modle"));
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].contains("claude.modle"));
+    }
+
+    /// The dropped key is escaped. It is **registry-fetched** skill metadata,
+    /// and on the plain install path this warning reaches a terminal verbatim
+    /// through `tracing::warn!` (only `--format json` escaped it, via serde).
+    ///
+    /// Both hostile shapes, because they need different guards: ESC drives the
+    /// terminal, and U+202E is **not** `char::is_control`, so an ESC-only test
+    /// would pass while the bidi case still shipped.
+    ///
+    /// Driven through `partition_metadata` rather than a YAML fixture so the
+    /// raw code points reach the sink unaltered by the parser.
+    #[test]
+    fn an_unknown_target_key_is_escaped_in_the_warning() {
+        let metadata =
+            std::collections::BTreeMap::from([("claude.\u{1b}[2J\u{202e}evil".to_string(), "opus".to_string())]);
+        let (_, _, warnings, _) =
+            partition_metadata(&metadata, ClientTarget::Claude.vendor().skill_fields(), "claude").expect("partition");
+        let w = warnings.first().expect("an unknown own-namespace key must warn");
+        assert!(!w.contains('\u{1b}'), "raw ESC must not reach the terminal: {w:?}");
+        assert!(!w.contains('\u{202e}'), "raw U+202E must not reach the terminal: {w:?}");
+        assert!(
+            w.contains(r"claude.\u{1b}[2J\u{202e}evil"),
+            "the escaped key must still name what the author has to fix: {w:?}"
+        );
+    }
+
+    /// The sibling sink of the test above, and the one that matters more: the
+    /// *value* of a KNOWN key is unconstrained registry-fetched text, whereas
+    /// the key is a closed-set `<vendor>.<field>`. `RenderError::InvalidValue`
+    /// reaches a terminal through `SkillErrorKind::MetadataInvalid`, which
+    /// carries it as `#[source]`, so `{err:#}` prints it.
+    ///
+    /// Escaping only the warning and leaving this raw is how the hole reopens.
+    #[test]
+    fn an_invalid_metadata_value_is_escaped_in_the_error() {
+        let metadata =
+            std::collections::BTreeMap::from([("claude.effort".to_string(), "\u{1b}[2J\u{202e}evil".to_string())]);
+        let err = partition_metadata(&metadata, ClientTarget::Claude.vendor().skill_fields(), "claude")
+            .expect_err("an unconvertible literal must be refused");
+        let msg = err.to_string();
+        assert!(!msg.contains('\u{1b}'), "raw ESC must not reach the terminal: {msg:?}");
+        assert!(
+            !msg.contains('\u{202e}'),
+            "raw U+202E must not reach the terminal: {msg:?}"
+        );
+        assert!(
+            msg.contains(r"\u{1b}[2J\u{202e}evil"),
+            "the escaped literal must still name what the author has to fix: {msg:?}"
+        );
     }
 
     #[test]
@@ -1382,6 +1453,39 @@ metadata:
         let warnings = validate_agent_metadata(&legacy.frontmatter).expect("valid");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("author it inside 'metadata'"));
+    }
+
+    /// The agent and rule migration nudges gate on `split_namespaced(key)`,
+    /// which constrains only the namespace half — `claude.<anything>` passes
+    /// and `key` comes straight from `fm.extra`. Unlike the skill nudge, whose
+    /// `key` must equal a registry field name exactly, these two are wide open.
+    ///
+    /// Reachable under a plain `grim install` through `pack_local_artifact`
+    /// (`src/skill/local_pack.rs`) on the path-dependency path, so a cloned
+    /// repo delivers it — the `state.json` threat model.
+    ///
+    /// ESC and U+202E together: an upstream layer already escapes ESC here
+    /// while leaving the bidi override intact, which is exactly how an
+    /// ESC-only test ships the hole.
+    #[test]
+    fn top_level_namespaced_key_nudges_are_escaped() {
+        let hostile = "\"claude.\\e[2J\\u202Eevil\": x\n";
+        let clean = |w: &str| !w.contains('\u{1b}') && !w.contains('\u{202e}');
+
+        let a = agent(&format!("---\nname: rev\ndescription: d\n{hostile}---\nbody\n"));
+        let aw = validate_agent_metadata(&a.frontmatter).expect("valid");
+        assert!(aw.iter().all(|w| clean(w)), "agent nudge leaked raw bytes: {aw:?}");
+
+        let r = rule(&format!("---\nname: r\ndescription: d\n{hostile}---\nbody\n"));
+        let rw = validate_rule_metadata(&r.frontmatter).expect("valid");
+        assert!(rw.iter().all(|w| clean(w)), "rule nudge leaked raw bytes: {rw:?}");
+
+        // The escaped key must still name what the author has to fix.
+        assert!(
+            aw.iter()
+                .chain(&rw)
+                .any(|w| w.contains(r"claude.\u{1b}[2J\u{202e}evil"))
+        );
     }
 
     #[test]
