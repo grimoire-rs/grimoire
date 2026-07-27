@@ -42,7 +42,7 @@ Legend:
 | [Codex] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"></path></svg> | ✓ | ✗ | ✓ | ◐ |
 | [Cursor] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"></path></svg> | ✓ | ✓ | ✓ | ◐ |
 | [Kiro] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M4.594 6.677C6.67-2.226 18.746-2.211 21.16 6.632c.353 1.297 1.725 7.582-1.673 13.747-1.545 2.797-5.841 5.49-6.99 1.883C8.6 25.477 3.315 24.1 5.789 18.609l-.318.143c-3.57 1.305-3.863-1.208-3.173-2.513.45-.84.727-1.335.937-1.897.353-.975.458-1.568.593-2.498.27-1.837.277-3.607.765-5.167zm8.37.01a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.214-.705 1.214-1.89 0-.622-.127-1.125-.367-1.455a1.014 1.014 0 00-.855-.435zm4.08 0a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.215-.705 1.215-1.89 0-.622-.128-1.125-.368-1.455a1.014 1.014 0 00-.855-.435z"></path></svg> | ✓ | ✓ | ✗ | ◐ |
-| [Junie] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M24 9.333C24 18.666 20 24 9.333 24H8v-8h1.333C14 16 16 14 16 9.333V8h8v1.333zM8 16H0V8h8v8zM16 8H8V0h8v8z"></path></svg> | ✓ | ✗ | ✗ | ◐ |
+| [Junie] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M24 9.333C24 18.666 20 24 9.333 24H8v-8h1.333C14 16 16 14 16 9.333V8h8v1.333zM8 16H0V8h8v8zM16 8H8V0h8v8z"></path></svg> | ✓ | ◐ | ✗ | ◐ |
 | [Gemini] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"></path></svg> | ✓ | ✗ | ✓ | ◐ |
 | [Zed] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z"/></svg> | ✓ | ✗ | ✗ | ◐ |
 | [Amp] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg> | ✓ | ✗ | ✗ | ◐ |
@@ -135,12 +135,23 @@ incompatible JSON schema in the same `.kiro/agents/` directory (open bug
 [kiro #8040]). Writing IDE-format files could break CLI users, so grim declines
 [Kiro] agents pending a resolution.
 
-### Junie: rules and agents declined {#gap-junie}
+### Junie: rules lose scoping and are project-only, agents declined {#gap-junie}
 
-[Junie] has no grim-ownable per-file rules surface — its mechanism is a single
-`.junie/AGENTS.md`, not a per-rule directory — so rules are declined. [Junie]'s
-`.junie/agents/` format exists but is early-access-preview only, not generally
-available; agents are declined until it ships.
+[Junie] rules install into `.junie/rules/<name>.md` at **project scope** with
+their `paths` dropped and a warning. The blocker is **scoping, not
+ownability** — an earlier version of this page said [Junie] had "no
+grim-ownable per-file rules surface", and that was wrong. `.junie/rules/` is a
+real per-file directory grim can own; it sits above the legacy guidelines file
+in [Junie]'s own discovery order. What it lacks is any per-file activation
+key: every Markdown file in the directory is concatenated automatically, so a
+rule's `paths` has nowhere to land and the rule loads unconditionally.
+
+At **global scope** grim writes nothing at all. There is no `~/.junie/rules/`
+upstream, so a global rule is skipped with a warning and records zero outputs
+rather than landing in a directory [Junie] never reads.
+
+[Junie]'s `.junie/agents/` format exists but is early-access-preview only, not
+generally available; agents are declined until it ships.
 
 ### Gemini: rules declined, agents gated by a setting {#gap-gemini}
 

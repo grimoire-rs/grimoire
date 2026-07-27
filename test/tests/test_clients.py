@@ -522,14 +522,18 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
 # Wave-1 vendor declined-kind semantics (mirrors the Codex-declines-Rule
 # blocks above, one row per new vendor).
 #
-# Rule declines: Junie/Gemini/Zed/Amp have no grim-ownable per-file rule
-# surface (adr_vendor_wave_expansion.md §2 — Kiro is Native, so excluded).
+# Rule declines: Gemini/Zed/Amp have no grim-ownable per-file rule surface
+# (adr_vendor_wave_expansion.md §2 — Kiro is Native, so excluded). Junie was
+# here until its `.junie/rules/` surface was re-verified as current rather
+# than legacy: it is now Degraded at project scope (installs, `paths`
+# dropped) and has no global surface at all, so it is covered by its own
+# pair of tests in test_shared_skills.py instead.
 # Agent declines: Kiro (#8040 CLI/IDE schema collision), Junie (EAP-only),
 # Zed (ACP, no file format), Amp (runtime-spawned subagents).
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("client", ["junie", "gemini", "zed", "amp"])
+@pytest.mark.parametrize("client", ["gemini", "zed", "amp"])
 def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
     grim_at, project_dir: Path, registry: str, unique_repo: str, client: str
 ) -> None:

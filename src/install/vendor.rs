@@ -184,6 +184,33 @@ pub trait Vendor {
         KindSupport::Native
     }
 
+    /// Whether this vendor has a grim-ownable directory for `kind` at `scope`.
+    ///
+    /// [`Self::kind_support`] takes no scope, so it cannot express a vendor
+    /// that hosts a kind at one scope and not the other. This is the
+    /// scope-aware half, and it exists for exactly the same reason
+    /// [`Self::mcp_config_path`]'s `Option` does — the installer's
+    /// `client_supports_kind` consults both.
+    ///
+    /// Default `true`: almost every vendor hosts each kind it supports at both
+    /// scopes. The two shipped gaps run in opposite directions, which is why
+    /// this is one predicate rather than a per-kind pair:
+    ///
+    /// - **Junie** has `.junie/rules/` but no global `~/.junie/rules/`;
+    /// - **OpenClaw** has global `~/.openclaw/skills` but no per-repository
+    ///   scope at all — its "workspace" is a fixed daemon home.
+    ///
+    /// Returning `false` makes the installer warn, skip, and record **zero
+    /// outputs** for that client at that scope — never write to a directory
+    /// nothing reads, and never anchor a record at a path the anchor's own
+    /// meaning does not cover.
+    ///
+    /// Not consulted for [`ArtifactKind::Mcp`] (that is `mcp_config_path`'s
+    /// job), nor when [`Self::kind_support`] already declines the kind.
+    fn kind_surface(&self, _kind: ArtifactKind, _scope: ConfigScope) -> bool {
+        true
+    }
+
     /// Known `<vendor>.*` skill metadata fields lifted into native
     /// `SKILL.md` frontmatter. Empty ⇒ the vendor reads only universal
     /// agentskills fields (any own-namespace key is a typo: warn + drop).
@@ -567,6 +594,38 @@ mod tests {
             !ClientTarget::Claude.vendor().skill_fields().is_empty(),
             "Claude is the live example the rule is written for"
         );
+    }
+
+    /// Every `(client, kind, scope)` whose surface is absent — the complete
+    /// exception set to `kind_surface`'s `true` default.
+    const SCOPE_GAPS: &[(&str, ArtifactKind, ConfigScope)] = &[
+        // `.junie/rules/` is ownable; no global `~/.junie/rules/` exists.
+        ("junie", ArtifactKind::Rule, ConfigScope::Global),
+    ];
+
+    #[test]
+    fn kind_surface_is_true_everywhere_except_the_declared_scope_gaps() {
+        use crate::install::client_target::ClientTarget;
+
+        // `kind_surface` defaults to `true`, so it must not have narrowed any
+        // shipped vendor. Asserted over the real roster at BOTH scopes and all
+        // three file kinds rather than by reading the default — an accidental
+        // override would silently stop a client installing a kind the compat
+        // matrix says it supports, and nothing else would notice.
+        for client in ClientTarget::ALL {
+            for kind in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent] {
+                for scope in [ConfigScope::Project, ConfigScope::Global] {
+                    let expected = !SCOPE_GAPS
+                        .iter()
+                        .any(|(c, k, s)| *c == client.vendor().name() && *k == kind && *s == scope);
+                    assert_eq!(
+                        client.vendor().kind_surface(kind, scope),
+                        expected,
+                        "{client} kind_surface({kind:?}, {scope:?}) must be {expected}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

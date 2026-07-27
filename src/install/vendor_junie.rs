@@ -1,16 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Junie's vendor strategy: universal skills + MCP; rules and agents declined.
+//! Junie's vendor strategy: universal skills + MCP; project-scope rules
+//! (degraded); agents declined.
 //!
 //! JetBrains Junie mapping (`adr_vendor_wave_expansion.md`; live-verified
 //! 2026-07-19, `research_vendor_verification_junie_gemini.md`):
 //!
 //! - **Skills**: `.junie/skills/<name>/` (project), `~/.junie/skills/<name>/`
 //!   (global); project overrides a same-name user skill. Universal shape.
-//! - **Rules**: **declined**. `.junie/rules/` does not exist; the real
-//!   surface is `.junie/AGENTS.md` (single user-owned file, no per-file
-//!   ownable dir) → wave-2 injection bucket.
+//! - **Rules**: **degraded, project scope only** (re-verified 2026-07-27,
+//!   <https://junie.jetbrains.com/docs/environment-variables.html>).
+//!
+//!   The earlier verdict — "no grim-ownable per-file rules surface" — was
+//!   **wrong**, and the correction matters because it changes what has to
+//!   happen upstream before this can become `Native`. `.junie/rules/*.md` is
+//!   current, not legacy: it sits at step 4 of Junie's discovery order, above
+//!   the step-5 file explicitly labelled "Legacy guidelines file (still
+//!   supported)". It is a real per-file directory grim can own.
+//!
+//!   The blocker is **scoping**, not ownability. Verbatim upstream: "All
+//!   Markdown files in the rules directory, concatenated automatically."
+//!   Arbitrary `*.md`, flat, concatenated, with no documented per-file
+//!   activation key — so a rule's `paths` has nowhere to land. It installs
+//!   with `paths` dropped plus a fidelity-loss warning (the OpenCode shape).
+//!
+//!   There is no global `~/.junie/rules/`, and [`Vendor::kind_support`] takes
+//!   no scope — so the scope half is answered by [`Vendor::kind_surface`],
+//!   which returns `false` at global scope. The installer then warns, skips,
+//!   and records zero outputs rather than writing to a directory Junie never
+//!   reads.
 //! - **Agents**: **declined**. `.junie/agents/*.md` exists but is **EAP-only,
 //!   not GA** — watchlisted for GA.
 //! - **MCP**: `.junie/mcp/mcp.json` (project) / `~/.junie/mcp/mcp.json`
@@ -28,7 +47,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir};
+use super::vendor::{KindSupport, Vendor, home_dir, provenance};
 
 /// JetBrains Junie.
 pub struct JunieVendor;
@@ -43,12 +62,23 @@ impl Vendor for JunieVendor {
     }
 
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
-        // Rules declined — no ownable per-file surface (`.junie/AGENTS.md`
-        // only). Agents declined — `.junie/agents/*.md` is EAP-only.
+        // Rules degraded — `.junie/rules/*.md` is ownable, but every file in
+        // it is concatenated unconditionally, so `paths` scoping is dropped.
+        // Agents declined — `.junie/agents/*.md` is EAP-only.
         match kind {
-            ArtifactKind::Rule | ArtifactKind::Agent => KindSupport::Declined,
+            ArtifactKind::Rule => KindSupport::Degraded,
+            ArtifactKind::Agent => KindSupport::Declined,
             _ => KindSupport::Native,
         }
+    }
+
+    fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
+        // Rules are project-only: `.junie/rules/` is a workspace directory and
+        // no global `~/.junie/rules/` exists upstream. `kind_support` cannot
+        // say this — it takes no scope — so a global rule is skipped here
+        // instead of being written where nothing reads it. Skills are
+        // unaffected and install at both scopes.
+        !(kind == ArtifactKind::Rule && scope == ConfigScope::Global)
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -63,7 +93,9 @@ impl Vendor for JunieVendor {
     }
 
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        // Dead path: `kind_support` declines `Rule`. Defensive location.
+        // Live at project scope (`.junie/rules/<name>.md`). The global arm is
+        // a dead path — `kind_surface` refuses that scope before the installer
+        // asks for a destination — but stays defensive so the trait is total.
         scope_root(workspace, scope).join("rules").join(format!("{name}.md"))
     }
 
@@ -143,12 +175,31 @@ impl Vendor for JunieVendor {
 
     fn rule_index(
         &self,
-        _parsed: &ParsedRule,
+        parsed: &ParsedRule,
         _scope: ConfigScope,
-        _pinned: &str,
+        pinned: &str,
     ) -> Result<Option<RenderedDoc>, RenderError> {
-        // Never called: rules are skipped at the `kind_support` gate.
-        Ok(None)
+        // Junie concatenates every `*.md` in `.junie/rules/` verbatim, so
+        // frontmatter is not read — always rewrite to provenance + body. The
+        // projection still runs for its typo-guard warnings (a `junie.*` rule
+        // key is unknown by definition; the registry is empty).
+        let projection = render::project_rule(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        // Degraded, not declined: the file installs and loads, but `paths`
+        // has no on-disk target because the whole rules directory is
+        // concatenated unconditionally. Surface the loss (OpenCode's shape).
+        if !parsed.frontmatter.paths.is_empty() {
+            warnings.push(
+                "path scoping ('paths:') is dropped for Junie: every file in .junie/rules/ is concatenated \
+                 automatically, so this rule loads unconditionally"
+                    .to_string(),
+            );
+        }
+
+        let mut document = provenance(pinned);
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 
     fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -176,28 +227,96 @@ pub(crate) fn junie_root(home: Option<PathBuf>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    //! Specification tests for Junie — skills + MCP only; rules and agents
-    //! declined (`adr_vendor_wave_expansion.md` +
-    //! `research_vendor_verification_junie_gemini.md`).
+    //! Specification tests for Junie — skills + MCP native, rules degraded at
+    //! project scope only, agents declined (`adr_vendor_wave_expansion.md` +
+    //! `research_vendor_verification_junie_gemini.md`, re-verified 2026-07-27).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
+    use crate::skill::RuleFrontmatter;
 
-    // ── kind_support: rules + agents declined (no ownable surface / EAP-only) ──
+    // ── kind_support: rules degraded (ownable, unscopable), agents declined ──
 
     #[test]
-    fn kind_support_declines_rule_and_agent() {
+    fn kind_support_degrades_rule_and_declines_agent() {
         assert_eq!(JunieVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
         assert_eq!(JunieVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
         assert_eq!(
             JunieVendor.kind_support(ArtifactKind::Rule),
-            KindSupport::Declined,
-            "no ownable per-file surface (`.junie/AGENTS.md` only)"
+            KindSupport::Degraded,
+            "`.junie/rules/` IS ownable — the blocker is scoping, not ownability"
         );
         assert_eq!(
             JunieVendor.kind_support(ArtifactKind::Agent),
             KindSupport::Declined,
             "`.junie/agents/*.md` is EAP-only, not GA"
         );
+    }
+
+    // ── kind_surface: rules project-only (no `~/.junie/rules/` upstream) ──
+
+    #[test]
+    fn kind_surface_gates_rules_to_project_scope_only() {
+        // The scope half `kind_support` cannot express. Global must be false,
+        // or the installer writes `~/.junie/rules/<name>.md` — a path nothing
+        // reads — where it previously wrote nothing at all.
+        assert!(JunieVendor.kind_surface(ArtifactKind::Rule, ConfigScope::Project));
+        assert!(
+            !JunieVendor.kind_surface(ArtifactKind::Rule, ConfigScope::Global),
+            "no global ~/.junie/rules/ exists upstream"
+        );
+        // Skills are untouched by the gate — `~/.junie/skills/` is real.
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            assert!(
+                JunieVendor.kind_surface(ArtifactKind::Skill, scope),
+                "the rules gap must not narrow skills at {scope:?}"
+            );
+        }
+    }
+
+    // ── rule_index: provenance + body, `paths` dropped with a warning ──
+
+    #[test]
+    fn rule_index_drops_paths_and_warns() {
+        let doc = "---\npaths: [\"**/*.rs\"]\n---\n# Rust Style\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
+        let out = JunieVendor
+            .rule_index(&parsed, ConfigScope::Project, "r@sha256:d")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out.document,
+            "<!-- generated by grim from r@sha256:d; edits will be overwritten -->\n# Rust Style\nbody\n"
+        );
+        assert!(
+            !out.document.contains("paths:"),
+            "Junie concatenates the file verbatim — frontmatter would be noise: {}",
+            out.document
+        );
+        assert_eq!(out.warnings.len(), 1, "scoped rule warns: {:?}", out.warnings);
+        assert!(out.warnings[0].contains("path scoping"), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn rule_index_unscoped_rule_is_warning_free() {
+        // Nothing is dropped when there is no `paths:` — no warning.
+        let parsed = RuleFrontmatter::parse_doc("# Rule\nguidance\n", Path::new("r.md")).unwrap();
+        let out = JunieVendor
+            .rule_index(&parsed, ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.warnings.is_empty(),
+            "unscoped rule is warning-free: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn rule_index_is_deterministic() {
+        let parsed = RuleFrontmatter::parse_doc("---\npaths: [\"a\"]\n---\nbody\n", Path::new("r.md")).unwrap();
+        let a = JunieVendor.rule_index(&parsed, ConfigScope::Project, "p").unwrap();
+        let b = JunieVendor.rule_index(&parsed, ConfigScope::Project, "p").unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
     }
 
     // ── detect: project scope follows the `.junie` dot-dir ──

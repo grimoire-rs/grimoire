@@ -504,21 +504,38 @@ async fn install_one<M: ArtifactMaterializer>(
     }
 
     // A vendor may decline a kind it has no native target for (Codex declines
-    // rules). Drop declined clients from the effective set: no dest, no
-    // materialize, no record for them. A declined client never has a recorded
+    // rules), or host the kind but have no surface for it at this scope
+    // (Junie has no global rules directory). Drop both from the effective set:
+    // no dest, no materialize, no record for them. Neither ever has a recorded
     // output, so the pin-change re-add above only carries supporting clients —
-    // the target set is the sole source of declined ones. This per-client skip
-    // is expected (the client simply cannot host the kind) and logged at debug
-    // only; the user-facing warning for "no client could host this artifact"
-    // is raised once by the caller when the whole supporting set is empty, so a
-    // rule installed into a default set that merely *includes* Codex stays
-    // quiet on stderr.
+    // the target set is the sole source of skipped ones. The user-facing
+    // warning for "no client could host this artifact" is raised once by the
+    // caller when the whole supporting set is empty.
     materialize_set.retain(|client| {
-        // A `Declined` kind has no native target; `Degraded`/`Native` both host
-        // it (Degraded materializes with a fidelity-loss warning at render).
-        let supported = client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined;
+        // The same predicate the fetch-before-gate used, so the two cannot
+        // disagree about who gets written. `install_one` returns early for
+        // `Mcp`, so this only ever judges Skill/Rule/Agent.
+        let supported = client_supports_kind(*client, kind, target);
         if !supported {
-            tracing::debug!("{client} has no native target for {kind} '{}'; skipping", artifact.name);
+            // A `Declined` kind has no native target anywhere; `Degraded`/
+            // `Native` both host it (Degraded materializes with a
+            // fidelity-loss warning at render). This per-client skip is
+            // expected and logged at debug only, so a rule installed into a
+            // default set that merely *includes* Codex stays quiet on stderr.
+            if client.vendor().kind_support(kind) == crate::install::vendor::KindSupport::Declined {
+                tracing::debug!("{client} has no native target for {kind} '{}'; skipping", artifact.name);
+            } else {
+                // The client DOES host this kind — it just has no surface for
+                // it at this scope. Silence would be misleading here: the user
+                // selected a client the matrix says supports the kind, and it
+                // is about to write nothing.
+                tracing::warn!(
+                    "{kind} '{}' skipped for {client}: {client} has no {kind} directory at {} scope, \
+                     so grim wrote nothing rather than install where it is never read",
+                    artifact.name,
+                    target.scope()
+                );
+            }
         }
         supported
     });
@@ -855,12 +872,22 @@ async fn install_one<M: ArtifactMaterializer>(
     })
 }
 
-/// Kind-aware "can `client` host `kind` at all" predicate (plan C3.4). MCP
-/// is judged by [`crate::install::vendor::Vendor::mcp_config_path`] (a
-/// vendor may materialize other kinds but carry no MCP config surface at
-/// this scope — `kind_support` alone can't see that); every other kind is
-/// hosted unless [`kind_support`](crate::install::vendor::Vendor::kind_support)
-/// returns [`KindSupport::Declined`](crate::install::vendor::KindSupport::Declined).
+/// Kind-aware "can `client` host `kind` at this scope" predicate (plan C3.4).
+///
+/// Two kinds need a scope-aware second half that
+/// [`kind_support`](crate::install::vendor::Vendor::kind_support) cannot give,
+/// because it takes no scope:
+///
+/// - **MCP** is judged by [`Vendor::mcp_config_path`](crate::install::vendor::Vendor::mcp_config_path)
+///   — a vendor may materialize other kinds but carry no MCP config surface here;
+/// - **every other kind** additionally consults
+///   [`Vendor::kind_surface`](crate::install::vendor::Vendor::kind_surface) —
+///   Junie owns `.junie/rules/` but has no global equivalent; OpenClaw owns
+///   `~/.openclaw/skills` but has no per-repository scope. It defaults to
+///   `true`, so a vendor without such a gap keeps its previous answer exactly.
+///
+/// A kind is otherwise hosted unless `kind_support` returns
+/// [`KindSupport::Declined`](crate::install::vendor::KindSupport::Declined).
 fn client_supports_kind(
     client: crate::install::client_target::ClientTarget,
     kind: ArtifactKind,
@@ -871,7 +898,16 @@ fn client_supports_kind(
             .vendor()
             .mcp_config_path(target.workspace(), target.scope())
             .is_some(),
-        kind => client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined,
+        // Every other kind gets the same scope-aware second half: a vendor may
+        // host the kind and still have no directory for it at THIS scope
+        // (Junie has `.junie/rules/` but no global one; OpenClaw has global
+        // skills but no per-repository scope). `kind_support` cannot express
+        // that — it takes no scope. Defaults to `true`, so a vendor without a
+        // gap is unaffected.
+        kind => {
+            client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined
+                && client.vendor().kind_surface(kind, target.scope())
+        }
     }
 }
 

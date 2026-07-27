@@ -719,10 +719,20 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Kiro, ArtifactKind::Rule)
                 | (ClientTarget::Kiro, ArtifactKind::Mcp) => vendor_root(client),
 
-                // Junie: skills + MCP under `~/.junie` (rules + agents declined).
+                // Junie: skills + MCP under `~/.junie` (agents declined).
                 (ClientTarget::Junie, ArtifactKind::Skill) | (ClientTarget::Junie, ArtifactKind::Mcp) => {
                     vendor_root(client)
                 }
+
+                // Junie rules are `Degraded`, not declined — but only at
+                // PROJECT scope, where every target anchors at `Workspace`
+                // before this match is reached. Globally there is no
+                // `~/.junie/rules/` at all, so there is no destination to
+                // classify and `Vendor::kind_surface` refuses the scope before
+                // the installer ever asks for one. `None` is the honest answer,
+                // and it keeps global Junie rules at the zero outputs they have
+                // always produced.
+                (ClientTarget::Junie, ArtifactKind::Rule) => None,
 
                 // Gemini: skills via the shared `.agents/skills` pool; agents +
                 // MCP under `~/.gemini` (rules declined).
@@ -771,7 +781,6 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // new vendor's kind gap must still be classified here.
                 (ClientTarget::Codex, ArtifactKind::Rule)
                 | (ClientTarget::Kiro, ArtifactKind::Agent)
-                | (ClientTarget::Junie, ArtifactKind::Rule)
                 | (ClientTarget::Junie, ArtifactKind::Agent)
                 | (ClientTarget::Gemini, ArtifactKind::Rule)
                 | (ClientTarget::Zed, ArtifactKind::Rule)
@@ -2671,9 +2680,15 @@ mod tests {
                 (PathAnchor::VendorRoot("kiro"), format!("steering/{name}.md"))
             }
 
-            // Junie: skills only (rules + agents declined).
+            // Junie: skills at both scopes; rules PROJECT-ONLY (degraded —
+            // `paths` is dropped, but the file installs and loads). There is
+            // no `~/.junie/rules/`, so the global triple has no entry here and
+            // the loop skips it on an empty candidate set.
             (ConfigScope::Project, ClientTarget::Junie, ArtifactKind::Skill) => {
                 (PathAnchor::Workspace, format!(".junie/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Junie, ArtifactKind::Rule) => {
+                (PathAnchor::Workspace, format!(".junie/rules/{name}.md"))
             }
             (ConfigScope::Global, ClientTarget::Junie, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("junie"), format!("skills/{name}"))
@@ -2740,9 +2755,11 @@ mod tests {
             // MCP descriptors register into client configs, not files —
             // their entry anchors land with the vendor MCP writers.
             (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
-            // Declined (scope, client, kind) triples never reach `from_target`
-            // (the installer skips them at the `kind_support` gate), so the test
-            // loop `continue`s before calling this function — unreachable here.
+            // Triples with no anchor never reach `from_target` — either the
+            // vendor declines the kind outright, or (global Junie rules) it
+            // hosts the kind but has no surface at that scope. Both yield an
+            // empty candidate set, on which the test loop `continue`s before
+            // calling this function — unreachable here.
             (_, ClientTarget::Kiro, ArtifactKind::Agent)
             | (_, ClientTarget::Junie, ArtifactKind::Rule)
             | (_, ClientTarget::Junie, ArtifactKind::Agent)
@@ -2840,10 +2857,24 @@ mod tests {
         for scope in scopes {
             for client in clients {
                 for kind in kinds {
-                    // A vendor that declines a kind never reaches `from_target`
-                    // (the installer skips it at the `kind_support` gate), so
-                    // it has no anchor-remainder entry — Codex rules here.
-                    if client.vendor().kind_support(kind) == crate::install::vendor::KindSupport::Declined {
+                    // A triple the installer never materializes has no
+                    // anchor-remainder entry. This mirrors `installer.rs`'s
+                    // `client_supports_kind` (minus its Mcp arm — Mcp is not in
+                    // `kinds`), so it covers both producers: an outright
+                    // decline (Codex rules) and a kind the vendor hosts but has
+                    // no surface for at this scope (global Junie rules, which
+                    // are `Degraded` — `kind_support` alone would wrongly
+                    // demand a table entry for them).
+                    //
+                    // NOT keyed on an empty candidate set: project scope is
+                    // unconditionally `[Workspace]` for every triple, declined
+                    // ones included, so that predicate silently stops skipping
+                    // anything at project scope. The count assertion below is
+                    // what stops this from quietly shrinking coverage.
+                    let vendor = client.vendor();
+                    let hosted = vendor.kind_support(kind) != crate::install::vendor::KindSupport::Declined
+                        && vendor.kind_surface(kind, scope);
+                    if !hosted {
                         continue;
                     }
                     combo_count += 1;
@@ -2908,14 +2939,15 @@ mod tests {
         }
 
         // Exhaustiveness guard: 2 scopes × 12 clients × 3 kinds = 72, minus the
-        // 12 declined (client, kind) pairs the `kind_support` gate skips
-        // (Codex-Rule, Kiro-Agent, Junie-Rule/Agent, Gemini-Rule, Zed-Rule/Agent,
-        // Amp-Rule/Agent, Agents-Rule/Agent, Antigravity-Rule) × 2 scopes = 24 →
-        // 48 combos. If a new ClientTarget or ArtifactKind variant is added, this
+        // 11 declined (client, kind) pairs (Codex-Rule, Kiro-Agent, Junie-Agent,
+        // Gemini-Rule, Zed-Rule/Agent, Amp-Rule/Agent, Agents-Rule/Agent,
+        // Antigravity-Rule) × 2 scopes = 22, minus global Junie-Rule alone —
+        // `Degraded` at project scope, no `~/.junie/rules/` globally → 49
+        // combos. If a new ClientTarget or ArtifactKind variant is added, this
         // fails, forcing the table to be extended.
         assert_eq!(
-            combo_count, 48,
-            "expected 48 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 49,
+            "expected 49 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }
