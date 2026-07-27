@@ -79,6 +79,13 @@ CLIENT_VALUE_NAMES = [
     # under Principle 9: `options.clients` only ever gains accepted values.
     "agents",
     "antigravity",
+    # The wave-2 skills-only batch. Additive under Principle 9, same as above.
+    "cline",
+    "droid",
+    "goose",
+    "warp",
+    "openclaw",
+    "kilo",
 ]
 
 

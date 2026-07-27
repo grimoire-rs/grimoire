@@ -930,6 +930,12 @@ metadata:
             // under its own `~/.gemini/config/skills`. The invariant below
             // probes the project root, which is what makes it a member here.
             ClientTarget::Antigravity,
+            // Goose renders INTO the pool at both scopes — upstream labels its
+            // own `.goose/skills` back-compat and names `.agents/skills` the
+            // recommended location. Warp is pool-*capable* but renders
+            // natively, so it is deliberately NOT here: this roster is "who
+            // writes the shared tree", not "who can read it".
+            ClientTarget::Goose,
         ];
 
         let ws = Path::new("/w");

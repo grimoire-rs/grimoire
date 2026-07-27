@@ -36,13 +36,19 @@ use super::vendor_agents::AgentsVendor;
 use super::vendor_amp::AmpVendor;
 use super::vendor_antigravity::AntigravityVendor;
 use super::vendor_claude::ClaudeVendor;
+use super::vendor_cline::ClineVendor;
 use super::vendor_codex::CodexVendor;
 use super::vendor_copilot::CopilotVendor;
 use super::vendor_cursor::CursorVendor;
+use super::vendor_droid::DroidVendor;
 use super::vendor_gemini::GeminiVendor;
+use super::vendor_goose::GooseVendor;
 use super::vendor_junie::JunieVendor;
+use super::vendor_kilo::KiloVendor;
 use super::vendor_kiro::KiroVendor;
+use super::vendor_openclaw::OpenClawVendor;
 use super::vendor_opencode::OpenCodeVendor;
+use super::vendor_warp::WarpVendor;
 use super::vendor_zed::ZedVendor;
 
 /// A supported client target.
@@ -94,6 +100,25 @@ pub enum ClientTarget {
     /// desktop product; the Antigravity CLI and IDE variants read different
     /// global directories and are not served by this name.
     Antigravity,
+    /// Cline — `.cline/skills` (skills only; rules, agents, and MCP declined).
+    /// A documented non-adopter of the shared `.agents/skills` pool.
+    Cline,
+    /// Droid (Factory) — `.factory/skills` (skills only). The client is
+    /// `droid`; its directory is `.factory`. That mismatch is deliberate.
+    Droid,
+    /// Goose (Block) — shared `.agents/skills` at both scopes (skills only).
+    /// The one client in its batch that renders to the pool: its own
+    /// `.goose/skills` is labelled back-compat upstream.
+    Goose,
+    /// Warp — `.warp/skills` (skills only). Renders natively but is
+    /// pool-*capable*, so it can be opted into `.agents/skills`.
+    Warp,
+    /// OpenClaw — `~/.openclaw/skills`, **global scope only**: its "project"
+    /// path is a fixed daemon home that does not track the repository.
+    OpenClaw,
+    /// Kilo — `.kilo/skills` (skills only). Never writes the deprecated
+    /// `.kilocode`; a partial pool member, so off the shared-pool roster.
+    Kilo,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -113,6 +138,12 @@ impl std::str::FromStr for ClientTarget {
             "amp" => Ok(Self::Amp),
             "agents" => Ok(Self::Agents),
             "antigravity" => Ok(Self::Antigravity),
+            "cline" => Ok(Self::Cline),
+            "droid" => Ok(Self::Droid),
+            "goose" => Ok(Self::Goose),
+            "warp" => Ok(Self::Warp),
+            "openclaw" => Ok(Self::OpenClaw),
+            "kilo" => Ok(Self::Kilo),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -146,6 +177,12 @@ impl ClientTarget {
             Self::Amp => "amp",
             Self::Agents => "agents",
             Self::Antigravity => "antigravity",
+            Self::Cline => "cline",
+            Self::Droid => "droid",
+            Self::Goose => "goose",
+            Self::Warp => "warp",
+            Self::OpenClaw => "openclaw",
+            Self::Kilo => "kilo",
         }
     }
 
@@ -166,6 +203,12 @@ impl ClientTarget {
         Self::Amp.as_str(),
         Self::Agents.as_str(),
         Self::Antigravity.as_str(),
+        Self::Cline.as_str(),
+        Self::Droid.as_str(),
+        Self::Goose.as_str(),
+        Self::Warp.as_str(),
+        Self::OpenClaw.as_str(),
+        Self::Kilo.as_str(),
     ];
 }
 
@@ -204,7 +247,7 @@ pub struct MaterializeRequest<'a> {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 12] = [
+    pub const ALL: [ClientTarget; 18] = [
         Self::Claude,
         Self::OpenCode,
         Self::Copilot,
@@ -217,6 +260,12 @@ impl ClientTarget {
         Self::Amp,
         Self::Agents,
         Self::Antigravity,
+        Self::Cline,
+        Self::Droid,
+        Self::Goose,
+        Self::Warp,
+        Self::OpenClaw,
+        Self::Kilo,
     ];
 
     /// The per-vendor materialization strategy behind this identity.
@@ -234,6 +283,12 @@ impl ClientTarget {
             Self::Amp => &AmpVendor,
             Self::Agents => &AgentsVendor,
             Self::Antigravity => &AntigravityVendor,
+            Self::Cline => &ClineVendor,
+            Self::Droid => &DroidVendor,
+            Self::Goose => &GooseVendor,
+            Self::Warp => &WarpVendor,
+            Self::OpenClaw => &OpenClawVendor,
+            Self::Kilo => &KiloVendor,
         }
     }
 
@@ -555,6 +610,14 @@ mod tests {
             // Antigravity: rules declined (global rules are a monolithic
             // ~/.gemini/GEMINI.md shared with Gemini CLI).
             (ClientTarget::Antigravity, Native, Declined, Native, true),
+            // The wave-2 skills-only batch: every one declines Rule, Agent and
+            // MCP, so each has no MCP config surface either.
+            (ClientTarget::Cline, Native, Declined, Declined, false),
+            (ClientTarget::Droid, Native, Declined, Declined, false),
+            (ClientTarget::Goose, Native, Declined, Declined, false),
+            (ClientTarget::Warp, Native, Declined, Declined, false),
+            (ClientTarget::OpenClaw, Native, Declined, Declined, false),
+            (ClientTarget::Kilo, Native, Declined, Declined, false),
         ];
         assert_eq!(
             grid.len(),
@@ -856,6 +919,12 @@ mod tests {
             ("amp", ClientTarget::Amp),
             ("agents", ClientTarget::Agents),
             ("antigravity", ClientTarget::Antigravity),
+            ("cline", ClientTarget::Cline),
+            ("droid", ClientTarget::Droid),
+            ("goose", ClientTarget::Goose),
+            ("warp", ClientTarget::Warp),
+            ("openclaw", ClientTarget::OpenClaw),
+            ("kilo", ClientTarget::Kilo),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
@@ -880,7 +949,7 @@ mod tests {
         let w = Path::new("/w");
         let project = crate::config::scope::ConfigScope::Project;
 
-        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 12] = [
+        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 18] = [
             (
                 ClientTarget::Claude,
                 ".claude/skills/x",
@@ -938,6 +1007,17 @@ mod tests {
                 None,
                 Some(".agents/agents/x.md"),
             ),
+            // Wave-2 batch: skills only, each in its own dir except Goose,
+            // which renders to the shared pool at both scopes.
+            (ClientTarget::Cline, ".cline/skills/x", None, None),
+            // Droid's client name and directory deliberately differ.
+            (ClientTarget::Droid, ".factory/skills/x", None, None),
+            (ClientTarget::Goose, ".agents/skills/x", None, None),
+            (ClientTarget::Warp, ".warp/skills/x", None, None),
+            // OpenClaw has no project scope at all; this is its defensive dead
+            // path, never an install destination (`kind_surface` refuses it).
+            (ClientTarget::OpenClaw, ".openclaw/skills/x", None, None),
+            (ClientTarget::Kilo, ".kilo/skills/x", None, None),
         ];
         assert_eq!(
             table.len(),

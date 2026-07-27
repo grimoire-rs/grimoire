@@ -48,6 +48,12 @@ Legend:
 | [Amp] <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true" width="16" height="16" fill="currentColor"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg> | ✓ | ✗ | ✗ | ◐ |
 | agents | ✓ | ✗ | ✗ | ✗ |
 | [Antigravity] | ✓ | ✗ | ✓ | ◐ |
+| [Cline] | ✓ | ✗ | ✗ | ✗ |
+| [Droid] | ✓ | ✗ | ✗ | ✗ |
+| [Goose] | ✓ | ✗ | ✗ | ✗ |
+| [Warp] | ✓ | ✗ | ✗ | ✗ |
+| [OpenClaw] | ✓ | ✗ | ✗ | ✗ |
+| [Kilo] | ✓ | ✗ | ✗ | ✗ |
 
 </div>
 
@@ -55,9 +61,8 @@ Bundles decompose into their member kinds and are not a column.
 
 `agents` is not a product — it is the vendor-neutral target. Selecting it
 installs one copy of each skill into the cross-vendor `.agents/skills` pool
-that Codex, Gemini, Zed, Amp, and (at project scope) Antigravity all scan —
-making it the pool's sixth writer — rather than into any one client's
-directory. Rules, agents, and MCP have no vendor-neutral format, so it declines
+that Codex, Gemini, Zed, Amp, Goose, and (at project scope) Antigravity all
+scan, rather than into any one client's directory. Rules, agents, and MCP have no vendor-neutral format, so it declines
 all three. It is never detected, only selected: request it explicitly with
 `--client agents` or in `[options].clients`.
 
@@ -168,12 +173,18 @@ targets that surface, verified against the still-served enterprise docs.
 
 ### Shared skills pool visibility {#gap-shared-pool}
 
-[Codex], [Gemini], [Zed], [Amp], and — at project scope — [Antigravity] all
-read the cross-vendor `.agents/skills` directory. A skill installed for any one
-of them is physically the same file every other pool member reads, so it is
-discoverable by all of them even when only one was selected. [Antigravity] is
-the one partial member: its *global* skills live under its own
+[Codex], [Gemini], [Zed], [Amp], [Goose], and — at project scope —
+[Antigravity] all read the cross-vendor `.agents/skills` directory. A skill
+installed for any one of them is physically the same file every other pool
+member reads, so it is discoverable by all of them even when only one was
+selected. [Goose] is a full member at both scopes; [Antigravity] is the one
+partial member: its *global* skills live under its own
 `~/.gemini/config/skills`, so a global install for it is a separate copy.
+
+[Warp] is a different case again — it *reads* the pool at both scopes, but grim
+installs its skills to `.warp/skills/` because that is a first-class location
+upstream. Set `[options.vendors.warp].shared_skills` to move them into the pool
+instead. The same opt-in is available for [Cursor], [Copilot] and [OpenCode].
 
 This is upstream scan behavior, not a grim choice; grim
 refcounts the shared directory so removing one client never deletes a skill
@@ -230,6 +241,53 @@ CLI (`agy`) and the Antigravity IDE read *different* global skill directories
 their users are not served by this client name; both can be added later under
 their own names.
 
+### The skills-only clients {#gap-skills-only}
+
+[Cline], [Droid], [Goose], [Warp], [OpenClaw] and [Kilo] install **skills
+only**. Rules, agents and MCP are declined for all six, but not for the same
+reason in every case. Five of them — [Droid], [Goose], [Warp], [OpenClaw] and
+[Kilo] — document no per-file rules surface that can express a rule's `paths`.
+[Cline] is the exception and its decline is a **scheduling** decision, not a
+capability one: see below. None of the six ships an installable subagent file
+format, and grim writes no MCP config for any of them. Each decline is additive
+to reverse — support can be added later without breaking anything, while
+withdrawing it could not be.
+
+Client-specific detail worth knowing:
+
+- **[Cline]** is the one whose rules decline is *not* about a missing
+  capability. Its `.clinerules/` genuinely documents per-file `paths:`
+  scoping — the exact mechanism whose absence forces a decline elsewhere. It
+  is declined here only because this release ships skills for these clients;
+  it is the strongest candidate to gain rule support next. Cline is also a
+  documented **non-adopter** of the shared `.agents/skills` pool: its own docs
+  list `.cline/skills/`, `.clinerules/skills/` and `.claude/skills/`, and the
+  pool appears nowhere.
+- **[Droid]** is Factory's agent. The client is named `droid` but its directory
+  is `.factory/` — grim names the client, not the vendor org, the same way it
+  uses `claude` rather than `anthropic`. Factory also documents a compatibility
+  directory `.agent/skills/`, singular, which is a different convention from
+  the `.agents` pool; grim writes neither.
+- **[Goose]** is the one client here that installs into the shared
+  `.agents/skills` pool rather than its own directory, because Goose's own docs
+  label `.goose/skills/` backward-compatibility and name `.agents/skills` the
+  recommended location. Its skills are therefore visible to every other pool
+  client, as described under [Shared skills pool visibility](#gap-shared-pool).
+- **[Warp]** reads the pool too, but its own `.warp/skills/` is a first-class
+  location upstream, so grim installs there by default. Set
+  `[options.vendors.warp].shared_skills` to move them into the pool instead.
+  `~/.warp/` is the same path on macOS, Linux and Windows.
+- **[OpenClaw]** installs at **global scope only**. It has no per-repository
+  concept: the path its documentation calls "project" is a fixed daemon home
+  under `~/.openclaw/workspace` that does not follow the repository you run
+  grim in, so installing there would mix unrelated projects' skills into one
+  directory. A project-scope install warns, writes nothing, and records no
+  outputs. Use `--global`.
+- **[Kilo]** was formerly Kilo Code, and grim uses the current name. It writes
+  `.kilo/` exclusively; the older `.kilocode/` is deprecated upstream and grim
+  never writes it, though an existing one is still recognized when detecting
+  whether Kilo is in use.
+
 ## The `compatibility:` frontmatter field {#compatibility-disclaimer}
 
 An artifact may carry a free-text `compatibility:` frontmatter field. It is an
@@ -252,6 +310,12 @@ where.
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
 [antigravity]: https://antigravity.google
+[cline]: https://cline.bot
+[droid]: https://factory.ai
+[goose]: https://block.github.io/goose
+[warp]: https://warp.dev
+[openclaw]: https://github.com/openclaw/openclaw
+[kilo]: https://kilo.ai
 [antigravity-rules-collision]: https://github.com/google-gemini/gemini-cli/issues/16058
 [cursor-glob-split]: https://forum.cursor.com/t/76648
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
