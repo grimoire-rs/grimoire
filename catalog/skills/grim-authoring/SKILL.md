@@ -38,8 +38,9 @@ host every kind — decide this **before** you author, because it changes
 what you write. Treat the [enforced matrix][clients] as authoritative;
 the summary below is a planning aid that the next client can age:
 
-- **Skills** install everywhere. The universal kind — no client declines
-  it, which is why it is the portable choice.
+- **Skills** are the universal kind — no client declines them, which is why
+  a skill is the portable choice. One scope caveat: OpenClaw is
+  global-scope-only, so a *project* install for it writes nothing.
 - **Rules** are native for Claude Code, Copilot, Cursor, and Kiro;
   degraded for OpenCode and Junie (the file installs, its path scoping
   does not); and **declined** by everyone else — grim warns, skips, and

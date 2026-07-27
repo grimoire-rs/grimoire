@@ -92,16 +92,17 @@ it must sit in changes (as of 2026; re-verify):
 | Directory | Scanned by |
 |---|---|
 | `.claude/skills/` | [Claude Code][cc], also scanned by [OpenCode][oc] and [Copilot][cop] |
-| `.agents/skills/` | the cross-vendor pool: [Codex][cx], [Gemini CLI][gem], [Zed][zed], [Amp][amp] — also scanned by [OpenCode][oc] and [Copilot][cop] |
+| `.agents/skills/` | the cross-vendor pool: [Codex][cx], [Gemini CLI][gem], [Zed][zed], [Amp][amp] — also scanned by [OpenCode][oc] and [Copilot][cop], and by a growing set of newer clients that adopt the convention |
 | `<client>/skills/` | each client's own dir: `.opencode/`, `.github/`, `.cursor/`, `.kiro/`, `.junie/` |
 
 Two consequences worth designing for:
 
-- **The shared pool is one copy with four readers.** A skill in
-  `.agents/skills/` is visible to Codex, Gemini CLI, Zed, and Amp
-  simultaneously — so a name collision there collides for all four, and
-  editing or deleting it changes what all four see. Unique, specific names
-  matter more here than anywhere else.
+- **The shared pool is one copy with many readers.** A skill in
+  `.agents/skills/` is visible to every client that scans the directory
+  simultaneously — so a name collision there collides for all of them, and
+  editing or deleting it changes what all of them see. The reader set keeps
+  growing as clients adopt the convention, which only sharpens the point:
+  unique, specific names matter more here than anywhere else.
 - **Vendor frontmatter degrades silently.** All major clients ignore
   unknown frontmatter, so a client-specific field is dropped rather than
   rejected — never make correctness depend on one (see [Anatomy](#anatomy)).

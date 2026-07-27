@@ -524,10 +524,10 @@ for the active scope:
 | **Antigravity** | **never** — `false` by design; all its project surfaces live under the shared `.agents/`, so keying on it would install Antigravity into every workspace that ever used a pool client. Upstream documents no product-specific project marker | `~/.gemini/config` exists |
 | **Cline** | `<workspace>/.clinerules` **or** `<workspace>/.cline` exists | `~/.cline` exists |
 | **Droid** | `<workspace>/.factory` exists | `~/.factory` exists |
-| **Goose** | `<workspace>/.goose` exists — **never** `.agents/`, which is where Goose writes | any of Goose's config roots exists (`$GOOSE_PATH_ROOT`, the XDG dir, and the macOS Application Support path, OR-ed) |
-| **Warp** | `<workspace>/.warp` exists | `~/.warp` exists (identical on all three platforms) |
-| **OpenClaw** | **never** — it has no project scope | `~/.openclaw` exists |
-| **Kilo** | `<workspace>/.kilo` **or** `<workspace>/.kilocode` exists | `~/.config/kilo` or `~/.kilo` exists (OR-ed) |
+| **Goose** | `<workspace>/.goose` exists — **never** `.agents/`, which is where Goose writes | any candidate config root exists: `$XDG_CONFIG_HOME/goose` or `~/Library/Application Support/goose`, OR-ed — **but `$GOOSE_PATH_ROOT`, when set, *replaces* that list rather than extending it.** `~/.goose` is not a global marker |
+| **Warp** | `<workspace>/.warp` exists | `~/.warp` exists — deliberately the same path on all three platforms; the OS-specific app-data dirs are **not** consulted |
+| **OpenClaw** | **never** — it has no project scope, and `kind_surface(Skill, Project)` refuses skills there too | `~/.openclaw` exists |
+| **Kilo** | `<workspace>/.kilo` **or** `<workspace>/.kilocode` exists — `.kilocode` counts for detection only and is **never written** | `~/.kilo` or `$XDG_CONFIG_HOME/kilo` exists (OR-ed) |
 
 **Never key `detect()` on `.agents/`.** It is a shared multi-client marker,
 and for Goose — which *renders into* the pool — keying on it would make the
