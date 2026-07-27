@@ -119,7 +119,8 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     }
 }
 
-/// Droid's user-level root `~/.factory`. No env override exists upstream. The
+/// Droid's user-level root `~/.factory`. No env override was found on the
+/// pages checked. The
 /// [`PathAnchor`](super::path_anchor) `VendorRoot("droid")` anchor is rooted
 /// here — note the tag is `droid-root` while the directory is `.factory`.
 pub(crate) fn droid_root(home: Option<PathBuf>) -> Option<PathBuf> {

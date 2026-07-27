@@ -64,9 +64,8 @@ linked from [vendor-metadata.md](vendor-metadata.md).
 
 ## Per-Client Emit
 
-**Six of the ten clients host an agent at all**, each with its own
-populated `<vendor>.*` agent registry — decide up front whether your
-audience is in that set:
+**Only a minority of clients host an agent at all** — decide up front
+whether your audience is in that set:
 
 | Client | Registry | Emit |
 |---|---|---|
@@ -76,12 +75,13 @@ audience is in that set:
 | Codex | `codex.*` | **TOML** (see below) |
 | Cursor | `cursor.*` | Markdown frontmatter; the common `tools` has no equivalent and is dropped with a warning |
 | Gemini CLI | `gemini.*` | Markdown frontmatter; Gemini loads agents only when its `experimental.enableAgents` setting is on (the default) |
+| Antigravity | *(none yet)* | Markdown frontmatter; `tools` emitted as a YAML list (upstream types it `string[]`). The namespace is reserved but its agent registry is empty, so an `antigravity.*` key warns and drops |
 
-Every emit but Claude's carries a provenance comment. **Kiro, Junie,
-Zed, and Amp decline agents** — no installable agent file format exists
-for them, so grim warns, skips, and writes nothing. Their namespaces are
-still reserved but carry **no populated registry for any kind**: a
-`kiro.*`/`junie.*`/`zed.*`/`amp.*` key hits an empty registry and is
+Every emit but Claude's carries a provenance comment. **Every other
+client declines agents** — no installable agent file format exists for
+them, so grim warns, skips, and writes nothing. Their namespaces are
+still reserved but carry **no populated registry for any kind**: such a
+key hits an empty registry and is
 warned + dropped, the same typo-guard outcome as a misspelt key in a
 populated one.
 

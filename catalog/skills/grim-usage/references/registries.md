@@ -155,7 +155,8 @@ pointers into an index repository rather than reading them — see
 
 `grim config` reads and writes `grimoire.toml`, modeled on `git
 config`, so you rarely hand-edit the file. It covers **settings**
-(`[options]`, `[options.tui]`) and **named registries** (`[[registries]]`) —
+(`[options]`, `[options.tui]`, `[options.vendors.<name>]`) and **named
+registries** (`[[registries]]`) —
 but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[bundles]`),
 which stay under `grim add` / `grim remove` because those must re-resolve the
 lock on every change.
@@ -167,6 +168,7 @@ lock on every change.
   grim config set   options.clients claude,opencode
   grim config set   options.tui.default_view tree
   grim config set   options.show_deprecated true   # show deprecated artifacts by default
+  grim config set   options.vendors.cursor.shared_skills true  # per-client: install this client's skills into the shared .agents/skills pool
   grim config set   options.clients claude,opencode --dry-run  # validate + report, write nothing
   grim config get   options.clients          # bare value on one line; exit 1 if unset
   grim config list                           # every explicitly-set key in this scope
@@ -242,10 +244,14 @@ no extra configuration. The TUI flips scope at runtime with `g`.
 
 ## Client Targets
 
-An installed artifact lands in a **client target**: `claude`, `opencode`,
-`copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, or
-the vendor-neutral `agents`, each receiving the artifact in its native
-layout. `grim install` and `grim update` choose targets by precedence:
+An installed artifact lands in a **client target** — `claude`, `opencode`,
+`copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`,
+`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, `kilo`, or
+the vendor-neutral `agents` — each receiving the artifact in its native
+layout. The set grows; `grim context` reports the names that resolve for
+your scope, and the [Client Compatibility matrix][clients-matrix] is
+authoritative.
+`grim install` and `grim update` choose targets by precedence:
 
 1. `--client <list>` flag (comma-separated: `--client claude,copilot`)
 2. config `[options].clients` (TOML array of client names)
@@ -257,8 +263,11 @@ layout. `grim install` and `grim update` choose targets by precedence:
 
 `agents` renders **skills only**; it has no vendor-neutral surface for
 rules, agents, or MCP servers. So if nothing is detected and your lock
-holds none of those kinds, `grim install` exits **78** and tells you to
-name a client with `--client`.
+holds *only* those kinds, the install has nothing it can write: `grim
+install` — and `grim add` on such an artifact — exits **78** and tells you
+to name a client with `--client` or `[options].clients`. `grim add` still
+writes the declaration and the lock entry first, so a follow-up `grim
+install --client <name>` completes without re-adding.
 
 The detected set is recomputed each run and never written back to config —
 except by `grim init`, which seeds `[options].clients` with what it detects
@@ -397,6 +406,7 @@ Confirm current flags with `grim mcp --help`.
 
 [scopes]: https://grimoire.rs/concepts.html#scopes
 [clients]: https://grimoire.rs/concepts.html#clients
+[clients-matrix]: https://grimoire.rs/clients.html#matrix
 [online]: https://grimoire.rs/concepts.html#online-by-default-offline-on-demand
 [envvars]: https://grimoire.rs/configuration.html#environment-variables
 [registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility

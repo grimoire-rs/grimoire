@@ -33,21 +33,26 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 
 ## Which Clients Host Which Kind
 
-Grim installs into ten clients, and not every client can host every
-kind — decide this **before** you author, because it changes what you
-write:
+Grim installs into a growing set of clients, and not every client can
+host every kind — decide this **before** you author, because it changes
+what you write. Treat the [enforced matrix][clients] as authoritative;
+the summary below is a planning aid that the next client can age:
 
-- **Skills** install everywhere. The universal kind.
+- **Skills** install everywhere. The universal kind — no client declines
+  it, which is why it is the portable choice.
 - **Rules** are native for Claude Code, Copilot, Cursor, and Kiro;
-  degraded for OpenCode (the file installs, its path scoping does not);
-  and **declined** by Codex, Junie, Gemini, Zed, and Amp — grim warns,
-  skips, and writes no file. Half the fleet cannot scope instructions:
-  when the audience is broad, a skill reaches clients a rule never will.
+  degraded for OpenCode and Junie (the file installs, its path scoping
+  does not); and **declined** by everyone else — grim warns, skips, and
+  writes no file. Most of the fleet cannot scope instructions: when the
+  audience is broad, a skill reaches clients a rule never will.
 - **Agents** install for Claude Code, OpenCode, Copilot, Codex, Cursor,
-  and Gemini. Kiro, Junie, Zed, and Amp decline them.
-- **MCP servers** register for all ten, but only Claude accepts the `ws`
-  transport and the `[server.oauth]` block; every other client skips
-  such a descriptor with a warning.
+  Gemini, and Antigravity. Every other client declines them.
+- **MCP servers** register for the clients that ship a config file grim
+  can splice — Claude, OpenCode, Copilot, Codex, Cursor, Kiro, Junie,
+  Gemini, Zed, Amp, and Antigravity. Only Claude accepts the `ws`
+  transport and the `[server.oauth]` block; every other client skips such
+  a descriptor with a warning. The skills-only clients (and the
+  vendor-neutral `agents` target) write no MCP config at all.
 
 A declined kind is an honest refusal, not a silent failure — but it is
 still zero files. The enforced matrix and the upstream reason behind
@@ -148,7 +153,7 @@ repeat → release. Confirm flags with `grim install --help`.
 | [references/agent-spec.md](references/agent-spec.md) | Authoring an agent definition or its vendor overrides |
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
-| [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in any of the ten reserved `<vendor>.*` namespaces (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`) |
+| [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in a reserved `<vendor>.*` namespace — one per client name (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`, `cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*`) |
 | [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, batch manifests, description companions, or triaging an exit-65 failure |
 | [references/bootstrap-existing-repo.md](references/bootstrap-existing-repo.md) | Turning an existing skill repo (agentskills.io `skills/<name>/SKILL.md` or `.claude/skills/`) into a grim publisher — inventorying artifacts, fixing names, backfilling catalog metadata, wiring publish CI |
 | [references/updating.md](references/updating.md) | Maintaining this skill package itself |

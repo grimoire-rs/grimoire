@@ -439,7 +439,7 @@ pub fn xdg_config_dir() -> Option<PathBuf> {
 }
 
 /// The cross-vendor shared skills pool `$HOME/.agents/skills` — the open
-/// standard scanned by Codex, Gemini, Zed, and Amp (keyed on `$HOME` only,
+/// standard scanned by every pool member (keyed on `$HOME` only,
 /// **not** relocated by any vendor's config-dir override). The
 /// [`PathAnchor`](super::path_anchor) `AgentsSkills` anchor is rooted here.
 pub(crate) fn global_skills_root(home: Option<PathBuf>) -> Option<PathBuf> {

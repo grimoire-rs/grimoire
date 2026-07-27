@@ -1,10 +1,10 @@
 # Vendor Metadata
 
-You loaded this file because you are adding a key in one of the ten
-reserved vendor namespaces — `claude.*`, `opencode.*`, `copilot.*`,
-`codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`,
-`amp.*` — to an artifact, or a publish failed or warned on a vendor
-key.
+You loaded this file because you are adding a key in a reserved vendor
+namespace — `claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`,
+`kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`,
+`cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*` — to an
+artifact, or a publish failed or warned on a vendor key.
 
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
 [Literal Discipline](#literal-discipline) ·
@@ -19,26 +19,38 @@ artifact's `metadata` map. At install time grim looks each key up in the
 target vendor's registry and **projects** it — converts the string to
 its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
-all clients. The ten recognized namespaces are `claude`, `opencode`,
-`copilot`, `codex`, `cursor`, `gemini`, `kiro`, `junie`, `zed`, and `amp`
-(derived from every registered `ClientTarget`); any other prefix (e.g.
-`vendor.x`) is plain metadata and passes through untouched. Kiro, Junie,
-Zed, and Amp have **no populated field registries** in wave 1 — they
-install the universal agentskills shape — but their namespace is still
-recognized: any `kiro.*`/`junie.*`/`zed.*`/`amp.*` key hits the empty
-registry and is **warned + dropped**, the same typo-guard outcome as an
-unknown key in any other tool namespace, never a silent passthrough.
-`codex` is a **reserved namespace**, not just a prefix convention: a
-`codex.*` key authored before Codex client support landed was plain
-passthrough metadata; today it is a tool-namespaced key subject to the same
-known/unknown handling as the others (an unrecognized `codex.foo` now warns
-and drops instead of surviving untouched). Codex, Cursor, and Gemini expose
-**agent-only** registries (`cursor.*` / `gemini.*` project to native
-subagent frontmatter); their skills use the universal shape and their MCP
-entries derive from the descriptor, so only agents carry those keys. Note
-that not every client hosts every kind — Codex, Junie, Gemini, Zed, and Amp
-decline rules; Kiro, Junie, Zed, and Amp decline agents — and grim warns
-and skips a kind a client cannot host.
+all clients. The recognized namespaces are `claude`, `opencode`,
+`copilot`, `codex`, `cursor`, `gemini`, `kiro`, `junie`, `zed`, `amp`,
+`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, and `kilo` —
+**one per client name**, derived from every registered `ClientTarget`, so
+the list grows every time grim adds a client ([canonical
+list][projection]). The vendor-neutral `agents` target is the one
+exception: it owns no namespace, because `agents.*` is an ordinary word
+that plain metadata legitimately uses. Any prefix outside the reserved
+set (e.g. `vendor.x`) is plain metadata and passes through untouched.
+
+**Most of those namespaces carry no populated field registry.** Only
+Claude has a *skill* registry; Claude, OpenCode, Copilot, Codex, Cursor,
+and Gemini have an *agent* registry. Everyone else installs the universal
+agentskills shape — but the namespace is still reserved, so a key using
+one of those prefixes hits an **empty** registry and is **warned +
+dropped**, the same typo-guard outcome as an unknown key in a populated
+namespace, never a silent passthrough. The counter-intuitive consequence
+worth internalizing: `goose.foo` on a skill is dropped **even when Goose
+is the target**, because Goose's own registry is empty.
+
+Reservation is retroactive by design: a `codex.*` key authored before
+Codex client support landed was plain passthrough metadata, and today it
+is a tool-namespaced key subject to the same known/unknown handling as
+the others. The same happened to `antigravity.*`, `cline.*`, `droid.*`,
+`goose.*`, `warp.*`, `openclaw.*` and `kilo.*` when those clients landed,
+and it will happen to the next client's prefix. Do not use a client name
+as a plain metadata prefix.
+
+Note also that not every client hosts every kind — most decline rules,
+most decline agents, and the skills-only clients write no MCP config at
+all — and grim warns and skips a kind a client cannot host. The enforced
+matrix is authoritative ([client matrix][clients]).
 
 ## Outcome Classes
 
@@ -52,10 +64,9 @@ they explain every vendor-metadata surprise:
 | Unknown key in your **own** namespace (typo: `claude.efort`) | Warning + dropped — the typo guard; silent data loss if the warning is ignored |
 | Key in a **foreign** namespace (e.g. `opencode.*` rendering for Claude) | Dropped silently — by design, that is multi-client serving |
 
-Two corollaries: the OpenCode, Copilot, Codex, Cursor, and Gemini *skill*
-registries are empty (those namespaces exist only for agents), so any
-`opencode.*`/`copilot.*`/`codex.*`/`cursor.*`/`gemini.*` key on a skill is
-always unknown → warn + drop. And when a namespaced key collides with a
+Two corollaries: **every** *skill* registry except Claude's is empty, so a
+namespaced key on a skill is always unknown → warn + drop, whichever
+client you are targeting. And when a namespaced key collides with a
 same-named top-level field, the namespaced key wins — with a warning in the
 legacy-migration case, silently for the agent `model`/`tools` override
 escape hatch.
@@ -89,7 +100,7 @@ grow over time. The authoritative tables:
 - [`cursor.*` agent registry][cursor-agent-reg] (`cursor.model`, `cursor.readonly`, `cursor.is-background`)
 - [`gemini.*` agent registry][gemini-agent-reg] (`gemini.model`, `gemini.temperature`, `gemini.max-turns`, `gemini.timeout-mins`, `gemini.kind`)
 - [Rule-level keys][rule-keys] (today: `copilot.exclude-agent` only)
-- [Empty skill registries][empty-reg] (OpenCode, Copilot, Codex, Cursor, Gemini — those namespaces are agent-only)
+- [Empty skill registries][empty-reg] — every client but Claude; a namespaced skill key always warns and drops
 
 ## Worked Example
 
@@ -125,6 +136,7 @@ to silence the nudge and gain type conversion ([migration][migration]).
 
 [why]: https://grimoire.rs/vendor-metadata.html#why-metadata
 [projection]: https://grimoire.rs/vendor-metadata.html#projection-semantics
+[clients]: https://grimoire.rs/clients.html#matrix
 [claude-reg]: https://grimoire.rs/vendor-metadata.html#claude-registry
 [claude-agent-reg]: https://grimoire.rs/vendor-metadata.html#claude-agent-registry
 [opencode-agent-reg]: https://grimoire.rs/vendor-metadata.html#opencode-agent-registry

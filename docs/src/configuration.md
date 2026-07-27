@@ -105,9 +105,10 @@ shared_skills = true
 | `shared_skills` | boolean | `false` | When `true`, this client's skills install into the cross-vendor `.agents/skills` pool instead of the client's own skills directory. Absent or `false`, the client keeps its native layout. |
 
 Only a client that actually reads the pool may be opted into it — grim never
-writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`
-and the generic `agents` client (which already render there), plus `cursor`,
-`copilot` and `opencode` (which scan it alongside their own skills directory).
+writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`,
+`goose` and the generic `agents` client (which already render there), plus
+`cursor`, `copilot`, `opencode` and `warp` (which scan it alongside their own
+skills directory).
 Setting `true` on any other client is refused: exit 65 (`EX_DATAERR`) from
 [`grim config set`](./commands.md#config), exit 78 (`EX_CONFIG`) at load when
 the value was hand-authored. `false` stays accepted for every client — it is
@@ -444,12 +445,28 @@ applies.
 | `COPILOT_HOME` | GitHub Copilot home override (vendor variable). Replaces `~/.copilot` for global-scope skills and agents, and relocates `mcp-config.json`. Also drives detection. | unset |
 | `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
 | `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
+| `CODEX_HOME` | Codex home override (vendor variable). Replaces `~/.codex` for global-scope agents and the MCP `config.toml`. Does **not** relocate Codex skills — those follow the cross-vendor `$HOME/.agents/skills` standard. Also drives detection. | unset |
+| `KIRO_HOME` | Kiro home override (vendor variable). Replaces `~/.kiro` **outright, with no `.kiro` segment appended**, for global-scope skills, `steering/` rules, and `settings/mcp.json`. Also drives detection. grim follows the Kiro **CLI**; the Kiro IDE ignores this variable upstream. | unset |
+| `GEMINI_CLI_HOME` | Gemini CLI home override (vendor variable). It replaces the **home directory**, so Gemini's config root becomes `$GEMINI_CLI_HOME/.gemini` — the segment is still appended, the opposite shape to `CODEX_HOME`/`KIRO_HOME`. Relocates global-scope Gemini agents and its `settings.json` MCP registration, and drives detection. Does **not** relocate the shared `$HOME/.agents/skills` pool, which serves several clients under one refcount. | unset |
+| `XDG_CONFIG_HOME` | Standard XDG base directory. Roots OpenCode's default config dir, Amp's settings dir, and — **on Linux and FreeBSD only** — Zed's. On macOS Zed uses a hardcoded `~/.config/zed`; on Windows, `%APPDATA%\Zed`. | `~/.config` |
 | `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
 | `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
 | `NO_COLOR` | Any non-empty value disables color under [`--color auto`](./commands.md#global-options) — the highest-priority `auto` signal, overriding even `CLICOLOR_FORCE`. Only `--color always` overrides it. | unset |
 | `CLICOLOR_FORCE` | A non-empty value other than `0` forces color on under `--color auto`, even when stdout is not a terminal — beaten only by `NO_COLOR`. | unset |
 | `CLICOLOR` | `0` disables color under `--color auto`. Any other value has no effect (color already follows the terminal check). | unset |
 | `TERM` | `dumb` disables color under `--color auto`, the same terminal-capability convention most color-aware CLIs follow. | unset |
+
+Two further vendor variables are read for **detection only** and never
+change where grim writes: `$GOOSE_PATH_ROOT` (one of the candidate Goose
+config roots) and `$COPILOT_HOME`'s VS Code counterpart — VS Code's
+embedded Copilot CLI ignores `COPILOT_HOME`, so setting it moves grim's
+output for the standalone CLI but not for the embedded one.
+
+Newly honoring a vendor variable relocates a render root for anyone who
+already set it. That is a layout move, not a breaking change — grim reaps
+the pre-override copy on the next install, update, or uninstall. See
+[Stability](./stability.md#unstable) for what that guarantees and what it
+does not.
 
 Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
 `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,

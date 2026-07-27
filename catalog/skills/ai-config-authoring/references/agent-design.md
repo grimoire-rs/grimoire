@@ -97,9 +97,9 @@ empty.
 
 ## Portability
 
-Agents are the **least portable** artifact type — six clients host an
-installable agent file, in six incompatible envelopes, and four host none
-at all (as of 2026; re-verify):
+Agents are the **least portable** artifact type — a minority of clients host
+an installable agent file at all, each in its own incompatible envelope, and
+every other client hosts none (as of 2026; re-verify):
 
 | Client | Path | Format | Notes |
 |---|---|---|---|
@@ -110,20 +110,21 @@ at all (as of 2026; re-verify):
 | [Cursor][cur-agents] | `.cursor/agents/*.md` | Markdown | Read-only and background flags; no `tools` equivalent |
 | [Gemini CLI][gem-agents] | `.gemini/agents/*.md` | Markdown | Loaded only while the `experimental.enableAgents` setting is on — it defaults on (as of 2026; re-verify) |
 
-**Four clients have no agent file you can package**: [Kiro][kiro] — a
+**Several clients have no agent file you can package**: [Kiro][kiro] — a
 native IDE format exists, but its CLI expects an incompatible schema in the
 same `.kiro/agents/` directory ([kiro #8040][kiro-8040]), so no single file
 serves both; [Junie][junie] — its agents directory is early-access preview,
 not generally available; [Zed][zed] — agents run over the Agent Client
 Protocol, with no file to install; and [Amp][amp] — subagents are spawned at
-runtime. Delegation still works on those clients — it is just not something
-you can package.
+runtime. Newer skills-first clients are in the same position by default:
+assume no packageable agent format until a client documents one. Delegation
+still works on those clients — it is just not something you can package.
 
 The only documented cross-read: VS Code Copilot also detects
 `.claude/agents/*.md`; no other cross-read is documented (as of 2026;
 re-verify). Portable strategy: keep the prompt body vendor-neutral and
 generate the per-client envelopes; only `description` is conceptually
-common to all six.
+common to every envelope.
 
 ## Further Reading
 

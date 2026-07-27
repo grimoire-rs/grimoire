@@ -61,10 +61,17 @@ Bundles decompose into their member kinds and are not a column.
 
 `agents` is not a product — it is the vendor-neutral target. Selecting it
 installs one copy of each skill into the cross-vendor `.agents/skills` pool
-that Codex, Gemini, Zed, Amp, Goose, and (at project scope) Antigravity all
-scan, rather than into any one client's directory. Rules, agents, and MCP have no vendor-neutral format, so it declines
-all three. It is never detected, only selected: request it explicitly with
-`--client agents` or in `[options].clients`.
+rather than into any one client's directory. That pool is read by more clients
+than write to it — see [Shared skills pool visibility](#gap-shared-pool) for
+who scans it. Rules, agents, and MCP have no vendor-neutral format, so
+`agents` declines all three. It is never detected, only selected: request it
+explicitly with `--client agents` or in `[options].clients`.
+
+It is also what grim falls back to when *nothing* is detected: rather than
+writing a directory for every client it knows about, an install with no
+`--client`, no `[options].clients`, and no client marker present targets
+`agents` alone. If the declared set holds nothing it can install, the command
+exits `78` and names both ways to select a client.
 
 ## Known gaps {#known-gaps}
 
@@ -173,22 +180,47 @@ targets that surface, verified against the still-served enterprise docs.
 
 ### Shared skills pool visibility {#gap-shared-pool}
 
-[Codex], [Gemini], [Zed], [Amp], [Goose], and — at project scope —
-[Antigravity] all read the cross-vendor `.agents/skills` directory. A skill
-installed for any one of them is physically the same file every other pool
-member reads, so it is discoverable by all of them even when only one was
-selected. [Goose] is a full member at both scopes; [Antigravity] is the one
-partial member: its *global* skills live under its own
-`~/.gemini/config/skills`, so a global install for it is a separate copy.
+**Reading the pool and writing to it are different lists**, and conflating
+them is the usual source of confusion here.
 
-[Warp] is a different case again — it *reads* the pool at both scopes, but grim
-installs its skills to `.warp/skills/` because that is a first-class location
-upstream. Set `[options.vendors.warp].shared_skills` to move them into the pool
-instead. The same opt-in is available for [Cursor], [Copilot] and [OpenCode].
+*Writing* — grim installs skills into `.agents/skills` by default for
+[Codex], [Gemini], [Zed], [Amp], [Goose], the vendor-neutral `agents` target,
+and — at **project scope only** — [Antigravity]. A skill installed for any one
+of them is physically the same file, so it is discoverable by every client
+that scans the directory even when only one was selected. [Goose] is a full
+member at both scopes; [Antigravity] is partial, because its *global* skills
+live under its own `~/.gemini/config/skills`, so a global install for it is a
+separate copy.
 
-This is upstream scan behavior, not a grim choice; grim
-refcounts the shared directory so removing one client never deletes a skill
-another client still records.
+*Reading* — several more clients scan the pool without grim writing there by
+default. [Cursor], [Copilot], [OpenCode] and [Warp] all read it at both
+scopes, but each has a first-class directory of its own upstream, and grim
+prefers a vendor-specific location wherever one exists. [Kilo] reads the
+**project** pool but has no global support, and [OpenClaw] reads the
+**global** pool but has no project scope; both are partial readers, and grim
+installs both to their own directories.
+
+Set `[options.vendors.<name>].shared_skills` on any full pool reader —
+[Cursor], [Copilot], [OpenCode] or [Warp] — to move that client's skills into
+the pool instead. The key is refused (exit `65` at `grim config set`, `78`
+when hand-authored) for a client that is not a verified pool reader, because
+enabling it there would write where nothing reads. Partial readers are
+excluded on purpose: membership is scope-blind, so a client that reads the
+pool at only one scope would get skills written where it never scans at the
+other.
+
+Which clients *read* the pool is upstream scan behavior, not a grim choice: a
+skill installed for one member is visible to every other member whether or
+not you asked for that. Which clients grim *writes* it for is partly a
+choice — yours. [Goose] and project-scope [Antigravity] land there because
+their own vendors point there, but every opt-in above is you deciding to
+trade a client's native layout for that wider visibility. Left unset, the
+client keeps its own directory.
+
+grim refcounts the shared directory so removing one client never deletes a
+skill another client still records — subject to one [documented
+boundary](./stability.md#limitations-pool-refcount): that refcount reads
+install state, not the filesystem.
 
 ### Zed: rules and agents declined, MCP env references {#gap-zed}
 
@@ -217,7 +249,8 @@ install a rule that looks scoped and is not.
 
 [Antigravity] is also never auto-detected in a workspace. All of its
 project-scope surfaces live under `.agents/`, which [Codex], [Gemini], [Zed],
-[Amp] and `agents` also use — detecting on it would install [Antigravity] files
+[Amp], [Goose] and `agents` also use — detecting on it would install
+[Antigravity] files
 into every workspace that has ever used any pool client. Upstream documents no
 product-specific project marker, so grim reports none: request it explicitly
 with `--client antigravity` or in `[options].clients`. Global scope is detected
@@ -245,10 +278,11 @@ their own names.
 
 [Cline], [Droid], [Goose], [Warp], [OpenClaw] and [Kilo] install **skills
 only**. Rules, agents and MCP are declined for all six, but not for the same
-reason in every case. Five of them — [Droid], [Goose], [Warp], [OpenClaw] and
-[Kilo] — document no per-file rules surface that can express a rule's `paths`.
-[Cline] is the exception and its decline is a **scheduling** decision, not a
-capability one: see below. None of the six ships an installable subagent file
+reason in every case. Four of them — [Droid], [Goose], [Warp] and [OpenClaw] —
+document no per-file rules surface that can express a rule's `paths`. For
+[Cline] and [Kilo] the decline is a **scheduling** decision rather than a
+capability one: this release ships skills for these clients, and rule support
+is additive to add later. None of the six ships an installable subagent file
 format, and grim writes no MCP config for any of them. Each decline is additive
 to reverse — support can be added later without breaking anything, while
 withdrawing it could not be.

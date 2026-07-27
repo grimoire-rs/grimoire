@@ -44,9 +44,9 @@ Reality — support and failure modes:
 | Type | Vendor support | Failure modes |
 |---|---|---|
 | Always-on instruction file | Universal — every client has one, under a different name: CLAUDE.md (Claude Code, hierarchy + imports), AGENTS.md (OpenCode, Codex, Zed, Amp — Amp falls back to AGENT.md then CLAUDE.md), copilot-instructions.md plus AGENTS.md/CLAUDE.md (Copilot), GEMINI.md (Gemini CLI), always-on steering (Kiro), an unscoped always-apply rule (Cursor), `.junie/AGENTS.md` (Junie — a client-specific path, not the root file) — all as of 2026; re-verify | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
-| Glob-scoped rule | A minority capability — see [the grouping below](#where-vendors-disagree). Real per-file scoping on four clients (Claude Code, Copilot, Cursor, Kiro); a per-file surface without scoping on OpenCode; five clients have no ownable per-file rule file at all (as of 2026; re-verify) | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning; porting to a client without scoping either drops the scope or converts it to always-on cost |
-| On-demand skill | Universal — the only type every client hosts, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify). Discovery directories differ, and four clients share one pool — see [skill-design.md](skill-design.md) | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
-| Subagent | Six clients ship an installable agent file, in six incompatible envelopes; four have no installable format at all — the per-client table is in [agent-design.md](agent-design.md) (as of 2026; re-verify) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism; an agent file written for a client with no format is simply never read |
+| Glob-scoped rule | A minority capability — see [the grouping below](#where-vendors-disagree). Real per-file scoping on four clients (Claude Code, Copilot, Cursor, Kiro); a per-file surface without scoping on OpenCode and Junie; every other surveyed client has no ownable per-file rule file at all (as of 2026; re-verify) | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning; porting to a client without scoping either drops the scope or converts it to always-on cost |
+| On-demand skill | Universal — the only type every client hosts, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify). Discovery directories differ, and a growing group of clients share one cross-vendor pool — see [skill-design.md](skill-design.md) | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
+| Subagent | A minority of clients ship an installable agent file, each in its own incompatible envelope; every other client has no installable format at all — the per-client table is in [agent-design.md](agent-design.md) (as of 2026; re-verify) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism; an agent file written for a client with no format is simply never read |
 | Hook | Claude Code: shell commands + exit-code protocol. OpenCode: JS/TS plugins (can throw to cancel a tool call). Copilot: declarative JSON in `.github/hooks/` | Not a security boundary: condition filters fail open, blocked tools get routed around, and some headless/pipe modes skip hooks entirely (as of 2026) |
 
 ## Decision Heuristics
@@ -89,14 +89,16 @@ Ask in order; the first decisive answer picks the type.
 
 The first question is not *how* a type behaves per client but *whether the
 client can host it at all* — write a type into a client with no surface for
-it and the config looks installed while doing nothing. Ten clients group
-into three tiers (as of 2026; re-verify):
+it and the config looks installed while doing nothing. The clients surveyed
+here group into three tiers (as of 2026; re-verify) — the survey is a
+sample, not a census, and a newer client should be assumed skills-only
+until its own docs say otherwise:
 
 | Type | Every client | Some clients | No surface at all |
 |---|---|---|---|
 | Skill | [Claude Code][cc], [OpenCode][oc-home], [Copilot][cop-home], [Codex][cx-home], [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | — | — |
 | Always-on file | all ten, under different filenames | — | — |
-| Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode (per-file, no scoping) | Codex, Junie, Gemini CLI, Zed, Amp — always-on file only |
+| Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode, Junie (per-file, no scoping) | Codex, Gemini CLI, Zed, Amp — always-on file only |
 | Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI | Kiro, Junie, Zed, Amp — no installable format |
 | Hook | — | Claude Code, OpenCode, Copilot | unsurveyed for the other seven |
 
@@ -118,9 +120,10 @@ type** — which is why cross-client packaging defaults to skills.
   conversation message that persists; OpenCode returns it as a native
   `skill` tool result; Copilot uses dual activation (semantic + slash).
   Same standard, different delivery — never depend on the delivery.
-- **Four clients share one skills directory.** Codex, Gemini CLI, Zed, and
-  Amp all scan the cross-vendor `.agents/skills/`, so one copy there is
-  read by all four — and a name collision there collides for all four.
+- **A group of clients share one skills directory.** Codex, Gemini CLI, Zed
+  and Amp all scan the cross-vendor `.agents/skills/`, and the group keeps
+  growing as newer clients adopt the convention, so one copy there is read
+  by every member — and a name collision there collides for every member.
   See [skill-design.md](skill-design.md).
 - **Hooks are three technologies.** Shell + exit codes (Claude Code),
   JS/TS plugins that can cancel tool calls (OpenCode), declarative JSON
