@@ -261,7 +261,20 @@ impl<'de> Deserialize<'de> for PathAnchor {
                 .chain(VENDOR_ROOTS.iter().map(|(name, _)| format!("{name}-root")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            serde::de::Error::custom(format!("unknown path anchor '{tag}', expected one of {known}"))
+            // Bounded *and* escaped, because the two hazards are independent.
+            // The tag comes off a `state.json` a `git clone` can deliver (grim's
+            // own `.gitignore` exists only after grim has run) and lands on a
+            // terminal via `tracing::error!("{err:#}")`: `escape_debug` renders
+            // the control byte as `\u{…}`, and covers what
+            // `char::is_control` does not — U+202E and the other bidi /
+            // zero-width format characters are not control chars. `take(64)`
+            // is the separate problem: without it a 1 MiB tag echoes whole.
+            // A truncated prefix still greps in the offending file.
+            let shown = tag.chars().take(64).collect::<String>();
+            serde::de::Error::custom(format!(
+                "unknown path anchor '{}', expected one of {known}",
+                shown.escape_debug()
+            ))
         })
     }
 }
@@ -1474,6 +1487,63 @@ mod tests {
         // writer has only ever emitted the plain string, so no state.json grim
         // produced can carry this form.
         assert!(serde_json::from_str::<PathAnchor>("{\"claude-root\":null}").is_err());
+        // Fail-closed against the hostile shapes a `git clone` can deliver in a
+        // `.grimoire/state.json`. `from_serde_tag` matches a closed set, so
+        // every one of these lands in the `None` arm — pinned rather than
+        // argued, because "the match is closed" is exactly the property a
+        // future prefix/suffix-tolerant tag parser would quietly break.
+        for hostile in [
+            "\u{1b}[2Jclaude-root",   // ESC, drives the terminal
+            "claude\u{202e}-root",    // U+202E — not `char::is_control`
+            "claude-root\0",          // NUL
+            "\u{441}laude-root",      // Cyrillic homoglyph for `c`
+            "claude-root ",           // trailing space
+            "CLAUDE-ROOT",            // case
+            &"a".repeat(1024 * 1024), // 1 MiB, no unbounded work
+        ] {
+            assert!(
+                serde_json::from_value::<PathAnchor>(serde_json::Value::String(hostile.to_string())).is_err(),
+                "a hostile tag must be refused, not coerced onto a real anchor"
+            );
+        }
+    }
+
+    /// The refused tag is echoed **escaped and bounded**. This message reaches
+    /// a terminal through `tracing::error!("{err:#}")`, and a `state.json` can
+    /// arrive with a `git clone` — grim's own `.gitignore` exists only after
+    /// grim has run, so a repo can ship a hostile one.
+    ///
+    /// Both hostile shapes, because they need different guards: ESC drives the
+    /// terminal, and U+202E is **not** `char::is_control`, so a test that only
+    /// injects ESC would pass while the bidi case still shipped. The 1 MiB tag
+    /// is the third: escaping alone would echo all of it verbatim.
+    #[test]
+    fn a_refused_anchor_tag_is_escaped_and_bounded_in_the_error() {
+        let msg = |tag: &str| {
+            serde_json::from_value::<PathAnchor>(serde_json::Value::String(tag.to_string()))
+                .expect_err("a hostile tag must be refused")
+                .to_string()
+        };
+
+        let esc = msg("\u{1b}[2J\u{202e}evil-root");
+        assert!(!esc.contains('\u{1b}'), "raw ESC must not reach the terminal: {esc:?}");
+        assert!(
+            !esc.contains('\u{202e}'),
+            "raw U+202E must not reach the terminal: {esc:?}"
+        );
+        assert!(
+            esc.contains(r"\u{1b}[2J\u{202e}evil-root"),
+            "the escaped tag must still be greppable in the user's state.json: {esc:?}"
+        );
+
+        // Bounded independently of the escaping: an unbounded echo is its own
+        // problem, and `escape_debug` would only inflate it.
+        let long = msg(&"a".repeat(1024 * 1024));
+        assert!(
+            !long.contains(&"a".repeat(65)),
+            "a 1 MiB tag must be truncated, not echoed whole (message is {} bytes)",
+            long.len()
+        );
     }
 
     /// The write path, the table, and the read path agree.

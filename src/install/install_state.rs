@@ -619,6 +619,27 @@ impl InstallState {
         })
     }
 
+    /// A serde failure as `InvalidData`, with its message **bounded and
+    /// escaped** — the single chokepoint for every `state.json` parse error.
+    ///
+    /// Serde quotes attacker-controlled text back at the user: an unknown
+    /// **field name** (`RawInstallRecord` is `deny_unknown_fields`, which
+    /// stays — it is the fail-closed guard), a variant tag, a bad literal. The
+    /// message lands on a terminal through `tracing::error!("{err:#}")`, and a
+    /// `state.json` can arrive with a `git clone` — grim's own `.gitignore`
+    /// exists only after grim has run.
+    ///
+    /// Same shape as [`PathAnchor`](super::path_anchor::PathAnchor)'s
+    /// deserialize error one struct away: `escape_debug` because
+    /// `char::is_control` misses U+202E and the other bidi / zero-width format
+    /// characters, and a length bound because a 1 MiB field name otherwise
+    /// echoes whole. 512 chars, not 64: serde appends the field vocabulary and
+    /// `at line L column C`, which is the actionable half of the message.
+    fn invalid_state_data(e: &serde_json::Error) -> std::io::Error {
+        let shown: String = e.to_string().chars().take(512).collect();
+        std::io::Error::new(std::io::ErrorKind::InvalidData, shown.escape_debug().to_string())
+    }
+
     /// Parse raw state bytes into the in-memory record map, converting a V1
     /// file to V2 in memory when `convert` supplies the `(scope, roots)` the
     /// anchoring step needs. A V1 file with `convert == None` (global `load`,
@@ -655,13 +676,12 @@ impl InstallState {
                         ),
                     ));
                 }
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+                return Err(Self::invalid_state_data(&e));
             }
         };
         let (records, lossy) = match probe.version {
             InstallStateVersion::V2 => {
-                let file: InstallStateFile = serde_json::from_slice(bytes)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let file: InstallStateFile = serde_json::from_slice(bytes).map_err(|e| Self::invalid_state_data(&e))?;
                 (file.records, false)
             }
             InstallStateVersion::V1 => {
@@ -671,8 +691,8 @@ impl InstallState {
                         "legacy V1 install state cannot be loaded without anchor roots",
                     ));
                 };
-                let file: InstallStateFileV1 = serde_json::from_slice(bytes)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let file: InstallStateFileV1 =
+                    serde_json::from_slice(bytes).map_err(|e| Self::invalid_state_data(&e))?;
                 convert_v1_records(file.records, scope, roots)
             }
         };
@@ -1062,6 +1082,44 @@ mod tests {
             support_dir: None,
             entry: None,
         }
+    }
+
+    /// `RawInstallRecord` carries `#[serde(deny_unknown_fields)]`, so serde
+    /// echoes a hostile **field name** from the same `state.json` the anchor
+    /// tag comes from — one struct away from the escape already applied there.
+    /// The message reaches a terminal via `tracing::error!("{err:#}")`.
+    ///
+    /// `deny_unknown_fields` stays: it is the fail-closed guard, and this test
+    /// depends on it firing.
+    #[test]
+    fn a_hostile_field_name_in_state_json_is_escaped_and_bounded() {
+        let msg = |field: &str| {
+            let json = format!(r#"{{"version":2,"records":[{{"{field}":1,"kind":"skill","name":"n","outputs":[]}}]}}"#);
+            InstallState::records_from_bytes(json.as_bytes(), std::path::Path::new("/s.json"), None)
+                .expect_err("an unknown field must be refused")
+                .to_string()
+        };
+
+        // ESC and U+202E together — U+202E is not `char::is_control`. Written
+        // as JSON `\u` escapes: a raw control byte inside a JSON string is not
+        // valid JSON, so serde decodes these into the real code points.
+        let hostile = msg(r"\u001b[2J\u202Eevil");
+        assert!(
+            !hostile.contains('\u{1b}'),
+            "raw ESC must not reach the terminal: {hostile:?}"
+        );
+        assert!(
+            !hostile.contains('\u{202e}'),
+            "raw U+202E must not reach the terminal: {hostile:?}"
+        );
+
+        // Bounded independently of the escaping, as for the anchor tag.
+        let long = msg(&"a".repeat(1024 * 1024));
+        assert!(
+            !long.contains(&"a".repeat(513)),
+            "a 1 MiB field name must be truncated, not echoed whole (message is {} bytes)",
+            long.len()
+        );
     }
 
     #[test]
