@@ -316,7 +316,6 @@ mod tests {
         assert!(ZedVendor.detect(w, ConfigScope::Project), "present .zed ⇒ detected");
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn detect_global_scope_existence_permutations_via_zed_root() {
         // `ZedVendor::detect`'s Global arm is exactly
@@ -330,19 +329,30 @@ mod tests {
         // both an XDG_CONFIG_HOME-unset (`~/.config` fallback value) and an
         // XDG_CONFIG_HOME-set (custom dir) resolved value — the most
         // error-prone root among the wave-1 vendors.
+        //
+        // Goes through `zed_root_from` with an explicit `Xdg` kind, not
+        // `zed_root`: `zed_root` reads ambient `$HOME`/`%APPDATA%`, and on the
+        // `HomeDotConfig` (macOS) arm it *discards* the injected argument, so
+        // both fabricated permutations collapse onto the host's real
+        // `~/.config/zed` — the second `!exists()` assertion then fails on the
+        // directory the first one just created, and the test writes into the
+        // real `$HOME`. Injecting the kind keeps the check hermetic and runs it
+        // on every host, mirroring `vendor_amp.rs`/`vendor_codex.rs`, whose
+        // roots take every input as an argument.
         let tmp = tempfile::tempdir().unwrap();
         let fallback = tmp.path().join("home").join(".config"); // unset ⇒ ~/.config fallback
         let custom = tmp.path().join("custom-xdg"); // set ⇒ a custom XDG_CONFIG_HOME
+        let xdg_root = |xdg| zed_root_from(ZedRootKind::Xdg, xdg, None, None);
 
         // Unset: fallback root absent ⇒ not detected yet.
-        let root = zed_root(Some(fallback.clone())).unwrap();
+        let root = xdg_root(Some(fallback.clone())).unwrap();
         assert!(!root.exists(), "absent ~/.config/zed must not exist yet: {root:?}");
         std::fs::create_dir_all(&root).unwrap();
         assert!(root.exists(), "present ~/.config/zed now exists");
 
         // Set: a custom XDG_CONFIG_HOME root absent ⇒ not detected yet,
         // independent of the fallback resolved above.
-        let overridden = zed_root(Some(custom.clone())).unwrap();
+        let overridden = xdg_root(Some(custom.clone())).unwrap();
         assert!(
             !overridden.exists(),
             "absent custom XDG_CONFIG_HOME/zed must not exist yet: {overridden:?}"
@@ -351,7 +361,7 @@ mod tests {
         assert!(overridden.exists());
 
         // Neither XDG_CONFIG_HOME nor $HOME resolvable ⇒ no root at all.
-        assert_eq!(zed_root(None), None);
+        assert_eq!(xdg_root(None), None);
     }
 
     // ── mcp_entry: `context_servers` container, FLAT entry shape ──
