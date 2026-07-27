@@ -201,12 +201,14 @@ impl InstallTarget {
     /// rather than restating the path here. Every other kind, and every
     /// client that did not opt in, keeps its native layout untouched.
     ///
-    /// The six clients that already render into the pool (`codex`, `gemini`,
-    /// `zed`, `amp`, `agents`, `goose`) resolve their skills root through that
-    /// exact same helper, so opting one of them in is a genuine no-op rather
-    /// than a coincidence. `goose` is newly pool-capable, so
-    /// `[options.vendors.goose].shared_skills = true` is an accepted config
-    /// today — and it is this no-op, not a second write path.
+    /// Every client that already renders into the pool resolves its skills
+    /// root through that exact same helper, so opting one of them in is a
+    /// genuine no-op rather than a coincidence. `render.rs`'s `POOL_ROSTER` is
+    /// the authoritative list; deliberately not restated here, since a count
+    /// goes stale the next time a client joins. `goose` is one of them and is
+    /// newly pool-capable, so `[options.vendors.goose].shared_skills = true`
+    /// is an accepted config today — and it is this no-op, not a second write
+    /// path.
     pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
         if kind == ArtifactKind::Skill && self.shared_skills.contains(&client) {
             return ClientTarget::Agents.path_for(&self.workspace, self.scope, kind, name);

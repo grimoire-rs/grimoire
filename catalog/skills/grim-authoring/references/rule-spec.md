@@ -88,7 +88,8 @@ OpenCode belongs in the body. Two authoring consequences of the rest:
 Cursor splits its `globs` string on **every** comma, including one inside
 a `{a,b}` brace alternation, so author `src/**/*.rs` and `src/**/*.toml`
 as two patterns rather than `src/**/*.{rs,toml}`; and when the audience
-is broad, a skill reaches the five clients a rule cannot. Full mapping:
+is broad, a skill reaches every client a rule cannot — most of the fleet.
+Full mapping:
 [rule keys][rule-keys] · [client matrix and gaps][clients].
 
 ## Examples

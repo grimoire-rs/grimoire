@@ -109,9 +109,11 @@ the VS Code config and Cursor; Claude, Kiro, Gemini, and Amp read
 
 ## What Each Client Receives
 
-Grim renders each of the ten clients' own schema — container key, entry
+Grim renders each MCP-hosting client's own schema — container key, entry
 shape, and file differ per client, and the authoritative matrix lives on
-the docs site ([emit matrix][emit-matrix]). What matters while
+the docs site ([emit matrix][emit-matrix]). Not every client is in that
+set: the skills-only clients and the vendor-neutral `agents` target ship
+no MCP config surface, so a descriptor writes nothing for them. What matters while
 *authoring*, rather than at install time:
 
 - **`stdio`, `http`, and `sse` register for every client.** The `ws`

@@ -5,7 +5,7 @@
 //!
 //! `agents` is not a product. It is the vendor-neutral install target: one
 //! copy into the cross-vendor open-standard pool (`<ws>/.agents/skills`,
-//! global `$HOME/.agents/skills`) that Codex, Gemini, Zed, and Amp all scan,
+//! global `$HOME/.agents/skills`) that every pool member scans,
 //! for a workspace where naming a specific client would be wrong.
 //!
 //! It exists to become the fallback for "no client detected", replacing the
@@ -109,7 +109,7 @@ impl Vendor for AgentsVendor {
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         // Shared-pool skills are vendor-independent: route through the
         // vendor-less universal renderer so no per-vendor field can leak into
-        // the shared file (the Codex/Gemini/Zed/Amp path).
+        // the shared file (the shared-pool path).
         Ok(render::render_universal_skill_doc(doc))
     }
 
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(
             AgentsVendor.skills_root(ws, ConfigScope::Global),
             global_skills_root(home_dir()).unwrap_or_else(|| ws.join(".agents").join("skills")),
-            "global lands in the same $HOME-keyed pool the other four members share"
+            "global lands in the same $HOME-keyed pool every other member shares"
         );
     }
 

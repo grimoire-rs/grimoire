@@ -86,16 +86,18 @@ with a tree: always-on root → catalog/index file → scoped leaf rules.
 ## Vendor Differences
 
 **Every client has an always-on file; per-file scoping is the minority
-capability.** Of the ten clients surveyed (as of 2026; re-verify), four
-support real glob scoping, one hosts per-file rules without scoping, and
-five have no ownable per-file rule surface at all — for those five the
-always-on file is the *only* place rule content can live.
+capability.** Of the clients surveyed below (as of 2026; re-verify), four
+support real glob scoping, two host per-file rules without scoping, and the
+rest have no ownable per-file rule surface at all — for those the always-on
+file is the *only* place rule content can live. The survey is a sample, not
+a census: newer clients keep arriving and almost all of them ship skills
+first and rules later, if ever.
 
 | Per-file rule surface | Clients | What you get |
 |---|---|---|
 | Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list | Content loads only when a matching file is in play |
-| Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array | The body loads, the scope does not: permanent cost |
-| None | [Codex][cx-skills], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | Nothing to install — route the content to the always-on file |
+| Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array; [Junie][junie] — `.junie/rules/*.md`, every Markdown file in the directory concatenated automatically, project scope only (no user-level rules directory exists) | The body loads, the scope does not: permanent cost |
+| None | [Codex][cx-skills], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | Nothing to install — route the content to the always-on file |
 
 Per-client caveats worth knowing before you write a glob:
 
@@ -120,9 +122,8 @@ so an oversized AGENTS.md can force context compaction.
   client-specific path, not the portable root file.
 - Porting scoped rules to OpenCode converts them into always-on cost;
   consider converting procedural rules into skills there instead.
-- For the five clients with no rule surface, do not ship a rule file and
-  hope — the content belongs in the always-on file, or in a skill if it is
-  occasional.
+- For a client with no rule surface, do not ship a rule file and hope — the
+  content belongs in the always-on file, or in a skill if it is occasional.
 - Write for the worst consumer: most-critical content first, short
   imperative bullets, and never rely on the client fetching external URLs
   as normative content.
@@ -152,8 +153,10 @@ session and merely lives in another file.
   all; AGENTS.md is its only always-on surface.
 - [Cursor][cur] / [Kiro][kiro] — the two newer clients with real glob
   scoping; check both for the comma-split and user-scope caveats above.
-- [Junie][junie] / [Gemini CLI][gem] / [Zed][zed] / [Amp][amp] — always-on
-  instruction files only; re-check before assuming a rule installs.
+- [Junie][junie] — `.junie/rules/*.md` is a real per-file directory, but it
+  is concatenated wholesale with no per-file activation key, and there is no
+  user-level equivalent; [Gemini CLI][gem] / [Zed][zed] / [Amp][amp] —
+  always-on instruction files only. Re-check before assuming a rule installs.
 - [VS Code: custom instructions][vsc-ci] — `applyTo:` mechanics and the
   documented mismatch failure mode.
 - [Copilot code review instructions deep-dive][gh-blog] — the 4,000-char

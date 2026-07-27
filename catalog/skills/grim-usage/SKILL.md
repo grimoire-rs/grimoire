@@ -14,20 +14,23 @@ metadata:
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
 It distributes five artifact kinds — **skills**, **rules**, **agents**,
 **MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
-Docker Hub, a private Distribution), with lockfile-pinned installs into ten
-AI clients: Claude Code, OpenCode, GitHub Copilot, Codex, Cursor, Kiro,
-JetBrains Junie, Gemini CLI, Zed, and Amp. An MCP
+Docker Hub, a private Distribution), with lockfile-pinned installs into a
+growing set of AI clients (Claude Code, OpenCode, GitHub Copilot, Codex,
+Cursor, Kiro, JetBrains Junie, Gemini CLI, Zed, Amp and more — plus a
+vendor-neutral `agents` target). An MCP
 server artifact installs by registering an entry in each client's native MCP
 config file (never as a file of its own); uninstall removes only that
 entry, never the file.
 
-Not every client can host every kind: a skill and an MCP server install
-everywhere, but a rule needs a per-file scoping surface and an agent needs
-a shipped file format that some clients lack. Where a client cannot
-faithfully host a kind, grim warns and skips it (e.g. Codex, Junie, Gemini,
-Zed, and Amp decline rules; Kiro, Junie, Zed, and Amp decline agents). The
-authoritative per-client support matrix is the [Client Compatibility][clients]
-docs page — trust it over this summary.
+Not every client can host every kind: a **skill** is the one kind every
+client hosts, but a rule needs a per-file scoping surface, an agent needs a
+shipped file format, and an MCP server needs a config file grim can splice —
+and many clients lack one or more of those. Where a client cannot faithfully
+host a kind, grim warns and skips it, writing zero files. Most clients
+decline rules and agents, and the skills-only clients write no MCP config at
+all. The authoritative per-client support matrix is the [Client
+Compatibility][clients] docs page — trust it over this summary, and check it
+rather than assuming.
 
 ## Verify Before Acting
 

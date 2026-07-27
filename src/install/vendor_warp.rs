@@ -122,7 +122,7 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 }
 
 /// Warp's user-level root `~/.warp` — **cross-platform**, identical on macOS,
-/// Linux and Windows. No env override exists upstream. The
+/// Linux and Windows. No env override was found on the pages checked. The
 /// [`PathAnchor`](super::path_anchor) `VendorRoot("warp")` anchor is rooted here.
 pub(crate) fn warp_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".warp"))

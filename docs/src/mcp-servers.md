@@ -183,14 +183,14 @@ minor release (see [stability][stability-unstable]).
 | [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
 | [Cursor][cursor-docs] | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
-| [Kiro][kiro-docs] | project / global | `.kiro/settings/mcp.json` / `~/.kiro/settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
+| [Kiro][kiro-docs] | project / global | `.kiro/settings/mcp.json` / `$KIRO_HOME`\|`~/.kiro`/`settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
 | [Junie][junie-docs] | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; oauth skipped | undocumented — ref-bearing descriptors skipped |
-| [Gemini CLI][gemini-docs] | project / global | `.gemini/settings.json` (both scopes) | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
-| [Zed][zed-docs] | project / global | `.zed/settings.json` / `~/.config/zed/settings.json` (JSONC) | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
+| [Gemini CLI][gemini-docs] | project / global | `<workspace>/.gemini/settings.json` / `$GEMINI_CLI_HOME`\|`$HOME` + `/.gemini/settings.json` — the `.gemini` segment is appended either way | `mcpServers` | `stdio`: `command`; `sse`: `url`; `http`: `httpUrl`; oauth skipped | `${VAR}` (native passthrough) |
+| [Zed][zed-docs] | project / global | `.zed/settings.json` / the platform-resolved Zed config root + `/settings.json` (JSONC) — `$XDG_CONFIG_HOME`\|`~/.config`/`zed` on Linux and FreeBSD, a hardcoded `~/.config/zed` on macOS, `%APPDATA%\Zed` on Windows | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 | [Antigravity][antigravity-docs] | project / global | `.agents/mcp_config.json` / `~/.gemini/config/mcp_config.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; remote (`sse`, `http`): `serverUrl` + `headers`; ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
 
-Seven clients are absent from the table because grim writes no MCP config for
+Some clients are absent from the table because grim writes no MCP config for
 them at all — they decline the kind, so grim warns, skips, and writes nothing.
 
 The vendor-neutral `agents` client has no MCP surface to write: there is no

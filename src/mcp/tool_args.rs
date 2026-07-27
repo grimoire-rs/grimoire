@@ -82,9 +82,9 @@ pub struct FetchToolArgs {
     #[serde(rename = "ref")]
     pub reference: String,
 
-    /// Return this client's projection (`claude` / `opencode` / `copilot` /
-    /// `codex` / `cursor` / `kiro` / `junie` / `gemini` / `zed` / `amp`)
-    /// instead of the canonical as-authored document.
+    /// Return this client's projection instead of the canonical as-authored
+    /// document. Accepts any supported client name; the set is
+    /// `ClientTarget`-derived and widens as clients are added.
     #[serde(default)]
     pub vendor: Option<String>,
 

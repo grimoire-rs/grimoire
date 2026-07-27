@@ -93,12 +93,13 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
   descriptions, disclosure patterns, eval-first workflow, anti-patterns.
 - [Effective context engineering for AI agents][ctx] — the theory behind
   every budget above: attention as a finite resource, just-in-time loading.
-- Per-client documentation — skills install into ten clients as of 2026
+- Per-client documentation — the clients surveyed throughout this skill
   ([Claude Code][cc], [OpenCode][oc], [Copilot][cop], [Codex][cx],
   [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem],
-  [Zed][zed], [Amp][amp]), but rules and agents each reach only about
-  half of them; every `references/` file carries the per-client links for
-  the type it covers.
+  [Zed][zed], [Amp][amp]) all host skills, but rules and agents each reach
+  only about half of them, and newer clients keep arriving skills-first.
+  Every `references/` file carries the per-client links for the type it
+  covers.
 
 [grimoire]: https://github.com/grimoire-rs/grimoire
 [spec]: https://agentskills.io/specification

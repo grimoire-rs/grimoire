@@ -373,6 +373,10 @@ grim installs skills into the directories each client scans for
 | [Warp][warp-docs] | `.warp/skills/<name>/` — native by default; pool-capable via `[options.vendors.warp].shared_skills` |
 | [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/` |
 | [OpenClaw][openclaw-docs] | *(none — no project scope; see the global table)* |
+| `agents` (vendor-neutral) | `.agents/skills/<name>/` (shared pool — its only surface; never auto-detected, only selected) |
+
+A client whose `[options.vendors.<name>].shared_skills` is set writes to
+`.agents/skills/<name>/` instead of the directory above.
 
 **Global scope** (user-level; grim installs directly into each client's
 native discovery directory, honoring the client's own directory-override
@@ -384,12 +388,12 @@ environment variable):
 | [GitHub Copilot][copilot-skills-docs] | `~/.copilot/skills/<name>/` | `$COPILOT_HOME/skills/<name>/` — the variable replaces the entire `~/.copilot` path ([Copilot CLI config-dir reference][copilot-config-dir-docs]) |
 | [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/skills/<name>/` | None — `CURSOR_CONFIG_DIR` is not honored (possibly CLI-only; watchlisted) |
-| [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | None — `KIRO_HOME` is not honored (CLI-only; the IDE ignores it) |
+| [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | `$KIRO_HOME/skills/<name>/` — the variable replaces the entire `~/.kiro` tree, with **no** `.kiro` segment appended ([Kiro CLI configuration reference][kiro-cli-config-docs]). grim follows the **CLI**. The Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable ([kiro #9148]), so a user who sets `KIRO_HOME` and also uses the IDE gets grim's output where the CLI reads it, not the IDE |
 | [Junie][junie-docs] | `~/.junie/skills/<name>/` | None — the per-kind `JUNIE_*_LOCATIONS` family is not honored |
 | [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
-| [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no `GEMINI_CONFIG_DIR` exists upstream; skills always key on `$HOME` |
-| [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's `$XDG_CONFIG_HOME`-rooted settings root |
-| [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — no such env var exists upstream; skills always key on `$HOME` |
+| [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None **for skills** — they always key on `$HOME`. `GEMINI_CONFIG_DIR` does not exist upstream, but `$GEMINI_CLI_HOME` **does**, and grim honors it: it replaces the *home directory*, so Gemini's config root (agents, `settings.json`) becomes `$GEMINI_CLI_HOME/.gemini` — the `.gemini` segment is still appended, the opposite shape to `$CODEX_HOME`/`$KIRO_HOME`. The shared pool deliberately does not follow it: one physical tree serves every pool client under a single refcount, so it stays keyed on the real `$HOME` |
+| [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's settings root. That settings root is `$XDG_CONFIG_HOME`-rooted on **Linux and FreeBSD only**; macOS is a hardcoded `~/.config/zed` and Windows is `%APPDATA%\Zed` |
+| [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`. (`$AMP_SETTINGS_FILE` is not honored either; its existence is contested rather than disproven, and no source documents its precedence — see the vendor capability watchlist) |
 | [Antigravity][antigravity-skills-docs] | `~/.gemini/config/skills/<name>/` — **not** the shared pool: Antigravity pools only at project scope, and globally reads its own root | None found in current docs (`ANTIGRAVITY_API_KEY` / `ANTIGRAVITY_TOKEN` are auth credentials and relocate nothing) |
 | [Cline][cline-docs] | `~/.cline/skills/<name>/` (`%USERPROFILE%\.cline\skills\` on Windows) | None — `CLINE_DATA_DIR` is evidenced only for the MCP data directory, never for skill discovery, so grim does not honor it |
 | [Droid][droid-docs] | `~/.factory/skills/<name>/` | None — no `FACTORY_HOME` or `DROID_HOME` appears in current docs |
@@ -397,10 +401,17 @@ environment variable):
 | [Warp][warp-docs] | `~/.warp/skills/<name>/` — the same path on macOS, Linux and Windows | None found in current docs |
 | [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` is referenced but never defined upstream, so grim does not honor it |
 | [Kilo][kilo-docs] | `~/.kilo/skills/<name>/` | None found in current docs |
+| `agents` (vendor-neutral) | `$HOME/.agents/skills/<name>/` (shared pool — its only surface) | None — the pool is never relocated by any vendor variable |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
 environments), grim falls back to the workspace layout under `$GRIM_HOME`
 for the affected client.
+
+A client whose `[options.vendors.<name>].shared_skills` is set writes to
+`$HOME/.agents/skills/<name>/` instead of the directory above. Flipping the
+key in either direction is a layout move: the skill is re-materialized at
+the new destination and the old copy reaped, unless a surviving pool
+sibling still records it.
 
 [GitHub Copilot][copilot-skills-docs] skills install natively to
 `~/.copilot/skills` per the [Copilot CLI add-skills][copilot-skills-docs]
@@ -565,6 +576,8 @@ claude namespace to silence it and gain proper type conversion.
 [cursor-subagents-docs]: https://cursor.com/docs/context/subagents
 [gemini-subagents-docs]: https://geminicli.com/docs/core/subagents
 [kiro-docs]: https://kiro.dev
+[kiro-cli-config-docs]: https://kiro.dev/docs/cli/chat/configuration
+[kiro #9148]: https://github.com/kirodotdev/Kiro/issues/9148
 [junie-docs]: https://www.jetbrains.com/junie/
 [zed-docs]: https://zed.dev
 [amp-docs]: https://ampcode.com

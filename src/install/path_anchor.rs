@@ -172,7 +172,7 @@ pub enum PathAnchor {
     /// the one-row-per-vendor table cannot express.
     ClaudeUserDir,
     /// The cross-vendor open standard `$HOME/.agents/skills`, shared by
-    /// Codex, Gemini, Zed, Amp and the generic `agents` client.
+    /// every pool member, including the generic `agents` client.
     ///
     /// Not a vendor root on three counts: it belongs to no single vendor, the
     /// root already ends in `/skills` (so `relative` is the bare skill name),
@@ -2954,7 +2954,7 @@ mod tests {
             .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
             claude_user_dir: None,
-            // /agents/skills is the shared skills root (Codex/Gemini/Zed/Amp);
+            // /agents/skills is the shared skills root (every pool member);
             // the rest are each vendor's own config root.
             agents_skills: Some(PathBuf::from("/agents/skills")),
         };

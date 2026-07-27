@@ -921,7 +921,7 @@ metadata:
 
     #[test]
     fn pool_vendors_declare_no_skill_fields() {
-        // Codex/Gemini/Zed/Amp resolve every skill to the ONE shared
+        // Every pool vendor resolves every skill to the ONE shared
         // `$HOME/.agents/skills/<name>` pool, so the pooled SKILL.md must stay
         // vendor-independent. Every pool vendor but `agents` routes `skill_index`
         // through the vendor-AWARE `render_skill_doc` (so an unknown

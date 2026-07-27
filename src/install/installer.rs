@@ -670,7 +670,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // Materialize into every client in the effective set, replacing any prior
     // output, and record one output per client for the integrity record.
     //
-    // Several shared-pool clients (Codex/Gemini/Zed/Amp skills) resolve to ONE
+    // Several shared-pool clients resolve their skills to ONE
     // `.agents/skills/<name>` directory. The universal skill renderer (D1a)
     // guarantees they render byte-identical, so copying + fsyncing + hashing
     // that directory once per client would be 4× pure waste (s2-perf). Dedup by
@@ -2461,7 +2461,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_pool_skill_dedups_to_one_dest_and_self_heals() {
-        // The four shared-pool vendors (Codex/Gemini/Zed/Amp) resolve a skill
+        // The shared-pool vendors resolve a skill
         // to ONE `.agents/skills/<name>` dir (D1b dedup). A fresh install
         // records one output per client, all pinning that single path with the
         // SAME footprint hash — the several-outputs-one-path shape the prune

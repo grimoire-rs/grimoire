@@ -24,7 +24,7 @@
 //! the additively-reversible side (see `mcp_entry`'s ws arm).
 //!
 //! - **Skills**: project `<ws>/.agents/skills` — the shared cross-vendor pool,
-//!   with Codex/Gemini/Zed/Amp. Global `~/.gemini/config/skills`, which is
+//!   with every other pool member. Global `~/.gemini/config/skills`, which is
 //!   Antigravity's **own** root, *not* the `$HOME/.agents/skills` pool. That
 //!   asymmetry is upstream's, not grim's. The `/docs/skills` page states it
 //!   as a two-column table, reported as:
@@ -113,7 +113,7 @@ impl Vendor for AntigravityVendor {
         match scope {
             // NO project-scope signal exists, and that is the honest answer.
             // Antigravity's project surfaces all live under `.agents/`, which
-            // Codex, Gemini, Zed, Amp and the generic client also use — keying
+            // Codex, Gemini, Zed, Amp, Goose and the generic client also use — keying
             // on it would install Antigravity files into every workspace that
             // has ever used any pool client, which is exactly the
             // "install for a client the user never asked for" bug the generic
@@ -453,7 +453,7 @@ mod tests {
         );
         // The trap this asserts against: Antigravity does NOT read
         // `.gemini/skills`, and its GLOBAL skills are its own root, not the
-        // `$HOME/.agents/skills` pool the other five members share.
+        // `$HOME/.agents/skills` pool every other pool member shares.
         let global = AntigravityVendor.skills_root(w, ConfigScope::Global);
         assert!(
             !global.starts_with("/w") || home_dir().is_none(),

@@ -87,8 +87,8 @@ OpenCode needs.
 
 On install, grim projects the canonical agent file into each client's native
 format, or declines it where the client ships no ownable agent surface. Agents
-are the least uniform kind — only seven clients have a file format grim can
-own.
+are the least uniform kind — only a minority of clients ship a file format grim
+can own, and the rest decline outright.
 
 | Client | Output | What grim projects |
 |---|---|---|
@@ -147,7 +147,7 @@ client's directory-override variable — the same resolution as
 | [Copilot CLI][copilot-agents-docs] | `~/.copilot/agents/<name>.md` | `$COPILOT_HOME/agents/` |
 | [Codex][codex-subagents-docs] | `~/.codex/agents/<name>.toml` | `$CODEX_HOME/agents/` |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/agents/<name>.md` | None — `CURSOR_CONFIG_DIR` is not honored |
-| [Gemini CLI][gemini-subagents-docs] | `~/.gemini/agents/<name>.md` | None — no `GEMINI_CONFIG_DIR` exists upstream |
+| [Gemini CLI][gemini-subagents-docs] | `~/.gemini/agents/<name>.md` | `$GEMINI_CLI_HOME/.gemini/agents/` — the variable replaces the home directory, so the `.gemini` segment is still appended. No `GEMINI_CONFIG_DIR` exists upstream |
 | [Antigravity][antigravity-subagents-docs] | `~/.gemini/config/agents/<name>.md` | None found in current docs |
 
 Unlike global rules, Copilot agents have a real user-level home — no

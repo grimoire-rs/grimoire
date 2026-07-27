@@ -93,13 +93,31 @@ freezing them would block improving Grimoire without a major version bump —
 the exclusions are what keep 1.x able to move at all:
 
 - **Vendor render layout.** The exact files and paths grim writes under
-  `~/.claude`, `.claude/`, `~/.copilot`, the OpenCode config directories,
-  `~/.cursor`, `~/.kiro`, `~/.junie`, `~/.gemini`, the Zed and Amp
-  settings directories, the shared `$HOME/.agents/skills` pool (Codex,
-  Gemini, Zed, Amp), and where an MCP entry lands inside a client's own
-  config file are not a contract. They are an implementation detail of
-  the [vendor projection layer][vendor-metadata], free to move between
-  minors as clients change their own conventions.
+  any client's own configuration root, and where an MCP entry lands
+  inside a client's own config file, are not a contract. Neither is the
+  shared `$HOME/.agents/skills` pool: *which* clients render into it
+  moves as clients adopt or retire the convention, and
+  [`[options.vendors.<name>].shared_skills`][options-vendors] lets a
+  pool-reading client opt in — moving that client's skills out of its own
+  directory and into the pool, or back. The per-client roots are
+  enumerated by the [vendor projection layer][vendor-metadata] and in the
+  [client compatibility matrix][clients]; those enumerations are
+  documentation, not a promise, and are free to move between minors as
+  clients change their own conventions.
+
+  A root that a vendor environment variable relocates moves the layout
+  with it, and a release that *starts* honoring one moves it for everyone
+  who already set it. This release began honoring `$KIRO_HOME` and
+  `$GEMINI_CLI_HOME`, and stopped consulting `$XDG_CONFIG_HOME` for Zed
+  on macOS (upstream never read it there) — so an artifact installed
+  under the old resolution sits at a root grim no longer resolves. The
+  next `install`, `update`, or `uninstall` reaps that stranded copy under
+  the [migration promise](#promise) below; until one of them runs,
+  [`grim status`][status] reports the artifact `not-installed` even
+  though the file is on disk. A stranded copy you have edited yourself is
+  preserved rather than deleted and reported in `retained` — or, for an
+  MCP entry spliced into a config file grim does not own, in
+  `abandoned_entries`.
 - **Everything else that is not exit codes or JSON.** State-file contents
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
@@ -153,9 +171,9 @@ stability (`.claude/artifacts/adr_render_layout_stability.md`).
 
 ## Known limitations {#limitations}
 
-Four behaviors fall outside every guarantee above — not because they are
-likely to change, but because they are hard constraints of the current
-design.
+The behaviors below fall outside every guarantee above — not because they
+are likely to change, but because they are hard constraints of the
+current design.
 
 ### A shared `GRIM_HOME` has a single writer {#limitations-shared-home}
 
@@ -172,6 +190,32 @@ install` re-materializes anything dropped. The supported arrangement for
 1.0 is one writer at a time. Project scope is unaffected: each workspace
 owns `<workspace>/.grimoire/state.json`, so two projects never collide
 even on a shared volume.
+
+### The shared-pool refcount trusts install state {#limitations-pool-refcount}
+
+Several clients read one physical `$HOME/.agents/skills/<name>` directory
+(see [Shared skills pool visibility][gap-shared-pool]), so grim must not
+delete it while another client still wants it. The guard that decides
+this — reached from the dropped-client reaper on [`grim
+update`][update] and from `uninstall` — is a **refcount over install
+state alone**: it walks the *same artifact record's* `outputs` array and
+keeps the directory if any output that is neither being removed nor
+itself dropped in this pass resolves to the same target. There is no
+filesystem fallback and no cross-record scan.
+
+That is exact whenever the record matches reality, which is the case grim
+maintains. It is not self-correcting when the record does not: a
+hand-edited or truncated `.grimoire/state.json` / `global.json` that no
+longer lists a pool client's output makes that client invisible to the
+guard, and removing the last client the record *does* list deletes a
+directory the missing client still scans. The files are recoverable —
+re-running [`grim install`][install] re-materializes them — but the
+deletion is not announced as shared, because from the record's point of
+view nothing was sharing it.
+
+Editing install state by hand is outside the supported envelope for the
+same reason [local path sources](#limitations-path-source-trust) are: the
+state file is grim's own bookkeeping, and grim reads it back as fact.
 
 ### Forward compatibility {#limitations-forward-compat}
 
@@ -277,6 +321,9 @@ unaffected — they read straight from disk and never touch a manifest.
 [package-index]: ./package-index.md#spec
 [init]: ./commands.md#init
 [configuration]: ./configuration.md
+[options-vendors]: ./configuration.md#options-vendors
+[clients]: ./clients.md#matrix
+[gap-shared-pool]: ./clients.md#gap-shared-pool
 [env-vars]: ./configuration.md#environment-variables
 [artifacts-kinds]: ./artifacts.md#kinds
 [batch-publish]: ./publishing.md#batch-publish

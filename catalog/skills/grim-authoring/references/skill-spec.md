@@ -87,8 +87,8 @@ a description companion instead — see
 
 ## Client-Agnostic Content
 
-One published skill serves all ten clients — skill is the one kind no
-client declines. Only Claude Code carries a *skill* registry; every other
+One published skill serves every client grim supports — skill is the one
+kind no client declines. Only Claude Code carries a *skill* registry; every other
 client's is intentionally empty, so they all receive the identical
 universal render and read the lifted `claude.*` fields as unknown keys
 ([empty registries][empty-registries]). Write the body client-neutrally:

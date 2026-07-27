@@ -120,7 +120,7 @@ The supported dotted keys are:
 
 | Key | Value type | Notes |
 |-----|------------|-------|
-| `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from the ten supported clients (see the [client compatibility matrix](./clients.md#matrix)) — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
+| `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from the supported client names (see the [client compatibility matrix](./clients.md#matrix)) — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
 | `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
 | `options.show_deprecated` | `true` or `false` | `false` is the default (deprecated artifacts are hidden from `grim search` and the TUI unless installed); setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). Seeds the initial state for both `grim search` and `grim tui`; the search `--show-deprecated` flag and the TUI `h` key override it per run. |
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
@@ -676,8 +676,8 @@ grim search --refresh --registry ghcr.io/acme
 `grim fetch <ref>` resolves an artifact and prints its content — **use ≠
 install**: nothing is materialized, no state is touched. It is the CLI
 port of the MCP [`grim_fetch` tool](#mcp): canonical (as-authored) content
-by default, a `--vendor <client>` projection (any of the ten supported
-clients — see the [client compatibility matrix](./clients.md#matrix)), or one
+by default, a `--vendor <client>` projection (any supported client — see
+the [client compatibility matrix](./clients.md#matrix)), or one
 `--path <tree-path>` support file. Two more flags switch the report to a
 different shape entirely instead of fetching the artifact:
 [`--description`](#fetch-description) fetches the repository's description
@@ -1192,7 +1192,7 @@ down when the client closes stdin (EOF).
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any of the ten supported clients — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
