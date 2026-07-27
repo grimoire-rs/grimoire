@@ -70,8 +70,9 @@ where catalog UIs look for a readme or icon.
 
 ## Per-Client Transforms
 
-Rules reach the fewest clients of any kind: five of the ten host them,
-five decline outright (agents: six host, four decline). The same
+Rules reach the fewest clients of any kind — a minority host them at all
+and everyone else declines outright, which is why a skill is the portable
+choice when the audience is broad ([client matrix][clients]). The same
 published rule lands differently per client:
 
 | Client | Transform |
@@ -81,7 +82,8 @@ published rule lands differently per client:
 | Cursor | Written to `.cursor/rules/<name>.mdc`; `paths` comma-joined into a single `globs` string plus a computed `alwaysApply: false` — unscoped emits no `globs` and `alwaysApply: true` |
 | Kiro | Written to `.kiro/steering/<name>.md`; `paths` become a `fileMatchPattern` YAML **array** (not comma-joined) plus `inclusion: fileMatch` — unscoped emits `inclusion: always`. Global-scope scoping is upstream-inert today; grim writes the correct file and warns |
 | OpenCode | Frontmatter **stripped** and `paths` dropped with a warning; body written with a provenance comment; loading registered as a managed glob in `opencode.json` |
-| Codex · Junie · Gemini · Zed · Amp | **Declined** — no ownable path-scoped surface (always-on `AGENTS.md`/`GEMINI.md` hierarchies only); grim warns, skips, and writes no file |
+| Junie | **Degraded, project scope only.** Written to `.junie/rules/<name>.md` as provenance + body with `paths` dropped and a warning — the directory is ownable, but every Markdown file in it is concatenated automatically with no per-file activation key. At global scope grim warns, skips, and writes nothing: no `~/.junie/rules/` exists upstream |
+| Codex · Gemini · Zed · Amp · everyone else | **Declined** — no ownable path-scoped surface (always-on `AGENTS.md`/`GEMINI.md` hierarchies, or a UI-managed surface with no on-disk path); grim warns, skips, and writes no file |
 
 OpenCode never sees rule frontmatter at all — anything that must reach
 OpenCode belongs in the body. Two authoring consequences of the rest:

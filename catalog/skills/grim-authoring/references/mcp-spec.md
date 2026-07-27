@@ -15,9 +15,12 @@ An MCP server descriptor is one `.toml` file named by its file stem under
 the standard name rules, with catalog metadata at the top level and a
 single `[server]` table. It never materializes a file at install time —
 grim registers a vendor-native entry in the MCP config file each client
-already reads, and removes exactly that entry on uninstall. All ten
-clients have such a file, so an MCP descriptor is the only kind besides
-skills that no client declines outright. Codex's config is TOML, not
+already reads, and removes exactly that entry on uninstall. Most clients
+have such a file, but not all: the skills-only clients and the
+vendor-neutral `agents` target ship no MCP config surface and decline the
+kind outright, so **skill is the only kind no client declines**. Check the
+[client matrix][clients] before assuming your audience is covered. Codex's
+config is TOML, not
 JSON — grim splices it span-preserving the same way, so surrounding user
 keys and comments survive.
 
@@ -165,4 +168,5 @@ a description companion — see
 [release-checklist.md](release-checklist.md#description-companion).
 
 [emit-matrix]: https://grimoire.rs/mcp-servers.html#emit-matrix
+[clients]: https://grimoire.rs/clients.html#matrix
 [env-refs]: https://grimoire.rs/mcp-servers.html#env-references

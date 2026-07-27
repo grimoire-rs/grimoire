@@ -11,7 +11,9 @@ unmodified and what does not — otherwise "just run `grim update`" is a
 gamble, not a routine operation.
 
 This page names exactly what becomes a semver-guarded contract at 1.0 and
-what is explicitly excluded from it.
+what is explicitly excluded from it. For the behaviour changes you will
+actually notice on the first command after an upgrade — and what to do about
+each — see [Upgrading](./upgrading.md).
 
 ## Frozen at 1.0 {#frozen}
 
@@ -107,17 +109,18 @@ the exclusions are what keep 1.x able to move at all:
 
   A root that a vendor environment variable relocates moves the layout
   with it, and a release that *starts* honoring one moves it for everyone
-  who already set it. This release began honoring `$KIRO_HOME` and
-  `$GEMINI_CLI_HOME`, and stopped consulting `$XDG_CONFIG_HOME` for Zed
-  on macOS (upstream never read it there) — so an artifact installed
-  under the old resolution sits at a root grim no longer resolves. The
-  next `install`, `update`, or `uninstall` reaps that stranded copy under
-  the [migration promise](#promise) below; until one of them runs,
-  [`grim status`][status] reports the artifact `not-installed` even
-  though the file is on disk. A stranded copy you have edited yourself is
-  preserved rather than deleted and reported in `retained` — or, for an
-  MCP entry spliced into a config file grim does not own, in
-  `abandoned_entries`.
+  who already set that variable. The most recent instance: `$KIRO_HOME`
+  and `$GEMINI_CLI_HOME` became honored, and Zed's macOS root stopped
+  consulting `$XDG_CONFIG_HOME` (upstream never read it there). An
+  artifact installed under the old resolution then sits at a root grim no
+  longer resolves. The next `install`, `update`, or `uninstall` reaps
+  that stranded copy under the [migration promise](#promise) below; until
+  one of them runs, [`grim status`][status] reports the artifact's `state`
+  as `missing` even though the file is still on disk. A stranded copy
+  you edited yourself is preserved rather than deleted, and grim warns
+  naming both paths; on the `uninstall` path it is additionally listed in
+  `retained` — or, for an MCP entry spliced into a config file grim does
+  not own, in `abandoned_entries`.
 - **Everything else that is not exit codes or JSON.** State-file contents
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
@@ -196,12 +199,12 @@ even on a shared volume.
 Several clients read one physical `$HOME/.agents/skills/<name>` directory
 (see [Shared skills pool visibility][gap-shared-pool]), so grim must not
 delete it while another client still wants it. The guard that decides
-this — reached from the dropped-client reaper on [`grim
-update`][update] and from `uninstall` — is a **refcount over install
-state alone**: it walks the *same artifact record's* `outputs` array and
-keeps the directory if any output that is neither being removed nor
-itself dropped in this pass resolves to the same target. There is no
-filesystem fallback and no cross-record scan.
+this — reached only from the dropped-client reaper on [`grim
+update`][update] — is a **refcount over install state alone**: it walks
+the *same artifact record's* `outputs` array and keeps the directory if
+any output that is neither being removed nor itself dropped in this pass
+resolves to the same target **and the same support directory**. There is
+no filesystem fallback and no cross-record scan.
 
 That is exact whenever the record matches reality, which is the case grim
 maintains. It is not self-correcting when the record does not: a
