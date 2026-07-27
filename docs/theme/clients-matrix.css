@@ -7,10 +7,63 @@
   margin: 0;
 }
 
-/* Reused client marks (see the attribution comment above the table):
-   nudge onto the text baseline and give the link text some breathing
-   room. */
+/* Reused client marks (see the attribution comment above the table). They
+   lead each row so every mark sits on one left edge and the client names
+   line up behind them — trailing marks landed at a different x on every
+   row, which read as noise.
+
+   Sizing is handled in the markup, not here: the marks are not drawn to a
+   common optical size (Zed, Amp, Warp, Kilo and Goose fill their 24-unit
+   viewBox edge to edge; OpenCode's art covers barely half of it), so each
+   one's viewBox is repadded around its own ink until every mark carries the
+   same optical weight. Shrinking the shared box instead only fixed the
+   full-bleed five by starving the rest — hence a full 1em box here.
+
+   `vertical-align: middle` centres that box on the text's optical middle
+   (baseline + half x-height), so a mark never hangs below the descender
+   and never pokes above the ascender — a fixed px nudge did both,
+   depending on how tall the glyph inside happened to be. */
+.matrix-table svg,
+.matrix-table .mark {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
 .matrix-table svg {
-  vertical-align: -3px;
-  margin-left: 6px;
+  width: 1em;
+  height: 1em;
+}
+
+/* Droid has no mark in either icon set. A lettered box of the same
+   footprint keeps its name on the shared left edge instead of shunting it
+   6px left of every other row. Mirrors the landing page's `.client .tile`
+   fallback.
+
+   Its border is its ink, so the box matches the *ink* the repadded marks
+   carry (21 of 24 units), not their full 1em viewport. The box shrinks its
+   own font to fit the letter and `em` lengths resolve against *that*
+   smaller size — so the side is 1.59em of 0.55em, i.e. 0.875em of the
+   surrounding text. Change one factor, change the other. */
+.matrix-table .mark {
+  display: inline-grid;
+  place-items: center;
+  font-size: 0.55em;
+  width: 1.59em;
+  height: 1.59em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+/* Headroom: mdBook sets no line-height on `td`, so a cell's line box is
+   whatever its tallest inline element needs — which let a mark-bearing row
+   sit a couple of pixels taller than a text-only one. 1.6 exceeds any mark
+   at the size above, so every row settles at the same height. */
+.matrix-table td {
+  line-height: 1.6;
+}
+
+/* Mark + name are one unit — never break the line between them. */
+.matrix-table td:first-child {
+  white-space: nowrap;
 }

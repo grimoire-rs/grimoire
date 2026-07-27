@@ -685,11 +685,14 @@ mod tests {
             if cells.len() < 5 {
                 continue;
             }
-            // The client cell may be a hyperlink (`[Claude]`, `[Claude][claude]`,
-            // or `[Claude](url)`) — reduce it to the link text before matching.
+            // The client cell leads with an inline mark (`<svg …>`, or a
+            // lettered `<span>` for a client no icon set carries) and then a
+            // hyperlink (`[Claude]`, `[Claude][claude]`, or `[Claude](url)`) —
+            // reduce it to the link text before matching.
             let raw = cells[0];
             let name = raw
-                .strip_prefix('[')
+                .split_once('[')
+                .map(|(_, rest)| rest)
                 .and_then(|r| r.split_once(']'))
                 .map_or(raw, |(text, _)| text)
                 .to_ascii_lowercase();
