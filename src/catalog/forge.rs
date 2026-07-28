@@ -540,12 +540,10 @@ async fn github_pull_request(
             .map(str::to_string)
             .ok_or_else(|| "pull request exists but could not be located".to_string());
     }
-    let body: serde_json::Value = response
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(status_error(response).await);
+    }
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     body.get("html_url")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
@@ -623,12 +621,10 @@ async fn gitlab_merge_request(
             .map(str::to_string)
             .ok_or_else(|| "merge request exists but could not be located".to_string());
     }
-    let body: serde_json::Value = response
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(status_error(response).await);
+    }
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     body.get("web_url")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
@@ -1358,6 +1354,31 @@ async fn get_json(http: &reqwest::Client, ctx: &ForgeContext, url: &str) -> Resu
     } else {
         Err(format!("HTTP status {status}"))
     }
+}
+
+/// The number of body characters kept in a [`status_error`] detail string —
+/// enough for a forge's own JSON error message, capped against a forge
+/// returning something large or hostile.
+const STATUS_ERROR_BODY_CAP: usize = 300;
+
+/// Build the detail string for a non-success `response`: the status plus
+/// (capped) body — the forge's own reason for a create-PR/MR failure lives
+/// in the body (`{"message": "...", ...}`), never in headers, which is why
+/// only the body is read here. Falls back to the status alone when the
+/// body is empty or unreadable, so the message is never worse than
+/// reporting the status by itself.
+async fn status_error(response: reqwest::Response) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("HTTP status {status}");
+    }
+    let body = match body.char_indices().nth(STATUS_ERROR_BODY_CAP) {
+        Some((end, _)) => format!("{}… [truncated]", &body[..end]),
+        None => body.to_string(),
+    };
+    format!("HTTP status {status}: {body}")
 }
 
 #[cfg(test)]
@@ -2104,6 +2125,58 @@ mod tests {
             }
         });
         (host, handle)
+    }
+
+    /// Regression for the silent-decline bug's second half: raising the log
+    /// call to `warn` (see `create_change_request`) is pointless if
+    /// `{detail}` still carries only the bare status — the forge's actual
+    /// reason (e.g. GitHub's "Actions is not permitted to create or approve
+    /// pull requests") lives in the response body, so `status_error` must
+    /// read and fold it in.
+    #[tokio::test]
+    async fn status_error_includes_the_response_body_when_present() {
+        let body = r#"{"message":"GitHub Actions is not permitted to create or approve pull requests","documentation_url":"https://docs.github.com/rest/pulls/pulls#create-a-pull-request"}"#;
+        let (host, handle) = spawn_mock_forge(move |_first| {
+            format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        })
+        .await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{host}/repos/acme/index/pulls"))
+            .send()
+            .await
+            .unwrap();
+        let detail = status_error(response).await;
+        handle.abort();
+        assert!(detail.contains("403"), "{detail}");
+        assert!(
+            detail.contains("GitHub Actions is not permitted to create or approve pull requests"),
+            "{detail}"
+        );
+    }
+
+    /// The other half of the contract: an empty (or unreadable) body must
+    /// never make the message worse than today's status-only string.
+    #[tokio::test]
+    async fn status_error_falls_back_to_status_only_when_body_is_empty() {
+        let (host, handle) = spawn_mock_forge(|_first| {
+            "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+        })
+        .await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{host}/repos/acme/index/pulls"))
+            .send()
+            .await
+            .unwrap();
+        let detail = status_error(response).await;
+        handle.abort();
+        assert_eq!(
+            detail, "HTTP status 403 Forbidden",
+            "empty body must fall back to status only"
+        );
     }
 
     /// A throwaway GitLab-shaped forge for the fork-identity gate (W6): the
