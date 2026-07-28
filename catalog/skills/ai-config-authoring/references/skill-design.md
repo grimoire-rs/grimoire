@@ -92,8 +92,20 @@ it must sit in changes (as of 2026; re-verify):
 | Directory | Scanned by |
 |---|---|
 | `.claude/skills/` | [Claude Code][cc], also scanned by [OpenCode][oc] and [Copilot][cop] |
-| `.agents/skills/` | the cross-vendor pool: [Codex][cx], [Gemini CLI][gem], [Zed][zed], [Amp][amp] — also scanned by [OpenCode][oc] and [Copilot][cop], and by a growing set of newer clients that adopt the convention |
-| `<client>/skills/` | each client's own dir: `.opencode/`, `.github/`, `.cursor/`, `.kiro/`, `.junie/` |
+| `.agents/skills/` | the cross-vendor pool — see below |
+| `<client>/skills/` | each client's own dir: `.opencode/`, `.github/`, `.cursor/`, `.kiro/`, `.junie/`, and one per newer client |
+
+The pool is where portability actually pays off, and it is the one place
+where **reading it and writing to it are different lists** — conflating
+them is the usual mistake. [Codex][cx], [Gemini CLI][gem], [Zed][zed],
+[Amp][amp] and [Goose][goose] point at `.agents/skills/` as their own
+location. [OpenCode][oc], [Copilot][cop], [Cursor][cur] and [Warp][warp]
+scan it *in addition* to a first-class directory of their own, so a tool
+writing on your behalf will usually prefer the vendor-specific path and
+treat the pool as an opt-in. And adoption is not universal: [Cline][cline]
+documents `.cline/skills/`, `.clinerules/skills/` and `.claude/skills/`
+with the pool named nowhere (as of 2026; re-verify each of these — this
+list moves faster than anything else in this guide).
 
 Two consequences worth designing for:
 
@@ -102,7 +114,10 @@ Two consequences worth designing for:
   simultaneously — so a name collision there collides for all of them, and
   editing or deleting it changes what all of them see. The reader set keeps
   growing as clients adopt the convention, which only sharpens the point:
-  unique, specific names matter more here than anywhere else.
+  unique, specific names matter more here than anywhere else. It also means
+  "installed for one client" and "visible to one client" are not the same
+  statement — never assume a pool skill is private to the client you
+  installed it for.
 - **Vendor frontmatter degrades silently.** All major clients ignore
   unknown frontmatter, so a client-specific field is dropped rather than
   rejected — never make correctness depend on one (see [Anatomy](#anatomy)).
@@ -168,6 +183,10 @@ body.
 [gem]: https://geminicli.com
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[cur]: https://cursor.com
+[goose]: https://block.github.io/goose
+[warp]: https://warp.dev
+[cline]: https://cline.bot
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [overview]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
 [eng]: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills

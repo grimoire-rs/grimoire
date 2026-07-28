@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-27
+
+### Added
+
+- Add the [options.vendors.<name>] per-client table *(config)*
+- Add the vendor-neutral `agents` client *(install)*
+- Install an opted-in client's skills into the shared pool *(install)*
+- Add Google Antigravity 2.0 as a client *(install)*
+- Host Junie rules at project scope, decline them globally *(install)*
+- Add six skills-only clients *(install)*
+
+### Changed
+
+- Parameterize the per-vendor root anchor *(install)*
+
+### Documentation
+
+- Record promotion positioning research for 1.0
+- Correct proposed GitHub topics against real browse counts
+- Fix README quick start
+- State that grim add installs by default in the quick start
+- Record short-ref resolution research for W1-B
+- Explain that short refs expand verbatim, without a kind segment
+- Explain that the kind segment is optional, not required
+- Reframe short-ref findings and record the dual-identity test
+- Drop premature stability rationale from the catalog README
+- Scope the short-ref fix to a recommendation, not a layout change
+- Ocx renamed upgrade to update
+- Add a landing page at the site root
+- Add a social preview card for the site
+- Emit canonical, Open Graph, and sitemap metadata
+- Pin mdBook in the contributor instructions too
+- Point the landing client marks at their vendors
+- Show client marks in the compatibility matrix
+- Name the compatibility matrix on the landing page
+- State the inbound license and require a DCO sign-off
+- Lead with what grim does, not what it is built on
+- Add a security policy that states the no-signing boundary
+- Add a recorded demo cast to the landing page
+- Replace the landing-page demo GIF with a vendored asciinema player
+- Record the vendor config and client selection decisions *(adr)*
+- Reconcile the vendor surface across docs, rules, and catalog
+- Add an upgrading page for the visible behaviour changes
+- Show every client on the landing page and align the matrix marks
+
+### Fixed
+
+- Resolve each client's global root from its own override *(install)*
+- Escape untrusted config content in error messages *(config)*
+- Reap outputs stranded at a relocated vendor root *(install)*
+- Warn by name when a reserved namespace drops a skill key *(install)*
+- Close the reaper overlap gap and escape untrusted text *(install)*
+
 ## [0.11.1] - 2026-07-23
 
 ### Added
@@ -570,6 +623,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.12.0]: https://github.com/grimoire-rs/grimoire/compare/v0.11.1..v0.12.0
 [0.11.1]: https://github.com/grimoire-rs/grimoire/compare/v0.11.0..v0.11.1
 [0.11.0]: https://github.com/grimoire-rs/grimoire/compare/v0.10.0..v0.11.0
 [0.10.0]: https://github.com/grimoire-rs/grimoire/compare/v0.9.1..v0.10.0

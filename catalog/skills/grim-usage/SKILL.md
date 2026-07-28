@@ -2,7 +2,7 @@
 name: grim-usage
 description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.11
+compatibility: grim>=0.12
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
@@ -15,22 +15,32 @@ Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
 It distributes five artifact kinds — **skills**, **rules**, **agents**,
 **MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
 Docker Hub, a private Distribution), with lockfile-pinned installs into a
-growing set of AI clients (Claude Code, OpenCode, GitHub Copilot, Codex,
-Cursor, Kiro, JetBrains Junie, Gemini CLI, Zed, Amp and more — plus a
-vendor-neutral `agents` target). An MCP
-server artifact installs by registering an entry in each client's native MCP
-config file (never as a file of its own); uninstall removes only that
-entry, never the file.
+growing fleet of AI clients plus a vendor-neutral `agents` target. The
+current names are listed in
+[references/registries.md](references/registries.md#client-targets); the
+set grows every minor release, so read it there rather than assuming. An
+MCP server artifact installs by registering an entry in each client's
+native MCP config file (never as a file of its own); uninstall removes
+only that entry, never the file.
 
 Not every client can host every kind: a **skill** is the one kind every
 client hosts, but a rule needs a per-file scoping surface, an agent needs a
 shipped file format, and an MCP server needs a config file grim can splice —
 and many clients lack one or more of those. Where a client cannot faithfully
-host a kind, grim warns and skips it, writing zero files. Most clients
-decline rules and agents, and the skills-only clients write no MCP config at
-all. The authoritative per-client support matrix is the [Client
+host a kind, grim warns and skips it, writing zero files. Most of the fleet
+declines rules and agents, and the skills-only clients write no MCP config
+at all. The authoritative per-client support matrix is the [Client
 Compatibility][clients] docs page — trust it over this summary, and check it
 rather than assuming.
+
+Two consequences of that shape are worth knowing before your first
+install. When **nothing** is detected, grim targets the generic `agents`
+client — one copy into the shared `.agents/skills` pool — rather than
+writing a directory for every client it knows about; a lock holding only
+rules, agents, or MCP servers then has nowhere to go and exits **78**. And
+a client that reads that shared pool can be moved into it deliberately with
+`options.vendors.<name>.shared_skills`. Both in
+[references/registries.md](references/registries.md#client-targets).
 
 ## Verify Before Acting
 

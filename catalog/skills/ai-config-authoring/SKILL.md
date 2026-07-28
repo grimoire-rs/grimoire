@@ -97,9 +97,12 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
   ([Claude Code][cc], [OpenCode][oc], [Copilot][cop], [Codex][cx],
   [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem],
   [Zed][zed], [Amp][amp]) all host skills, but rules and agents each reach
-  only about half of them, and newer clients keep arriving skills-first.
-  Every `references/` file carries the per-client links for the type it
-  covers.
+  only about half of them. Newer clients keep arriving skills-first, and a
+  second wave of them ([Antigravity][ag], [Cline][cline], [Droid][droid],
+  [Goose][goose], [Warp][warp], [OpenClaw][openclaw], [Kilo][kilo]) held
+  that pattern without exception — which is why a skill is the portable
+  default. Every `references/` file carries the per-client links for the
+  type it covers.
 
 [grimoire]: https://github.com/grimoire-rs/grimoire
 [spec]: https://agentskills.io/specification
@@ -115,3 +118,10 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
 [gem]: https://geminicli.com
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[ag]: https://antigravity.google
+[cline]: https://cline.bot
+[droid]: https://factory.ai
+[goose]: https://block.github.io/goose
+[warp]: https://warp.dev
+[openclaw]: https://github.com/openclaw/openclaw
+[kilo]: https://kilo.ai

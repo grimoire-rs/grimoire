@@ -92,13 +92,13 @@ the VS Code config and Cursor; Claude, Kiro, Gemini, and Amp read
 
 - `${VAR:-default}` is **rejected** — only Claude supports
   defaults natively, so a default would behave differently per client.
-- **Three surfaces have no substitution mechanism at all** — Copilot
-  CLI's global `mcp-config.json`, Junie (interpolation undocumented
-  upstream), and Zed. A descriptor carrying any `${VAR}` skips those
-  clients with a warning rather than ever writing a secret (or a broken
-  literal) to disk; every other client still installs normally. Budget
-  for it: an env-referencing server reaches a smaller fleet than a
-  self-contained one.
+- **Four surfaces have no substitution mechanism at all** — Copilot
+  CLI's global `mcp-config.json`, Junie and Antigravity (interpolation
+  undocumented upstream), and Zed. A descriptor carrying any `${VAR}`
+  skips those clients with a warning rather than ever writing a secret
+  (or a broken literal) to disk; every other client still installs
+  normally. Budget for it: an env-referencing server reaches a smaller
+  fleet than a self-contained one.
 - Codex's `config.toml` receives a stdio `env` value **verbatim** — the
   literal `${VAR}` string is written as the launched subprocess's OS
   environment assignment (the same passthrough Claude/OpenCode give it),

@@ -4,8 +4,8 @@ Vendor-neutral craft knowledge for writing effective AI-agent
 configuration — skills, rules, agents, and always-on instructions — for
 any AI coding client (covered by name, as of 2026 — Claude Code,
 OpenCode, GitHub Copilot, Codex, Cursor, Kiro, JetBrains Junie, Gemini
-CLI, Zed, and Amp; the guidance generalizes to newer clients, which
-overwhelmingly ship skills first).
+CLI, Zed, and Amp, plus a skills-first wave surveyed as a group:
+Antigravity, Cline, Droid, Goose, Warp, OpenClaw, and Kilo).
 
 The skill guides the decisions that make config actually fire and stay
 useful: choosing between a skill, rule, hook, or always-on instruction;

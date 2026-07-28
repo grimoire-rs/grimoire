@@ -109,6 +109,7 @@ every other client hosts none (as of 2026; re-verify):
 | [Codex][cx-agents] | `.codex/agents/<name>.toml` | TOML | Body in `developer_instructions`; no `tools` equivalent |
 | [Cursor][cur-agents] | `.cursor/agents/*.md` | Markdown | Read-only and background flags; no `tools` equivalent |
 | [Gemini CLI][gem-agents] | `.gemini/agents/*.md` | Markdown | Loaded only while the `experimental.enableAgents` setting is on — it defaults on (as of 2026; re-verify) |
+| [Antigravity][ag-agents] | `.agents/agents/*.md` | Markdown | `tools` is typed `string[]` upstream — a YAML list, not the comma string other clients take |
 
 **Several clients have no agent file you can package**: [Kiro][kiro] — a
 native IDE format exists, but its CLI expects an incompatible schema in the
@@ -117,8 +118,12 @@ serves both; [Junie][junie] — its agents directory is early-access preview,
 not generally available; [Zed][zed] — agents run over the Agent Client
 Protocol, with no file to install; and [Amp][amp] — subagents are spawned at
 runtime. Newer skills-first clients are in the same position by default:
-assume no packageable agent format until a client documents one. Delegation
-still works on those clients — it is just not something you can package.
+assume no packageable agent format until a client documents one — a later
+survey of seven of them turned up exactly one exception (Antigravity,
+above), with Goose and OpenClaw spawning subagents at runtime, Warp
+confining agent profiles to its settings UI, and Cline, Droid and Kilo
+shipping no agent file at all. Delegation still works on those clients —
+it is just not something you can package.
 
 The only documented cross-read: VS Code Copilot also detects
 `.claude/agents/*.md`; no other cross-read is documented (as of 2026;
@@ -155,6 +160,7 @@ common to every envelope.
 [cx-agents]: https://developers.openai.com/codex/subagents
 [cur-agents]: https://cursor.com/docs/context/subagents
 [gem-agents]: https://geminicli.com/docs/core/subagents
+[ag-agents]: https://antigravity.google/docs/subagents
 [kiro]: https://kiro.dev
 [kiro-8040]: https://github.com/kirodotdev/Kiro/issues/8040
 [junie]: https://www.jetbrains.com/junie/
