@@ -470,8 +470,8 @@ pub async fn create_change_request(
     match result {
         Ok(url) => Some(url),
         Err(detail) => {
-            tracing::info!(
-                "forge API did not open the change request ({detail}); the branch is pushed — open it manually"
+            tracing::warn!(
+                "forge API did not open the change request (reason: {detail}); the branch is pushed — open it manually (check the repo's or token's permission to create pull/merge requests)"
             );
             None
         }
@@ -2008,6 +2008,40 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "the short deadline must bound the wait"
+        );
+    }
+
+    /// Regression for the silent-decline bug: a forge API failure (here, a
+    /// transport-level failure — nothing listens on 127.0.0.1:1) must still
+    /// degrade `create_change_request` to `None` rather than propagating an
+    /// error, so the caller reports the pushed branch instead of failing the
+    /// whole announce. Proves the `Err(detail)` arm is reached and the
+    /// documented "best-effort, never worse than a plain push" contract
+    /// holds. Does **not** assert the log level of the emitted warning — no
+    /// tracing-capture pattern exists elsewhere in this crate to assert
+    /// against, so that part of the fix (`tracing::info!` → `tracing::warn!`)
+    /// is verified by code inspection only.
+    #[tokio::test]
+    async fn create_change_request_degrades_to_none_on_transport_failure() {
+        let ctx = ForgeContext {
+            kind: ForgeKind::GitHub,
+            api_url: Some("http://127.0.0.1:1".to_string()),
+            token: Some("ghp-x".to_string()),
+            ci_namespace: None,
+        };
+        let http = reqwest::Client::new();
+        let result = create_change_request(
+            &http,
+            &ctx,
+            "https://github.com/acme/index",
+            "announce/test",
+            "announce: test",
+            None,
+        )
+        .await;
+        assert_eq!(
+            result, None,
+            "an unreachable forge API must degrade to None, never fail the announce"
         );
     }
 
