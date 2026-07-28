@@ -488,3 +488,76 @@ def test_config_file_with_oci_and_index_rejected(grim_at, project_dir: Path) -> 
     runner = grim_at(project_dir)
     r = runner.run("config", "list", check=False)
     assert r.returncode == 78, f"expected 78, got {r.returncode}: {r.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Install from an index source (global scope, vendor-native destination)
+# ---------------------------------------------------------------------------
+
+
+def test_install_from_http_index_lands_in_claude_config_dir(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, http_index
+) -> None:
+    """The whole reason an index exists: a user who knows only its URL can
+    add it, find a package through it, and install that package.
+
+    The index is a phone book, so the pointer carries a tagless
+    ``registry/repository`` ref and no version — the install has to resolve
+    the tag against the real registry. Global scope with
+    ``$CLAUDE_CONFIG_DIR`` set is the shape a first-time user actually
+    hits, and it is what proves the index never becomes the download
+    source: the bytes come from the registry, only the *listing* from the
+    index.
+    """
+    from src.helpers import make_artifact
+    from src.runner import GrimRunner
+
+    root, base = http_index
+    art = make_artifact(
+        f"{unique_repo}/index-installed",
+        "skill",
+        {
+            "index-installed/SKILL.md": (
+                "---\nname: index-installed\ndescription: Reached via an index.\n---\n\nBody.\n"
+            )
+        },
+    )
+    # Tagless: exactly what `grim publish --announce` writes into a pointer.
+    _write_all_json(
+        root,
+        [
+            _package(
+                "index-installed",
+                "skill",
+                f"{registry}/{art.repo}",
+                "Reached via an index.",
+            )
+        ],
+    )
+
+    runner = GrimRunner(grim_binary, grim_home)
+    config_dir = grim_home.parent / "claude-cfg-index"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+    runner.run("config", "registry", "add", "hub", "--index", base, "--default", "--global")
+
+    rows = json.loads(runner.run("--format", "json", "search", "--refresh", "--global").stdout)["items"]
+    repos = [r.get("repo", "") for r in rows]
+    assert f"{registry}/{art.repo}" in repos, f"index must list the package; got {repos}"
+
+    # Declare and install in the SAME scope — a project-scope `add` writes a
+    # config `install --global` cannot see.
+    runner.run("add", "--global", "--no-install", f"{registry}/{art.repo}")
+    runner.run("install", "--global", "--client", "claude", format="json")
+
+    skill = config_dir / "skills/index-installed/SKILL.md"
+    assert skill.is_file(), (
+        f"a package found through an index must install like any other; "
+        f"nothing at {skill}"
+    )
+    assert "name: index-installed" in skill.read_text()
+    # The vendor override is honoured, so nothing leaked into the default tree.
+    assert not (runner.home / ".claude/skills/index-installed").exists(), (
+        "global skill must NOT land in default ~/.claude when CLAUDE_CONFIG_DIR is set"
+    )
