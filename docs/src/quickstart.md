@@ -109,6 +109,13 @@ entry — use [`grim uninstall`][uninstall]. To browse what the index offers
 before declaring anything, launch the interactive browser with
 [`grim tui`][tui].
 
+## Next
+
+Sharing config across a team means publishing it and having somewhere to
+find it. [Host Your Own Index][hosting] scaffolds that second half in one
+command — a catalog site and a contribution gate, served from GitHub or
+GitLab Pages.
+
 <!-- external -->
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
 [opencode]: https://opencode.ai
@@ -117,6 +124,7 @@ before declaring anything, launch the interactive browser with
 
 <!-- internal -->
 [index]: ./package-index.md
+[hosting]: ./hosting-an-index.md
 [install]: ./installation.md
 [tui]: ./commands.md#tui
 [uninstall]: ./commands.md#uninstall

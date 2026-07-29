@@ -32,7 +32,8 @@ run, so there is nothing to install globally:
 $ npx @grimoire-rs/indexer init acme-index
 ```
 
-It asks six questions, each with a default:
+It asks a short series of questions, each with a default, and offers to
+run `git init` at the end:
 
 | Prompt | What it decides |
 |---|---|
@@ -92,6 +93,12 @@ A private instance that refuses remote CI includes needs one edit — see
 
 Either way the deployed site is two things at once: a searchable catalog
 for humans, and `all.json` for grim.
+
+> **Proven where?** The GitHub loop — scaffold, push, Pages, announce,
+> gate, auto-merge, consume from a clean `GRIM_HOME` — was rehearsed end
+> to end against live repositories. The GitLab jobs run the same tool
+> with the same arguments and are covered by tests, but that leg has not
+> been exercised against a live instance yet.
 
 ## Use It {#consume}
 
@@ -206,10 +213,11 @@ advisory.
 ## Make It Yours {#branding}
 
 `index.config.json` is the whole customization surface, and every key is
-optional:
+optional — a missing file renders the defaults. The ones worth knowing:
 
 | Key | Effect |
 |---|---|
+| `site` | The canonical deploy URL. Drives absolute link-preview URLs; `init` writes the base URL you gave it |
 | `brand`, `brandMark` | Header text and its accent-styled monospace prefix |
 | `description`, `tagline` | Meta description and the hero paragraph |
 | `logo`, `favicon` | Header logo (and default link-preview image), tab icon |
@@ -271,8 +279,13 @@ Nothing above assumes a public repository. Three shapes work:
   the clone URL: `index = "https://gitlab.example.com/platform/index.git"`.
   grim shallow-clones and walks the tree, authenticating through ambient
   git credentials — a credential helper or ssh agent. It never prompts.
-- **Private repo, private Pages.** GitLab Pages can require a session on
-  the project; the index then resolves for anyone who can read the repo.
+- **Private repo, authenticated Pages.** [GitLab Pages access
+  control][gl-pages-auth] restricts a site to project members once an
+  administrator enables it instance-wide. GitHub's equivalent is narrower:
+  publishing a Pages site privately [requires GitHub Enterprise
+  Cloud][gh-pages-private], and only for a project site owned by the
+  organization. Without it, a private repository's Pages site is still
+  public — use the git transport instead.
 - **Air-gapped.** `index-policy.json` bounds which registries entries may
   point at, so an internal index can refuse anything not on your mirror.
 
@@ -297,7 +310,9 @@ browsable catalog, the contribution gate, or both.
 
 <!-- external -->
 [gh-pages]: https://pages.github.com/
+[gh-pages-private]: https://docs.github.com/en/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site
 [gl-pages]: https://docs.gitlab.com/ee/user/project/pages/
+[gl-pages-auth]: https://docs.gitlab.com/user/project/pages/pages_access_control/
 [node]: https://nodejs.org/
 [npm]: https://www.npmjs.com/package/@grimoire-rs/indexer
 [renovate]: https://docs.renovatebot.com/modules/manager/github-actions/
