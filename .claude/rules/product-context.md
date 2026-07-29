@@ -56,6 +56,20 @@ to publish a skill once and install or upgrade it across many projects.
 - **Standards-based** — stable, widely adopted, vendor-neutral
 - **Ecosystem tooling** — scanning, replication, GC already exist
 
+## Discovery: The Index
+
+Registries answer "give me this package", not "what packages exist?" —
+`_catalog` is gated or absent on GHCR, Docker Hub, and GitLab SaaS. A
+**package index** fills that gap: a repository of pointers grim browses.
+
+It is deliberately not a service. `npx @grimoire-rs/indexer init`
+scaffolds an index repository — pointer tree, catalog site, contribution
+gate — that GitHub or GitLab Pages serves, so a team stands up its own
+discovery surface with no server and no account. The public index at
+`index.grimoire.rs` is the default, not the system. This is the current
+lead adoption story on the landing page and in
+`docs/src/hosting-an-index.md`.
+
 ## Target Users
 
 - **Primary**: Engineers maintaining AI-agent configuration shared across

@@ -155,6 +155,13 @@ CLI equivalent:
 grim config registry add hub --index https://index.grimoire.rs --default
 ```
 
+Running your own index is one command: `npx @grimoire-rs/indexer init`
+scaffolds an index repository — pointer tree, site config, and CI that
+builds the catalog site and gates contributions — served from GitHub or
+GitLab Pages. A plain git repository holding `index/**/metadata.json`
+also works as-is, with no build step. Full walkthrough:
+[Host Your Own Index][hosting].
+
 `oci` and `index` set together on one entry is a config error (exit 78);
 a locator that matches neither transport shape is a data error (exit 65).
 Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
@@ -413,8 +420,8 @@ Confirm current flags with `grim mcp --help`.
   [online-by-default][online] — the semantics behind each section above.
 - [Configuration][envvars] — environment variables, `[[registries]]`
   schema, precedence rules, data layout under `GRIM_HOME`.
-- [The Package Index][package-index] — index spec, auto-merge rules,
-  hosting your own.
+- [The Package Index][package-index] — index spec, auto-merge rules.
+- [Host Your Own Index][hosting] — scaffold, deploy, and gate your own.
 - [Command reference: search][search], [tui][tui], and [mcp][mcp].
 
 [scopes]: https://grimoire.rs/concepts.html#scopes
@@ -424,6 +431,7 @@ Confirm current flags with `grim mcp --help`.
 [envvars]: https://grimoire.rs/configuration.html#environment-variables
 [registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
 [package-index]: https://grimoire.rs/package-index.html
+[hosting]: https://grimoire.rs/hosting-an-index.html
 [index-repo]: https://github.com/grimoire-rs/index
 [config-cmd]: https://grimoire.rs/commands.html#config
 [search]: https://grimoire.rs/commands.html#search

@@ -62,6 +62,23 @@ grim tui                                         # browse the index
 
 Full documentation: **[grimoire docs][docs]**.
 
+## Run Your Own Index
+
+`grim search` reads a **package index** — a directory of pointers into your
+registries. The public one is the default, not the system: one command
+scaffolds your own, and GitHub or GitLab Pages serves it.
+
+```sh
+npx @grimoire-rs/indexer init                    # scaffold the index repo
+git push                                         # Pages builds and serves it
+grim config registry add acme --index https://acme.github.io/index
+```
+
+You get a searchable catalog site, the JSON grim resolves against, and a
+contribution gate that refuses a pull request writing a namespace its author
+does not own. No index server, no database, no account — private repos work
+the same way. Walkthrough: [hosting an index][docs-hosting].
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
@@ -87,6 +104,7 @@ Grimoire is licensed under the [Apache License, Version 2.0][license].
 [docs-badge]: https://img.shields.io/badge/docs-grimoire-blue
 [docs-install]: https://grimoire.rs/installation.html
 [docs-clients]: https://grimoire.rs/clients.html
+[docs-hosting]: https://grimoire.rs/hosting-an-index.html
 [setup-grimoire]: https://github.com/grimoire-rs/setup-grimoire
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg

@@ -12,7 +12,8 @@ repository or a folder of static files), and any OCI registry can host
 the packages it points to. The happy path is the default index at
 [index.grimoire.rs][index-site], maintained at
 [grimoire-rs/index][index-repo] on GitHub — but nothing in grim is
-hard-wired to it.
+hard-wired to it, and standing up your own is
+[one command](./hosting-an-index.md).
 
 > **Phone book, not catalog.** The index stores *pointers* — name, kind,
 > OCI ref, description, ownership. It never stores versions. grim
@@ -306,12 +307,26 @@ GitLab is covered in [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 ## Hosting Your Own Index {#self-hosting}
 
-Any of the following is a complete, working index:
+One command scaffolds a complete index repository — content tree, site
+config, contribution gate, and CI for [GitHub Pages][gh-pages] or
+[GitLab Pages][gl-pages]:
+
+```console
+$ npx @grimoire-rs/indexer init
+$ git push
+$ grim config registry add acme --index https://acme.github.io/index
+```
+
+[Host Your Own Index](./hosting-an-index.md) is the walkthrough: prompts,
+what lands on disk, deploying to either forge, accepting contributions,
+branding, and running one privately. The two lower-level shapes below
+stay valid — nothing in grim requires the toolchain.
 
 ### A Plain Git Repository {#self-hosting-git}
 
-Simplest — works everywhere. Create a repository with the layout above,
-on GitHub, [GitLab][gitlab], or any git host. Done. Consumers configure:
+Simplest — works everywhere, with no build step at all. Create a
+repository with the layout above, on GitHub, [GitLab][gitlab], or any git
+host. Done. Consumers configure:
 
 ```toml
 [[registries]]
@@ -324,8 +339,8 @@ helper or ssh agent) — grim never prompts.
 
 ### Static Files {#self-hosting-static}
 
-Fastest for consumers. Compile `all.json` (see [`scripts/build.py`][build-py]
-in the default index for a ~50-line reference) and serve the `dist/`
+Fastest for consumers, and what the scaffolded CI publishes: compile
+`all.json` plus the path-addressable pointer copies and serve the `dist/`
 folder from [GitHub Pages][gh-pages], [GitLab Pages][gl-pages], or any
 webserver:
 
@@ -335,20 +350,22 @@ alias = "team"
 index = "https://index.your-domain.example"
 ```
 
-### Fork the Default Index {#self-hosting-fork}
+`npx @grimoire-rs/indexer build` performs that compilation, and renders
+the browsable catalog alongside it.
 
-Fork [grimoire-rs/index][index-repo] to inherit the layout, the build
-script, the Pages deployment, and the validation / auto-merge pipeline
-in one step — the repo ships **both** a GitHub Actions workflow and a
-`.gitlab-ci.yml`, so a fork works on either forge (the foreign CI files
-stay inert). For the full corporate GitLab walkthrough — CI variables,
-auto-merge by group membership, release mirrors — see
-[Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
+### Fork an Existing Index {#self-hosting-fork}
 
-This is a fork you run as your own index, long-lived and configured as a
-`[[registries]]` target — distinct from the throwaway fork
-[`--announce` creates automatically](#announcing) to contribute a pointer
-back to someone else's index.
+Forking [grimoire-rs/index][index-repo] inherits its **entries** as well
+as its layout, which is what makes it the right move only when you want
+the public catalog as a starting point — a mirror, or an internal index
+seeded from the public one. Starting empty is `init`, above.
+
+Either way, this is a repository you run as your own index, long-lived
+and configured as a `[[registries]]` target — distinct from the throwaway
+fork [`--announce` creates automatically](#announcing) to contribute a
+pointer back to someone else's index. For the full corporate GitLab
+walkthrough — CI variables, auto-merge by group membership, release
+mirrors — see [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 ## Relationship to Registries {#registries}
 
@@ -377,4 +394,3 @@ index can point at public packages.
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs
 [index-repo]: https://github.com/grimoire-rs/index
-[build-py]: https://github.com/grimoire-rs/index/blob/main/scripts/build.py

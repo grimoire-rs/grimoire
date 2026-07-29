@@ -54,6 +54,15 @@ from there (the `$CI_SERVER_FQDN/ci/grimoire-components/…` path above).
 
 ## Fork the Index {#index}
 
+Two ways to get an index project on your instance. A **fresh, empty** one
+is `npx @grimoire-rs/indexer init --forge gitlab`, which scaffolds the
+content tree, the site config, and a `.gitlab-ci.yml` that builds Pages
+and gates merge requests — see
+[Host Your Own Index](./hosting-an-index.md). The rest of this page
+covers the **fork**, which is what you want when the public catalog is
+your starting point, and it stays the reference for the CI-variable
+surface either way.
+
 Import [grimoire-rs/index][index-repo] into your instance (e.g.
 `platform/index`). The repo ships CI for **both** forges — GitHub
 workflows under `.github/` and a `.gitlab-ci.yml` — so the import works

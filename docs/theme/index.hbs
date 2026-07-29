@@ -254,7 +254,7 @@ pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radi
       <p style="font-size:16.5px; line-height:28px; margin:22px 0 0; max-width:46ch; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Skills, rules, agents and MCP servers — declared once, pinned by digest, written into each coding agent in the format it actually reads. Storage is any OCI registry. There is no Grimoire service.</p>
       <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:30px">
         <a class="cta cta-primary" href="#install">Install grim</a>
-        <a class="cta cta-secondary" href="https://index.grimoire.rs">Browse the index →</a>
+        <a class="cta cta-secondary" href="#index">Host your own index →</a>
       </div>
     </div>
 
@@ -423,6 +423,41 @@ rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-styl
     </div>
   </section>
 
+  <section id="index" style="padding:0 0 clamp(36px,4vw,52px); scroll-margin-top:20px">
+    <div style="display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--color-neutral-700); padding-bottom:11.2px">
+      <span class="mono" style="font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--color-accent)">your own index</span>
+      <span class="spacer"></span>
+      <span class="mono dim" style="font-size:12px">GitHub or GitLab Pages</span>
+    </div>
+    <div style="padding-top:16px">
+      <p style="font-size:15px; line-height:26px; margin:0; max-width:78ch">A <strong>package index</strong> is the phone book grim searches: pointers into your registries, not another copy of the packages. The public one is the default, not the system — one command scaffolds your own, and your forge's Pages serves it.</p>
+    </div>
+    <div style="padding-top:14px">
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>npx @grimoire-rs/indexer init<span class="dim">                    # scaffold the index repo</span></pre>
+        <button type="button" class="cmd-copy" data-copy="npx @grimoire-rs/indexer init">copy</button>
+      </div>
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>git push<span class="dim">                                         # Pages builds and serves it</span></pre>
+        <button type="button" class="cmd-copy" data-copy="git push">copy</button>
+      </div>
+      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
+        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim config registry add acme --index https://acme.github.io/index</pre>
+        <button type="button" class="cmd-copy" data-copy="grim config registry add acme --index https://acme.github.io/index">copy</button>
+      </div>
+    </div>
+    <div class="fanout" style="padding-top:22px; align-items:start">
+      <div>
+        <p class="kicker">what you get</p>
+        <p style="font-size:15px; line-height:26px; margin:0; color:color-mix(in srgb, var(--color-text) 74%, transparent)">A searchable catalog site and the JSON grim resolves against, plus a contribution gate that refuses a pull request writing a namespace its author does not own. Publishers announce into it with <span class="mono">grim publish --announce</span>.</p>
+      </div>
+      <div>
+        <p class="kicker">what you run</p>
+        <p style="font-size:15px; line-height:26px; margin:0; color:color-mix(in srgb, var(--color-text) 74%, transparent)">Nothing. No index server, no database, no account — a repository on the forge you already use, private or public. <a href="{{ path_to_root }}hosting-an-index.html">Host your own index →</a></p>
+      </div>
+    </div>
+  </section>
+
   <section style="padding:0 0 clamp(36px,4vw,52px)">
     <div style="border-top:1px solid var(--color-neutral-700)">
       <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
@@ -431,7 +466,7 @@ rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-styl
       </div>
       <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
         <div class="mono dim" style="font-size:13px; line-height:26px">storage</div>
-        <div style="font-size:15px; line-height:26px">any OCI registry · publish your own · <a href="{{ path_to_root }}package-index.html">the index is self-hostable</a></div>
+        <div style="font-size:15px; line-height:26px">any OCI registry · publish your own · <a href="{{ path_to_root }}hosting-an-index.html">run the index yourself</a></div>
       </div>
       <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
         <div class="mono dim" style="font-size:13px; line-height:26px">interface</div>

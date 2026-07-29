@@ -36,6 +36,9 @@ TLS, and replication for free — there is no bespoke server to operate.
 - [Installation][install] — get the `grim` binary.
 - [Quick Start][quickstart] — install your first skill in five commands.
 - [Concepts][concepts] — skills versus rules, scopes, locks, and clients.
+- [Host Your Own Index][hosting] — one command scaffolds a package index
+  your team browses and publishes into, served from GitHub or GitLab
+  Pages.
 - [Command Reference][commands] — every subcommand and flag.
 
 <!-- external -->
@@ -48,4 +51,5 @@ TLS, and replication for free — there is no bespoke server to operate.
 [install]: ./installation.md
 [quickstart]: ./quickstart.md
 [concepts]: ./concepts.md
+[hosting]: ./hosting-an-index.md
 [commands]: ./commands.md
