@@ -89,7 +89,7 @@ and deploys the built site. Nothing else is required — no deploy key, no
 **GitLab.** Push to the default branch. The `pages` job publishes
 `public/`, and GitLab serves it at `https://<group>.gitlab.io/<project>`.
 A private instance that refuses remote CI includes needs one edit — see
-[Upgrading CI](#upgrading).
+[Upgrading CI][upgrading].
 
 Either way the deployed site is two things at once: a searchable catalog
 for humans, and `all.json` for grim.
@@ -110,12 +110,12 @@ $ grim search review
 $ grim add ghcr.io/acme/skills/code-review
 ```
 
-That writes a [`[[registries]]`](./configuration.md) entry, which is
+That writes a [`[[registries]]`][config] entry, which is
 per-project — so a repository can browse your internal index and the
 public one side by side. Listings are cached under `$GRIM_HOME/catalog/`
 with a one-hour TTL, `--refresh` forces a re-fetch, and `--offline`
 serves the cache without touching the network. The rest of the transport
-behavior is in [Consuming an Index](./package-index.md#consuming).
+behavior is in [Consuming an Index][consuming].
 
 ## Fill It {#packages}
 
@@ -137,7 +137,7 @@ the namespace. There are two ways to add one.
 ```
 
 The field-by-field contract is the
-[index specification](./package-index.md#spec-metadata). Note the ref
+[index specification][spec-metadata]. Note the ref
 carries **no tag** — versions resolve live from the registry, so an index
 can never serve a stale one.
 
@@ -151,7 +151,7 @@ $ grim publish --announce
 grim pushes the packages to the registry, then opens a pull or merge
 request against your index with the pointers — forking automatically when
 the publisher has no push access. The full behavior is in
-[Announcing Packages](./package-index.md#announcing).
+[Announcing Packages][announcing].
 
 > **One repo for both?** `init --with-skills` scaffolds the combined
 > layout: your skills under `skills/`, the index that lists them beside
@@ -291,7 +291,7 @@ Nothing above assumes a public repository. Three shapes work:
 
 The corporate GitLab walkthrough — release mirrors for the grim binary
 itself, auto-merge by group membership, publishers with zero forge
-configuration — is [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
+configuration — is [Self-Hosted GitLab Setup][gitlab].
 
 ## Without the Toolchain {#plain-git}
 
@@ -316,6 +316,14 @@ browsable catalog, the contribution gate, or both.
 [node]: https://nodejs.org/
 [npm]: https://www.npmjs.com/package/@grimoire-rs/indexer
 [renovate]: https://docs.renovatebot.com/modules/manager/github-actions/
+
+<!-- internal -->
+[config]: ./configuration.md
+[consuming]: ./package-index.md#consuming
+[spec-metadata]: ./package-index.md#spec-metadata
+[announcing]: ./package-index.md#announcing
+[gitlab]: ./self-hosted-gitlab.md
+[upgrading]: #upgrading
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs
