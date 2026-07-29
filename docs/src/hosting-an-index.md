@@ -22,6 +22,13 @@ account to create.
 > layout, same commands, same `grim search`. Consumers can configure
 > several at once.
 
+> **If you have run a Helm chart repository, you already know this
+> shape.** A [chart repository][helm-repo] is a static `index.yaml` plus
+> files on any webserver — no repository server to operate, which is why
+> hosting one on Pages became the norm. A grim index is the same trade:
+> pointers compiled to static JSON, a site built beside it, and the forge
+> doing the serving.
+
 ## Scaffold It {#scaffold}
 
 The scaffolder ships on npm as [`@grimoire-rs/indexer`][npm]. It needs
@@ -310,6 +317,7 @@ browsable catalog, the contribution gate, or both.
 
 <!-- external -->
 [gh-pages]: https://pages.github.com/
+[helm-repo]: https://helm.sh/docs/topics/chart_repository/
 [gh-pages-private]: https://docs.github.com/en/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site
 [gl-pages]: https://docs.gitlab.com/ee/user/project/pages/
 [gl-pages-auth]: https://docs.gitlab.com/user/project/pages/pages_access_control/
