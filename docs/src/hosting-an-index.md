@@ -89,10 +89,14 @@ What lands on disk:
 
 Only one forge's CI is written — whichever the repository host implies.
 
-Re-running `init` is safe: a file that already matches is reported
-`unchanged`, and one you have edited is left alone as `skipped` unless
-you pass `--force`. That matters, because the CI files are the ones you
-are most likely to touch.
+Re-running `init` is safe, and every prompt defaults to what this index
+already answered — so pressing Enter through the questions you do not
+care about changes nothing. A file that already matches is reported
+`unchanged`, one you have edited is left alone as `skipped` unless you
+pass `--force`, and two are reported `preserved` and never rewritten at
+all: `publish.toml` and `index-policy.json` hold the packages you declare
+and the trust settings the gate reads, and no scaffold can regenerate
+either. Edit those two directly.
 
 Build it locally before you push anything:
 
