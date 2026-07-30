@@ -17,6 +17,11 @@ Pages][gh-pages] or [GitLab Pages][gl-pages] — and the forge you already
 pay for hosts the result. There is no index server, no database, and no
 account to create.
 
+> **Want it as a checklist?** [Run your own index][wizard] walks the same
+> setup step by step, switched between GitHub and GitLab. This page is the
+> reference behind it. On GitHub you can also skip step one entirely and
+> start from the [`index-template`][template] repository.
+
 > **Which index?** The public one at [index.grimoire.rs][index-site] is
 > the *default*, not the system. Your own index is a peer of it: same
 > layout, same commands, same `grim search`. Consumers can configure
@@ -39,17 +44,25 @@ run, so there is nothing to install globally:
 $ npx @grimoire-rs/indexer init acme-index
 ```
 
-It asks a short series of questions, each with a default, and offers to
-run `git init` at the end:
+It asks a short series of questions, each with a default. Run it inside a
+clone and it reads the `origin` remote first, which answers the two that
+are otherwise awkward — which forge, and where Pages will serve you:
 
 | Prompt | What it decides |
 |---|---|
 | Index name | The identifier, and the default registry alias |
 | Display title | The site's `<h1>`, header, and `<title>` |
-| Base URL | Where the site will be served — `https://acme.github.io/index` |
+| Repository URL | Read off `origin` when there is one — otherwise asked |
+| Base URL | Where the site will be served. Derived from the repository; type a custom domain to override |
 | Registry alias | The alias consumers get in the copy-paste "add this index" block |
 | Brand logo | Path or URL; blank renders the title as text |
-| CI to scaffold | GitHub Actions, GitLab CI, or both |
+| Registry host | The committed allowlist the contribution gate bounds every entry by |
+| Initialize git? | Offered when the directory is not already a repository |
+| Install now? | Writes `package-lock.json` — CI installs from it, so answer yes |
+
+The forge is derived from the repository host rather than asked. One
+repository runs one pipeline; rendering both left every index carrying CI
+it would never run.
 
 Every answer is also a flag, and `--quick` skips the wizard entirely —
 that is the form to use in a script:
@@ -65,12 +78,16 @@ What lands on disk:
 | Path | Purpose |
 |---|---|
 | `index/` | The content tree — one `metadata.json` per package |
-| `index.config.json` | Site identity: title, base URL, branding, registry hint |
+| `index.config.json` | Site identity: title, base URL, branding, and the `ci` block |
 | `index-policy.json` | Committed allowlist the contribution gate reads |
+| `package.json`, `package-lock.json` | The scripts, and the pin on which renderer builds and judges this index |
 | `.github/workflows/pages.yml` | Build and deploy to GitHub Pages |
 | `.github/workflows/validate.yml` | The contribution gate on pull requests |
-| `.gitlab-ci.yml` | Both of the above, as GitLab CI jobs |
+| `.github/workflows/verify-ci.yml` | Re-renders the workflows and fails on drift |
+| `.gitlab-ci.yml` | All of the above, as GitLab CI jobs |
 | `README.md`, `.gitignore` | Contributor-facing docs and build-output ignores |
+
+Only one forge's CI is written — whichever the repository host implies.
 
 Re-running `init` is safe: a file that already matches is reported
 `unchanged`, and one you have edited is left alone as `skipped` unless
@@ -160,12 +177,38 @@ request against your index with the pointers — forking automatically when
 the publisher has no push access. The full behavior is in
 [Announcing Packages][announcing].
 
-> **One repo for both?** `init --with-skills` scaffolds the combined
-> layout: your skills under `skills/`, the index that lists them beside
-> it, and a `publish.toml` that announces into itself. Convenient when
-> one team owns both sides; the separate-repos shape is the default
-> because an index is a distribution database that many publishers
-> announce into.
+### One repo for both {#packages-combined}
+
+`init --with-skills` scaffolds the combined layout: your skills under
+`skills/`, the index that lists them beside it, a `publish.toml` that
+announces into itself, and a **release pipeline** to run it. Convenient when
+one team owns both sides; the separate-repos shape stays the default,
+because an index is a distribution database that many publishers announce
+into.
+
+The pipeline needs one decision, which `init` asks for and `ci.publish`
+records — when a release happens:
+
+| `ci.publish` | Fires on |
+|---|---|
+| `tag` | A `v*` tag. Cutting a release is a deliberate act |
+| `default-branch` | Every push to the trunk. A version bump in `publish.toml` *is* the release |
+| `never` | Nothing is rendered. The default, and the only right answer for an index that owns no packages |
+
+Either way the job runs `grim publish --announce`, and
+[skip-existing][skip-existing] makes a re-run over unchanged versions a
+no-op — which is what makes the every-push trigger reasonable rather than
+reckless. Registry credentials default to the zero-setup path on each forge
+(the built-in token against GHCR, the job token against GitLab's registry);
+publishing elsewhere is repository variables, not an edit to the generated
+file.
+
+> **Two things this layout costs you.** On GitHub the announce needs
+> *Settings → Actions → General → "Allow GitHub Actions to create and
+> approve pull requests"*, which is off by default — without it the packages
+> publish and the pull request then fails to open. And that pull request is
+> **not gated**: GitHub runs no workflows on one opened with the built-in
+> token, so `validate` never fires on it. Review it by hand.
 
 ## Accept Contributions {#gate}
 
@@ -204,10 +247,18 @@ Widening trust is a reviewed commit rather than a CI variable, which is
 the point.
 
 > **Requiring the check on GitHub**: the context to require in branch
-> protection is `validate / validate` — the caller job name, then the
-> called one. Requiring plain `validate` names a context that never
-> reports, which blocks every pull request forever and looks exactly like
-> the gate rejecting the contribution.
+> protection is `validate` — the job key in the committed workflow. (It
+> was `validate / validate` while the scaffold emitted thin callers of
+> reusable workflows; those are gone.) Add the check and the branch rule
+> together: requiring a context that never reports blocks every pull
+> request forever and looks exactly like the gate rejecting the
+> contribution.
+
+Passing contributions can land unattended. Set `"autoMerge": true` in the
+`ci` block and re-render with `npm run ci`; the generated job squash-merges
+the pull request the gate passed, pinned to the commit the gate actually
+judged, then redeploys. It is **GitHub-only** and deliberately so — see the
+GitLab limit below.
 
 Two limits, stated plainly. On GitHub, a pull request opened with the
 built-in `GITHUB_TOKEN` triggers no workflows — so in the combined
@@ -255,28 +306,60 @@ It writes README, changelog, logo, contents, and the resolved version
 list into `enrich/`, skipping any package whose digest has not moved
 since the last run. The scaffolded CI installs grim and runs this before
 every build, so the deployed site stays current without a scheduled job.
-It is also the only step that goes online — set `enrich: false` (GitHub)
-or `GRIM_INDEXER_ENRICH: "false"` (GitLab) for a pointers-only site that
-never leaves the runner.
+It is also the only step that goes online — set `"enrich": false` in the
+[`ci` block](#upgrading) and re-render for a pointers-only site that never
+leaves the runner.
 
-## Upgrading CI {#upgrading}
+## Changing the CI {#upgrading}
 
-The scaffolded workflows are deliberately thin: they call reusable
-workflows that the indexer repository owns, pinned by tag.
+Your index owns its pipeline. The workflow files are **committed in your
+repository** and rendered from the `ci` block of `index.config.json` —
+nothing is fetched from the indexer repository at run time, and the version
+that builds your index is the one your `package-lock.json` names.
 
-```yaml
-jobs:
-  pages:
-    uses: grimoire-rs/indexer/.github/workflows/index-pages.yml@v0.2.2
-    with:
-      grim-indexer-version: "0.2.2"
+```json
+{
+  "ci": { "forge": "github", "enrich": true, "autoMerge": false }
+}
 ```
 
-So picking up a CI fix is bumping a ref — never re-scaffolding over your
-edits. [Renovate][renovate]'s built-in `github-actions` manager bumps it
-for you. GitLab works the same way through a pinned `include: remote:`;
-an instance that blocks remote includes vendors the file into the repo
-and switches to `include: local:`.
+| Key | Effect |
+|---|---|
+| `forge` | `github` or `gitlab` — which pipeline is rendered |
+| `defaultBranch` | The branch that deploys Pages, and that `publish: "default-branch"` releases from. Default `main` |
+| `enrich` | `false` renders a pipeline that never goes online (pointers-only site) |
+| `publish` | `tag` or `default-branch` adds the release pipeline for the [combined layout](#packages). Default `never` |
+| `autoMerge` | `true` adds the squash-merge job for contributions the gate passed. GitHub only |
+| `allowManualEdits` | `true` drops the drift check, and the workflows become yours to hand-edit |
+
+`defaultBranch` exists because GitHub has no expression for the default
+branch inside an `on:` trigger — it has to be a literal. A repository whose
+trunk is `master` previously got workflows that were valid, committed, and
+never fired. GitLab reads `$CI_DEFAULT_BRANCH` at run time and ignores the
+key.
+
+Edit the block, then re-render:
+
+```console
+$ npm run ci        # rewrite the workflow files
+$ npm run ci:check  # what CI runs — exits 65 on drift
+```
+
+The generated `verify-ci` job runs `ci:check` on every push, so a
+hand-edited workflow fails loudly rather than quietly forking the pipeline.
+It tolerates a bumped `uses:` pin, so [Renovate][renovate] keeping the
+actions current does not read as drift.
+
+Picking up a renderer fix is an ordinary dependency bump — update
+`@grimoire-rs/indexer` in `package.json`, run `npm install` and
+`npm run ci`, commit the result. Never re-scaffold over your edits.
+
+> **Coming from `0.2.x`?** Those scaffolds call reusable workflows in the
+> indexer repository, which `0.3.0` deleted. The pinned refs still resolve
+> — old tags are not removed — so an untouched index keeps working, and it
+> breaks the moment something bumps the pin. Convert before that happens:
+> add a `package.json` pinning `@grimoire-rs/indexer` (if the old scaffold
+> has none) and run `npm run ci` to render the real workflows.
 
 ## Private and Internal {#private}
 
@@ -323,10 +406,12 @@ browsable catalog, the contribution gate, or both.
 [gl-pages-auth]: https://docs.gitlab.com/user/project/pages/pages_access_control/
 [node]: https://nodejs.org/
 [npm]: https://www.npmjs.com/package/@grimoire-rs/indexer
-[renovate]: https://docs.renovatebot.com/modules/manager/github-actions/
+[renovate]: https://docs.renovatebot.com/modules/manager/npm/
+[template]: https://github.com/grimoire-rs/index-template
 
 <!-- internal -->
 [config]: ./configuration.md
+[skip-existing]: ./publishing.md#batch-publish-skip-existing
 [consuming]: ./package-index.md#consuming
 [spec-metadata]: ./package-index.md#spec-metadata
 [announcing]: ./package-index.md#announcing
@@ -335,3 +420,4 @@ browsable catalog, the contribution gate, or both.
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs
+[wizard]: https://grimoire.rs/start.html
