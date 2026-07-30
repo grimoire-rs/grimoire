@@ -6,8 +6,10 @@
     copied verbatim by mdBook (which copies everything under src/ that is not
     .md), so it lands at grimoire.rs/start.html with no chapter chrome, no
     sidebar, and no mdBook CSS. docs/seo.py injects the canonical and OG tags
-    afterwards from the <title> and description below, and adds it to
-    sitemap.xml.
+    afterwards from the page title and description below, and adds it to
+    sitemap.xml. Never write a literal title element into this comment —
+    seo.py matches the first one in the file, and would lift the comment
+    text into og:title.
 
     The design tokens below are a deliberate copy of the landing page's, not a
     shared file: both documents are self-contained by contract (no external
@@ -24,8 +26,8 @@
     Step content is the short imperative path; each step links into
     hosting-an-index.html for the reasoning. Keep it that way — the reference
     page owns the "why", this page owns the order. Anything a reader does not
-    need in order to run the next command goes behind a <details>, so an open
-    step stays roughly one screen. Two exceptions stay expanded on purpose:
+    need in order to run the next command goes behind a disclosure, so an
+    open step stays roughly one screen. Two exceptions stay expanded:
     the registry-host allowlist and the namespace-equals-forge-namespace
     assumption are trust decisions, and a collapsed security caveat is one
     nobody reads.
