@@ -1,0 +1,621 @@
+<!DOCTYPE HTML>
+<!--
+    Guided setup for running your own package index.
+
+    A standalone document, like the landing page in theme/index.hbs: it is
+    copied verbatim by mdBook (which copies everything under src/ that is not
+    .md), so it lands at grimoire.rs/start.html with no chapter chrome, no
+    sidebar, and no mdBook CSS. docs/seo.py injects the canonical and OG tags
+    afterwards from the <title> and description below, and adds it to
+    sitemap.xml.
+
+    The design tokens below are a deliberate copy of the landing page's, not a
+    shared file: both documents are self-contained by contract (no external
+    host, no build step between them), and one stylesheet linked from a
+    Handlebars template and a static file is a third moving part for ~40 lines
+    of custom properties. Change a colour here and there, or neither.
+
+    The forge switch and the stepper are CSS only — radio inputs plus :has(),
+    the same mechanism the landing page's macOS/Windows switch uses. No script
+    drives navigation, so every step is reachable with JavaScript disabled and
+    a "Next" button is a <label>, not a handler. The only script on the page is
+    the clipboard helper, and the copy buttons stay hidden until it runs.
+
+    Step content is the short imperative path; each step links into
+    hosting-an-index.html for the reasoning. Keep it that way — the reference
+    page owns the "why", this page owns the order. Anything a reader does not
+    need in order to run the next command goes behind a <details>, so an open
+    step stays roughly one screen. Two exceptions stay expanded on purpose:
+    the registry-host allowlist and the namespace-equals-forge-namespace
+    assumption are trust decisions, and a collapsed security caveat is one
+    nobody reads.
+-->
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Run your own index — Grimoire</title>
+        <meta name="description" content="Step-by-step setup for a Grimoire package index on GitHub or GitLab Pages: scaffold the repository, deploy it, gate contributions, and point grim at it.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#161826">
+        <!-- Inline, not a link to theme/favicon.svg: mdBook content-hashes the
+             theme's favicons into the book root (favicon-c7beecce.svg), and a
+             static file cannot ask Handlebars what that name is. The mark is the
+             same one drawn in the header below. -->
+        <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Cpath fill='%23FFB02E' d='M64 5Q68.5 25.5 90 30 68.5 34.5 64 55 59.5 34.5 38 30 59.5 25.5 64 5Z'/%3E%3Cpath fill='%236D52F4' d='M16 60C32 54 50 58 64 68 78 58 96 54 112 60V98C96 92 78 96 64 106 50 96 32 92 16 98Z'/%3E%3Cpath fill='%23DCD2FC' d='M24 66c12-4 26-1 40 8 14-9 28-12 40-8v26c-12-4-26-2-40 6-14-8-28-10-40-6Z'/%3E%3C/svg%3E">
+        <style>
+:root {
+  --color-bg: #161826;
+  --color-text: #e9e9ed;
+  --color-accent: #9184d9;
+  --color-accent-300: #d2cefd;
+  --color-accent-900: #2b2741;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-heading);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--color-text);
+  text-wrap: pretty;
+  background:
+    radial-gradient(1100px 640px at 88% -220px, color-mix(in srgb, var(--color-accent-900) 62%, transparent), transparent 62%),
+    var(--color-bg);
+}
+
+a { color: var(--color-accent-300); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
+a:hover { color: var(--color-accent); }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+
+.wrap { max-width: 1160px; margin: 0 auto; padding-inline: clamp(20px, 5vw, 64px); }
+.narrow { max-width: 820px; }
+.mono { font-family: var(--font-mono); }
+.kicker { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.spacer { flex: 1; }
+.dim { color: color-mix(in srgb, var(--color-text) 52%, transparent); }
+
+pre { margin: 0; overflow-x: auto; font-family: var(--font-mono); }
+pre::-webkit-scrollbar { height: 6px; }
+pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radius: 6px; }
+
+.cta {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 20px; border-radius: var(--radius-md);
+  font-family: var(--font-heading); font-weight: 500; font-size: 14.5px; line-height: 1.2;
+  text-decoration: none; white-space: nowrap;
+}
+.cta-primary { color: #14121f; background: var(--color-accent); cursor: pointer; }
+.cta-primary:hover { color: #14121f; background: var(--color-accent-300); }
+.cta-secondary { color: var(--color-text); border: 1px solid var(--color-neutral-700); }
+.cta-secondary:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+
+/* — the forge switch: radio + :has(), no script.
+     Every step's forge-specific block is tagged [data-forge], and exactly one
+     of the two is displayed. A block with no tag is shared by both. — */
+[data-forgeblock]:has(input[value="gitlab"]:checked) [data-forge="github"] { display: none; }
+[data-forgeblock]:not(:has(input[value="gitlab"]:checked)) [data-forge="gitlab"] { display: none; }
+.forge {
+  display: inline-flex; align-items: center; gap: 9px; cursor: pointer;
+  padding: 9px 17px; border-radius: var(--radius-md);
+  border: 1px solid var(--color-neutral-800);
+  font-weight: 500; font-size: 14.5px; line-height: 1.2;
+  color: color-mix(in srgb, var(--color-text) 58%, transparent);
+  transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+.forge:hover { color: color-mix(in srgb, var(--color-text) 85%, transparent); }
+.forge:has(input:checked) {
+  color: var(--color-text);
+  border-color: color-mix(in srgb, var(--color-accent) 65%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+.forge:has(input:focus-visible) { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.forge input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.forge svg { display: block; width: 18px; height: 18px; fill: currentColor; flex: none; }
+
+/* — the stepper. One radio per step, so the browser enforces "exactly one
+     open" for free and the whole thing survives with scripting off.
+     `.step:has(~ .step > input:checked)` is "a later step is open", i.e. this
+     one is behind us — that is what draws the tick. — */
+.steps { margin: 0; padding: 0; list-style: none; }
+.step { position: relative; padding-left: 46px; padding-bottom: 6px; }
+.step > input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+/* The rail. It runs from just under this step's marker into the next one's
+   head padding, so the line is continuous between circles rather than
+   stopping at each step's box. `.num` is raised over it — an absolutely
+   positioned ::before otherwise paints above the in-flow marker. */
+.step:not(:last-child)::before {
+  content: ""; position: absolute; left: 15px; top: 46px; bottom: -11px;
+  width: 1px; background: var(--color-neutral-800);
+}
+.step-head {
+  display: flex; align-items: center; gap: 14px; cursor: pointer;
+  margin-left: -46px; padding: 11px 0;
+  font-weight: 500; font-size: 16.5px; letter-spacing: -0.01em;
+  color: color-mix(in srgb, var(--color-text) 62%, transparent);
+  transition: color 120ms ease;
+}
+.step-head:hover { color: var(--color-text); }
+.step:has(> input:checked) > .step-head { color: var(--color-text); }
+.step:has(> input:focus-visible) > .step-head { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: var(--radius-sm); }
+.num {
+  position: relative; z-index: 1;
+  flex: none; width: 31px; height: 31px; display: grid; place-items: center;
+  border-radius: 50%; border: 1px solid var(--color-neutral-700);
+  background: var(--color-bg);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.step:has(> input:checked) .num {
+  border-color: var(--color-accent); background: var(--color-accent); color: #14121f;
+}
+.step:has(~ .step > input:checked) .num {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  color: var(--color-accent);
+}
+/* The tick replaces the digit once the step is behind us. */
+.num .tick { display: none; }
+.step:has(~ .step > input:checked) .num .tick { display: block; width: 13px; height: 13px; fill: currentColor; }
+.step:has(~ .step > input:checked) .num .digit { display: none; }
+
+.step-body { display: none; padding-bottom: 26px; }
+.step:has(> input:checked) > .step-body { display: block; }
+.step-body p, details p { margin: 0 0 14px; font-size: 15px; line-height: 26px; max-width: 74ch; color: color-mix(in srgb, var(--color-text) 80%, transparent); }
+.step-body > p:last-child { margin-bottom: 0; }
+.step-body ul { margin: 0 0 14px; padding-left: 20px; font-size: 15px; line-height: 26px; color: color-mix(in srgb, var(--color-text) 80%, transparent); }
+.step-body li + li { margin-top: 5px; }
+
+/* — disclosures. The step body is the short imperative path; anything a
+     reader does not need in order to run the next command lives behind one
+     of these. <details> is the platform's own accordion — no script, works
+     with JS off, and Ctrl+F opens it in Chromium. — */
+details { margin: 0 0 14px; }
+summary {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  list-style: none; padding: 3px 0;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.4;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+summary::-webkit-details-marker { display: none; }
+summary::before {
+  content: "+"; flex: none;
+  width: 16px; height: 16px; display: grid; place-items: center;
+  border: 1px solid var(--color-neutral-800); border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1;
+}
+details[open] > summary::before { content: "−"; }
+summary:hover { color: var(--color-accent-300); }
+details > :not(summary) { margin-top: 12px; }
+details > :last-child { margin-bottom: 0; }
+
+.block {
+  border: 1px solid var(--color-neutral-800); border-radius: var(--radius-md);
+  padding: 12px 15px; margin: 0 0 14px;
+}
+.block pre { font-size: 13.5px; line-height: 26px; }
+.block .prompt { color: var(--color-accent); }
+
+table { border-collapse: collapse; width: 100%; margin: 0 0 14px; font-size: 14px; }
+th, td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--color-neutral-800); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; font-weight: 400; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+td:first-child { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+td { color: color-mix(in srgb, var(--color-text) 78%, transparent); }
+
+.aside {
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  padding: 2px 0 2px 15px; margin: 0 0 14px;
+  font-size: 14px; line-height: 24px;
+  color: color-mix(in srgb, var(--color-text) 68%, transparent);
+}
+.aside strong { color: color-mix(in srgb, var(--color-text) 88%, transparent); font-weight: 500; }
+
+.step-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; margin-top: 20px; }
+.step-foot .more { font-family: var(--font-mono); font-size: 12.5px; }
+
+/* — placeholders. A command carrying one is not runnable, so it does not get
+     a copy button: a button that hands you `acme` is worse than no button,
+     because you find out after pasting. Mark what has to be replaced instead,
+     and label the block so the absence reads as deliberate. — */
+.ph {
+  color: var(--color-accent-300);
+  border-bottom: 1px dashed color-mix(in srgb, var(--color-accent) 70%, transparent);
+}
+.block--fill { border-style: dashed; }
+.block--fill .label {
+  display: block; margin-bottom: 7px;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 45%, transparent);
+}
+
+.cmd-copy { display: none; }
+.js .cmd-copy {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; white-space: nowrap; cursor: pointer;
+  font-family: var(--font-heading); font-weight: 500; font-size: 14px; line-height: 1.2;
+  color: var(--color-accent); background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-md);
+  padding: 5.6px 2.8px;
+  opacity: 0.45; transition: opacity 120ms ease;
+}
+.cmd-copy:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+[data-cmd] { display: flex; align-items: center; gap: 11.2px; }
+[data-cmd] pre { flex: 1; min-width: 0; }
+[data-cmd]:hover .cmd-copy, [data-cmd]:focus-within .cmd-copy { opacity: 1; }
+
+@media (max-width: 560px) {
+  [data-navlinks] { display: none !important; }
+  .step { padding-left: 0; }
+  .step-head { margin-left: 0; }
+  .step:not(:last-child)::before { display: none; }
+}
+        </style>
+    </head>
+    <body>
+
+<header style="border-bottom:1px solid var(--color-neutral-800)">
+  <div class="wrap" style="padding-block:14px; display:flex; align-items:center; gap:clamp(16px,3vw,32px)">
+    <a href="index.html" style="display:flex; align-items:center; gap:8.4px; flex:none; text-decoration:none; color:inherit" aria-label="Back to grimoire.rs">
+      <span aria-hidden="true" style="font-size:17px; line-height:1; color:color-mix(in srgb, var(--color-text) 55%, transparent)">←</span>
+      <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display:block; flex:none">
+        <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
+          <path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path>
+          <path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path>
+          <path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path>
+          <path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path>
+          <path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path>
+          <path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path>
+        </g>
+      </svg>
+      <span style="font-weight:500; font-size:15px; letter-spacing:-0.01em">grimoire<span style="color:var(--color-accent)">.rs</span></span>
+    </a>
+    <span class="spacer"></span>
+    <span data-navlinks class="mono" style="display:flex; align-items:center; gap:clamp(14px,2.2vw,26px); font-size:13px">
+      <a href="https://index.grimoire.rs">index</a>
+      <a href="introduction.html">docs</a>
+      <a href="hosting-an-index.html">reference</a>
+      <a href="https://github.com/grimoire-rs/indexer">source</a>
+    </span>
+  </div>
+</header>
+
+<div class="wrap narrow">
+  <section style="padding:clamp(36px,4.5vw,56px) 0 clamp(24px,2.6vw,32px)">
+    <p class="kicker">run your own index</p>
+    <h1 style="font-weight:500; font-size:clamp(28px,3.2vw,38px); line-height:1.16; letter-spacing:-0.02em; margin:0">Stand up a package index in about ten minutes.</h1>
+    <p style="font-size:16px; line-height:27px; margin:20px 0 0; max-width:62ch; color:color-mix(in srgb, var(--color-text) 78%, transparent)">An index is the phone book <span class="mono">grim</span> browses — pointers into the OCI registries you already have, compiled to a static site your forge serves. No index server, no database, no account. Follow the steps; each one is a few commands.</p>
+  </section>
+
+  <div data-forgeblock>
+    <section style="padding:0 0 clamp(28px,3vw,38px)">
+      <p class="kicker">first, where does it live</p>
+      <div role="radiogroup" aria-label="Forge" style="display:flex; flex-wrap:wrap; gap:10px">
+        <label class="forge">
+          <input type="radio" name="forge" value="github" checked>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg>
+          GitHub
+        </label>
+        <label class="forge">
+          <input type="radio" name="forge" value="gitlab">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.45.044 13.587a.924.924 0 00.331 1.03L12 23.054l11.625-8.436a.92.92 0 00.33-1.031"></path></svg>
+          GitLab
+        </label>
+      </div>
+      <p class="dim" style="font-size:13px; margin:12px 0 0">Everything below switches with this. One repository runs on one forge, so the scaffolder renders one pipeline, not both.</p>
+    </section>
+
+    <div class="steps">
+
+      <!-- 1 -->
+      <div class="step">
+        <input type="radio" name="step" id="s1" checked>
+        <label class="step-head" for="s1">
+          <span class="num"><span class="digit">1</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Create the repository
+        </label>
+        <div class="step-body">
+          <div data-forge="github">
+            <p>Open <a href="https://github.com/grimoire-rs/index-template">grimoire-rs/index-template</a>, press <strong>Use this template → Create a new repository</strong>, and name it. The name shows up in the published URL.</p>
+            <div class="block block--fill">
+              <span class="label">your repository</span>
+              <pre><span class="prompt">$ </span>git clone <span class="ph">&lt;the URL GitHub gave you&gt;</span> &amp;&amp; cd <span class="ph">&lt;repo&gt;</span></pre>
+            </div>
+            <details>
+              <summary>Private repository?</summary>
+              <p>It works, but GitHub only serves a private repo's Pages site on Enterprise Cloud. Without it, hand consumers the clone URL and skip Pages entirely — grim reads an index straight over git.</p>
+            </details>
+          </div>
+          <div data-forge="gitlab">
+            <p>GitLab has no "use this template" button for a repository on another forge. Create an ordinary blank project and clone it; the scaffolder writes into it next.</p>
+            <div class="block block--fill">
+              <span class="label">your project</span>
+              <pre><span class="prompt">$ </span>git clone <span class="ph">&lt;the URL GitLab gave you&gt;</span> &amp;&amp; cd <span class="ph">&lt;project&gt;</span></pre>
+            </div>
+            <details>
+              <summary>Self-hosted instance?</summary>
+              <p>Same command with your own host. Nothing in the scaffold reaches out to gitlab.com.</p>
+            </details>
+          </div>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s2">Next</label>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2 -->
+      <div class="step">
+        <input type="radio" name="step" id="s2">
+        <label class="step-head" for="s2">
+          <span class="num"><span class="digit">2</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Scaffold it
+        </label>
+        <div class="step-body">
+          <div data-forge="github">
+            <p>The template ships one script. It installs the toolchain, then runs the scaffolder in place:</p>
+            <div class="block" data-cmd>
+              <pre><span class="prompt">$ </span>npm install &amp;&amp; npm run setup</pre>
+              <button type="button" class="cmd-copy" data-copy="npm install && npm run setup">copy</button>
+            </div>
+          </div>
+          <div data-forge="gitlab">
+            <p>Run the scaffolder in the clone. It ships on npm as <a href="https://www.npmjs.com/package/@grimoire-rs/indexer">@grimoire-rs/indexer</a> and needs <a href="https://nodejs.org/">Node.js</a> 22.14 or newer — nothing installed globally:</p>
+            <div class="block" data-cmd>
+              <pre><span class="prompt">$ </span>npx @grimoire-rs/indexer init .</pre>
+              <button type="button" class="cmd-copy" data-copy="npx @grimoire-rs/indexer init .">copy</button>
+            </div>
+          </div>
+          <p>It reads the <span class="mono">origin</span> remote, so the two hard questions — which forge, and where the site is served — already have the right answer waiting. Most of the rest is Enter.</p>
+          <div class="aside"><strong>The registry host is the one answer worth reading.</strong> It is the committed allowlist the contribution gate bounds every entry by, so widening it later is a reviewed commit rather than a CI variable.</div>
+          <details>
+            <summary>What each prompt decides</summary>
+            <table>
+              <thead><tr><th>Prompt</th><th>What it decides</th></tr></thead>
+              <tbody>
+                <tr><td>Index name</td><td>The identifier, and the default for the registry alias</td></tr>
+                <tr><td>Display title</td><td>The site's heading and <span class="mono">&lt;title&gt;</span></td></tr>
+                <tr><td>Repository URL</td><td>Read off <span class="mono">origin</span> — you will not be asked</td></tr>
+                <tr><td>Base URL</td><td>Derived from the repository. Type a custom domain here if you have one</td></tr>
+                <tr><td>Registry alias</td><td>The alias in the copy-paste "add this index" block on the site</td></tr>
+                <tr><td>Brand logo</td><td>A site-root path or URL; blank renders the title as text</td></tr>
+                <tr><td>Registry host</td><td><strong>The gate's allowlist.</strong> Entries pointing anywhere else are refused</td></tr>
+                <tr><td>Install now?</td><td>Yes — it writes <span class="mono">package-lock.json</span>, which CI installs from</td></tr>
+              </tbody>
+            </table>
+          </details>
+          <details>
+            <summary>Publish your own skills from this repository too?</summary>
+            <p>One question decides the layout. Answer yes and you get a <span class="mono">skills/</span> tree, a <span class="mono">publish.toml</span>, and a release pipeline — one repository holding the packages, the catalog that lists them, and the CI that ships both. Then it asks <strong>when</strong> a release happens.</p>
+            <table>
+              <thead><tr><th>Trigger</th><th>Fires on</th></tr></thead>
+              <tbody>
+                <tr><td>tag</td><td>A <span class="mono">v*</span> tag. Cutting a release is a deliberate act</td></tr>
+                <tr><td>default-branch</td><td>Every push to the trunk. Bumping the version in <span class="mono">publish.toml</span> <em>is</em> the release</td></tr>
+              </tbody>
+            </table>
+            <p>Either way the job publishes and then announces into the index beside it, and <span class="mono">grim publish</span> skips versions the registry already has — which makes the every-push option reasonable rather than reckless. Change your mind later by editing <span class="mono">ci.publish</span> and re-rendering.</p>
+            <div class="aside"><strong>Say no if other people will publish into this index.</strong> In the combined layout this repository's own announce is opened by its CI token — which triggers no workflows on GitHub, so that one pull request arrives past the gate and wants a human. It also needs <em>Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"</em>, off by default.</div>
+          </details>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s3">Next</label>
+            <a class="more" href="hosting-an-index.html#scaffold">What it writes →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 -->
+      <div class="step">
+        <input type="radio" name="step" id="s3">
+        <label class="step-head" for="s3">
+          <span class="num"><span class="digit">3</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Look at it before you push
+        </label>
+        <div class="step-body">
+          <p>The same renderer CI runs, on your machine, with hot reload:</p>
+          <div class="block" data-cmd>
+            <pre><span class="prompt">$ </span>npm run dev</pre>
+            <button type="button" class="cmd-copy" data-copy="npm run dev">copy</button>
+          </div>
+          <p>An empty catalog is the correct answer — you have not added entries yet. What you are checking is the branding: title, logo, and the "add this index" block that hands visitors the command to consume you.</p>
+          <details>
+            <summary>The four files worth knowing</summary>
+            <table>
+              <thead><tr><th>File</th><th>What it is</th></tr></thead>
+              <tbody>
+                <tr><td>index/…/metadata.json</td><td>The data. One pointer per package, under <span class="mono">index/&lt;host&gt;/&lt;namespace&gt;/&lt;package&gt;/</span></td></tr>
+                <tr><td>index.config.json</td><td>Branding, your registry, and the <span class="mono">ci</span> block the pipeline is rendered from</td></tr>
+                <tr><td>index-policy.json</td><td>The committed allowlist the gate reads — registry hosts, reserved namespaces</td></tr>
+                <tr><td>package-lock.json</td><td>Pins which renderer version builds and judges this index</td></tr>
+              </tbody>
+            </table>
+          </details>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s4">Next</label>
+            <a class="more" href="hosting-an-index.html#branding">Branding keys →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4 -->
+      <div class="step">
+        <input type="radio" name="step" id="s4">
+        <label class="step-head" for="s4">
+          <span class="num"><span class="digit">4</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Turn on Pages
+        </label>
+        <div class="step-body">
+          <div data-forge="github">
+            <p>In the repository, open <strong>Settings → Pages</strong> and set <strong>Source</strong> to <strong>GitHub Actions</strong>.</p>
+            <p>Do it now, before the first push. Until the source is set, the <span class="mono">pages</span> workflow runs green and deploys nothing — a failure mode that looks like success.</p>
+            <details>
+              <summary>Any credentials to set up?</summary>
+              <p>None. No deploy key, no <span class="mono">gh-pages</span> branch, no personal access token — the workflow uses the built-in <span class="mono">GITHUB_TOKEN</span>.</p>
+            </details>
+          </div>
+          <div data-forge="gitlab">
+            <p>Nothing to enable. The <span class="mono">pages</span> job publishes <span class="mono">public/</span>, and GitLab serves it at <span class="mono">https://&lt;group&gt;.gitlab.io/&lt;project&gt;</span> as soon as the job succeeds.</p>
+            <details>
+              <summary>Private instance that refuses remote CI includes?</summary>
+              <p>No change needed — the pipeline is committed in this repository and includes nothing from elsewhere.</p>
+            </details>
+          </div>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s5">Next</label>
+            <a class="more" href="hosting-an-index.html#deploy">Deploy notes →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5 -->
+      <div class="step">
+        <input type="radio" name="step" id="s5">
+        <label class="step-head" for="s5">
+          <span class="num"><span class="digit">5</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Push it
+        </label>
+        <div class="step-body">
+          <p>Commit everything the scaffolder wrote — including <span class="mono">package-lock.json</span>. CI installs from it, so it is not optional.</p>
+          <div class="block" data-cmd>
+            <pre><span class="prompt">$ </span>git add -A &amp;&amp; git commit -m "chore: bootstrap the index" &amp;&amp; git push</pre>
+            <button type="button" class="cmd-copy" data-copy="git add -A && git commit -m &quot;chore: bootstrap the index&quot; && git push">copy</button>
+          </div>
+          <p>That is the deploy. The pipeline enriches from the registry, builds, and publishes; your index is live at the base URL the scaffolder printed.</p>
+          <details>
+            <summary>Never hand-edit the workflow files</summary>
+            <p>The pipeline is committed here, not fetched — rendered from the <span class="mono">ci</span> block of <span class="mono">index.config.json</span>. Change that block and re-run <span class="mono">npm run ci</span>. A generated check re-renders and diffs on every push, so a hand-edit fails loudly instead of quietly forking your pipeline.</p>
+          </details>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s6">Next</label>
+            <a class="more" href="hosting-an-index.html#upgrading">Changing the CI →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6 -->
+      <div class="step">
+        <input type="radio" name="step" id="s6">
+        <label class="step-head" for="s6">
+          <span class="num"><span class="digit">6</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Guard contributions
+        </label>
+        <div class="step-body">
+          <p>An index other people publish into has to answer one question mechanically: <em>is this author allowed to write this entry?</em> The <span class="mono">validate</span> job is that answer. Exit 0 means eligible to merge; anything else means a human looks.</p>
+          <p>It refuses a change that:</p>
+          <ul>
+            <li>touches any path other than <span class="mono">index/&lt;host&gt;/&lt;ns&gt;/&lt;pkg&gt;/metadata.json</span>,</li>
+            <li>claims a namespace whose forge owner is not the author — checked against the <strong>numeric</strong> account id, so a recycled login cannot inherit it,</li>
+            <li>fails the metadata schema,</li>
+            <li>points at a registry host outside <span class="mono">index-policy.json</span>, or</li>
+            <li>names an OCI reference the registry cannot actually serve.</li>
+          </ul>
+          <p>It judges all of that against the <strong>committed</strong> state of your repository, never the state the change proposes — so a pull request cannot allowlist its own registry host in the same commit.</p>
+          <div class="aside"><strong>That rests on one assumption: registry namespace equals forge namespace.</strong> True for <span class="mono">ghcr.io/&lt;github-owner&gt;</span>, which is why the gate can be trusted to auto-merge there. If your registry's namespaces are not your forge's — a self-hosted registry, a shared vendor account, a mirror — leave auto-merge off and review by hand.</div>
+          <details>
+            <summary>How does someone claim a namespace?</summary>
+            <p>They do not — <strong>there is no claim step.</strong> The <span class="mono">&lt;namespace&gt;</span> segment of the path is looked up on your forge as a real account, organisation or group, every run. A first contribution is judged exactly like the hundredth; nothing is granted by an earlier merge, and nothing is stored. Names you never want claimed go in <span class="mono">reservedNamespaces</span>.</p>
+          </details>
+          <div data-forge="github">
+            <p>Nothing merges itself unless you ask. Auto-merge is <strong>off</strong> in a fresh scaffold; the gate reports, and you decide.</p>
+            <details>
+              <summary>Require the check, or let it merge on its own</summary>
+              <p>Require it: <strong>Settings → Rules</strong> (or branch protection) → require the status check named <span class="mono">validate</span>.</p>
+              <div class="aside"><strong>Add the check and the rule together.</strong> Requiring a context that never reports blocks every pull request forever, and looks exactly like the gate rejecting the contribution.</div>
+              <p>To let passing contributions land by themselves, set <span class="mono">"autoMerge": true</span> in the <span class="mono">ci</span> block and re-render with <span class="mono">npm run ci</span>.</p>
+            </details>
+          </div>
+          <div data-forge="gitlab">
+            <div class="aside"><strong>On GitLab the gate is advisory, and that is structural.</strong> A merge request supplies its own <span class="mono">.gitlab-ci.yml</span>, so a contributor can delete the job that judges them; and a fork's pipeline runs in the fork. Enforce it instance-side — a required merge check, protected-branch approval rules, or a compliance pipeline — or review merge requests by hand.</div>
+            <details>
+              <summary>Why is auto-merge GitHub-only?</summary>
+              <p>Merging an unreviewed contribution unattended needs a gate a contribution cannot edit, and GitLab has no equivalent of <span class="mono">pull_request_target</span>.</p>
+            </details>
+          </div>
+          <div class="step-foot">
+            <label class="cta cta-primary" for="s7">Next</label>
+            <a class="more" href="hosting-an-index.html#gate">How the gate works →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 7 -->
+      <div class="step">
+        <input type="radio" name="step" id="s7">
+        <label class="step-head" for="s7">
+          <span class="num"><span class="digit">7</span><svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 11.6 2.6 8l1.1-1.1 2.5 2.5 6-6L13.3 4.5z"></path></svg></span>
+          Use it, and fill it
+        </label>
+        <div class="step-body">
+          <p>Point grim at the published URL. From then on it is a browse source like any other, alongside the public index rather than instead of it:</p>
+          <div class="block block--fill">
+            <span class="label">alias and URL are yours</span>
+            <pre><span class="prompt">$ </span>grim config registry add <span class="ph">&lt;alias&gt;</span> --index <span class="ph">&lt;your Pages URL&gt;</span></pre>
+          </div>
+          <p>You do not have to assemble that by hand — your published index renders the finished line on its own front page. That is what you hand to anyone who asks how to use your index.</p>
+          <div class="block" data-cmd>
+            <pre><span class="prompt">$ </span>grim search review</pre>
+            <button type="button" class="cmd-copy" data-copy="grim search review">copy</button>
+          </div>
+          <p>Then put something in it. Publishers announce into your index by pointing their <span class="mono">publish.toml</span> at it and running:</p>
+          <div class="block" data-cmd>
+            <pre><span class="prompt">$ </span>grim publish --announce</pre>
+            <button type="button" class="cmd-copy" data-copy="grim publish --announce">copy</button>
+          </div>
+          <p>That pushes the packages to the registry and opens a pull request against your index with the pointers — forking automatically when the publisher has no push access. For an index you curate yourself, write the <span class="mono">metadata.json</span> by hand; the shape is four fields and an owner.</p>
+          <div class="step-foot">
+            <a class="cta cta-secondary" href="hosting-an-index.html">Full reference</a>
+            <a class="more" href="hosting-an-index.html#packages">Adding entries →</a>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <section style="padding:clamp(32px,3.6vw,46px) 0 0; border-top:1px solid var(--color-neutral-800); margin-top:clamp(28px,3vw,40px)">
+    <p class="kicker">three things people ask</p>
+    <details>
+      <summary>Every package says "No README available"</summary>
+      <p>That is an index that has not run <span class="mono">enrich</span>. An index stores pointers only; the pipeline reads the registry for READMEs, versions and logos before each build. Set <span class="mono">"enrich": false</span> in the <span class="mono">ci</span> block for a pointers-only site that never leaves the runner.</p>
+    </details>
+    <details>
+      <summary>Can I add an index to a repository that already exists?</summary>
+      <p>Not in a subdirectory. <span class="mono">index/</span> is resolved from the repository root by both the gate and the generated pipeline, so an index tucked below it builds locally and then rejects every contribution. Give it its own repository — that is the supported shape, and it costs nothing on either forge.</p>
+    </details>
+    <details>
+      <summary>Do I need the scaffolder at all?</summary>
+      <p>No. A git repository containing <span class="mono">index/&lt;host&gt;/&lt;ns&gt;/&lt;pkg&gt;/metadata.json</span> already <em>is</em> an index — grim walks the tree over git, no build and no CI. Reach for the scaffolder when you want the browsable catalog, the contribution gate, or both.</p>
+    </details>
+  </section>
+
+  <footer class="mono" style="padding:clamp(30px,3.4vw,44px) 0 clamp(40px,5vw,70px); display:flex; flex-wrap:wrap; gap:12px 32px; align-items:baseline; font-size:12.5px; line-height:24px">
+    <a href="index.html">home</a>
+    <a href="hosting-an-index.html">reference</a>
+    <a href="https://github.com/grimoire-rs/index-template">template repository</a>
+    <a href="https://github.com/grimoire-rs/indexer">grim-indexer</a>
+    <span class="spacer"></span>
+    <span class="dim">artifacts live in your registry, not ours</span>
+  </footer>
+</div>
+
+<script>
+    document.documentElement.classList.add('js');
+    document.addEventListener('click', function (e) {
+        const b = e.target.closest('[data-copy]');
+        if (!b || !navigator.clipboard) return;
+        navigator.clipboard.writeText(b.getAttribute('data-copy'));
+        const prev = b.textContent;
+        b.textContent = 'copied';
+        setTimeout(function () { b.textContent = prev; }, 1400);
+    });
+</script>
+    </body>
+</html>
