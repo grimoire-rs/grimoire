@@ -241,7 +241,7 @@ pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radi
     <span data-navlinks class="mono" style="display:flex; align-items:center; gap:clamp(14px,2.2vw,26px); font-size:13px">
       <a href="https://index.grimoire.rs">index</a>
       <a href="{{ path_to_root }}introduction.html">docs</a>
-      <a href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">vs&nbsp;code</a>
+      <a href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">vscode</a>
       <a href="https://github.com/grimoire-rs/grimoire">source</a>
     </span>
   </div>
@@ -255,7 +255,7 @@ pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radi
       <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:30px">
         <a class="cta cta-primary" href="#install">Install grim</a>
         <a class="cta cta-secondary" href="https://index.grimoire.rs">Browse the index</a>
-        <a class="cta cta-secondary" href="{{ path_to_root }}start.html">Create your own →</a>
+        <a class="cta cta-secondary" href="{{ path_to_root }}start.html">Create your own</a>
       </div>
     </div>
 
@@ -523,7 +523,10 @@ rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-styl
 <script>
     AsciinemaPlayer.create('{{ path_to_root }}demo.cast', document.getElementById('demo-player'), {
         autoPlay: true,
-        loop: true,
+        // Plays once. A looping terminal in the corner of the eye reads as
+        // motion to dismiss rather than something to watch; the player keeps
+        // its controls, so a second viewing is a click away.
+        loop: false,
         // Cap dead air. The recorded `grim add` blocked 13.6s on the
         // recording host's network — over half the cast was a frozen
         // screen, which reads as "the tool is slow" rather than "the
