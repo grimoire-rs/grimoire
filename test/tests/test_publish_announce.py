@@ -1743,3 +1743,100 @@ def test_publish_announce_github_fork_branch_pushed_when_pr_creation_fails(
     data = json.loads(result.stdout)
     assert data["announce"]["outcome"] == "branch-pushed", data
     assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
+
+
+# ── pointer-name collisions (#71) ──────────────────────────────────────────
+#
+# The index keys a pointer by entry NAME alone
+# (index/<host>/<ns>/<name>/metadata.json) with the kind a field inside the
+# file, so two kinds sharing a name render to one path and the later kind in
+# publish order silently wins. --announce refuses the run up front instead.
+
+
+def _collision_manifest(project_dir: Path, ns: str, name: str) -> None:
+    """A manifest whose skill and rule claim the same name."""
+    _make_skill_source(project_dir, name, "Collides.")
+    _write(
+        project_dir / "rules" / f"{name}.md",
+        f"---\npaths: ['**/*.md']\n---\n# {name}\nRule body.\n",
+    )
+    _write(
+        project_dir / "publish.toml",
+        f'registry = "{REGISTRY_HOST}"\n'
+        f'repository_prefix = "{ns}"\n'
+        f"\n[announce]\n"
+        f'repository = "{INDEX_URL}"\n'
+        'namespace = "acme"\n'
+        "owner_id = 42\n"
+        f"\n[skills.{name}]\n"
+        'version = "0.1.0"\n'
+        f"\n[rules.{name}]\n"
+        'version = "0.1.0"\n',
+    )
+
+
+def test_publish_announce_refuses_one_name_claimed_by_two_kinds(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-collide"
+    _collision_manifest(project_dir, ns, name)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert name in result.stderr and "overwrite each other" in result.stderr, result.stderr
+    # Refused before the first push: nothing reached the index.
+    assert _git(bare, "branch", "--list", "announce/*").strip() == ""
+
+
+def test_publish_announce_collision_refused_before_any_push(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """The guard runs ahead of the registry mutations, so a refused manifest
+    leaves no half-published artifact behind."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-collide-nopush"
+    _collision_manifest(project_dir, ns, name)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    assert runner.run("publish", "--announce", check=False).returncode == 65
+
+    # The skill would have been the first push of the batch; it is absent.
+    probe = runner.run(
+        "describe", f"{REGISTRY_HOST}/{ns}/skills/{name}:0.1.0", check=False
+    )
+    assert probe.returncode != 0, f"nothing may be published: {probe.stdout}"
+
+
+def test_publish_without_announce_allows_one_name_across_kinds(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """Without --announce the two entries publish to distinct OCI repositories
+    (skills/<name>, rules/<name>) — legitimate, so the guard stays out of it."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-collide-ok"
+    _collision_manifest(project_dir, ns, name)
+
+    runner = grim_at(project_dir)
+    result = runner.run("publish", check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_publish_announce_dry_run_reports_the_collision(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A dry run is the preview — it must fail the same way, so the collision
+    surfaces before a real publish is attempted."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-collide-dry"
+    _collision_manifest(project_dir, ns, name)
+
+    runner = grim_at(project_dir)
+    _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", "--dry-run", check=False)
+    assert result.returncode == 65, result.stderr
+    assert "overwrite each other" in result.stderr, result.stderr

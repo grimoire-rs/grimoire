@@ -730,6 +730,46 @@ fn validate_entry_name(name: &str, manifest_path: &std::path::Path) -> anyhow::R
     Ok(())
 }
 
+/// Collision gate for `--announce`: the index carries one pointer per entry
+/// **name** (`index/<host>/<ns>/<name>/metadata.json`), with the kind a field
+/// *inside* the file rather than a path segment. Two entries sharing a name
+/// therefore render to one path and silently overwrite each other — within a
+/// single run the later kind in publish order wins, and the earlier pointer is
+/// lost without a word (issue #71).
+///
+/// Refuse the whole run before the first push, so the registry never gains
+/// bytes the index cannot faithfully describe.
+///
+/// Announce-only by design: the same two names publish to *distinct* OCI
+/// repositories (`skills/x`, `bundles/x`), which is legitimate on its own.
+/// This detects collisions **within one manifest**; a name colliding with a
+/// pointer some earlier run announced is not visible here.
+fn validate_announce_names(entries: &[PlannedEntry], manifest_path: &std::path::Path) -> anyhow::Result<()> {
+    let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for entry in entries {
+        by_name
+            .entry(entry.name.as_str())
+            .or_default()
+            .push(kind_str(entry.kind));
+    }
+    let collisions: Vec<String> = by_name
+        .iter()
+        .filter(|(_, kinds)| kinds.len() > 1)
+        .map(|(name, kinds)| format!("'{name}' ({})", kinds.join(" + ")))
+        .collect();
+    if !collisions.is_empty() {
+        return Err(data_error_at(
+            manifest_path,
+            format!(
+                "--announce writes one index pointer per name, so these entries would overwrite \
+                 each other: {}; rename all but one, or publish without --announce",
+                collisions.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Structural gate for the resolved registry value (manifest `registry`
 /// or `--registry` override): an empty value or one carrying a path
 /// separator would compose a malformed or surprising OCI reference that
@@ -901,6 +941,13 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         &args.only,
         channel,
     );
+
+    // Announce pointers are keyed by entry name alone, so two kinds sharing a
+    // name would clobber each other in the index (#71). Checked before the
+    // first push — and on a dry run too, so the preview catches it.
+    if args.announce {
+        validate_announce_names(&entries, &args.manifest)?;
+    }
 
     // Resolve the description companions before any push: an explicit companion
     // path that does not exist is a data error (65) surfaced here, not partway
@@ -4588,6 +4635,69 @@ mod tests {
         let repos: Vec<&str> = planned.iter().map(|p| p.repository.as_str()).collect();
         assert!(repos.contains(&"localhost:5000/acme/skills/a"));
         assert!(repos.contains(&"localhost:5000/acme/skills/b"));
+    }
+
+    // ── announce pointer-name collision guard (#71) ───────────────────────
+    //
+    // The index keys a pointer by entry NAME alone, so two kinds sharing a name
+    // render to one `metadata.json` and the later kind in publish order wins.
+    // The guard refuses the run before any push instead of letting the earlier
+    // pointer disappear silently.
+
+    fn planned(kind: ArtifactKind, name: &str) -> PlannedEntry {
+        PlannedEntry {
+            kind,
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            reference: format!("localhost:5000/acme/{name}:1.0.0"),
+            pin: false,
+            name_not_appended: false,
+        }
+    }
+
+    #[test]
+    fn announce_names_reject_two_kinds_sharing_one_name() {
+        let entries = vec![
+            planned(ArtifactKind::Skill, "hex"),
+            planned(ArtifactKind::Bundle, "hex"),
+        ];
+        let err = validate_announce_names(&entries, Path::new("publish.toml"))
+            .expect_err("a name claimed by two kinds must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'hex'"), "the message names the collision: {msg}");
+        assert!(msg.contains("skill") && msg.contains("bundle"), "and both kinds: {msg}");
+        assert_eq!(
+            classify_error(&err),
+            ExitCode::DataError,
+            "a manifest that cannot be announced faithfully is a data error (65)"
+        );
+    }
+
+    #[test]
+    fn announce_names_accept_distinct_names_across_kinds() {
+        let entries = vec![
+            planned(ArtifactKind::Skill, "hex-core"),
+            planned(ArtifactKind::Bundle, "hex"),
+            planned(ArtifactKind::Rule, "hex-style"),
+        ];
+        validate_announce_names(&entries, Path::new("publish.toml"))
+            .expect("distinct names never collide, however many kinds are in play");
+    }
+
+    #[test]
+    fn announce_names_report_every_colliding_name() {
+        let entries = vec![
+            planned(ArtifactKind::Skill, "alpha"),
+            planned(ArtifactKind::Bundle, "alpha"),
+            planned(ArtifactKind::Rule, "beta"),
+            planned(ArtifactKind::Agent, "beta"),
+        ];
+        let err = validate_announce_names(&entries, Path::new("publish.toml")).expect_err("both names collide");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("'alpha'") && msg.contains("'beta'"),
+            "one run reports every collision, not just the first: {msg}"
+        );
     }
 
     // ── B1: description path containment guard ────────────────────────────

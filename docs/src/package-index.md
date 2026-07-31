@@ -84,6 +84,13 @@ scripts/                           # (optional) build/validation tooling
   multiple segments (`platform/ai`).
 - `<package>` is the package name and MUST equal the `name` field in the
   contained `metadata.json`.
+- A package name is **claimed by one kind per namespace**. The kind lives
+  *inside* `metadata.json`, not in the path, so a skill and a bundle both
+  named `hex` would resolve to one pointer and the second would overwrite
+  the first. `grim publish --announce` refuses a manifest whose entries
+  share a name before it pushes anything (exit 65) — publishing the same
+  two names *without* `--announce` stays fine, since they occupy distinct
+  OCI repositories.
 - Top-level directories that are not a host are *reserved* (vanity
   namespaces; maintainer-approved on the default index).
 

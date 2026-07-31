@@ -191,6 +191,12 @@ topic branch, then opens the pull/merge request via the forge REST API
 A GitLab host without an API token gets the MR via git push options; a
 plain git host gets the pushed branch and its URL printed.
 
+The pointer path carries no kind, so a name is claimed by one kind per
+namespace. A manifest whose entries share a name — a skill and a bundle
+both called `hex` — is refused before any push (exit 65), on a dry run
+too; drop `--announce` and the same two entries publish fine, to distinct
+OCI repositories.
+
 With an API-capable credential, `--announce` auto-forks: when you lack
 push access to the configured index, grim forks it for you and opens the
 cross-repo pull/merge request against the upstream automatically.
