@@ -296,6 +296,33 @@ async fn build_work(
     Ok((work, snapshots))
 }
 
+/// One `(kind, name)` claimed by bundles that disagree, with the sources
+/// that claimed it — collected so a single pass reports every conflict.
+struct Conflict {
+    kind: ArtifactKind,
+    name: String,
+    id: Identifier,
+    sources: String,
+}
+
+/// Render the conflicts beyond the first as a message suffix, so one run
+/// names the whole set. Empty when there is nothing beyond the first.
+fn describe_further_conflicts(rest: &[Conflict]) -> String {
+    if rest.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = rest
+        .iter()
+        .map(|c| format!("{} '{}' ({})", c.kind, c.name, c.sources))
+        .collect();
+    format!(
+        "; {n} further {noun} conflict the same way: {list}",
+        n = rest.len(),
+        noun = if rest.len() == 1 { "artifact" } else { "artifacts" },
+        list = list.join(", ")
+    )
+}
+
 /// Apply the bundle conflict policy to expanded members, returning the work
 /// items for those that survive. Pure (no I/O) so it is unit-tested
 /// directly.
@@ -305,6 +332,10 @@ async fn build_work(
 /// - coalesce members that all share one identifier;
 /// - fail closed with [`ResolveErrorKind::BundleConflict`] when two bundles
 ///   disagree.
+///
+/// Every conflict is collected before returning, not just the first: the
+/// user fixes each one by hand, and a fail-fast made them re-run `lock`
+/// once per conflict to discover the next.
 // The sibling resolution functions return the same `ResolveError` without
 // tripping `result_large_err` because they are `async` (their signature is
 // a `Future`, which the lint does not inspect). This is the one sync
@@ -325,6 +356,7 @@ fn merge_bundle_members(
     }
 
     let mut work = Vec::new();
+    let mut conflicts: Vec<Conflict> = Vec::new();
     for ((kind, name), group) in by_key {
         // A direct declaration overrides any bundle member.
         if direct_keys.contains(&(kind, name.clone())) {
@@ -339,13 +371,13 @@ fn merge_bundle_members(
                 .collect();
             sources.sort();
             sources.dedup();
-            let reference = ArtifactRef::registry(kind, name, first.id.clone());
-            return Err(ResolveError::new(
-                reference,
-                ResolveErrorKind::BundleConflict {
-                    sources: sources.join(", "),
-                },
-            ));
+            conflicts.push(Conflict {
+                kind,
+                name,
+                id: first.id.clone(),
+                sources: sources.join(", "),
+            });
+            continue;
         }
         // Record EVERY contributing bundle (sorted + deduped, so the lock
         // stays deterministic) — evicting one bundle later must keep a
@@ -361,6 +393,18 @@ fn merge_bundle_members(
             id: first.id.clone(),
             bundles,
         });
+    }
+
+    // The error is keyed on the first conflict (`BTreeMap` order, so the
+    // choice is deterministic); the rest ride along in the message.
+    if let Some(first) = conflicts.first() {
+        return Err(ResolveError::new(
+            ArtifactRef::registry(first.kind, first.name.clone(), first.id.clone()),
+            ResolveErrorKind::BundleConflict {
+                sources: first.sources.clone(),
+                others: describe_further_conflicts(&conflicts[1..]),
+            },
+        ));
     }
 
     Ok(work)
@@ -1556,6 +1600,47 @@ mod tests {
         let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
         assert!(matches!(err.kind, ResolveErrorKind::BundleConflict { .. }));
         assert_eq!(err.reference.name, "code-review");
+        let ResolveErrorKind::BundleConflict { others, .. } = &err.kind else {
+            unreachable!("matched above");
+        };
+        assert_eq!(others, "", "a lone conflict names nothing further");
+    }
+
+    #[test]
+    fn every_conflict_is_reported_in_one_pass() {
+        // Fail-fast named one conflict per run, so a user with four of them
+        // had to run `lock` four times to discover them all.
+        let mut members = Vec::new();
+        for name in ["handoff", "pickup", "ai-hygiene"] {
+            members.push(member(
+                ArtifactKind::Skill,
+                name,
+                &format!("ghcr.io/acme/{name}:stable"),
+                "ghcr.io/acme/stack-a",
+                "1",
+            ));
+            members.push(member(
+                ArtifactKind::Skill,
+                name,
+                &format!("ghcr.io/acme/{name}:1.4"),
+                "ghcr.io/acme/stack-b",
+                "2",
+            ));
+        }
+
+        let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
+        let msg = err.to_string();
+        // Keyed on the first in BTreeMap order, the other two ride along.
+        assert_eq!(err.reference.name, "ai-hygiene");
+        assert!(msg.contains("2 further artifacts conflict"), "got: {msg}");
+        for name in ["handoff", "pickup"] {
+            assert!(
+                msg.contains(name),
+                "every conflict must be named, missing {name} in: {msg}"
+            );
+        }
+        // Each further conflict carries its own sources, not just its name.
+        assert!(msg.contains("stack-a") && msg.contains("stack-b"), "got: {msg}");
     }
 
     #[test]

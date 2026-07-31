@@ -177,6 +177,35 @@ def test_disagreeing_bundles_fail_closed(
     assert "conflict" in (result.stderr + result.stdout).lower()
 
 
+def test_every_bundle_conflict_is_named_in_one_run(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """One `lock` run names every conflict, not just the first.
+
+    Fail-fast reported one per run, so a user with several had to fix and
+    re-run once per conflict to discover the next.
+    """
+    names = ["handoff", "pickup"]
+    members_a = [
+        ("skill", n, _member_skill(unique_repo, f"{n}-a", tag="stable").fq)
+        for n in names
+    ]
+    members_b = [
+        ("skill", n, _member_skill(unique_repo, f"{n}-b", tag="stable").fq)
+        for n in names
+    ]
+    bundle_a = make_bundle(f"{unique_repo}/stack-a", members_a, tag="1.0.0")
+    bundle_b = make_bundle(f"{unique_repo}/stack-b", members_b, tag="1.0.0")
+    write_config(project_dir, bundles={"a": bundle_a.fq, "b": bundle_b.fq})
+    runner = grim_at(project_dir)
+
+    result = runner.run("lock", check=False)
+    assert result.returncode == 78, result.stderr
+    output = result.stderr + result.stdout
+    for name in names:
+        assert name in output, f"{name} must be named in one run; got: {output}"
+
+
 def test_add_bundle_declares_and_locks(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

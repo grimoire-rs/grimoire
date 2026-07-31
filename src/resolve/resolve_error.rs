@@ -85,10 +85,14 @@ pub enum ResolveErrorKind {
     /// The same `(kind, name)` member is declared by two or more bundles
     /// with conflicting identifiers. Fail-closed: the user resolves it by
     /// declaring the member directly to choose one.
+    ///
+    /// `others` names every *further* conflicting member found in the same
+    /// pass (empty when this is the only one), so one run reports the whole
+    /// set instead of one per run.
     #[error(
-        "declared by multiple bundles with conflicting versions ({sources}); declare it directly in [skills]/[rules] to choose one"
+        "declared by multiple bundles with conflicting versions ({sources}); declare it directly in [skills]/[rules] to choose one{others}"
     )]
-    BundleConflict { sources: String },
+    BundleConflict { sources: String, others: String },
 
     /// A local path source failed to validate or pack at lock time: the
     /// path does not exist, the artifact fails kind validation, or a
