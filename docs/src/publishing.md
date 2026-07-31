@@ -962,8 +962,10 @@ Several additional conditions exit 65 at validation time:
 - **Empty manifest** — a manifest that declares no entries in any kind table
   exits 65 with "no packages declared in manifest". Grim treats this as a
   likely wrong-file mistake rather than a valid no-op.
-- **Oversized manifest** — a manifest file larger than 64 KiB is rejected
-  before parsing. This is an unconditional limit, not a warning.
+- **Oversized manifest** — a manifest file larger than 8 MiB is rejected
+  before parsing. This is an unconditional limit, not a warning. The same
+  cap applies to `grimoire.toml` and `grimoire.lock`; it is a bound against
+  a degenerate parse, set far above any real manifest.
 - **Prerelease or build-metadata `--version`** — a value like `1.2.3-rc.1`
   or `1.2.3+build` parses as semver but is not strict `X.Y.Z`. The
   manifest forbids prerelease/build entry versions, so grim rejects the

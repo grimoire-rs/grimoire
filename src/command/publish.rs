@@ -1429,8 +1429,8 @@ fn resolve_push_registry(flag: Option<&str>, manifest_push_registry: Option<&str
     })
 }
 
-/// Load and deserialize the publish manifest from `path`, enforcing the
-/// 64 KiB cap via `config::read_capped`.
+/// Load and deserialize the publish manifest from `path`, enforcing
+/// [`crate::config::FILE_SIZE_LIMIT_BYTES`] via `config::read_capped`.
 ///
 /// # Errors
 ///
@@ -1441,7 +1441,7 @@ fn resolve_push_registry(flag: Option<&str>, manifest_push_registry: Option<&str
 /// `grim release --kind bundle` (mirror of the `read_bundle_members`
 /// guard in `build.rs`).
 fn load_manifest(path: &std::path::Path) -> anyhow::Result<PublishManifest> {
-    // Read with 64 KiB cap. ConfigError's Display already embeds the path
+    // Read with the config-tier cap. ConfigError's Display already embeds the path
     // ("{path}: {kind}"), so we must NOT pass e.to_string() as the msg into
     // data_error_at — that would produce "{path}: {path}: …" double-path.
     // Instead inspect the ConfigError kind and produce a single-path message
@@ -1457,7 +1457,7 @@ fn load_manifest(path: &std::path::Path) -> anyhow::Result<PublishManifest> {
                 "manifest not found".to_string()
             }
             ConfigErrorKind::FileTooLarge { size: _, limit } => {
-                format!("manifest exceeds the {limit}-byte (64 KiB) size limit")
+                format!("manifest exceeds the {limit}-byte size limit")
             }
             ConfigErrorKind::Io(io_err) => {
                 // Use the source cause, not the ConfigError Display, to avoid
@@ -3306,16 +3306,16 @@ mod tests {
 
     #[test]
     fn load_manifest_rejects_oversized_file() {
-        // Files exceeding the 64 KiB cap must be rejected (ADR D2 / config::read_capped)
+        // Files exceeding the config-tier cap must be rejected before
+        // parsing (ADR D2 / config::read_capped).
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("publish.toml");
-        // Write a file exceeding 64 KiB
-        let big = "x".repeat(65 * 1024 + 1);
+        let big = "x".repeat(crate::config::FILE_SIZE_LIMIT_BYTES as usize + 1);
         std::fs::write(&path, big).unwrap();
-        let err = load_manifest(&path).expect_err("file larger than 64 KiB must be rejected");
+        let err = load_manifest(&path).expect_err("a file past the cap must be rejected");
         let msg = format!("{:#}", err);
         assert!(
-            msg.contains("large") || msg.contains("64") || msg.contains("limit") || msg.contains("size"),
+            msg.contains("large") || msg.contains("limit") || msg.contains("size"),
             "error must mention size/limit, got: {msg}"
         );
     }
@@ -4358,18 +4358,17 @@ mod tests {
     }
 
     #[test]
-    fn load_manifest_oversized_file_mentions_64_kib_limit() {
+    fn load_manifest_oversized_file_mentions_the_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("big.toml");
-        // Write a file exceeding 64 KiB
-        let big = "x".repeat(65 * 1024 + 1);
+        let big = "x".repeat(crate::config::FILE_SIZE_LIMIT_BYTES as usize + 1);
         std::fs::write(&path, big).unwrap();
         let err = load_manifest(&path).expect_err("oversized file must error");
         let msg = format!("{err:#}");
         // Must mention the limit
         assert!(
-            msg.contains("64") || msg.contains("KiB") || msg.contains("limit") || msg.contains("large"),
-            "oversized manifest error must mention the 64 KiB limit, got: {msg}"
+            msg.contains("limit") || msg.contains("large"),
+            "oversized manifest error must mention the size limit, got: {msg}"
         );
         // Must NOT double-embed the path
         let path_str = path.to_string_lossy();

@@ -1205,7 +1205,8 @@ x = "ghcr.io/acme/x:1"
     fn oversize_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grimoire.toml");
-        let padding = "# pad pad pad pad pad pad pad pad pad pad pad pad\n".repeat(2200);
+        let line = "# pad pad pad pad pad pad pad pad pad pad pad pad\n";
+        let padding = line.repeat(FILE_SIZE_LIMIT_BYTES as usize / line.len() + 1);
         let body = format!("{padding}\n[skills]\nx = \"ghcr.io/acme/x:1\"\n");
         assert!(body.len() as u64 > FILE_SIZE_LIMIT_BYTES);
         std::fs::write(&path, &body).unwrap();

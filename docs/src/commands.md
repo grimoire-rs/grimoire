@@ -555,7 +555,8 @@ grim status --check --format json
 offline, no side effects. It answers "what would grim act on from here?"
 without a consumer reimplementing the config walk-up, client detection, or
 registry precedence rules: the resolved scope, the config/lock/state paths
-(with existence flags for config and lock), the effective
+(with existence flags for config and lock, plus the reason an existing lock
+is unreadable), the effective
 [client](./concepts.md#clients) target set, the resolved
 [registry browse set](./configuration.md#multiple-registries), the primary
 registry, and whether the run is [offline](#global-options) (and why:
@@ -566,8 +567,13 @@ grim context --format json | jq .clients
 ```
 
 The JSON document is a single object: `{version, scope, workspace,
-config_path, config_exists, lock_path, lock_exists, state_path, grim_home,
-offline, offline_source, clients, registries, default_registry}`.
+config_path, config_exists, lock_path, lock_exists, lock_error, state_path,
+grim_home, offline, offline_source, clients, registries, default_registry}`.
+`lock_error` carries the reason an **existing** lock could not be read
+(oversized, corrupt, permission-denied) and is `null` when the lock reads
+fine or is simply absent — `lock_exists` alone answers "is it there", not
+"can grim use it". The exit code stays `0` either way; `context` reports
+the state, it does not fail on it.
 `registries` entries are `{alias, url, kind, default, authenticated}` with
 `kind` either `registry` or `index`. `authenticated` is a boolean: `true`
 when a credential for this registry's **host** is present in the

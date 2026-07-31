@@ -84,11 +84,26 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
         Some(OfflineSource::Flag)
     };
 
+    // The lock is read, not just probed. This is the command a user reaches
+    // for when install state looks wrong, and reporting `exists` for a lock
+    // no other command can read points the diagnosis away from the actual
+    // fault. A missing lock stays silent — that is the normal pre-lock
+    // state, not a failure. Read-only either way, so the exit code is
+    // unchanged: `context` reports facts, it does not judge them.
+    let lock_error = match crate::lock::lock_io::load(&scope.lock_path) {
+        Ok(_) => None,
+        Err(e) if e.is_not_found() => None,
+        // The kind's chain, not the whole error: `LockError`'s own Display
+        // leads with the path, already reported as `lock_path`.
+        Err(e) => Some(format!("{:#}", anyhow::Error::new(e.kind))),
+    };
+
     let report = ContextReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         scope: scope.scope.to_string(),
         config_exists: scope.config_path.exists(),
         lock_exists: scope.lock_path.exists(),
+        lock_error,
         workspace: scope.workspace,
         config_path: scope.config_path,
         lock_path: scope.lock_path,

@@ -1078,6 +1078,10 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
             state.set_loading(false);
         }
     }
+    // Last, so the success arm's status reset (`apply_catalog_results`)
+    // cannot wipe it: a catalog that loaded fine still renders every row
+    // `not-installed` when the lock behind the badges was unreadable.
+    note_unreadable_lock(ctx, lock.as_ref(), state);
 }
 
 /// Apply the success-arm state mutations of a catalog load to `state`.
@@ -1459,6 +1463,9 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     // the view immediately (and a freshly-installed one appears), instead of
     // lingering until the next query edit or `h` toggle.
     state.refresh_filter();
+    // A scope toggle can land on a scope whose lock is unreadable — the row
+    // states just derived from it are all `not-installed`, so say why.
+    note_unreadable_lock(ctx, lock.as_ref(), state);
 }
 
 /// Re-derive the install state of every cached bundle-member node for the
@@ -1577,6 +1584,32 @@ fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
         ConfigScope::Project => InstallState::load_project(&ctx.workspace, &ctx.roots.grim_home, &ctx.config_path),
         ConfigScope::Global => InstallState::load_global(&ctx.state_path, &ctx.roots),
     }
+}
+
+/// Surface a lock that exists but cannot be read, on the status line and in
+/// `tui.log`.
+///
+/// [`load_scope_for_badges`] treats the lock as advisory and degrades to
+/// "no pins known", which renders every row `not-installed` — on screen
+/// indistinguishable from a genuinely empty install. An unreadable lock
+/// (oversized, corrupt, permission-denied) is a fault the user has to see,
+/// so it is reported rather than swallowed; a simply absent lock is normal
+/// and stays silent.
+///
+/// Re-reads only when the advisory load already returned `None`, so the
+/// happy path costs nothing.
+fn note_unreadable_lock(ctx: &TuiContext, lock: Option<&GrimoireLock>, state: &mut TuiState) {
+    if lock.is_some() {
+        return;
+    }
+    let Err(e) = lock_io::load(&ctx.lock_path) else {
+        return;
+    };
+    if e.is_not_found() {
+        return;
+    }
+    tracing::warn!(error = %e, "lock unreadable; every row degrades to not-installed");
+    state.set_status(format!("lock unreadable — install state not shown: {e}"));
 }
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
@@ -5786,6 +5819,32 @@ mod p2_app_member_node_tests {
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
         }
+    }
+
+    #[test]
+    fn note_unreadable_lock_speaks_up_for_a_bad_lock_and_stays_quiet_for_a_missing_one() {
+        // Regression: an unreadable lock used to be swallowed by the
+        // advisory `.ok()`, leaving a catalog rendered entirely
+        // `not-installed` with nothing on screen or in `tui.log` saying the
+        // lock had been skipped — indistinguishable from a lost setup.
+        let tmp = tempfile::tempdir().unwrap();
+        // Only `lock_path` is read here; the rest of the context is inert.
+        let ctx = c12_ctx(tmp.path());
+
+        let mut state = TuiState::new();
+        note_unreadable_lock(&ctx, None, &mut state);
+        assert_eq!(
+            state.status_line, "",
+            "a lock that does not exist yet is normal, not a fault"
+        );
+
+        std::fs::write(&ctx.lock_path, "this is not TOML at all\n[[[").unwrap();
+        note_unreadable_lock(&ctx, None, &mut state);
+        assert!(
+            state.status_line.contains("lock unreadable"),
+            "an unreadable lock must reach the status line, got {:?}",
+            state.status_line
+        );
     }
 
     #[tokio::test]

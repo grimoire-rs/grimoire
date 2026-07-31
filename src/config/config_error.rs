@@ -63,7 +63,7 @@ pub enum ConfigErrorKind {
     #[error("invalid TOML")]
     TomlParse(#[source] toml::de::Error),
 
-    /// The file on disk exceeds the 64 KiB size cap.
+    /// The file on disk exceeds [`crate::config::FILE_SIZE_LIMIT_BYTES`].
     #[error("file too large: {size} bytes exceeds limit of {limit} bytes")]
     FileTooLarge { size: u64, limit: u64 },
 

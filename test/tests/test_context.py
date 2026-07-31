@@ -28,6 +28,7 @@ def test_context_reports_scope_paths_clients_registries(
     assert doc["config_exists"] is True
     assert doc["lock_path"] == str(project_dir / "grimoire.lock")
     assert doc["lock_exists"] is False
+    assert "lock_error" in doc and doc["lock_error"] is None
     assert doc["state_path"] == str(project_dir / ".grimoire" / "state.json")
     assert doc["grim_home"], "grim_home always resolves"
     assert doc["version"], "version always present"
@@ -46,6 +47,29 @@ def test_context_reports_scope_paths_clients_registries(
         assert isinstance(r["authenticated"], bool)
         assert r["authenticated"] is False, r
     assert doc["default_registry"] == registry
+
+
+def test_context_reports_an_unreadable_lock(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """`lock_exists` answers "is it there", `lock_error` answers "can grim use it".
+
+    `context` is the command a user reaches for when install state looks
+    wrong; reporting a bare `exists` for a lock no other command can read
+    points the diagnosis away from the actual fault.
+    """
+    _project(project_dir, registry)
+    (project_dir / "grimoire.lock").write_text("not a lock at all\n[[[\n")
+    runner = grim_at(project_dir)
+
+    doc = runner.json("context")
+    assert doc["lock_exists"] is True
+    assert doc["lock_error"], "an unreadable lock must be reported, not just 'exists'"
+
+    plain = runner.plain("context")
+    assert any("unreadable" in ln for ln in plain.stdout.splitlines()), plain.stdout
+    # Read-only introspection: reporting the fault is not failing on it.
+    assert plain.returncode == 0
 
 
 def test_context_registry_authenticated_from_docker_config(

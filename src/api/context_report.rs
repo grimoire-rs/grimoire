@@ -9,8 +9,10 @@
 //! JSON format: a single object (not an array — the command always
 //! concerns exactly one resolved scope):
 //! `{version, scope, workspace, config_path, config_exists, lock_path,
-//! lock_exists, state_path, grim_home, offline, offline_source, clients,
-//! registries, default_registry}`. `offline_source` is `"flag"`, `"env"`,
+//! lock_exists, lock_error, state_path, grim_home, offline, offline_source,
+//! clients, registries, default_registry}`. `lock_error` is the reason an
+//! existing lock could not be read, else `null`.
+//! `offline_source` is `"flag"`, `"env"`,
 //! or `null` (when online); `clients` is the effective client-target
 //! name list (names only — vendor on-disk layout is unstable, and
 //! `grim status --format json` `outputs` is the path channel);
@@ -99,6 +101,12 @@ pub struct ContextReport {
     pub lock_path: PathBuf,
     /// Whether the lock file exists on disk.
     pub lock_exists: bool,
+    /// Why the existing lock could not be read (oversized, corrupt,
+    /// permission-denied), else `null`. `lock_exists: true` alone answers
+    /// "is it there", not "can grim use it" — and every state-bearing
+    /// command degrades or fails on an unreadable lock, so the diagnostic
+    /// surface has to distinguish the two.
+    pub lock_error: Option<String>,
     /// The install-state file path for the scope.
     pub state_path: PathBuf,
     /// The resolved Grimoire data root (`$GRIM_HOME`).
@@ -138,7 +146,11 @@ impl Printable for ContextReport {
                 format!(
                     "{} ({})",
                     self.lock_path.display(),
-                    if self.lock_exists { "exists" } else { "absent" }
+                    match (&self.lock_error, self.lock_exists) {
+                        (Some(e), _) => format!("unreadable: {e}"),
+                        (None, true) => "exists".to_string(),
+                        (None, false) => "absent".to_string(),
+                    }
                 ),
             ],
             vec!["state".into(), self.state_path.display().to_string()],
@@ -183,6 +195,7 @@ mod tests {
             config_exists: true,
             lock_path: PathBuf::from("/w/grimoire.lock"),
             lock_exists: false,
+            lock_error: None,
             state_path: PathBuf::from("/w/.grimoire/state.json"),
             grim_home: PathBuf::from("/home/u/.grimoire"),
             offline: true,

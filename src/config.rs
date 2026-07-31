@@ -40,14 +40,22 @@ pub use resolved::ResolvedOptions;
 #[allow(unused_imports)]
 pub use scope::ConfigScope;
 
-/// Maximum size of a `grimoire.toml` / `grimoire.lock` file. A larger
-/// file is a sanity failure (pathological input in CI), surfaced as a
-/// structured error rather than a degenerate parse.
-pub const FILE_SIZE_LIMIT_BYTES: u64 = 64 * 1024;
+/// Maximum size of a `grimoire.toml` / `grimoire.lock` / `publish.toml`
+/// file. A larger file is a sanity failure (pathological input in CI),
+/// surfaced as a structured error rather than a degenerate parse.
+///
+/// These are **local** files — two of them (the lock, and `grimoire.toml`
+/// under `grim add` / `grim config set`) are written by grim itself, and
+/// none is network input, so the cap is a bound against a degenerate parse
+/// rather than a DoS control. It is therefore set far above any real
+/// declaration: a 140-artifact lock with ~110-character registry paths and
+/// bundle provenance is ~80 KiB, which the previous 64 KiB cap rejected —
+/// leaving grim unable to read a lock it had just generated.
+pub const FILE_SIZE_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
 use std::path::Path;
 
-/// Read a config-tier file at `path`, enforcing the 64 KiB size cap.
+/// Read a config-tier file at `path`, enforcing [`FILE_SIZE_LIMIT_BYTES`].
 ///
 /// `metadata().len()` fast-paths a normal oversized file without reading
 /// any bytes; the post-read length re-check guards synthetic files

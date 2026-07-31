@@ -25,7 +25,7 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Load a lock from `path`, enforcing the 64 KiB cap.
+/// Load a lock from `path`, enforcing [`config::FILE_SIZE_LIMIT_BYTES`].
 ///
 /// # Errors
 ///
@@ -43,9 +43,17 @@ pub fn load(path: &Path) -> Result<GrimoireLock, LockError> {
 /// content changed but the new timestamp equals the previous string, it
 /// is bumped by one second so the change is observable.
 ///
+/// The serialized lock is measured against the same
+/// [`config::FILE_SIZE_LIMIT_BYTES`] the load path enforces: writing a
+/// lock this build would refuse to read back is never correct — every
+/// later command, including the one that would undo the growth, fails on
+/// a file grim itself produced. The check runs before the write, so the
+/// previous (readable) lock survives.
+///
 /// # Errors
 ///
-/// Serialization or I/O failure with `path` context.
+/// [`LockErrorKind::FileTooLarge`], or serialization / I/O failure — all
+/// with `path` context.
 pub fn save(path: &Path, lock: &GrimoireLock, previous: Option<&GrimoireLock>) -> Result<(), LockError> {
     let mut to_write = lock.clone();
     if let Some(prev) = previous {
@@ -58,11 +66,21 @@ pub fn save(path: &Path, lock: &GrimoireLock, previous: Option<&GrimoireLock>) -
     }
 
     let serialized = to_write.to_toml_string().map_err(|e| LockError::new(path, e.kind))?;
+    let size = serialized.len() as u64;
+    if size > config::FILE_SIZE_LIMIT_BYTES {
+        return Err(LockError::new(
+            path,
+            LockErrorKind::FileTooLarge {
+                size,
+                limit: config::FILE_SIZE_LIMIT_BYTES,
+            },
+        ));
+    }
     atomic_write(path, serialized.as_bytes()).map_err(|e| LockError::new(path, LockErrorKind::Io(e)))
 }
 
-/// Read a lock file with the shared 64 KiB cap, mapping config-tier I/O /
-/// size errors onto the lock-tier taxonomy.
+/// Read a lock file with the shared config-tier size cap, mapping
+/// config-tier I/O / size errors onto the lock-tier taxonomy.
 fn read_capped(path: &Path) -> Result<String, LockError> {
     config::read_capped(path).map_err(|e| {
         let kind = match e.kind {
@@ -413,11 +431,72 @@ mod tests {
         assert_eq!(mode & 0o777, 0o644);
     }
 
+    /// A lock of `count` artifacts with realistically long registry paths
+    /// (the shape a bundle-heavy, deep-path setup produces).
+    fn bulky_lock(count: usize) -> GrimoireLock {
+        let prefix = "b".repeat(180);
+        let skills = (0..count)
+            .map(|i| {
+                artifact(
+                    &format!("artifact-with-a-fairly-long-binding-name-{i:06}"),
+                    pinned(&format!("{prefix}/artifact-{i:06}"), Some("latest"), 'a'),
+                )
+            })
+            .collect();
+        lock_with("2026-04-19T00:00:00Z", skills)
+    }
+
+    #[test]
+    fn save_then_load_round_trips_a_lock_past_the_old_64_kib_cap() {
+        // Regression: a normal 140-artifact setup with deep registry paths
+        // serializes past 64 KiB, and grim then refused to read back the
+        // lock it had just written (every command after it exited 78).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let lock = bulky_lock(300);
+
+        save(&path, &lock, None).expect("a bulky lock must be writable");
+        let written = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            written > 64 * 1024,
+            "precondition: {written} bytes must exceed the old cap"
+        );
+
+        let loaded = load(&path).expect("grim must read back the lock it wrote");
+        assert_eq!(loaded.skills.len(), 300);
+    }
+
+    #[test]
+    fn save_refuses_a_lock_over_the_cap_and_leaves_the_previous_file() {
+        // The write path enforces the same cap as the read path, so an
+        // unreadable lock is never produced in the first place.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let small = lock_with("2026-04-19T00:00:00Z", vec![artifact("x", pinned("acme/x", None, 'a'))]);
+        save(&path, &small, None).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // ~290 bytes per entry ⇒ comfortably past the 8 MiB cap.
+        let huge = bulky_lock(40_000);
+        let err = save(&path, &huge, None).expect_err("an oversized lock must be refused");
+        assert!(
+            matches!(err.kind, LockErrorKind::FileTooLarge { .. }),
+            "expected FileTooLarge, got {:?}",
+            err.kind
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the previous, readable lock must survive a refused write"
+        );
+    }
+
     #[test]
     fn load_rejects_oversized() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grimoire.lock");
-        let padding = "# pad pad pad pad pad pad pad pad pad pad pad pad\n".repeat(2200);
+        let line = "# pad pad pad pad pad pad pad pad pad pad pad pad\n";
+        let padding = line.repeat(FILE_SIZE_LIMIT_BYTES as usize / line.len() + 1);
         let body = format!(
             "{padding}\n[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
              declaration_hash = \"sha256:{a}\"\ngenerated_by = \"grim 0.1.0\"\n\

@@ -253,7 +253,9 @@ Two read-only companions:
 - `grim context` reports the resolved invocation context — scope,
   config/lock/state paths (with existence flags), effective client set
   (names only), registry browse set, default registry, offline mode —
-  so scripts need not reimplement walk-up or precedence rules. Each JSON
+  so scripts need not reimplement walk-up or precedence rules. `lock_error`
+  carries the reason an *existing* lock cannot be read (else `null`):
+  `lock_exists` answers "is it there", not "can grim use it". Each JSON
   `registries` entry carries an `authenticated` boolean: whether the
   docker-compatible credential store holds an entry for that registry's
   host (a file-only probe — it never invokes a credential helper, so a

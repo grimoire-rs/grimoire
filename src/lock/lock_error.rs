@@ -26,6 +26,16 @@ impl LockError {
             kind,
         }
     }
+
+    /// Whether this is the plain "no lock file yet" failure — the one
+    /// outcome every reader treats as normal rather than as a fault.
+    ///
+    /// Everything else (oversize, corrupt, unreadable, version-gated) is a
+    /// real failure that must reach the user; readers that degrade to
+    /// "nothing is installed" have to tell the two apart.
+    pub fn is_not_found(&self) -> bool {
+        matches!(&self.kind, LockErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+    }
 }
 
 impl std::fmt::Display for LockError {
@@ -63,7 +73,8 @@ pub enum LockErrorKind {
     #[error("TOML serialization error")]
     TomlSerialize(#[source] toml::ser::Error),
 
-    /// The lock file exceeds the 64 KiB size cap.
+    /// The lock file exceeds [`crate::config::FILE_SIZE_LIMIT_BYTES`] —
+    /// on read, or on write before the file is replaced.
     #[error("file too large: {size} bytes exceeds limit of {limit} bytes")]
     FileTooLarge { size: u64, limit: u64 },
 

@@ -119,15 +119,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // load failure (78) and propagates.
     let lock = match lock_io::load(&scope.lock_path) {
         Ok(l) => Some(l),
-        Err(e) => {
-            if let crate::lock::lock_error::LockErrorKind::Io(io) = &e.kind
-                && io.kind() == std::io::ErrorKind::NotFound
-            {
-                None
-            } else {
-                return Err(crate::error::Error::from(e).into());
-            }
-        }
+        Err(e) if e.is_not_found() => None,
+        Err(e) => return Err(crate::error::Error::from(e).into()),
     };
 
     // A corrupt state file degrades to "nothing installed" for a
