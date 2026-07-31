@@ -31,6 +31,24 @@ CARGO_TOML = Path(__file__).parent.parent / "Cargo.toml"
 VERSION_RE = re.compile(r"(<[^>]*\bdata-grim-version\b[^>]*>)[^<]*(</)")
 CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 
+# The chapter pages get their footer injected here rather than in the theme,
+# because the `{{else}}` branch of theme/index.hbs is mdBook's stock template
+# kept byte for byte so an upgrade can be diffed against `mdbook init --theme`.
+# Editing it to add a footer would quietly end that. The landing page and the
+# standalone pages carry their own footer in source and are skipped.
+FOOTER_LINKS = (
+    ("{root}index.html", "home"),
+    ("{root}introduction.html", "documentation"),
+    ("{root}stability.html", "stability"),
+    ("{root}privacy.html", "privacy"),
+    ("https://github.com/grimoire-rs/grimoire/blob/main/LICENSE", "Apache-2.0"),
+)
+FOOTER_STYLE = (
+    "margin:3rem 0 1rem; padding-top:1.2rem; border-top:1px solid var(--table-border-color);"
+    "display:flex; flex-wrap:wrap; gap:0.6rem 2rem; align-items:baseline;"
+    "font-size:0.85em; opacity:0.75"
+)
+
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL)
 DESC_RE = re.compile(r'<meta name="description" content="(.*?)">', re.DOTALL)
 MAIN_RE = re.compile(r"<main>(.*?)</main>", re.DOTALL)
@@ -51,6 +69,26 @@ def crate_version():
     if not match:
         raise SystemExit(f"seo.py: no version found in {CARGO_TOML}")
     return match.group(1)
+
+
+def add_footer(html, rel_path):
+    """Append the site footer to a chapter page.
+
+    A page that already has a footer in source (the landing page, start.html,
+    privacy.html) is left alone, and so is anything without a `<main>` — that
+    is the marker of the stock chapter template.
+    """
+    if "<footer" in html or "</main>" not in html:
+        return html
+    root = "../" * (len(rel_path.parts) - 1)
+    links = "".join(
+        f'<a href="{href.format(root=root)}">{label}</a>' for href, label in FOOTER_LINKS
+    )
+    footer = (
+        f'</main>\n<footer style="{FOOTER_STYLE}">{links}'
+        "<span>artifacts live in your registry, not ours</span></footer>"
+    )
+    return html.replace("</main>", footer, 1)
 
 
 def page_url(rel_path):
@@ -94,10 +132,11 @@ def process(path, version):
     original = path.read_text(encoding="utf-8")
     # Runs before the canonical early-return below, so a re-run over an
     # already-tagged build still corrects a stale version.
-    html, stamped = VERSION_RE.subn(rf"\g<1>{version}\g<2>", original)
+    html = VERSION_RE.sub(rf"\g<1>{version}\g<2>", original)
+    html = add_footer(html, rel)
 
     if 'rel="canonical"' in html:
-        if stamped and html != original:
+        if html != original:
             path.write_text(html, encoding="utf-8")
         return url  # already tagged — idempotent otherwise
 
