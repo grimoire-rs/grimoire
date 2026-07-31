@@ -255,6 +255,16 @@ a data error (65) at install or fetch, never a silent drop. A descriptor
 that does not author the new fields serializes byte-identically across
 the boundary.
 
+A lock's **size** cuts the same way, for one release boundary. Builds up
+to and including 0.12.0 read `grimoire.toml`, `grimoire.lock`, and
+`publish.toml` under a 64 KiB cap; later builds read them under 8 MiB. A
+lock past 64 KiB — reachable around 140 artifacts with deep registry paths,
+sooner once [bundle](./concepts.md#bundles) provenance is counted — is
+therefore unreadable by a 0.12.0-or-older binary, which exits 78 like any
+other lock failure. Nothing regressed at that boundary: those builds could
+not read such a lock even when they had written it themselves, which is why
+the cap moved. A lock under 64 KiB is unaffected in both directions.
+
 ### Local path sources are trusted like a build script {#limitations-path-source-trust}
 
 A [local path source][path-sources] — a `grimoire.toml` skill, rule,
