@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Post-process the built mdBook site: inject canonical/OG/Twitter tags and
-write a sitemap.xml.
+"""Post-process the built mdBook site: stamp the crate version, inject
+canonical/OG/Twitter tags, and write a sitemap.xml.
 
 mdBook 0.5.3's Handlebars context registers no string helpers, so a theme
 partial has no way to turn `introduction.md` (the only path it sees) into
@@ -23,6 +23,14 @@ BOOK_DIR = Path(__file__).parent / "book"
 # canonical; 404.html and toc.html are not indexable content pages either.
 SKIP = {"404.html", "print.html", "toc.html"}
 
+CARGO_TOML = Path(__file__).parent.parent / "Cargo.toml"
+# The landing page used to carry the version as a literal, and it went stale
+# the first time nobody remembered to edit it by hand. Any element tagged
+# `data-grim-version` has its text replaced with the crate's version at build
+# time, so a release bump reaches the site with no second edit.
+VERSION_RE = re.compile(r"(<[^>]*\bdata-grim-version\b[^>]*>)[^<]*(</)")
+CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
+
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL)
 DESC_RE = re.compile(r'<meta name="description" content="(.*?)">', re.DOTALL)
 MAIN_RE = re.compile(r"<main>(.*?)</main>", re.DOTALL)
@@ -30,6 +38,19 @@ PARA_RE = re.compile(r"<p>(.*?)</p>", re.DOTALL)
 TAG_RE = re.compile(r"<[^>]+>")
 FALLBACK_TITLE = "Grimoire"
 FALLBACK_DESC = "An OCI-backed package manager for AI skills and rules"
+
+
+def crate_version():
+    """The `[package] version` from Cargo.toml.
+
+    Read off the first `version = "…"` in the file, which is the package's own
+    — dependency versions all live under `[dependencies]` further down, and
+    `[package]` is the first table.
+    """
+    match = CARGO_VERSION_RE.search(CARGO_TOML.read_text(encoding="utf-8"))
+    if not match:
+        raise SystemExit(f"seo.py: no version found in {CARGO_TOML}")
+    return match.group(1)
 
 
 def page_url(rel_path):
@@ -66,13 +87,19 @@ def chapter_summary(html):
     return None
 
 
-def process(path):
-    """Inject tags if missing; always return this page's canonical URL."""
+def process(path, version):
+    """Stamp the version, inject tags if missing, return the canonical URL."""
     rel = path.relative_to(BOOK_DIR)
     url = page_url(rel)
-    html = path.read_text(encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+    # Runs before the canonical early-return below, so a re-run over an
+    # already-tagged build still corrects a stale version.
+    html, stamped = VERSION_RE.subn(rf"\g<1>{version}\g<2>", original)
+
     if 'rel="canonical"' in html:
-        return url  # already tagged — idempotent, nothing to do
+        if stamped and html != original:
+            path.write_text(html, encoding="utf-8")
+        return url  # already tagged — idempotent otherwise
 
     title_match = TITLE_RE.search(html)
     title = title_match.group(1) if title_match else FALLBACK_TITLE
@@ -117,13 +144,14 @@ def write_sitemap(urls):
 
 
 def main():
+    version = crate_version()
     urls = [
-        process(path)
+        process(path, version)
         for path in sorted(BOOK_DIR.rglob("*.html"))
         if path.name not in SKIP
     ]
     write_sitemap(urls)
-    print(f"seo.py: processed {len(urls)} pages, wrote sitemap.xml")
+    print(f"seo.py: processed {len(urls)} pages at v{version}, wrote sitemap.xml")
 
 
 if __name__ == "__main__":

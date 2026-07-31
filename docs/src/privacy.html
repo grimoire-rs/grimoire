@@ -1,0 +1,188 @@
+<!DOCTYPE HTML>
+<!--
+    Privacy notice (Art. 13 GDPR).
+
+    A standalone document, like the landing page in theme/index.hbs and
+    start.html: mdBook copies everything under src/ that is not .md, so it
+    lands at grimoire.rs/privacy.html with no chapter chrome. docs/seo.py adds
+    the canonical and OG tags afterwards and lists it in sitemap.xml. Never
+    write a literal title element into this comment — seo.py matches the first
+    one in the file.
+
+    Every factual claim here was checked against the built site and against
+    GitHub's own documentation, and has to be re-checked if either moves:
+
+      * No third-party subresources. `grep` over docs/book for script/link/img
+        with an external host returns only grimoire.rs (canonical and OG URLs).
+        Fonts are the system stack; asciinema-player is vendored into src/.
+        Adding a CDN font, an analytics snippet, or an embedded video makes
+        the "nothing is loaded from anywhere else" claim false.
+      * localStorage keys are `mdbook-theme` and `mdbook-sidebar`, on the
+        mdBook chapter pages only. The landing page and start.html store
+        nothing. No cookies anywhere — `document.cookie` appears nowhere in
+        the build.
+      * The GitHub Pages IP-logging quote is from docs.github.com's "What is
+        GitHub Pages" page; the DPF certification is from GitHub's General
+        Privacy Statement.
+
+    No Impressum accompanies this page, deliberately: the site is private and
+    non-commercial, and § 5 DDG would require a ladungsfähige Anschrift. That
+    is the owner's decision, not an oversight — do not "fix" it by adding one.
+-->
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Privacy — Grimoire</title>
+        <meta name="description" content="What grimoire.rs processes when you visit: no cookies, no analytics, no third-party resources — only the server logs GitHub Pages keeps.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#161826">
+        <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Cpath fill='%23FFB02E' d='M64 5Q68.5 25.5 90 30 68.5 34.5 64 55 59.5 34.5 38 30 59.5 25.5 64 5Z'/%3E%3Cpath fill='%236D52F4' d='M16 60C32 54 50 58 64 68 78 58 96 54 112 60V98C96 92 78 96 64 106 50 96 32 92 16 98Z'/%3E%3Cpath fill='%23DCD2FC' d='M24 66c12-4 26-1 40 8 14-9 28-12 40-8v26c-12-4-26-2-40 6-14-8-28-10-40-6Z'/%3E%3C/svg%3E">
+        <style>
+:root {
+  --color-bg: #161826;
+  --color-text: #e9e9ed;
+  --color-accent: #9184d9;
+  --color-accent-300: #d2cefd;
+  --color-accent-900: #2b2741;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --radius-md: 8px;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-heading);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--color-text);
+  text-wrap: pretty;
+  background:
+    radial-gradient(1100px 640px at 88% -220px, color-mix(in srgb, var(--color-accent-900) 62%, transparent), transparent 62%),
+    var(--color-bg);
+}
+
+a { color: var(--color-accent-300); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
+a:hover { color: var(--color-accent); }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+
+.wrap { max-width: 1160px; margin: 0 auto; padding-inline: clamp(20px, 5vw, 64px); }
+.narrow { max-width: 760px; }
+.mono { font-family: var(--font-mono); }
+.kicker { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.spacer { flex: 1; }
+.dim { color: color-mix(in srgb, var(--color-text) 52%, transparent); }
+
+h2 {
+  margin: clamp(30px, 3.4vw, 42px) 0 12px;
+  font-weight: 500; font-size: 17px; letter-spacing: -0.01em;
+}
+p { margin: 0 0 14px; font-size: 15px; line-height: 26px; color: color-mix(in srgb, var(--color-text) 80%, transparent); }
+ul { margin: 0 0 14px; padding-left: 20px; font-size: 15px; line-height: 26px; color: color-mix(in srgb, var(--color-text) 80%, transparent); }
+li + li { margin-top: 5px; }
+
+.aside {
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  padding: 2px 0 2px 15px; margin: 0 0 14px;
+  font-size: 14px; line-height: 24px;
+  color: color-mix(in srgb, var(--color-text) 68%, transparent);
+}
+.aside strong { color: color-mix(in srgb, var(--color-text) 88%, transparent); font-weight: 500; }
+
+table { border-collapse: collapse; width: 100%; margin: 0 0 14px; font-size: 14px; }
+th, td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--color-neutral-800); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; font-weight: 400; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+td:first-child { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+td { color: color-mix(in srgb, var(--color-text) 78%, transparent); }
+
+@media (max-width: 560px) {
+  [data-navlinks] { display: none !important; }
+}
+        </style>
+    </head>
+    <body>
+
+<header style="border-bottom:1px solid var(--color-neutral-800)">
+  <div class="wrap" style="padding-block:14px; display:flex; align-items:center; gap:clamp(16px,3vw,32px)">
+    <a href="index.html" style="display:flex; align-items:center; gap:8.4px; flex:none; text-decoration:none; color:inherit" aria-label="Back to grimoire.rs">
+      <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display:block; flex:none">
+        <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
+          <path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path>
+          <path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path>
+          <path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path>
+          <path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path>
+          <path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path>
+          <path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path>
+        </g>
+      </svg>
+      <span style="font-weight:500; font-size:15px; letter-spacing:-0.01em">grimoire<span style="color:var(--color-accent)">.rs</span></span>
+      <span class="mono dim" data-grim-version style="font-size:12px">dev</span>
+    </a>
+    <span class="spacer"></span>
+    <span data-navlinks class="mono" style="display:flex; align-items:center; gap:clamp(14px,2.2vw,26px); font-size:13px">
+      <a href="https://index.grimoire.rs">index</a>
+      <a href="introduction.html">docs</a>
+      <a href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">vscode</a>
+      <a href="https://github.com/grimoire-rs/grimoire">source</a>
+    </span>
+  </div>
+</header>
+
+<div class="wrap narrow">
+  <section style="padding:clamp(36px,4.5vw,56px) 0 clamp(12px,1.6vw,20px)">
+    <p class="kicker">privacy</p>
+    <h1 style="font-weight:500; font-size:clamp(26px,3vw,34px); line-height:1.16; letter-spacing:-0.02em; margin:0">What this site processes.</h1>
+    <p style="font-size:16px; line-height:27px; margin:20px 0 0; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Almost nothing. grimoire.rs is a set of static files. There is no account, no form, no analytics, no cookie, and nothing on any page is loaded from another company's server. What remains is the request your browser makes to fetch the page, which the host logs — this notice exists to say so precisely.</p>
+  </section>
+
+  <h2>Who is responsible</h2>
+  <p>Michael Herwig — <a href="mailto:contact@michael-herwig.de">contact@michael-herwig.de</a>. This is a private, non-commercial open-source project.</p>
+
+  <h2>Server logs</h2>
+  <p>The site is hosted on <a href="https://pages.github.com/">GitHub Pages</a>. GitHub's own documentation states that <em>"when a GitHub Pages site is visited, the visitor's IP address is logged and stored for security purposes, regardless of whether the visitor has signed into GitHub or not."</em> Alongside the IP address, a request of this kind ordinarily records the time, the file requested, the referring page, and your browser's user-agent string.</p>
+  <table>
+    <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+    <tbody>
+      <tr><td>purpose</td><td>Delivering the site and keeping it secure — abuse and attack defence</td></tr>
+      <tr><td>legal basis</td><td>Art. 6(1)(f) GDPR, legitimate interest in a working and secure site</td></tr>
+      <tr><td>collected by</td><td>GitHub, not by me. I have no access to these logs and receive no reports from them</td></tr>
+      <tr><td>retention</td><td>Determined by GitHub — see their privacy statement below</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Hosting, and the transfer to the US</h2>
+  <p>GitHub Inc. is based in the United States. GitHub has certified to the U.S. Department of Commerce that it adheres to the <a href="https://www.dataprivacyframework.gov/">EU–U.S. Data Privacy Framework</a> principles, and additionally relies on the European Commission's standard contractual clauses (Implementing Decision 2021/914) for transfers from the EU, UK and Switzerland. The details, including retention periods and GitHub's own contact points, are in the <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub General Privacy Statement</a>.</p>
+
+  <h2>No cookies, no tracking</h2>
+  <p>This site sets no cookies and runs no analytics, no tag manager, and no advertising or tracking script. Nothing is fetched from a third-party server while you read: the typefaces are the ones already on your system, and the terminal player used on the front page is served from this domain rather than from a CDN.</p>
+  <p>The documentation chapters store two values in your browser's local storage — <span class="mono">mdbook-theme</span> and <span class="mono">mdbook-sidebar</span> — so the site keeps the colour theme and sidebar state you chose. They stay on your device, are never transmitted anywhere, and hold no identifier. Clearing your browser's site data removes them.</p>
+
+  <h2>Links to other sites</h2>
+  <p>Pages here link out to GitHub, npm, the Visual Studio Marketplace and container registries. Following such a link hands you to that operator, whose own privacy notice then applies. Nothing is sent to them until you click.</p>
+
+  <h2>Your rights</h2>
+  <p>Under the GDPR you may request access to your personal data (Art. 15), its rectification (Art. 16) or erasure (Art. 17), restriction of processing (Art. 18), data portability (Art. 20), and you may object to processing based on legitimate interest (Art. 21). Write to the address above.</p>
+  <div class="aside"><strong>One honest limitation:</strong> the log data described here is held by GitHub, and I never see it. A request about those logs is one only GitHub can answer — I will point you at them rather than pretend otherwise.</div>
+  <p>You also have the right to complain to a data protection supervisory authority (Art. 77 GDPR), in the member state of your residence, place of work, or of the alleged infringement.</p>
+
+  <h2>Changes</h2>
+  <p>This notice describes the site as it stands. If a page ever starts loading something from elsewhere, this page changes in the same commit.</p>
+  <p class="dim" style="font-size:13px">Last updated 31 July 2026.</p>
+
+  <footer class="mono" style="padding:clamp(30px,3.4vw,44px) 0 clamp(40px,5vw,70px); margin-top:clamp(24px,2.6vw,34px); border-top:1px solid var(--color-neutral-800); padding-top:22px; display:flex; flex-wrap:wrap; gap:12px 32px; align-items:baseline; font-size:12.5px; line-height:24px">
+    <a href="introduction.html">documentation</a>
+    <a href="stability.html">stability</a>
+    <a href="privacy.html">privacy</a>
+    <a href="https://github.com/grimoire-rs/grimoire/blob/main/LICENSE">Apache-2.0</a>
+    <span class="spacer"></span>
+    <span class="dim">artifacts live in your registry, not ours</span>
+  </footer>
+</div>
+
+    </body>
+</html>
