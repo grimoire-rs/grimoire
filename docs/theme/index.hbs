@@ -521,8 +521,8 @@ rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-styl
 </script>
 <script src="{{ path_to_root }}asciinema-player.min.js"></script>
 <script>
-    AsciinemaPlayer.create('{{ path_to_root }}demo.cast', document.getElementById('demo-player'), {
-        autoPlay: true,
+    var demo = document.getElementById('demo-player');
+    var player = AsciinemaPlayer.create('{{ path_to_root }}demo.cast', demo, {
         // Plays once. A looping terminal in the corner of the eye reads as
         // motion to dismiss rather than something to watch; the player keeps
         // its controls, so a second viewing is a click away.
@@ -532,7 +532,24 @@ rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-styl
         // screen, which reads as "the tool is slow" rather than "the
         // registry was far away". A local cold add runs in ~1s.
         idleTimeLimit: 1,
+        // Fetch up front so playback starts the instant it is asked to.
+        preload: true,
     });
+
+    // Start when the player is actually on screen, not on load. It sits below
+    // the hero and runs ~10s after `idleTimeLimit`, so autoplaying at load
+    // meant a one-shot cast finished before most people scrolled to it — the
+    // looping version only ever hid that. Fires once, then stops observing.
+    if (window.IntersectionObserver) {
+        var seen = new IntersectionObserver(function (entries) {
+            if (!entries.some(function (e) { return e.isIntersecting; })) return;
+            seen.disconnect();
+            player.play();
+        }, { threshold: 0.4 });
+        seen.observe(demo);
+    } else {
+        player.play();
+    }
 </script>
     </body>
 </html>
