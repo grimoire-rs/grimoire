@@ -288,6 +288,7 @@ optional — a missing file renders the defaults. The ones worth knowing:
 | `repoUrl`, `docsUrl` | Header links. `null` hides either |
 | `vscodeExtension` | The VS Code deep link on each package. `null` drops it |
 | `footerNote`, `attribution` | Footer sentence, and the "built with Grimoire" line |
+| `footerLinks` | Extra footer links — `[{ "label": "privacy", "href": "https://…" }]`. Absolute URLs only, none by default. Where the pages behind them are required at all depends on where you are and what the index is for |
 | `customCss` | A CSS file inlined after the default tokens — it wins over them |
 
 Colors, spacing, and the kind badges are CSS custom properties defined

@@ -9,18 +9,25 @@
     write a literal title element into this comment — seo.py matches the first
     one in the file.
 
-    Every factual claim here was checked against the built site and against
-    GitHub's own documentation, and has to be re-checked if either moves:
+    This notice covers grimoire.rs AND index.grimoire.rs, which is a separate
+    repository (grimoire-rs/index) rendered by @grimoire-rs/indexer and linked
+    here through its `footerLinks` config key. A claim below that stops being
+    true of *either* site has to be corrected here.
 
-      * No third-party subresources. `grep` over docs/book for script/link/img
-        with an external host returns only grimoire.rs (canonical and OG URLs).
-        Fonts are the system stack; asciinema-player is vendored into src/.
-        Adding a CDN font, an analytics snippet, or an embedded video makes
-        the "nothing is loaded from anywhere else" claim false.
-      * localStorage keys are `mdbook-theme` and `mdbook-sidebar`, on the
-        mdBook chapter pages only. The landing page and start.html store
-        nothing. No cookies anywhere — `document.cookie` appears nowhere in
-        the build.
+    Every factual claim was checked against both builds and against GitHub's
+    own documentation, and has to be re-checked if any of them moves:
+
+      * No third-party subresources, on either site. `grep` over docs/book and
+        over the index's dist/ for script/link/img with an external host
+        returns nothing off-domain. Fonts are the system stack;
+        asciinema-player is vendored into src/; package logos live in the
+        index repo's enrich/ tree rather than being hot-linked from a
+        registry. A CDN font, an analytics snippet, or a remote logo would
+        make the "nothing is loaded from anywhere else" claim false.
+      * localStorage keys are `mdbook-theme` and `mdbook-sidebar` on the
+        mdBook chapter pages, and `theme` on the index. The landing page,
+        start.html and this page store nothing. No cookies anywhere —
+        `document.cookie` appears in neither build.
       * The GitHub Pages IP-logging quote is from docs.github.com's "What is
         GitHub Pages" page; the DPF certification is from GitHub's General
         Privacy Statement.
@@ -137,14 +144,14 @@ td { color: color-mix(in srgb, var(--color-text) 78%, transparent); }
   <section style="padding:clamp(36px,4.5vw,56px) 0 clamp(12px,1.6vw,20px)">
     <p class="kicker">privacy</p>
     <h1 style="font-weight:500; font-size:clamp(26px,3vw,34px); line-height:1.16; letter-spacing:-0.02em; margin:0">What this site processes.</h1>
-    <p style="font-size:16px; line-height:27px; margin:20px 0 0; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Almost nothing. grimoire.rs is a set of static files. There is no account, no form, no analytics, no cookie, and nothing on any page is loaded from another company's server. What remains is the request your browser makes to fetch the page, which the host logs — this notice exists to say so precisely.</p>
+    <p style="font-size:16px; line-height:27px; margin:20px 0 0; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Almost nothing. <span class="mono">grimoire.rs</span> and <span class="mono">index.grimoire.rs</span> are both sets of static files. There is no account, no form, no analytics, no cookie, and nothing on any page of either is loaded from another company's server. What remains is the request your browser makes to fetch the page, which the host logs — this notice exists to say so precisely, and it covers both sites.</p>
   </section>
 
   <h2>Who is responsible</h2>
   <p>Michael Herwig — <a href="mailto:contact@michael-herwig.de">contact@michael-herwig.de</a>. This is a private, non-commercial open-source project.</p>
 
   <h2>Server logs</h2>
-  <p>The site is hosted on <a href="https://pages.github.com/">GitHub Pages</a>. GitHub's own documentation states that <em>"when a GitHub Pages site is visited, the visitor's IP address is logged and stored for security purposes, regardless of whether the visitor has signed into GitHub or not."</em> Alongside the IP address, a request of this kind ordinarily records the time, the file requested, the referring page, and your browser's user-agent string.</p>
+  <p>Both sites are hosted on <a href="https://pages.github.com/">GitHub Pages</a>. GitHub's own documentation states that <em>"when a GitHub Pages site is visited, the visitor's IP address is logged and stored for security purposes, regardless of whether the visitor has signed into GitHub or not."</em> Alongside the IP address, a request of this kind ordinarily records the time, the file requested, the referring page, and your browser's user-agent string.</p>
   <table>
     <thead><tr><th>Question</th><th>Answer</th></tr></thead>
     <tbody>
@@ -159,8 +166,8 @@ td { color: color-mix(in srgb, var(--color-text) 78%, transparent); }
   <p>GitHub Inc. is based in the United States. GitHub has certified to the U.S. Department of Commerce that it adheres to the <a href="https://www.dataprivacyframework.gov/">EU–U.S. Data Privacy Framework</a> principles, and additionally relies on the European Commission's standard contractual clauses (Implementing Decision 2021/914) for transfers from the EU, UK and Switzerland. The details, including retention periods and GitHub's own contact points, are in the <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub General Privacy Statement</a>.</p>
 
   <h2>No cookies, no tracking</h2>
-  <p>This site sets no cookies and runs no analytics, no tag manager, and no advertising or tracking script. Nothing is fetched from a third-party server while you read: the typefaces are the ones already on your system, and the terminal player used on the front page is served from this domain rather than from a CDN.</p>
-  <p>The documentation chapters store two values in your browser's local storage — <span class="mono">mdbook-theme</span> and <span class="mono">mdbook-sidebar</span> — so the site keeps the colour theme and sidebar state you chose. They stay on your device, are never transmitted anywhere, and hold no identifier. Clearing your browser's site data removes them.</p>
+  <p>Neither site sets a cookie, and neither runs analytics, a tag manager, or any advertising or tracking script. Nothing is fetched from a third-party server while you read: the typefaces are the ones already on your system, the terminal player on the front page is served from this domain rather than a CDN, and the package logos on the index are stored in the index repository rather than hot-linked from a registry.</p>
+  <p>Both sites remember the display choices you make, in your browser's local storage: <span class="mono">mdbook-theme</span> and <span class="mono">mdbook-sidebar</span> on the documentation chapters, and <span class="mono">theme</span> on the package index. They stay on your device, are never transmitted anywhere, and hold no identifier. Clearing your browser's site data removes them.</p>
 
   <h2>Links to other sites</h2>
   <p>Pages here link out to GitHub, npm, the Visual Studio Marketplace and container registries. Following such a link hands you to that operator, whose own privacy notice then applies. Nothing is sent to them until you click.</p>
