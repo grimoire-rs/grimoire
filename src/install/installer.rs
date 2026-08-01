@@ -516,19 +516,8 @@ async fn install_one<M: ArtifactMaterializer>(
         .as_ref()
         .is_some_and(|rec| !rec.source.eq_content(&artifact.source));
     let mut materialize_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
-    if pin_changed && let Some(rec) = &recorded {
-        for out in &rec.outputs {
-            let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>() else {
-                continue;
-            };
-            // An out-of-scope client (anchor root absent on this machine) cannot
-            // be re-materialized; leave it dropped, as today. Only re-materialize
-            // a still-active recorded client not already in the target set.
-            if out.target.anchor.root(roots).is_some() && !materialize_set.contains(&client) {
-                materialize_set.push(client);
-            }
-        }
-    }
+    let mut preserved = preserved_recorded_clients(pin_changed, recorded.as_ref(), target, roots, &mut materialize_set);
+    preserved.sort_by_key(|c| c.as_str());
 
     // A vendor may decline a kind it has no native target for (Codex declines
     // rules), or host the kind but have no surface for it at this scope
@@ -924,14 +913,24 @@ async fn install_one<M: ArtifactMaterializer>(
     // would re-introduce the very desync this fix removes. Dropping the record
     // entry leaves the on-disk files untouched (D3).
     //
+    // The one exception is `preserved`: an unselected client whose copy the
+    // user edited was deliberately NOT re-materialized (see
+    // [`preserved_recorded_clients`]), so its output is carried forward at its
+    // own hash. That is not the stale-pin desync — the record keeps describing
+    // bytes that really are on disk, `status` reports it `modified`, and
+    // `grim update`'s reaper is the thing that gets to decide its fate.
+    //
     // Capture "nothing materialized this run" from the fresh outputs BEFORE
     // they merge with carried-forward prior outputs: an all-declined install
     // (e.g. Codex-only rule) wrote no new file even when the record still
     // carries a prior client's output, and must report `Skipped`.
     let nothing_installed = client_records.is_empty();
     let mut outputs = client_records;
-    if !pin_changed && let Some(rec) = &recorded {
+    if let Some(rec) = &recorded {
         for out in &rec.outputs {
+            if pin_changed && !preserved.iter().any(|c| out.client == c.as_str()) {
+                continue;
+            }
             // Already materialized (in the effective set) — the fresh output is
             // already in `outputs` at `record.pinned`; skip the stale copy.
             if materialize_set.iter().any(|c| out.client == c.as_str()) {
@@ -1081,6 +1080,61 @@ fn refuse_uninstallable_fallback(
         return Ok(());
     }
     Err(InstallError::without_reference(InstallErrorKind::NoInstallableClient))
+}
+
+/// Extend `materialize_set` with the recorded clients a pin change must carry
+/// along, and return the ones it must instead leave alone.
+///
+/// A pin is an artifact-level property: every output in a record sits at
+/// `record.source`, so a subset selection at a NEW pin has to re-materialize
+/// the other recorded clients too, or they are stranded at the old pin with
+/// their record entry dropped and their files untracked.
+///
+/// **Except when the user has edited one of them.** A client absent from the
+/// selection is absent because the caller narrowed `--client` or dropped it
+/// from `[options].clients`; either way its copy is not this pass's to roll
+/// forward, and `grim update` implies force, so re-materializing it silently
+/// overwrites the edit. `reap_dropped_clients` then compares grim's own fresh
+/// bytes against the record, finds them intact, deletes the file, and reports
+/// an empty `kept_modified_clients` — the documented promise void, and the
+/// user's edit gone. Those outputs are returned so the caller can carry them
+/// forward verbatim instead: the record keeps describing what is really on
+/// disk (`status` reads `modified`, which is true) and the reaper sees the
+/// true bytes.
+///
+/// An unreadable or unresolvable output is treated as intact — "cannot hash"
+/// is not evidence of an edit, and this decision only ever chooses whether to
+/// leave something alone.
+fn preserved_recorded_clients(
+    pin_changed: bool,
+    recorded: Option<&InstallRecord>,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    materialize_set: &mut Vec<crate::install::client_target::ClientTarget>,
+) -> Vec<crate::install::client_target::ClientTarget> {
+    let mut preserved = Vec::new();
+    let (true, Some(rec)) = (pin_changed, recorded) else {
+        return preserved;
+    };
+    for out in &rec.outputs {
+        let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>() else {
+            continue;
+        };
+        // An out-of-scope client (anchor root absent on this machine) cannot be
+        // re-materialized; leave it dropped, as today.
+        if out.target.anchor.root(roots).is_none() || materialize_set.contains(&client) {
+            continue;
+        }
+        let drifted = out
+            .current_hash(roots, Containment::AllowRelocatedAncestor)
+            .is_ok_and(|actual| actual != out.content_hash);
+        if drifted && !target.clients().contains(&client) {
+            preserved.push(client);
+        } else {
+            materialize_set.push(client);
+        }
+    }
+    preserved
 }
 
 fn effective_supporting_clients(
@@ -1972,16 +2026,9 @@ async fn install_mcp(
         .as_ref()
         .is_some_and(|rec| !rec.source.eq_content(&artifact.source));
     let mut register_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
-    if pin_changed && let Some(rec) = &recorded {
-        for out in &rec.outputs {
-            let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>() else {
-                continue;
-            };
-            if out.target.anchor.root(roots).is_some() && !register_set.contains(&client) {
-                register_set.push(client);
-            }
-        }
-    }
+    // Same rule as the file path: an unselected client whose managed entry the
+    // user edited is not this pass's to roll forward.
+    let preserved = preserved_recorded_clients(pin_changed, recorded.as_ref(), target, roots, &mut register_set);
 
     // Plan every client, THEN write. The file path already gates its whole
     // client set before the first `remove_path`; this path used to gate and
@@ -2231,8 +2278,11 @@ async fn install_mcp(
     // Merge with the prior record (same-pin additive `--client` installs) —
     // identical semantics to the materialized path in `install_one`.
     let mut outputs = client_records;
-    if !pin_changed && let Some(rec) = &recorded {
+    if let Some(rec) = &recorded {
         for out in &rec.outputs {
+            if pin_changed && !preserved.iter().any(|c| out.client == c.as_str()) {
+                continue;
+            }
             if register_set.iter().any(|c| out.client == c.as_str()) {
                 continue;
             }
