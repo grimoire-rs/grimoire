@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0] - 2026-07-27
+## [0.12.0] - 2026-08-01
 
 ### Added
 
@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconcile the vendor surface across docs, rules, and catalog
 - Add an upgrading page for the visible behaviour changes
 - Show every client on the landing page and align the matrix marks
+- Lead with the self-hosted index as the adoption path
+- Raise the index section above the demo and link it from quickstart
+- Use reference-style links on the hosting page
+- Anchor the hosting page on the Helm chart-repo precedent
+- Add a guided setup page for running your own index
+- Bring the hosting reference up to the repo-owned CI
+- Describe what a re-run of `init` actually preserves
+- Drop the back arrow from the guided setup header
+- Play the demo once, and tidy two header strings
+- Start the demo when it scrolls into view, not on page load
+- Add a privacy notice, and stamp the version from Cargo.toml
+- Give the chapters a footer, and widen the guided setup page
+- Extend the privacy notice to cover index.grimoire.rs
+- Record the 64 KiB lock downgrade boundary *(stability)*
+- Install grim as ocx.sh/grimoire/cli *(installation)*
 
 ### Fixed
 
@@ -57,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reap outputs stranded at a relocated vendor root *(install)*
 - Warn by name when a reserved namespace drops a skill key *(install)*
 - Close the reaper overlap gap and escape untrusted text *(install)*
+- Warn (not info) when the forge declines to open the PR/MR *(announce)*
+- Fold the forge's response body into the PR/MR decline reason *(announce)*
+- Keep seo.py from lifting a comment into og:title *(docs)*
+- Refuse a name claimed by two kinds *(announce)*
+- Stop rejecting a lock grim itself wrote *(lock)*
+- Report every bundle conflict in one run *(lock)*
 
 ## [0.11.1] - 2026-07-23
 
