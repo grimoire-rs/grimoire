@@ -571,9 +571,18 @@ fn copy_tree(src: &Path, dst: &Path, out: &mut Vec<MaterializedFile>) -> Result<
 /// and survives the rename.
 fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::Builder::new()
-        .prefix(".grim-tmp-")
-        .make_in(parent, |path| std::fs::copy(src, path).map(|_| ()))?;
+    // `tempfile_in` creates with `O_EXCL`, and everything below works through
+    // that open handle rather than re-opening the temp by name — so nothing
+    // here can be redirected by a file (or symlink) planted at the path
+    // between creation and use. Reaching for `std::fs::copy` on the temp path
+    // would give up both properties.
+    let tmp = tempfile::Builder::new().prefix(".grim-tmp-").tempfile_in(parent)?;
+    let mut source = std::fs::File::open(src)?;
+    std::io::copy(&mut source, &mut tmp.as_file())?;
+    // `std::fs::copy` would have carried the mode; doing it by hand keeps the
+    // executable bit on a skill's scripts, which is what makes this helper
+    // exist instead of `atomic_write`.
+    tmp.as_file().set_permissions(source.metadata()?.permissions())?;
     tmp.persist(dst).map_err(|e| e.error)?;
     Ok(())
 }

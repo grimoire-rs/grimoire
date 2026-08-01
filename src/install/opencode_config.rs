@@ -207,6 +207,26 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
 /// An I/O failure, or — **only when adding** (`want == true`) — `InvalidData`
 /// when the existing content is not a JSON/JSONC object, or its `instructions`
 /// key is not an array (grim never clobbers an unknown-schema file).
+/// [`json_splice::remove_array_element`] driven to convergence.
+///
+/// That primitive removes one matching element per call. Grim's own upsert is
+/// idempotent so it never writes a duplicate, but a hand-edited config can
+/// hold the managed glob twice — and leaving the second one behind would keep
+/// OpenCode pointed at a rules directory the uninstall just emptied. The
+/// emptied-array case takes the whole key with it, so the loop terminates on
+/// the following `Unchanged`.
+fn remove_every_managed_element(raw: &str, entry: &str) -> io::Result<Splice> {
+    let mut removed: Option<String> = None;
+    loop {
+        let current = removed.as_deref().unwrap_or(raw);
+        match json_splice::remove_array_element(current, INSTRUCTIONS_KEY, entry)? {
+            Splice::Changed(next) => removed = Some(next),
+            Splice::Unchanged => break,
+        }
+    }
+    Ok(removed.map_or(Splice::Unchanged, Splice::Changed))
+}
+
 pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> io::Result<InstructionsSync> {
     // A missing file reads as empty text — the splice engine's own
     // "no document yet" case, which emits the minimal skeleton on add and
@@ -220,7 +240,7 @@ pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> 
     let spliced = if want {
         json_splice::upsert_array_element(&raw, INSTRUCTIONS_KEY, entry)
     } else {
-        json_splice::remove_array_element(&raw, INSTRUCTIONS_KEY, entry)
+        remove_every_managed_element(&raw, entry)
     };
     let spliced = match spliced {
         Ok(splice) => splice,
@@ -249,6 +269,29 @@ pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hand-edited config can list the managed glob twice. The splice
+    /// primitive removes one element per call, so removal has to converge —
+    /// a survivor keeps OpenCode reading a rules directory grim just emptied.
+    #[test]
+    fn remove_clears_every_copy_of_a_hand_duplicated_glob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.json");
+        std::fs::write(
+            &cfg,
+            r#"{"instructions": [".opencode/rules/*.md", "docs/*.md", ".opencode/rules/*.md"]}"#,
+        )
+        .unwrap();
+
+        let synced = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
+        assert_eq!(synced, InstructionsSync::Removed);
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            doc["instructions"],
+            serde_json::json!(["docs/*.md"]),
+            "every copy of the managed glob must go, and nothing else"
+        );
+    }
 
     #[test]
     fn add_creates_file_and_is_idempotent() {
