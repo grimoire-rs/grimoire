@@ -208,6 +208,11 @@ pub(crate) fn drop_from_lock(
     process(&mut lock.skills);
     process(&mut lock.rules);
     process(&mut lock.agents);
+    // `mcp` is a first-class lock list (`iter_artifacts` chains it, so the
+    // installer materializes it): omitting it here left an undeclared server
+    // in a lock the restamp below marks FRESH, and the next `grim install`
+    // re-spliced it into every client config.
+    process(&mut lock.mcp);
 
     // Prune cached snapshots for bundles no longer declared (or retagged).
     lock.bundles.retain(|b| {
@@ -383,6 +388,7 @@ fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &cr
     lock.skills.retain_mut(evict);
     lock.rules.retain_mut(evict);
     lock.agents.retain_mut(evict);
+    lock.mcp.retain_mut(evict);
 }
 
 #[cfg(test)]
@@ -429,6 +435,34 @@ mod tests {
             .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
             .collect();
         a
+    }
+
+    /// A locked `[[mcp]]` entry, optionally carrying bundle provenance.
+    fn locked_mcp(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
+        let mut a = LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Mcp,
+            PinnedIdentifier::try_from(id).unwrap(),
+        );
+        a.bundles = bundles
+            .iter()
+            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
+            .collect();
+        a
+    }
+
+    /// A `DesiredSet` declaring `mcp` bindings plus `bundles`.
+    fn mcp_set_of(mcp: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
+        let mut set = set_of(&[], bundles);
+        for (n, i) in mcp {
+            set.mcp.insert(
+                (*n).to_string(),
+                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
+            );
+        }
+        set.invalidate_declaration_hash_cache();
+        set
     }
 
     fn set_of(skills: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
@@ -680,7 +714,107 @@ mod tests {
         assert_eq!(out.lock.bundles[0].name, "b");
     }
 
+    // ── MCP entries (regression: the retain fan-out skipped lock.mcp) ────
+
+    #[test]
+    fn remove_mcp_drops_its_lock_entry() {
+        // Regression: `drop_from_lock` fanned the effective-set retain pass
+        // over skills/rules/agents only, then restamped `declaration_hash`
+        // anyway — so an undeclared MCP server survived in a lock that read
+        // FRESH, and the next `grim install` re-spliced it into every client
+        // config (`iter_artifacts` chains `mcp`).
+        let mut prev = lock_of(vec![]);
+        prev.mcp = vec![locked_mcp("grim", &[])];
+        let before = mcp_set_of(&[("grim", "localhost:5000/acme/grim:1")], &[]);
+        let after_set = mcp_set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Mcp, "grim", &before, &after_set);
+        assert!(
+            out.lock.mcp.is_empty(),
+            "the undeclared mcp entry must leave the lock, or install resurrects it: {:?}",
+            out.lock.mcp
+        );
+        assert_eq!(
+            out.lock.metadata.declaration_hash,
+            after_set.declaration_hash_cached(),
+            "nothing is stale, so the hash restamps fresh"
+        );
+    }
+
+    #[test]
+    fn remove_mcp_keeps_an_unrelated_entry() {
+        let mut prev = lock_of(vec![]);
+        prev.mcp = vec![locked_mcp("grim", &[]), locked_mcp("other", &[])];
+        let before = mcp_set_of(
+            &[
+                ("grim", "localhost:5000/acme/grim:1"),
+                ("other", "localhost:5000/acme/other:1"),
+            ],
+            &[],
+        );
+        let after_set = mcp_set_of(&[("other", "localhost:5000/acme/other:1")], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Mcp, "grim", &before, &after_set);
+        let names: Vec<&str> = out.lock.mcp.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["other"], "only the named entry drops");
+    }
+
+    #[test]
+    fn remove_bundle_via_sets_evicts_its_mcp_member() {
+        // The `Origin::Bundles` re-derivation reaches lock.mcp too: removing
+        // the only bundle that provided an mcp member must evict it.
+        let mut prev = lock_of(vec![]);
+        prev.mcp = vec![locked_mcp("grim", &[("localhost:5000/acme/stack", "1")])];
+        prev.bundles = vec![crate::lock::locked_bundle::LockedBundle {
+            name: "stack".to_string(),
+            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
+                repo: "localhost:5000/acme/stack".to_string(),
+                tag: "1".to_string(),
+                pinned: PinnedIdentifier::try_from(
+                    Identifier::parse("localhost:5000/acme/stack:1")
+                        .unwrap()
+                        .clone_with_digest(Digest::Sha256("b".repeat(64))),
+                )
+                .unwrap(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Mcp,
+                name: "grim".to_string(),
+                id: "localhost:5000/acme/grim:1".to_string(),
+            }],
+        }];
+        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
+        assert!(
+            out.lock.mcp.is_empty(),
+            "the removed bundle's mcp member must be evicted: {:?}",
+            out.lock.mcp
+        );
+    }
+
     // ── Legacy fallback (no usable [[bundle]] cache) ────────────────────
+
+    #[test]
+    fn legacy_bundle_eviction_drops_its_mcp_member() {
+        // Same gap on the legacy path: `evict_bundle_members` retained over
+        // skills/rules/agents only, so a bundle-provided mcp member survived
+        // as an orphan under a freshly restamped hash. `prev.bundles` is
+        // empty while a bundle is declared, which degrades `effective_set`
+        // to `None` and forces the legacy path.
+        let mut prev = lock_of(vec![]);
+        prev.mcp = vec![locked_mcp("grim", &[("ghcr.io/acme/stack-a", "1")])];
+        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        assert!(
+            out.lock.mcp.is_empty(),
+            "the sole contributor's removal must evict the mcp member: {:?}",
+            out.lock.mcp
+        );
+    }
 
     #[test]
     fn bundle_eviction_keeps_member_shared_with_other_bundle() {
