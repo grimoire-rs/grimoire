@@ -213,7 +213,10 @@ vendor layout itself is not a stable contract). Each item also carries
 `clients_missing`/`clients_extra` — the *explicitly configured*
 `[options].clients` diffed against what is actually recorded installed,
 computed locally, no network. Left unset (autodetect), both stay `[]` on
-every item instead of diffing against live client detection. A third
+every item instead of diffing against live client detection.
+`clients_missing` also skips a configured client whose vendor cannot host
+that kind at that scope (Codex declines rules, for one), since no output
+was ever going to be recorded for it. A third
 array, `clients_unresolved`, names every active client whose recorded
 output could not be resolved at all — the anchor root is gone, or the
 containment guard refused the path — so that client is silently absent

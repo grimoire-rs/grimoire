@@ -478,6 +478,9 @@ local state (no network) — sorted arrays, `[]` when the two sets agree. When
 `[options].clients` is unset (autodetect), both stay `[]` on every item
 instead: diffing against live client detection would report drift whenever
 detection disagrees with what was recorded, which is not real config drift.
+`clients_missing` also skips any configured client whose vendor cannot host
+that artifact's kind at that scope — a Codex rule, say — since the install
+was never going to record an output for it.
 
 A third array, `clients_unresolved`, names every active client whose recorded
 output path could not be resolved at all — an anchor root absent on this
@@ -623,14 +626,21 @@ of each client's config file, leaving the file itself and every other
 entry untouched.
 
 That splice is gated on the entry still matching what grim installed. If
-the managed entry has drifted — you edited it in place, or grim only
-*adopted* an identical entry that was already there and never wrote it —
+the managed entry has drifted — you edited it in place after install —
 `uninstall` refuses the whole operation with exit 65 (`reason:
 "modified"`, `forceable: true`) and changes nothing, so nothing is
 half-removed. `grim uninstall --force <kind> <name>` removes it anyway.
 An entry that is already gone, or sits in a config file grim cannot
 parse, is not gated: there is nothing left to preserve. Materialized
 files are deleted either way — `--force` affects config entries only.
+
+An entry grim *adopted* rather than wrote — it was already there and
+already identical, so the install recorded it without touching a byte —
+is left in the config file untouched, with or without `--force`, while
+the install record is dropped as usual. Uninstall is the inverse of
+install, and the inverse of writing nothing is removing nothing. Edit
+such an entry afterwards and it becomes ordinary drift, refused by the
+gate above.
 
 The lock follows the same effective-declaration rule as
 [`grim remove`](#remove): when a declared bundle still names the artifact at

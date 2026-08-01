@@ -63,6 +63,10 @@ against an *explicitly set* `[options].clients`; when it is unset
 (autodetect), `clients_missing`/`clients_extra` stay `[]` and
 `reaped_clients` stays `[]` on every row — neither ever keys off live
 client detection, which can drift independently of the user's config.
+`clients_missing` narrowed once more, additively: a configured client
+whose vendor cannot host that artifact kind at that scope drops out of
+it, because the install was never going to record an output there.
+Strictly fewer names in an already-present array is not a shape change.
 
 The newest instance is [`grim publish`][publishing-report]'s
 `announce.fork` (`{repo, created}` or `null`), added when `--announce`
