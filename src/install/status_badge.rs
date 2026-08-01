@@ -191,6 +191,7 @@ mod tests {
                 content_hash: content_hash(&abs).unwrap(),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         st
@@ -312,6 +313,7 @@ mod tests {
                 content_hash: hash,
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -383,6 +385,7 @@ mod tests {
                 content_hash: hash,
                 support_dir: None,
                 entry: Some("/mcpServers/grim".to_string()),
+                adopted: false,
             }],
         });
 
@@ -443,6 +446,7 @@ mod tests {
                 content_hash: Digest::Sha256("a".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 

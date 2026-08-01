@@ -535,6 +535,7 @@ mod tests {
                 content_hash: Digest::Sha256("b".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         assert_eq!(

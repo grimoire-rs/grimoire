@@ -1046,6 +1046,7 @@ mod tests {
             content_hash: Digest::Sha256("a".repeat(64)),
             support_dir: None,
             entry: None,
+            adopted: false,
         }
     }
 
@@ -1188,6 +1189,7 @@ mod tests {
                 content_hash: hash.clone(),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1262,6 +1264,7 @@ mod tests {
                 content_hash: Digest::Sha256("a".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1319,6 +1322,7 @@ mod tests {
                     content_hash: Digest::Sha256("a".repeat(64)),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -1329,6 +1333,7 @@ mod tests {
                     content_hash: Digest::Sha256("b".repeat(64)),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 client_output("codex"),
             ],
@@ -1456,6 +1461,7 @@ mod tests {
                     content_hash: claude_hash,
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -1466,6 +1472,7 @@ mod tests {
                     content_hash: Digest::Sha256("d".repeat(64)),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
             ],
         });
@@ -1533,6 +1540,7 @@ mod tests {
                 content_hash: opencode_hash,
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1596,6 +1604,7 @@ mod tests {
             content_hash: hash,
             support_dir: None,
             entry: None,
+            adopted: false,
         };
 
         let mut st = InstallState::load(&ws.join("s.json")).unwrap();
@@ -1729,6 +1738,7 @@ mod tests {
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 

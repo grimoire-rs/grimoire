@@ -219,6 +219,26 @@ pub fn uninstall(
         // the file. Tolerant like the OpenCode glob removal: an absent or
         // unparseable config has nothing grim-managed left to remove.
         if let Some(pointer) = &out.entry {
+            // An ADOPTED member was already in the file when grim installed:
+            // the untracked gate found it semantically identical and recorded
+            // it without writing a byte. Uninstall is the inverse of install,
+            // and the inverse of writing nothing is removing nothing — so the
+            // member stays and only the record entry goes. The hash check
+            // keeps that narrow: an adopted member the user has since edited
+            // is drift, and `refuse_drifted_entries` has already refused it
+            // above unless `--force` was given, at which point removing it is
+            // what the user asked for.
+            if out.adopted
+                && out
+                    .current_hash(roots, Containment::Strict)
+                    .is_ok_and(|actual| actual == out.content_hash)
+            {
+                tracing::warn!(
+                    "leaving managed entry '{pointer}' in '{}': grim adopted it rather than writing it, so it is not grim's to remove",
+                    target.display()
+                );
+                continue;
+            }
             // The splice engine is client-specific (Codex writes TOML, every
             // other vendor JSON/JSONC), dispatched on the recorded client's
             // `mcp_format` — the single source of truth shared with the install
@@ -468,6 +488,7 @@ mod tests {
             content_hash,
             support_dir: None,
             entry: None,
+            adopted: false,
         }
     }
 
@@ -496,6 +517,7 @@ mod tests {
                 relative: support_rel.to_string(),
             }),
             entry: None,
+            adopted: false,
         }
     }
 
@@ -660,6 +682,7 @@ mod tests {
                     content_hash: Digest::Sha256("a".repeat(64)),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -670,6 +693,7 @@ mod tests {
                     content_hash: Digest::Sha256("c".repeat(64)),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
             ],
         });
@@ -790,6 +814,7 @@ mod tests {
             content_hash: entry_hash(&serde_json::json!({"command": "grim"})),
             support_dir: None,
             entry: None,
+            adopted: false,
         };
         out.entry = Some("/mcp_servers/grim".to_string());
         state.record(InstallRecord {

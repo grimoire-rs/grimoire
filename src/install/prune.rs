@@ -786,6 +786,7 @@ mod tests {
                 content_hash: hash,
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         file
@@ -811,6 +812,7 @@ mod tests {
                 content_hash: hash,
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         dir
@@ -853,6 +855,7 @@ mod tests {
                 content_hash: hash,
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         file
@@ -902,6 +905,7 @@ mod tests {
             content_hash: Digest::Sha256("a".repeat(64)),
             support_dir: None,
             entry: None,
+            adopted: false,
         }
     }
 
@@ -1175,6 +1179,7 @@ mod tests {
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1229,6 +1234,7 @@ mod tests {
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1290,6 +1296,7 @@ mod tests {
             content_hash: hash,
             support_dir: None,
             entry: None,
+            adopted: false,
         }
     }
 
@@ -1518,6 +1525,7 @@ mod tests {
                 content_hash: Digest::Sha256("d".repeat(64)),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1577,6 +1585,7 @@ mod tests {
             content_hash: Digest::Sha256("a".repeat(64)),
             support_dir: None,
             entry: None,
+            adopted: false,
         };
         let outputs = [reaping.clone(), surviving];
 
@@ -1625,6 +1634,7 @@ mod tests {
                 content_hash: content_hash(&file).unwrap(),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 
@@ -1699,6 +1709,7 @@ mod tests {
                     content_hash: content_hash(&escaping).unwrap(),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "codex".to_string(),
@@ -1709,6 +1720,7 @@ mod tests {
                     content_hash: recorded,
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
             ],
         });
@@ -1777,6 +1789,7 @@ mod tests {
                         relative: ".claude/rules/x".to_string(),
                     }),
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "codex".to_string(),
@@ -1787,6 +1800,7 @@ mod tests {
                     content_hash: recorded,
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
             ],
         });
@@ -1834,6 +1848,7 @@ mod tests {
                 content_hash: content_hash(&file).unwrap(),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
 

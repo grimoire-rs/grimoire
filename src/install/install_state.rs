@@ -92,6 +92,18 @@ pub struct ClientOutput {
     /// older grim cannot parse a state file that carries this field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+    /// This output was **adopted**, not written: the destination already held
+    /// exactly what grim would have installed, so the install recorded it
+    /// without writing a byte. Uninstall consults it for `entry` outputs — a
+    /// member the user (or another tool) authored is left in the config file
+    /// rather than spliced out.
+    ///
+    /// Never serialized when `false` (the `dev` precedent). Both this struct
+    /// and `RawInstallRecord` are `deny_unknown_fields`, so an always-emitted
+    /// `"adopted": false` would make every new state file unreadable by an
+    /// older grim — a breaking change, not an additive one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted: bool,
 }
 
 impl ClientOutput {
@@ -1084,6 +1096,7 @@ fn convert_v1_records(
                 content_hash: out.content_hash,
                 support_dir,
                 entry: None,
+                adopted: false,
             });
         }
 
@@ -1142,7 +1155,31 @@ mod tests {
             content_hash: Algorithm::Sha256.hash(name.as_bytes()),
             support_dir: None,
             entry: None,
+            adopted: false,
         }
+    }
+
+    /// `adopted` is additive: absent reads as `false`, and `false` is never
+    /// written. Both this struct and `RawInstallRecord` are
+    /// `deny_unknown_fields`, so an always-emitted `"adopted": false` would
+    /// make every state file written by this grim unreadable by an older one.
+    #[test]
+    fn adopted_defaults_to_false_and_only_serializes_when_true() {
+        let without = r#"{"client":"claude","target":{"anchor":"workspace","relative":".mcp.json"},"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entry":"/mcpServers/x"}"#;
+        let parsed: ClientOutput = serde_json::from_str(without).expect("absent `adopted` must parse");
+        assert!(!parsed.adopted);
+        assert!(
+            !serde_json::to_string(&parsed).unwrap().contains("adopted"),
+            "a false `adopted` must not reach the wire"
+        );
+
+        let adopted = ClientOutput {
+            adopted: true,
+            ..parsed
+        };
+        let json = serde_json::to_string(&adopted).unwrap();
+        assert!(json.contains(r#""adopted":true"#), "{json}");
+        assert!(serde_json::from_str::<ClientOutput>(&json).unwrap().adopted);
     }
 
     /// `RawInstallRecord` carries `#[serde(deny_unknown_fields)]`, so serde
@@ -1229,6 +1266,7 @@ mod tests {
             content_hash: Algorithm::Sha256.hash(relative.as_bytes()),
             support_dir: None,
             entry: None,
+            adopted: false,
         }
     }
 
@@ -1395,6 +1433,7 @@ mod tests {
                 content_hash: Algorithm::Sha256.hash(b"v2test"),
                 support_dir: None,
                 entry: None,
+                adopted: false,
             }],
         });
         st.save().unwrap();
@@ -2373,6 +2412,7 @@ mod tests {
                     relative: ".claude/rules/multi-file-rule".to_string(),
                 }),
                 entry: None,
+                adopted: false,
             }],
         });
         st.save().unwrap();
@@ -2747,6 +2787,7 @@ mod tests {
                     content_hash: Algorithm::Sha256.hash(b"claude-bytes"),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -2757,6 +2798,7 @@ mod tests {
                     content_hash: Algorithm::Sha256.hash(b"copilot-bytes"),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -2767,6 +2809,7 @@ mod tests {
                     content_hash: Algorithm::Sha256.hash(b"opencode-bytes"),
                     support_dir: None,
                     entry: None,
+                    adopted: false,
                 },
             ],
         });
@@ -2834,6 +2877,7 @@ mod tests {
             content_hash: entry_value_hash(value).unwrap(),
             support_dir: None,
             entry: Some(pointer.to_string()),
+            adopted: false,
         };
         (out, roots)
     }
@@ -2920,6 +2964,7 @@ mod tests {
             content_hash: Algorithm::Sha256.hash(b"x"),
             support_dir: None,
             entry: None,
+            adopted: false,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(!json.contains("entry"), "absent entry must not serialize: {json}");

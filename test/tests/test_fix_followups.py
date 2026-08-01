@@ -15,6 +15,26 @@ RULE_V2 = "---\npaths: ['**/*.rs']\n---\n# Rust Style v2\n"
 EDITED = "locally edited by the user\n"
 
 
+MCP_DESCRIPTOR = """\
+description = "Test MCP server."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+"""
+
+
+def _release_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> str:
+    src = project_dir / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    descriptor = src / "grim-mcp.toml"
+    descriptor.write_text(MCP_DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    return ref
+
+
 def _write_rule_config(project_dir: Path, rule_ref: str, clients: list[str]) -> None:
     clients_toml = ", ".join(f'"{c}"' for c in clients)
     (project_dir / "grimoire.toml").write_text(
@@ -78,4 +98,46 @@ def test_dropped_client_edit_survives_an_update_that_also_rolls_the_pin(
     )
     assert claude.read_text().endswith("# Rust Style v2\n"), (
         "the still-configured client must have rolled to the new pin"
+    )
+
+
+def test_uninstall_leaves_an_adopted_mcp_entry_in_the_config(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An adopted MCP member is not grim's to remove.
+
+    The install-side untracked gate adopts a pre-existing member that is
+    semantically identical to what grim would write — recording it without
+    touching a byte. Uninstall is the inverse of install, so the inverse of
+    writing nothing is removing nothing: the member stays in the user's
+    config and only the record entry goes.
+    """
+    runner = grim_at(project_dir)
+    ref = _release_mcp(runner, project_dir, registry, unique_repo)
+
+    config = project_dir / ".mcp.json"
+    config.write_text(
+        '{\n  "mcpServers": {\n'
+        '    "grim-mcp": {"command": "grim", "args": ["mcp"]}\n'
+        "  }\n}\n"
+    )
+    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n[agents]\n")
+    runner.json("add", "--no-install", ref)
+
+    rows = runner.json("install")["items"]
+    assert {r["status"] for r in rows} == {"unchanged"}, (
+        f"an identical pre-existing member must be adopted, not written: {rows}"
+    )
+    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    record = next(r for r in state["records"] if r["name"] == "grim-mcp")
+    assert record["outputs"][0]["adopted"] is True, record
+
+    runner.run("uninstall", "mcp", "grim-mcp")
+    assert "grim-mcp" in json.loads(config.read_text())["mcpServers"], (
+        "grim wrote nothing to install this member, so it must write nothing "
+        "to remove it — the user's own entry is not grim's to splice out"
+    )
+    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    assert not any(r["name"] == "grim-mcp" for r in state["records"]), (
+        "the record must still be dropped"
     )
