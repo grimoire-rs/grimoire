@@ -153,19 +153,123 @@ pub fn remove_member(text: &str, container: &str, member: &str) -> io::Result<Sp
     if inner.members.len() == 1 {
         // Removing the last member: drop the whole container member so an
         // emptied `"mcpServers": {}` husk is not left behind.
-        let cut = cut_range(text, container_member);
+        let cut = cut_range(text, container_member.key_quote, container_member.value.end);
         let mut out = String::with_capacity(text.len());
         out.push_str(&text[..cut.start]);
         out.push_str(&text[cut.end..]);
         return Ok(Splice::Changed(out));
     }
 
-    let cut = cut_range(inner_text, existing);
+    let cut = cut_range(inner_text, existing.key_quote, existing.value.end);
     let base = container_member.value.start;
     let mut out = String::with_capacity(text.len());
     out.push_str(&text[..base + cut.start]);
     out.push_str(&text[base + cut.end..]);
     Ok(Splice::Changed(out))
+}
+
+/// Ensure the array at the root member `key` contains the string
+/// `element`, creating the array (and, for empty input, the root object) as
+/// needed. All bytes outside the inserted element survive verbatim.
+///
+/// The array counterpart of [`upsert_member`], for a managed *list* entry
+/// rather than a managed object member (OpenCode's `instructions` glob).
+/// Elements are compared semantically, so an element spelled with different
+/// escaping still counts as present.
+///
+/// # Errors
+///
+/// `InvalidData` when the text is not a JSON/JSONC object, or the existing
+/// `key` value is not an array.
+pub fn upsert_array_element(text: &str, key: &str, element: &str) -> io::Result<Splice> {
+    let rendered = json_string(element);
+    if text.trim().is_empty() {
+        // No document yet: emit the minimal pretty skeleton.
+        return Ok(Splice::Changed(format!(
+            "{{\n  \"{key}\": [\n    {rendered}\n  ]\n}}\n"
+        )));
+    }
+    if !parse_value(text).is_some_and(|v| v.is_object()) {
+        return Err(refused());
+    }
+    let root = scan_object(text)?;
+    let Some(key_member) = last_member(&root.members, key) else {
+        // Insert the whole array as a new root member.
+        let indent = root.member_indent(text);
+        let snippet = format!("\"{key}\": [\n{inner}{rendered}\n{indent}]", inner = deeper(&indent));
+        return Ok(Splice::Changed(insert_member(text, &root, &snippet)));
+    };
+
+    let array_text = &text[key_member.value.clone()];
+    let array = scan_array(array_text, key)?;
+    if array
+        .elements
+        .iter()
+        .any(|span| element_matches(array_text, span, element))
+    {
+        return Ok(Splice::Unchanged);
+    }
+    let new_array = insert_element(array_text, &array, &rendered, &key_member.key_indent(text));
+    let mut out = String::with_capacity(text.len() + new_array.len());
+    out.push_str(&text[..key_member.value.start]);
+    out.push_str(&new_array);
+    out.push_str(&text[key_member.value.end..]);
+    Ok(Splice::Changed(out))
+}
+
+/// Remove the string `element` from the array at the root member `key`;
+/// an array emptied by the removal takes its whole `key` member with it (no
+/// `"key": []` husk, mirroring [`remove_member`]'s emptied-container rule).
+/// Absent key/element is [`Splice::Unchanged`].
+///
+/// # Errors
+///
+/// `InvalidData` when the text is not a JSON/JSONC object (callers
+/// implementing tolerant removal map this themselves), or the existing
+/// `key` value is not an array.
+pub fn remove_array_element(text: &str, key: &str, element: &str) -> io::Result<Splice> {
+    if text.trim().is_empty() {
+        return Ok(Splice::Unchanged);
+    }
+    if !parse_value(text).is_some_and(|v| v.is_object()) {
+        return Err(refused());
+    }
+    let root = scan_object(text)?;
+    let Some(key_member) = last_member(&root.members, key) else {
+        return Ok(Splice::Unchanged);
+    };
+    let array_text = &text[key_member.value.clone()];
+    let array = scan_array(array_text, key)?;
+    let Some(found) = array
+        .elements
+        .iter()
+        .find(|span| element_matches(array_text, span, element))
+    else {
+        return Ok(Splice::Unchanged);
+    };
+
+    let mut out = String::with_capacity(text.len());
+    if array.elements.len() == 1 {
+        let cut = cut_range(text, key_member.key_quote, key_member.value.end);
+        out.push_str(&text[..cut.start]);
+        out.push_str(&text[cut.end..]);
+        return Ok(Splice::Changed(out));
+    }
+    let cut = cut_range(array_text, found.start, found.end);
+    let base = key_member.value.start;
+    out.push_str(&text[..base + cut.start]);
+    out.push_str(&text[base + cut.end..]);
+    Ok(Splice::Changed(out))
+}
+
+/// `element` rendered as a JSON string literal (escaped).
+fn json_string(element: &str) -> String {
+    serde_json::Value::String(element.to_string()).to_string()
+}
+
+/// Whether the element at `span` parses to exactly the string `element`.
+fn element_matches(text: &str, span: &Range<usize>, element: &str) -> bool {
+    parse_value(&text[span.clone()]).and_then(|v| v.as_str().map(str::to_string)) == Some(element.to_string())
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────
@@ -252,13 +356,56 @@ fn insert_member_with_indent(
     out
 }
 
-/// The byte range to delete for `member` of `obj`: the member itself, its
+/// Insert `rendered` as the array's new last element, matching the array's
+/// existing layout: appended on the same line for a single-line array, on
+/// its own line (at the elements' indent) for a multi-line one.
+/// `key_indent` indents the closing bracket when the array was empty.
+fn insert_element(text: &str, array: &ScannedArray, rendered: &str, key_indent: &str) -> String {
+    let mut out = String::with_capacity(text.len() + rendered.len() + 8);
+    match (array.elements.first(), array.elements.last()) {
+        (Some(first), Some(last)) => {
+            // An empty indent means the element does not start its own line,
+            // i.e. a single-line array — keep it on one line.
+            let indent = line_indent(text, first.start);
+            out.push_str(&text[..last.end]);
+            if indent.is_empty() {
+                out.push_str(", ");
+            } else {
+                out.push_str(",\n");
+                out.push_str(&indent);
+            }
+            out.push_str(rendered);
+            // An existing trailing comma (a JSONC extension) stays where it
+            // is — the insertion goes before it, as for object members.
+            out.push_str(&text[last.end..]);
+        }
+        _ => {
+            // Empty array: `[]` stays inline, `[\n]` keeps its own line.
+            let head = &text[..array.close_bracket];
+            out.push_str(head.trim_end());
+            if head.contains('\n') {
+                out.push('\n');
+                out.push_str(&deeper(key_indent));
+                out.push_str(rendered);
+                out.push('\n');
+                out.push_str(key_indent);
+            } else {
+                out.push_str(rendered);
+            }
+            out.push_str(&text[array.close_bracket..]);
+        }
+    }
+    out
+}
+
+/// The byte range to delete for the span `start..end`: the span itself, its
 /// separating comma (trailing when present, else the preceding one), and
-/// the whitespace that would otherwise leave a blank line.
-fn cut_range(text: &str, member: &Member) -> Range<usize> {
+/// the whitespace that would otherwise leave a blank line. Shared by object
+/// members (`start` = the key's opening quote) and array elements.
+fn cut_range(text: &str, start: usize, end: usize) -> Range<usize> {
     let bytes = text.as_bytes();
-    let mut start = member.key_quote;
-    let mut end = member.value.end;
+    let mut start = start;
+    let mut end = end;
 
     // Trailing comma (plus horizontal whitespace before it)?
     let mut j = end;
@@ -412,6 +559,58 @@ fn scan_object(text: &str) -> io::Result<ScannedObject> {
                 }
             }
             _ => return Err(refused()),
+        }
+    }
+}
+
+/// A scanned array: the byte range of each element and the offset of the
+/// closing bracket, both relative to the array's own text.
+#[derive(Debug)]
+struct ScannedArray {
+    elements: Vec<Range<usize>>,
+    close_bracket: usize,
+}
+
+/// Scan `text` as a single JSON/JSONC array and index its elements. `key`
+/// names the member holding it, for the error message.
+fn scan_array(text: &str, key: &str) -> io::Result<ScannedArray> {
+    let not_an_array = || invalid_data(format!("'{key}' is not a JSON array; refusing to edit"));
+    let mut s = Scanner {
+        bytes: text.as_bytes(),
+        pos: 0,
+    };
+    s.skip_trivia();
+    if s.peek() != Some(b'[') {
+        return Err(not_an_array());
+    }
+    s.pos += 1;
+    let mut elements = Vec::new();
+    loop {
+        s.skip_trivia();
+        match s.peek() {
+            Some(b']') => {
+                let array = ScannedArray {
+                    elements,
+                    close_bracket: s.pos,
+                };
+                // The span must end after the array (trivia only).
+                s.pos += 1;
+                s.skip_trivia();
+                if !s.at_root_end() {
+                    return Err(refused());
+                }
+                return Ok(array);
+            }
+            Some(_) => {
+                elements.push(s.skip_value()?);
+                s.skip_trivia();
+                match s.peek() {
+                    Some(b',') => s.pos += 1, // trailing comma before `]` tolerated by the loop
+                    Some(b']') => {}
+                    _ => return Err(refused()),
+                }
+            }
+            None => return Err(refused()),
         }
     }
 }
@@ -755,6 +954,160 @@ mod tests {
 
         // And removal restores the original byte-for-byte.
         let back = changed(remove_member(&out, "mcpServers", "grim").unwrap());
+        assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    // ── Array-element splice (OpenCode's managed `instructions` glob) ─────
+    //
+    // Same contract as the object-member splice above: span-preserving,
+    // semantic presence-detection, tolerant no-op removal.
+
+    #[test]
+    fn array_upsert_into_empty_text_creates_the_document() {
+        let out = changed(upsert_array_element("", "instructions", "a.md").unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["instructions"], json!(["a.md"]));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn array_upsert_preserves_comments_key_order_and_formatting() {
+        let text = concat!(
+            "{\n",
+            "  // which model\n",
+            "  \"model\":   \"a/b\",\n",
+            "  \"instructions\": [\n",
+            "    \"CONTRIBUTING.md\"\n",
+            "  ],\n",
+            "  \"alpha\": 1\n",
+            "}\n",
+        );
+        let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+        assert!(out.contains("// which model"), "comment preserved: {out}");
+        assert!(out.contains("\"model\":   \"a/b\""), "formatting preserved: {out}");
+        assert!(
+            out.find("\"model\"") < out.find("\"alpha\""),
+            "authored key order preserved: {out}"
+        );
+        assert!(out.contains("\"CONTRIBUTING.md\""), "sibling element preserved: {out}");
+        assert!(out.contains("\"g.md\""), "managed element added: {out}");
+
+        let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
+        assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    #[test]
+    fn array_upsert_creates_an_absent_array_and_keeps_siblings() {
+        let text = "{\n  \"model\": \"a/b\"\n}\n";
+        let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["model"], "a/b");
+        assert_eq!(doc["instructions"], json!(["g.md"]));
+
+        let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
+        assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    #[test]
+    fn array_upsert_into_an_empty_array_keeps_its_layout() {
+        for text in ["{\n  \"instructions\": []\n}\n", "{\n  \"instructions\": [\n  ]\n}\n"] {
+            let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+            let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(doc["instructions"], json!(["g.md"]), "input: {text:?} → {out}");
+        }
+    }
+
+    #[test]
+    fn array_upsert_appends_inline_for_a_single_line_array() {
+        let text = "{\"instructions\": [\"a.md\", \"b.md\"], \"model\": \"x\"}";
+        let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+        assert_eq!(
+            out,
+            "{\"instructions\": [\"a.md\", \"b.md\", \"g.md\"], \"model\": \"x\"}"
+        );
+
+        let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
+        assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    #[test]
+    fn array_upsert_is_idempotent_and_matches_semantically() {
+        let text = "{\n  \"instructions\": [\n    \"g.md\"\n  ]\n}\n";
+        assert_eq!(
+            upsert_array_element(text, "instructions", "g.md").unwrap(),
+            Splice::Unchanged
+        );
+        // Escaped spelling of the same string still counts as present.
+        let escaped = "{\n  \"instructions\": [\n    \"g\\u002em\\u0064\"\n  ]\n}\n";
+        assert_eq!(
+            upsert_array_element(escaped, "instructions", "g.md").unwrap(),
+            Splice::Unchanged
+        );
+    }
+
+    #[test]
+    fn array_remove_last_element_drops_the_whole_member() {
+        let text = "{\n  \"model\": \"a/b\",\n  \"instructions\": [\n    \"g.md\"\n  ]\n}\n";
+        let out = changed(remove_array_element(text, "instructions", "g.md").unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(doc.get("instructions").is_none(), "no empty-array husk left: {out}");
+        assert_eq!(doc["model"], "a/b");
+    }
+
+    #[test]
+    fn array_remove_absent_key_or_element_is_a_tolerant_no_op() {
+        assert_eq!(
+            remove_array_element("", "instructions", "g.md").unwrap(),
+            Splice::Unchanged
+        );
+        assert_eq!(
+            remove_array_element("{\"model\": \"x\"}", "instructions", "g.md").unwrap(),
+            Splice::Unchanged
+        );
+        assert_eq!(
+            remove_array_element("{\"instructions\": [\"a.md\"]}", "instructions", "g.md").unwrap(),
+            Splice::Unchanged
+        );
+    }
+
+    #[test]
+    fn array_splice_refuses_a_non_array_value_and_unparsable_text() {
+        for (text, key) in [
+            ("{\"instructions\": \"x\"}", "instructions"),
+            ("{\"instructions\": {}}", "instructions"),
+        ] {
+            let err = upsert_array_element(text, key, "g.md").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input: {text}");
+            assert!(err.to_string().contains("not a JSON array"), "input: {text}");
+            let err = remove_array_element(text, key, "g.md").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input: {text}");
+        }
+        let err = upsert_array_element("not json {{{", "instructions", "g.md").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn array_element_needing_escaping_round_trips() {
+        let element = "C:\\Users\\dev\\rules\\*.md";
+        let out = changed(upsert_array_element("", "instructions", element).unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["instructions"][0], element);
+        assert_eq!(
+            upsert_array_element(&out, "instructions", element).unwrap(),
+            Splice::Unchanged,
+            "an escaped element is detected as present on re-upsert"
+        );
+    }
+
+    #[test]
+    fn array_splice_tolerates_jsonc_trailing_commas() {
+        let text = "{\n  // c\n  \"instructions\": [\n    \"a.md\",\n  ],\n}\n";
+        let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+        assert!(out.contains("// c"), "comment preserved: {out}");
+        let doc: serde_json::Value = serde_json::from_str(&super::sanitize_jsonc(&out)).unwrap();
+        assert_eq!(doc["instructions"], json!(["a.md", "g.md"]));
+
+        let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
         assert_eq!(back, text, "remove undoes upsert exactly");
     }
 }

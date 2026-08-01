@@ -26,9 +26,9 @@ use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir};
 use crate::install::{
-    vendor_amp, vendor_antigravity, vendor_claude, vendor_cline, vendor_codex, vendor_copilot, vendor_cursor,
-    vendor_droid, vendor_gemini, vendor_junie, vendor_kilo, vendor_kiro, vendor_openclaw, vendor_opencode, vendor_warp,
-    vendor_zed,
+    opencode_config, vendor_amp, vendor_antigravity, vendor_claude, vendor_cline, vendor_codex, vendor_copilot,
+    vendor_cursor, vendor_droid, vendor_gemini, vendor_junie, vendor_kilo, vendor_kiro, vendor_openclaw,
+    vendor_opencode, vendor_warp, vendor_zed,
 };
 use crate::oci::ArtifactKind;
 
@@ -68,12 +68,15 @@ type VendorRootRow = (&'static str, fn(EnvLookup<'_>, Option<PathBuf>) -> Option
 /// `open-code`. `vendor_root_rows_and_reachable_vendor_roots_agree` is the
 /// guard; it fails on any row that does not read back as itself.
 ///
-/// `opencode` is excluded for a second, independent reason: OpenCode's config
-/// root is already addressed by the derived [`PathAnchor::OpenCodeRoot`], so
-/// such a row would be a second anchor for one root — two spellings of the
-/// same location in `state.json`, which the reaper and the prune refcount
-/// treat as distinct outputs. (It would additionally render identically to
-/// `OpenCodeRoot` under `Display`.)
+/// A row named `opencode` is excluded for a second, independent reason:
+/// OpenCode's skills-derived config root is already addressed by
+/// [`PathAnchor::OpenCodeRoot`], so such a row would be a second anchor for
+/// one root — two spellings of the same location in `state.json`, which the
+/// reaper and the prune refcount treat as distinct outputs. (It would
+/// additionally render identically to `OpenCodeRoot` under `Display`.)
+/// The [`OPENCODE_CONFIG_ROW`] row is *not* that: it resolves the directory
+/// holding OpenCode's config **file**, which `$OPENCODE_CONFIG` /
+/// `$OPENCODE_CONFIG_DIR` can move independently of the skills root.
 const VENDOR_ROOTS: &[VendorRootRow] = &[
     ("claude", |env, home| {
         vendor_claude::global_root(env("CLAUDE_CONFIG_DIR"), home)
@@ -109,7 +112,23 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     ("warp", |_, home| vendor_warp::warp_root(home)),
     ("openclaw", |_, home| vendor_openclaw::openclaw_root(home)),
     ("kilo", |_, home| vendor_kilo::kilo_root(home)),
+    // OpenCode's OTHER root: the directory holding the config **file** grim
+    // splices its global MCP entry into. Resolved through the very function
+    // the write path uses (`opencode_config::config_path_for_scope`), so the
+    // anchor cannot drift from where the bytes land — the divergence this row
+    // exists to close. `OpenCodeRoot` follows `$OPENCODE_CONFIG_DIR` via the
+    // skills root; the config file follows `$OPENCODE_CONFIG` / XDG. They
+    // coincide only in the default layout, and `candidate_anchors` keeps
+    // `open-code-root` first so that tie never re-anchors a shipped record.
+    (OPENCODE_CONFIG_ROW, |env, home| {
+        opencode_config::global_config_dir(env("OPENCODE_CONFIG"), env("XDG_CONFIG_HOME"), home)
+    }),
 ];
+
+/// The [`VENDOR_ROOTS`] row naming OpenCode's config-file directory. Named
+/// once so the row, the `candidate_anchors` arm, and the tests cannot drift;
+/// its on-disk tag is `opencode-config-root` (Principle 9: append-only).
+const OPENCODE_CONFIG_ROW: &str = "opencode-config";
 
 /// `$XDG_CONFIG_HOME`, else `<home>/.config` — the injected-input twin of
 /// [`xdg_config_dir`], so a [`VENDOR_ROOTS`] row that needs an XDG dir stays a
@@ -879,6 +898,25 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
             match primary {
                 None => Vec::new(),
                 Some(PathAnchor::GrimHome) => vec![PathAnchor::GrimHome],
+                // OpenCode MCP: the config FILE grim splices resolves from
+                // `$OPENCODE_CONFIG` else XDG, while `OpenCodeRoot` is derived
+                // from the skills root and therefore follows
+                // `$OPENCODE_CONFIG_DIR`. The two coincide in the default
+                // layout and diverge the moment EITHER variable is set — and
+                // the write path is authoritative, so both must classify or a
+                // global MCP install warns `UnknownAnchor` and skips, while an
+                // uninstall resolves the record to the wrong file, tolerates
+                // the NotFound, and leaves the real entry live forever.
+                //
+                // `OpenCodeRoot` stays FIRST: `from_target`'s sort is stable,
+                // so insertion order breaks the tie the coinciding case
+                // produces, keeping the `open-code-root` tag every shipped
+                // record already carries.
+                Some(PathAnchor::OpenCodeRoot) if kind == ArtifactKind::Mcp => vec![
+                    PathAnchor::OpenCodeRoot,
+                    PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW),
+                    PathAnchor::GrimHome,
+                ],
                 Some(anchor) if anchor != PathAnchor::AgentsSkills && pool_opt_in_capable(client, kind) => {
                     vec![anchor, PathAnchor::AgentsSkills, PathAnchor::GrimHome]
                 }
@@ -1067,8 +1105,9 @@ pub enum AnchorError {
 // ── T4: Specify from_target classification ──────────────────────────────────
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
+    use super::OPENCODE_CONFIG_ROW;
     use crate::config::scope::ConfigScope;
     use crate::install::client_target::ClientTarget;
     use crate::oci::ArtifactKind;
@@ -1130,6 +1169,7 @@ mod tests {
         "warp-root",
         "openclaw-root",
         "kilo-root",
+        "opencode-config-root",
     ];
 
     /// Every shipped tag still loads from a LITERAL JSON string, and
@@ -1970,6 +2010,112 @@ mod tests {
         .unwrap();
         assert_eq!(ap.anchor, PathAnchor::OpenCodeRoot);
         assert_eq!(ap.relative, "agents/my-agent.md");
+    }
+
+    /// Regression: the global OpenCode MCP config file classifies wherever
+    /// the WRITE path puts it, under either OpenCode variable.
+    ///
+    /// The anchor set used to hold `OpenCodeRoot` alone, which is derived
+    /// from the skills root and so follows `$OPENCODE_CONFIG_DIR` — while
+    /// `opencode_config::config_path_for_scope` resolves the file from
+    /// `$OPENCODE_CONFIG` else XDG. Setting either variable made the two
+    /// disagree: install warned `UnknownAnchor` and skipped, and an uninstall
+    /// after the fact resolved the record to the wrong file, tolerated the
+    /// NotFound, and dropped the record while the real entry stayed live.
+    #[test]
+    fn global_opencode_mcp_config_classifies_under_either_opencode_variable() {
+        let home = PathBuf::from("/fake/home");
+
+        // Direction 1: `$OPENCODE_CONFIG_DIR` moves the skills root (and with
+        // it `OpenCodeRoot`) while the config file stays at the XDG default.
+        let config_dir_set = |v: &str| (v == "OPENCODE_CONFIG_DIR").then(|| PathBuf::from("/custom/oc"));
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &config_dir_set,
+            Some(home.clone()),
+        );
+        let written = home.join(".config").join("opencode").join("opencode.json");
+        let ap = AnchoredPath::from_target(
+            &written,
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Mcp,
+            &roots,
+        )
+        .expect("the config file the write path targets must classify");
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW));
+        assert_eq!(ap.relative, "opencode.json");
+        assert_eq!(ap.resolve(&roots, Containment::Strict).unwrap(), written);
+
+        // Direction 2: `$OPENCODE_CONFIG` moves the config file to an
+        // arbitrary path while the skills root stays at the XDG default.
+        let config_set = |v: &str| (v == "OPENCODE_CONFIG").then(|| PathBuf::from("/etc/grim/oc.json"));
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &config_set,
+            Some(home.clone()),
+        );
+        let ap = AnchoredPath::from_target(
+            Path::new("/etc/grim/oc.json"),
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Mcp,
+            &roots,
+        )
+        .expect("an $OPENCODE_CONFIG-relocated config file must classify");
+        assert_eq!(ap.anchor, PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW));
+        assert_eq!(ap.relative, "oc.json");
+
+        // Default layout: the two roots coincide, and the tie must keep the
+        // `open-code-root` tag every shipped `state.json` already carries.
+        let no_env = |_: &str| None;
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &no_env,
+            Some(home.clone()),
+        );
+        let ap = AnchoredPath::from_target(
+            &written,
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Mcp,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(
+            ap.anchor,
+            PathAnchor::OpenCodeRoot,
+            "the coinciding default must not re-anchor an existing record"
+        );
+        assert_eq!(ap.relative, "opencode.json");
+    }
+
+    /// The new row is additive: a global OpenCode **agent** still anchors at
+    /// `OpenCodeRoot`, which follows the skills root, not the config file.
+    #[test]
+    fn opencode_config_row_does_not_capture_the_agent_anchor() {
+        let home = PathBuf::from("/fake/home");
+        let config_set = |v: &str| (v == "OPENCODE_CONFIG").then(|| PathBuf::from("/etc/grim/oc.json"));
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &config_set,
+            Some(home.clone()),
+        );
+        let abs = home.join(".config").join("opencode").join("agents").join("a.md");
+        let ap = AnchoredPath::from_target(
+            &abs,
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Agent,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(ap.anchor, PathAnchor::OpenCodeRoot);
+        assert_eq!(ap.relative, "agents/a.md");
     }
 
     /// The AgentsSkills and codex vendor-root anchors return their stored roots verbatim.

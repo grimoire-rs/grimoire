@@ -28,9 +28,11 @@
 //!
 //! Edits are conservative: a config that does not parse (even after
 //! JSONC comment / trailing-comma stripping) is **never** rewritten —
-//! the sync fails rather than clobbering user content. A parseable JSONC
-//! file is rewritten as plain JSON; its comments are not preserved (a
-//! documented caveat — the write warns when that happens).
+//! the sync fails rather than clobbering user content. The edit itself
+//! goes through the span-preserving [`super::json_splice`] engine — the
+//! same one that writes MCP entries into this very file — so every byte
+//! outside the managed `instructions` element (key order, formatting,
+//! JSONC comments) survives untouched.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,10 +43,14 @@ use crate::oci::ArtifactKind;
 use crate::store::atomic_write;
 
 use super::client_target::ClientTarget;
-use super::json_config::{invalid_data, parse_object, with_path};
+use super::json_config::with_path;
+use super::json_splice::{self, Splice};
 
 /// The workspace-relative glob grim manages for project-scope installs.
 pub const MANAGED_PROJECT_GLOB: &str = ".opencode/rules/*.md";
+
+/// The root config key holding OpenCode's instruction paths / globs / URLs.
+const INSTRUCTIONS_KEY: &str = "instructions";
 
 /// What a sync did to the vendor config.
 ///
@@ -93,6 +99,32 @@ pub fn config_path_for_scope(workspace: &Path, scope: ConfigScope) -> Option<Pat
             super::vendor::home_dir(),
         ),
     }
+}
+
+/// The directory holding the **global** OpenCode config file grim edits —
+/// the anchor root for a global OpenCode MCP output.
+///
+/// Derived from the same resolution [`config_path_for_scope`] uses, so the
+/// anchor and the write path can never disagree. They must not be derived
+/// separately: `$OPENCODE_CONFIG` names an arbitrary config **file**, while
+/// `$OPENCODE_CONFIG_DIR` moves the *skills* root (and with it
+/// [`PathAnchor::OpenCodeRoot`](super::path_anchor::PathAnchor)) without
+/// moving the config file, so either variable makes the two locations
+/// diverge.
+///
+/// `None` whenever [`config_path_for_scope`] resolves nothing, or the
+/// resolved path has no parent (a bare relative filename).
+pub fn global_config_dir(
+    env_override: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let parent = global_config_path(env_override, xdg_config_home, home)?
+        .parent()?
+        .to_path_buf();
+    // `Path::parent` of a bare `oc.json` is an empty path, which would anchor
+    // every record at the process CWD.
+    (!parent.as_os_str().is_empty()).then_some(parent)
 }
 
 /// The project-scope config: `opencode.jsonc` when present (OpenCode
@@ -176,72 +208,42 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
 /// when the existing content is not a JSON/JSONC object, or its `instructions`
 /// key is not an array (grim never clobbers an unknown-schema file).
 pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> io::Result<InstructionsSync> {
+    // A missing file reads as empty text — the splice engine's own
+    // "no document yet" case, which emits the minimal skeleton on add and
+    // is a no-op on remove.
     let raw = match std::fs::read_to_string(config_path) {
-        Ok(s) => Some(s),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(with_path(config_path, e)),
     };
 
-    let (mut doc, had_jsonc_extras) = match &raw {
-        None => (serde_json::Map::new(), false),
-        Some(raw) => match parse_object(raw, config_path) {
-            Ok(parsed) => parsed,
-            // Removal is tolerant (`want == false`): a config grim cannot parse
-            // has nothing grim-managed to remove, so converge as `Unchanged`
-            // rather than fail a command whose primary action already ran.
-            // Adding stays strict (never rewrite an unknown-schema file).
-            Err(_) if !want => return Ok(InstructionsSync::Unchanged),
-            Err(e) => return Err(e),
-        },
-    };
-
-    let instructions = doc.get("instructions");
-    let mut entries: Vec<serde_json::Value> = match instructions {
-        None => Vec::new(),
-        Some(serde_json::Value::Array(items)) => items.clone(),
-        // A non-array `instructions` is an unknown schema. On removal there is
-        // nothing grim-managed to take out → `Unchanged`; on add, refuse to
-        // edit rather than clobber the user's value.
-        Some(_) if !want => return Ok(InstructionsSync::Unchanged),
-        Some(_) => {
-            return Err(invalid_data(format!(
-                "'{}': 'instructions' is not an array; refusing to edit",
-                config_path.display()
-            )));
-        }
-    };
-
-    let present = entries.iter().any(|v| v.as_str() == Some(entry));
-    let outcome = match (want, present) {
-        (true, true) | (false, false) => return Ok(InstructionsSync::Unchanged),
-        (true, false) => {
-            entries.push(serde_json::Value::String(entry.to_string()));
-            InstructionsSync::Added
-        }
-        (false, true) => {
-            entries.retain(|v| v.as_str() != Some(entry));
-            InstructionsSync::Removed
-        }
-    };
-
-    if entries.is_empty() {
-        doc.remove("instructions");
+    let spliced = if want {
+        json_splice::upsert_array_element(&raw, INSTRUCTIONS_KEY, entry)
     } else {
-        doc.insert("instructions".to_string(), serde_json::Value::Array(entries));
-    }
+        json_splice::remove_array_element(&raw, INSTRUCTIONS_KEY, entry)
+    };
+    let spliced = match spliced {
+        Ok(splice) => splice,
+        // Removal is tolerant (`want == false`): a config grim cannot parse —
+        // or whose `instructions` is not an array — has nothing grim-managed
+        // to remove, so converge as `Unchanged` rather than fail a command
+        // whose primary action already ran. Adding stays strict (never
+        // rewrite an unknown-schema file).
+        Err(_) if !want => return Ok(InstructionsSync::Unchanged),
+        Err(e) => return Err(with_path(config_path, e)),
+    };
 
-    if had_jsonc_extras {
-        tracing::warn!(
-            "rewriting '{}' drops its JSONC comments (grim writes plain JSON)",
-            config_path.display()
-        );
+    match spliced {
+        Splice::Unchanged => Ok(InstructionsSync::Unchanged),
+        Splice::Changed(text) => {
+            atomic_write(config_path, text.as_bytes()).map_err(|e| with_path(config_path, e))?;
+            Ok(if want {
+                InstructionsSync::Added
+            } else {
+                InstructionsSync::Removed
+            })
+        }
     }
-
-    let mut bytes =
-        serde_json::to_vec_pretty(&serde_json::Value::Object(doc)).map_err(|e| invalid_data(e.to_string()))?;
-    bytes.push(b'\n');
-    atomic_write(config_path, &bytes).map_err(|e| with_path(config_path, e))?;
-    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -260,6 +262,62 @@ mod tests {
 
         let second = sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap();
         assert_eq!(second, InstructionsSync::Unchanged);
+    }
+
+    /// Regression: the managed `instructions` entry is spliced in place, so
+    /// every byte outside it — comments, key order, formatting — survives.
+    /// The sync used to reserialize the whole document through serde, which
+    /// dropped JSONC comments, reflowed the file, and alphabetized every key
+    /// (`serde_json::Map` is a `BTreeMap` in this build), rewriting a
+    /// user-owned config grim only meant to register one glob in.
+    #[test]
+    fn sync_preserves_comments_key_order_and_formatting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.jsonc");
+        let original = concat!(
+            "{\n",
+            "  // which model to use\n",
+            "  \"model\": \"anthropic/claude\",\n",
+            "  \"zulu\":   true,\n",
+            "  \"instructions\": [\n",
+            "    \"CONTRIBUTING.md\"\n",
+            "  ],\n",
+            "  \"alpha\": 1\n",
+            "}\n",
+        );
+        std::fs::write(&cfg, original).unwrap();
+
+        assert_eq!(
+            sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap(),
+            InstructionsSync::Added
+        );
+        let added = std::fs::read_to_string(&cfg).unwrap();
+        assert!(added.contains("// which model to use"), "comment preserved: {added}");
+        assert!(
+            added.find("\"zulu\"") < added.find("\"alpha\""),
+            "authored key order preserved, not alphabetized: {added}"
+        );
+        assert!(added.contains("\"zulu\":   true"), "formatting preserved: {added}");
+        assert!(
+            added.contains("\".opencode/rules/*.md\""),
+            "managed entry added: {added}"
+        );
+        assert!(
+            added.contains("\"CONTRIBUTING.md\""),
+            "sibling entry preserved: {added}"
+        );
+
+        // Removing what was just added restores the original bytes exactly —
+        // the strongest span-preservation invariant.
+        assert_eq!(
+            sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap(),
+            InstructionsSync::Removed
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            original,
+            "remove undoes add byte-for-byte"
+        );
     }
 
     #[test]
@@ -308,7 +366,14 @@ mod tests {
         .unwrap();
         let out = sync_managed_instruction(&cfg, "g", true).unwrap();
         assert_eq!(out, InstructionsSync::Added);
-        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        // The written file is still JSONC — its comments and trailing commas
+        // survive the splice — so it is read back through the JSONC-tolerant
+        // parser, not plain `serde_json::from_str`.
+        let written = std::fs::read_to_string(&cfg).unwrap();
+        assert!(written.contains("// the model"), "line comment survives: {written}");
+        assert!(written.contains("/* block */"), "block comment survives: {written}");
+        let doc: serde_json::Value =
+            serde_json::from_str(&crate::install::json_config::sanitize_jsonc(&written)).unwrap();
         assert_eq!(doc["model"], "a/b");
         assert_eq!(doc["instructions"], serde_json::json!(["x.md", "g"]));
 
@@ -511,30 +576,32 @@ mod tests {
     }
 
     #[test]
-    fn written_config_is_always_pretty_printed_valid_json() {
-        // Contract pin: every write goes through serde's pretty printer and
-        // ends with a newline — never a hand-assembled (and breakable)
-        // JSON string.
+    fn written_config_stays_valid_json_and_preserves_foreign_keys() {
+        // Contract pin: every write is a span-preserving splice that leaves
+        // the file valid JSON with its foreign keys byte-intact. This used to
+        // pin serde's pretty printer instead — the whole-file reserialize that
+        // reordered and reflowed a user-owned config on every rule install.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("opencode.json");
-        std::fs::write(&cfg, "{\"$schema\": \"https://opencode.ai/config.json\"}").unwrap();
+        let original = "{\"$schema\": \"https://opencode.ai/config.json\"}";
+        std::fs::write(&cfg, original).unwrap();
 
         sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap();
         let added = std::fs::read_to_string(&cfg).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&added).unwrap();
         assert_eq!(doc["$schema"], "https://opencode.ai/config.json");
-        assert_eq!(
-            added,
-            serde_json::to_string_pretty(&doc).unwrap() + "\n",
-            "output is pretty-printed and newline-terminated"
+        assert_eq!(doc["instructions"], serde_json::json!([".opencode/rules/*.md"]));
+        assert!(
+            added.contains("\"$schema\": \"https://opencode.ai/config.json\""),
+            "the foreign key's own spelling survives verbatim: {added}"
         );
 
-        // The remove round-trip stays valid pretty JSON too (the shape the
-        // user-reported breakage would have violated).
+        // Removing the last managed entry drops the whole `instructions`
+        // member (no `[]` husk) and restores the original bytes.
         sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
         let removed = std::fs::read_to_string(&cfg).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&removed).unwrap();
         assert!(doc.get("instructions").is_none());
-        assert_eq!(removed, serde_json::to_string_pretty(&doc).unwrap() + "\n");
+        assert_eq!(removed, original, "remove undoes add byte-for-byte");
     }
 }
