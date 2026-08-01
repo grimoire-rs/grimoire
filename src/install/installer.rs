@@ -601,19 +601,55 @@ async fn install_one<M: ArtifactMaterializer>(
             // client-level one — `output_at_current_layout`'s rule that an
             // uncomputable layout counts as current.
             //
-            // Sibling: the MCP untracked gate in `install_mcp` still keys on
-            // client alone. No shipped MCP layout move changes an entry's
-            // stored pair (root relocations leave it byte-identical), so it is
-            // latent — but a release that moves one must fix it the same way.
+            // Sibling: the MCP untracked gate in `install_mcp` keys on the
+            // same shape — stored pair, plus the entry pointer and the
+            // recorded value hash in place of the footprint hash below.
             let here =
                 crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)
                     .ok();
-            let tracked = recorded.as_ref().is_some_and(|rec| {
-                rec.outputs.iter().any(|out| match &here {
-                    Some(current) => current == &out.target,
-                    None => out.client == client.as_str(),
+            // A rule's support dir always lives at `<parent>/<name>/`;
+            // `footprint_hash` treats an absent support dir as no support,
+            // which matches both the recorded footprint and the preview when
+            // this version ships none.
+            let existing_support = match kind {
+                ArtifactKind::Rule => dest.parent().map(|p| p.join(&artifact.name)),
+                _ => None,
+            };
+            // Pair equality proves a record NAMES this path. It does not
+            // prove grim wrote the bytes now at it: two anchor roots can
+            // alias onto one location across runs (a vendor directory
+            // variable set for one run and unset for the next), and then a
+            // hand-authored file classifies to the very pair the record
+            // holds. Require the recorded content hash too, so a mismatch
+            // routes into the same forceable refusal — or identical-content
+            // adoption — an unrecorded destination takes. grim's own copies
+            // at a pre-override root hash-match by construction, so the
+            // layout-relocation flows that rest on pair-match adoption are
+            // unaffected.
+            //
+            // The integrity gate has usually hashed this same path already:
+            // whenever `here` is `Some` it resolves the record to this very
+            // location, and refuses first. The redundancy is deliberate —
+            // this gate is the last thing between `remove_path` and a file
+            // grim did not write, and it should not need another gate's
+            // coverage to be correct.
+            let tracked = recorded
+                .as_ref()
+                .and_then(|rec| {
+                    rec.outputs.iter().find(|out| match &here {
+                        Some(current) => current == &out.target,
+                        None => out.client == client.as_str(),
+                    })
                 })
-            });
+                .is_some_and(|out| {
+                    // Nothing on disk to protect (a deleted output about to
+                    // be re-materialized), or the bytes are the recorded
+                    // ones. A footprint that cannot be hashed at all — the
+                    // symlink shapes below — counts as untracked and falls
+                    // through to their dedicated refusal.
+                    (!dest.exists() && !dest.is_symlink())
+                        || footprint_hash(&dest, existing_support.as_deref()).is_ok_and(|h| h == out.content_hash)
+                });
             if tracked {
                 continue;
             }
@@ -647,13 +683,6 @@ async fn install_one<M: ArtifactMaterializer>(
             if !dest.exists() {
                 continue;
             }
-            // A rule's support dir always lives at `<parent>/<name>/`;
-            // `footprint_hash` treats an absent support dir as no
-            // support, matching the preview when this version ships none.
-            let existing_support = match kind {
-                ArtifactKind::Rule => dest.parent().map(|p| p.join(&artifact.name)),
-                _ => None,
-            };
             // Would-be output: render into a staging preview and hash it.
             let preview_root = staging.path().join(format!("preview-{client}"));
             std::fs::create_dir_all(&preview_root).map_err(|e| target_io(&preview_root, e))?;

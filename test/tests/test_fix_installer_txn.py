@@ -191,9 +191,9 @@ def test_env_aliased_root_refuses_instead_of_deleting(
     hand.write_text("# hand-authored, not grim's\n")
 
     result = grim.run("install", "--global", check=False)
-    assert result.returncode != 0, (
+    assert result.returncode == 65, (
         "grim wrote nothing at the un-aliased root, so overwriting it "
-        "needs --force"
+        f"needs --force; got {result.returncode}: {result.stderr}"
     )
     assert hand.read_text() == "# hand-authored, not grim's\n", (
         "a destination whose bytes are not the recorded ones must never "
