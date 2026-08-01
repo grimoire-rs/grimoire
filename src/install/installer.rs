@@ -837,13 +837,9 @@ async fn install_one<M: ArtifactMaterializer>(
     })();
 
     // Partial pass: some clients replaced their destinations, one failed.
-    // Record what is actually on disk before surfacing the error, under the
-    // PRIOR pin — the clients that never ran are still at it. Claiming the new
-    // pin would make the next install's integrity gate answer
-    // `AlreadyInstalled` and strand them; recording nothing leaves the clients
-    // that DID move looking locally modified, which refuses every later
-    // install without `--force`. The old pin is the honest answer: `status`
-    // reads `outdated`, and the retry re-materializes every client.
+    // Record what is actually on disk before surfacing the error — recording
+    // nothing leaves the clients that DID move looking locally modified,
+    // which refuses every later install without `--force`.
     //
     // Both reapers are skipped here on purpose. They delete prior outputs the
     // new set no longer produces, and on a partial pass "no longer produces"
@@ -879,28 +875,7 @@ async fn install_one<M: ArtifactMaterializer>(
                 });
             }
         }
-        if let Some(rec) = &recorded {
-            for out in &rec.outputs {
-                if outputs.iter().any(|fresh| fresh.client == out.client) {
-                    continue;
-                }
-                // Out of scope on this machine — neither resolvable nor
-                // verifiable, exactly as the success path treats it.
-                if out.target.anchor.root(roots).is_none() {
-                    continue;
-                }
-                outputs.push(out.clone());
-            }
-        }
-        if !outputs.is_empty() {
-            state.record(InstallRecord {
-                kind,
-                name: artifact.name.clone(),
-                source: recorded.map_or_else(|| artifact.source.clone(), |rec| rec.source),
-                dev: intent.is_dev(),
-                outputs,
-            });
-        }
+        record_partial_pass(state, artifact, kind, intent, recorded, outputs, roots);
         return Err(error);
     }
 
@@ -1851,6 +1826,73 @@ async fn fetch_verified_layer(
     Ok(blob)
 }
 
+/// One client's MCP registration, fully resolved but not yet written.
+///
+/// [`install_mcp`] plans every client before it writes any of them, so a
+/// refusal on the last client cannot leave the first client's config already
+/// spliced. `raw` is the config file as read during planning; the write reads
+/// nothing further, so the gate and the splice see identical bytes.
+struct PlannedRegistration {
+    client: crate::install::client_target::ClientTarget,
+    config_path: PathBuf,
+    anchored: crate::install::path_anchor::AnchoredPath,
+    format: crate::install::vendor::McpConfigFormat,
+    /// Two-level JSON pointer of the managed member (e.g. `/mcpServers/x`).
+    pointer: String,
+    /// `pointer` split into its container and member halves, owned so the
+    /// plan outlives the borrow.
+    container: String,
+    member: String,
+    value: serde_json::Value,
+    raw: String,
+    /// A semantically identical member already sat at `pointer` — the upsert
+    /// is a no-op and the entry is adopted into the record.
+    adopted: bool,
+}
+
+/// Record a partially-completed install pass before its error surfaces.
+///
+/// `fresh` holds the outputs that actually landed; every prior output for a
+/// client that never ran is carried forward, because its files (or config
+/// entry) are untouched. The record keeps the **prior** pin: some clients are
+/// still at it, and claiming the new one would make the next install's
+/// integrity gate answer `AlreadyInstalled` and strand them. Under the old
+/// pin the artifact reads `outdated` and the retry re-materializes every
+/// client — which is what "recoverable without `--force`" means here.
+fn record_partial_pass(
+    state: &mut InstallState,
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    intent: InstallIntent,
+    recorded: Option<InstallRecord>,
+    mut outputs: Vec<ClientOutput>,
+    roots: &AnchorRoots,
+) {
+    if let Some(rec) = &recorded {
+        for out in &rec.outputs {
+            if outputs.iter().any(|fresh| fresh.client == out.client) {
+                continue;
+            }
+            // Out of scope on this machine — neither resolvable nor
+            // verifiable, exactly as the success path treats it.
+            if out.target.anchor.root(roots).is_none() {
+                continue;
+            }
+            outputs.push(out.clone());
+        }
+    }
+    if outputs.is_empty() {
+        return;
+    }
+    state.record(InstallRecord {
+        kind,
+        name: artifact.name.clone(),
+        source: recorded.map_or_else(|| artifact.source.clone(), |rec| rec.source),
+        dev: intent.is_dev(),
+        outputs,
+    });
+}
+
 /// Install an MCP server descriptor: registration-only — no materialized
 /// file. The descriptor layer is fetched + parsed, then for every selected
 /// client the vendor renders its native config entry and grim splices it
@@ -1908,8 +1950,16 @@ async fn install_mcp(
         }
     }
 
-    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(register_set.len());
-    let mut adopted = 0usize;
+    // Plan every client, THEN write. The file path already gates its whole
+    // client set before the first `remove_path`; this path used to gate and
+    // splice per client, so a refusal on a later client left an earlier
+    // client's config carrying a grim-authored entry that no record covered:
+    // invisible to `uninstall`, re-refused by every reinstall, and live for
+    // whichever vendor reads that file.
+    let mut plans: Vec<PlannedRegistration> = Vec::with_capacity(register_set.len());
+    // Stale members of clients that can no longer represent the descriptor.
+    // Removing one is a write, so it waits behind the gate like the rest.
+    let mut stale_removals: Vec<(crate::install::client_target::ClientTarget, ClientOutput)> = Vec::new();
     for client in &register_set {
         let vendor = client.vendor();
         let format = vendor.mcp_config_format();
@@ -1927,45 +1977,15 @@ async fn install_mcp(
         // prior-tracked client whose OLD pin was representable but whose NEW
         // one is not (http→ws, oauth added): its recorded entry would drop
         // from the rebuilt record while its stale member lingered in the
-        // config file, unreachable by a later uninstall. Splice that stale
-        // member out here so the decline leaves no orphan.
+        // config file, unreachable by a later uninstall. Queue that stale
+        // member for removal so the decline leaves no orphan.
         let Some((pointer, value)) = vendor.mcp_entry(target.scope(), &artifact.name, &descriptor) else {
             if pin_changed
                 && let Some(rec) = &recorded
                 && let Some(stale) = rec.outputs.iter().find(|o| o.client == client.as_str())
-                && let Some(stale_pointer) = &stale.entry
+                && stale.entry.is_some()
             {
-                // Splice the stale member out of the file grim ACTUALLY wrote —
-                // the recorded output's anchored target resolved through the
-                // containment guard — never the `config_path` recomputed from
-                // the current environment. A repointed vendor variable (e.g.
-                // $OPENCODE_CONFIG now naming an unrelated external file) must
-                // not make grim edit a file it never owned, and the recorded
-                // resolve runs the same anchoring guard the write path uses. An
-                // unresolvable recorded target, or an on-disk value that drifted
-                // from the recorded hash (a user edit) or is already gone,
-                // leaves the entry in place — the safe direction (untracked
-                // clobber), reachable again by a reinstall on the original env.
-                match stale.resolved_target(roots, Containment::Strict) {
-                    Ok(recorded_path) => {
-                        let intact = stale
-                            .current_hash(roots, Containment::Strict)
-                            .is_ok_and(|h| h == stale.content_hash);
-                        if intact {
-                            crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale.mcp_format())
-                                .map_err(|e| target_io(&recorded_path, e))?;
-                            tracing::warn!(
-                                "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
-                                artifact.name,
-                                recorded_path.display()
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        "mcp server '{}' is no longer representable for {client} at the new pin; its stale entry could not be located to remove (recorded target unresolvable: {e}) and is left in place",
-                        artifact.name
-                    ),
-                }
+                stale_removals.push((*client, stale.clone()));
             }
             continue;
         };
@@ -1996,6 +2016,7 @@ async fn install_mcp(
             );
             continue;
         };
+        let (container, member) = (container.to_string(), member.to_string());
 
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(raw) => raw,
@@ -2007,51 +2028,133 @@ async fn install_mcp(
         // replacing its value would clobber it, so refuse unless forced.
         // A semantically identical member is adopted into the record
         // instead (the upsert below is a no-op for it).
-        let tracked = recorded
-            .as_ref()
-            .is_some_and(|rec| rec.outputs.iter().any(|out| out.client == client.as_str()));
         let existing_value = match format {
-            McpConfigFormat::Json => json_splice::member_value(&raw, container, member),
-            McpConfigFormat::Toml => toml_splice::member_value(&raw, container, member),
+            McpConfigFormat::Json => json_splice::member_value(&raw, &container, &member),
+            McpConfigFormat::Toml => toml_splice::member_value(&raw, &container, &member),
         };
+        // A client name is not proof grim wrote THIS member of THIS file: a
+        // vendor variable can repoint a config path between runs, and the
+        // recorded client string says nothing about the bytes now sitting at
+        // the pointer. Key on the stored `(anchor, relative)` pair plus the
+        // pointer, and require the member's semantic hash to be the one grim
+        // recorded writing — the same doctrine as the file gate above.
+        let existing_hash = existing_value.as_ref().and_then(|v| entry_value_hash(v).ok());
+        let tracked = recorded.as_ref().is_some_and(|rec| {
+            rec.outputs.iter().any(|out| {
+                out.target == anchored
+                    && out.entry.as_deref() == Some(pointer.as_str())
+                    && existing_hash.as_ref() == Some(&out.content_hash)
+            })
+        });
+        let mut adopted = false;
         if !force
             && !tracked
-            && let Some(existing) = existing_value
+            && let Some(existing) = &existing_value
         {
-            if existing != value {
+            if *existing != value {
                 return Ok(InstallOutcome::RefusedUntracked {
                     client: client.to_string(),
                     path: config_path,
                 });
             }
-            adopted += 1;
+            adopted = true;
         }
-        let spliced = match format {
-            McpConfigFormat::Json => json_splice::upsert_member(&raw, container, member, &value),
-            McpConfigFormat::Toml => toml_splice::upsert_member(&raw, container, member, &value),
-        };
-        match spliced {
-            Ok(Splice::Changed(text)) => {
-                if let Some(parent) = config_path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
-                }
-                crate::store::atomic_write::atomic_write(&config_path, text.as_bytes())
-                    .map_err(|e| target_io(&config_path, e))?;
-            }
-            Ok(Splice::Unchanged) => {}
-            Err(e) => return Err(target_io(&config_path, e).into()),
-        }
-
-        let content_hash = entry_value_hash(&value).map_err(|e| target_io(&config_path, e))?;
-        client_records.push(ClientOutput {
-            client: client.to_string(),
-            target: anchored,
-            content_hash,
-            support_dir: None,
-            entry: Some(pointer),
+        plans.push(PlannedRegistration {
+            client: *client,
+            config_path,
+            anchored,
+            format,
+            pointer,
+            container,
+            member,
+            value,
+            raw,
+            adopted,
         });
+    }
+
+    // Gate cleared for every client — nothing below can refuse, so the
+    // writes are safe to start.
+    for (client, stale) in &stale_removals {
+        // Splice the stale member out of the file grim ACTUALLY wrote — the
+        // recorded output's anchored target resolved through the containment
+        // guard — never a `config_path` recomputed from the current
+        // environment. A repointed vendor variable (e.g. $OPENCODE_CONFIG now
+        // naming an unrelated external file) must not make grim edit a file it
+        // never owned, and the recorded resolve runs the same anchoring guard
+        // the write path uses. An unresolvable recorded target, or an on-disk
+        // value that drifted from the recorded hash (a user edit) or is
+        // already gone, leaves the entry in place — the safe direction
+        // (untracked clobber), reachable again by a reinstall on the original
+        // env.
+        match stale.resolved_target(roots, Containment::Strict) {
+            Ok(recorded_path) => {
+                let intact = stale
+                    .current_hash(roots, Containment::Strict)
+                    .is_ok_and(|h| h == stale.content_hash);
+                if intact && let Some(stale_pointer) = &stale.entry {
+                    crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale.mcp_format())
+                        .map_err(|e| target_io(&recorded_path, e))?;
+                    tracing::warn!(
+                        "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
+                        artifact.name,
+                        recorded_path.display()
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "mcp server '{}' is no longer representable for {client} at the new pin; its stale entry could not be located to remove (recorded target unresolvable: {e}) and is left in place",
+                artifact.name
+            ),
+        }
+    }
+
+    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(plans.len());
+    let mut adopted = 0usize;
+    // Same partial-pass doctrine as `install_one`: a write failure part-way
+    // through leaves earlier clients spliced, and an unrecorded splice is the
+    // orphan entry this whole restructure exists to prevent.
+    let write_result = (|| -> Result<(), crate::error::Error> {
+        for plan in plans {
+            if plan.adopted {
+                adopted += 1;
+            }
+            let spliced = match plan.format {
+                McpConfigFormat::Json => {
+                    json_splice::upsert_member(&plan.raw, &plan.container, &plan.member, &plan.value)
+                }
+                McpConfigFormat::Toml => {
+                    toml_splice::upsert_member(&plan.raw, &plan.container, &plan.member, &plan.value)
+                }
+            };
+            match spliced {
+                Ok(Splice::Changed(text)) => {
+                    if let Some(parent) = plan.config_path.parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+                    }
+                    crate::store::atomic_write::atomic_write(&plan.config_path, text.as_bytes())
+                        .map_err(|e| target_io(&plan.config_path, e))?;
+                }
+                Ok(Splice::Unchanged) => {}
+                Err(e) => return Err(target_io(&plan.config_path, e).into()),
+            }
+
+            let content_hash = entry_value_hash(&plan.value).map_err(|e| target_io(&plan.config_path, e))?;
+            client_records.push(ClientOutput {
+                client: plan.client.to_string(),
+                target: plan.anchored,
+                content_hash,
+                support_dir: None,
+                entry: Some(plan.pointer),
+            });
+        }
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        record_partial_pass(state, artifact, kind, intent, recorded, client_records, roots);
+        return Err(error);
     }
 
     if client_records.is_empty() {
