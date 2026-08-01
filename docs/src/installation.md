@@ -10,7 +10,7 @@ them lands the same `grim` binary.
 idea as Grimoire, applied to executables instead of agent config. It is the
 recommended way to install `grim`: ocx resolves the right build for your
 platform, keeps the binary versioned in a local store, and upgrades it in
-place. Every Grimoire release is published to `ocx.sh/grim`.
+place. Every Grimoire release is published to `ocx.sh/grimoire/cli`.
 
 Install ocx once — its installer wires up your shell so ocx-managed binaries
 land on `PATH`:
@@ -28,7 +28,7 @@ irm https://setup.ocx.sh/pwsh | iex
 Then add `grim` to your global ocx toolchain:
 
 ```sh
-ocx --global add grim
+ocx --global add grimoire/cli
 ```
 
 Updating later is one command — it re-resolves every tool in the global
@@ -167,7 +167,7 @@ If the command prints a version string, you are ready for the
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/
 [ocx]: https://ocx.sh
-[ocx-grim]: https://ocx.sh/catalog/grim
+[ocx-grim]: https://index.ocx.sh/grimoire/cli
 [powershell]: https://learn.microsoft.com/powershell/scripting/install/installing-powershell
 [releases]: https://github.com/grimoire-rs/grimoire/releases
 [rustup]: https://rustup.rs
