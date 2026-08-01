@@ -94,9 +94,14 @@ pub struct ClientOutput {
     pub entry: Option<String>,
     /// This output was **adopted**, not written: the destination already held
     /// exactly what grim would have installed, so the install recorded it
-    /// without writing a byte. Uninstall consults it for `entry` outputs — a
-    /// member the user (or another tool) authored is left in the config file
-    /// rather than spliced out.
+    /// without writing a byte. Uninstall consults it — a member the user (or
+    /// another tool) authored is left in the config file rather than spliced
+    /// out.
+    ///
+    /// Set on `entry` outputs only. File outputs can be adopted too, but
+    /// nothing reads the flag for them, and writing it would put a field an
+    /// older grim rejects into every state file that ever adopted a
+    /// directory. A future file-side reader re-adds the emission additively.
     ///
     /// Never serialized when `false` (the `dev` precedent). Both this struct
     /// and `RawInstallRecord` are `deny_unknown_fields`, so an always-emitted

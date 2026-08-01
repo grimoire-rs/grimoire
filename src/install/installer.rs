@@ -564,10 +564,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // footprint hash equals what this install would write, the files
     // are adopted into the record instead (repairs the "state file
     // lost, outputs intact" case).
-    //
-    // Per client, not a bare count: the outcome below needs the count, and
-    // each output records whether grim wrote it or found it already correct.
-    let mut adopted: Vec<crate::install::client_target::ClientTarget> = Vec::new();
+    let mut adopted = 0usize;
     if !force {
         for client in &materialize_set {
             let dest = target.path_for(*client, kind, &artifact.name);
@@ -711,7 +708,7 @@ async fn install_one<M: ArtifactMaterializer>(
                     path: dest,
                 });
             }
-            adopted.push(*client);
+            adopted += 1;
         }
     }
 
@@ -855,7 +852,12 @@ async fn install_one<M: ArtifactMaterializer>(
                 content_hash: installed_hash,
                 support_dir: anchored_support,
                 entry: None,
-                adopted: adopted.contains(client),
+                // File outputs never carry the flag — only `entry` outputs
+                // have a reader (uninstall's adopted-member guard). Emitting
+                // it here would put a field an older grim rejects into every
+                // state file that ever adopted a directory, for data nothing
+                // consumes.
+                adopted: false,
             });
             in_flight = None;
         }
@@ -909,9 +911,7 @@ async fn install_one<M: ArtifactMaterializer>(
                     content_hash,
                     support_dir: anchored_support,
                     entry: None,
-                    // Whatever is at that path, grim did not finish writing
-                    // it — the record is adopting what it found.
-                    adopted: true,
+                    adopted: false,
                 });
             }
         }
@@ -998,7 +998,7 @@ async fn install_one<M: ArtifactMaterializer>(
         InstallOutcome::Skipped(format!("no selected client has a native target for {kind}"))
     } else if recorded.is_some() {
         InstallOutcome::Updated
-    } else if !adopted.is_empty() && adopted.len() == materialize_set.len() {
+    } else if adopted > 0 && adopted == materialize_set.len() {
         // Every output was adopted at an identical footprint — nothing
         // changed on disk; only the record was rebuilt.
         InstallOutcome::AlreadyInstalled
