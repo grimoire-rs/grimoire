@@ -672,9 +672,13 @@ pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle
         skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
         rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
         agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
+        // An mcp member is a first-class bundle member (the resolver locks
+        // it, `remove`/`prune` treat it as one) — omitting it here left the
+        // freshly-added bundle's server unregistered and `missing` in
+        // `status` until an unrelated `grim install` picked it up.
+        mcp: lock.mcp.iter().filter(|a| is_member(a)).cloned().collect(),
         // A projection feeds the installer only — the bundle cache is not
         // consulted there, so it is not carried over.
-        mcp: vec![],
         bundles: Vec::new(),
     }
 }

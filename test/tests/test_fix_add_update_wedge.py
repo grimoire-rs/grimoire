@@ -8,9 +8,19 @@ same command could clear.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, make_bundle, write_config
+
+MCP_DESCRIPTOR = """\
+description = "Grimoire catalog search and install status over MCP."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+"""
 
 
 def _seed_working_project(grim_at, project_dir: Path, registry: str, unique_repo: str):
@@ -88,3 +98,46 @@ def test_add_retry_with_corrected_ref_succeeds(
     assert out["name"] == "code-review"
     assert out["status"] == "added"
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
+
+
+def test_add_bundle_installs_its_mcp_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim add <bundle>` must materialize the bundle's mcp members too.
+
+    The install projection dropped them, so the lock listed the member while
+    no client config carried its entry and `grim status` reported it
+    `missing` right after a successful add.
+    """
+    runner = grim_at(project_dir)
+
+    descriptor = project_dir / "src" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_text(MCP_DESCRIPTOR)
+    mcp_ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), mcp_ref, "--kind", "mcp")
+
+    skill = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    bundle = make_bundle(
+        f"{unique_repo}/starter",
+        [("skill", "code-review", skill.fq), ("mcp", "grim-mcp", mcp_ref)],
+        tag="v1",
+    )
+    write_config(project_dir)
+
+    out = runner.json("add", bundle.fq)
+    assert out["kind"] == "bundle"
+
+    assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
+    mcp_config = project_dir / ".mcp.json"
+    assert mcp_config.is_file(), "the bundle's mcp member must be registered"
+    assert json.loads(mcp_config.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+
+    rows = runner.json("status")["items"]
+    member = next(r for r in rows if r["name"] == "grim-mcp")
+    assert member["state"] != "missing", rows
