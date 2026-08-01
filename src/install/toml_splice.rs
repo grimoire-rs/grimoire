@@ -55,16 +55,22 @@ pub fn upsert_member(text: &str, container: &str, member: &str, value: &serde_js
         .map_err(|e: toml_edit::TomlError| invalid_data(e.to_string()))?;
 
     let root = doc.as_table_mut();
-    let container_item = root.entry(container).or_insert_with(|| Item::Table(Table::new()));
+    // Hide the container header on a table grim creates — only its
+    // sub-tables print their own `[container.member]` headers. Set inside
+    // `or_insert_with` so it NEVER touches a table parsed from user text: a
+    // hand-authored bare `[mcp_servers]` header (and any comment attached
+    // to it) is dropped by `toml_edit` the moment the flag is set, and
+    // `remove_member` cannot put it back.
+    let container_item = root.entry(container).or_insert_with(|| {
+        let mut created = Table::new();
+        created.set_implicit(true);
+        Item::Table(created)
+    });
     let Some(container_table) = container_item.as_table_mut() else {
         return Err(invalid_data(format!(
             "'{container}' is not a TOML table; refusing to edit"
         )));
     };
-    // Hide an empty container header (only its sub-tables print their own
-    // `[container.member]` headers) — a no-op when the table already has
-    // direct key/values, or was already implicit from parsing.
-    container_table.set_implicit(true);
 
     if let Some(existing) = container_table.get(member)
         && toml_item_to_json(existing).as_ref() == Some(value)
@@ -396,6 +402,49 @@ mod tests {
             .and_then(toml::Value::as_table)
             .unwrap();
         assert_eq!(table.len(), 1, "no duplicate key left behind: {table:?}");
+    }
+
+    /// Regression: a hand-authored bare `[mcp_servers]` header and the
+    /// comment attached to it must survive an upsert. `set_implicit(true)`
+    /// used to run on the parsed container unconditionally, which told
+    /// `toml_edit` to stop printing a header the user wrote themselves —
+    /// taking its comment with it, unrecoverably (`remove_member` cannot
+    /// put back a header it never saw).
+    #[test]
+    fn upsert_preserves_a_hand_authored_container_header_and_its_comment() {
+        let text = "# --- My MCP servers ---\n[mcp_servers]\n\n[mcp_servers.mine]\ncommand = \"x\"\n";
+        let out = changed(upsert_member(text, "mcp_servers", "grim", &json!({"command": "grim"})).unwrap());
+        assert!(
+            out.contains("# --- My MCP servers ---"),
+            "the comment attached to the user's header survives: {out}"
+        );
+        assert!(
+            out.contains("\n[mcp_servers]\n"),
+            "the user's bare container header survives: {out}"
+        );
+        let doc = parse(&out);
+        assert_eq!(
+            str_at(&doc, &["mcp_servers", "mine", "command"]),
+            Some("x".to_string()),
+            "sibling server untouched"
+        );
+
+        // Round trip: removing what was just added restores the original
+        // bytes — the round-trip guarantee the implicit flag broke.
+        let back = changed(remove_member(&out, "mcp_servers", "grim").unwrap());
+        assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    /// The complement: a container grim itself creates stays implicit, so
+    /// no bare `[mcp_servers]` husk is emitted above the entry table.
+    #[test]
+    fn grim_created_container_stays_implicit() {
+        let out = changed(upsert_member("", "mcp_servers", "grim", &json!({"command": "grim"})).unwrap());
+        assert!(
+            !out.contains("[mcp_servers]"),
+            "a grim-created container prints no bare header: {out}"
+        );
+        assert!(out.contains("[mcp_servers.grim]"), "only the entry table: {out}");
     }
 
     #[test]
