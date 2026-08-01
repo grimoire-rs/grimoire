@@ -531,7 +531,7 @@ async fn install_one<M: ArtifactMaterializer>(
         // The same predicate the fetch-before-gate used, so the two cannot
         // disagree about who gets written. `install_one` returns early for
         // `Mcp`, so this only ever judges Skill/Rule/Agent.
-        let supported = client_supports_kind(*client, kind, target);
+        let supported = client_supports_kind(*client, kind, target.workspace(), target.scope());
         if !supported {
             // A `Declined` kind has no native target anywhere; `Degraded`/
             // `Native` both host it (Degraded materializes with a
@@ -1012,16 +1012,24 @@ async fn install_one<M: ArtifactMaterializer>(
 ///
 /// A kind is otherwise hosted unless `kind_support` returns
 /// [`KindSupport::Declined`](crate::install::vendor::KindSupport::Declined).
-fn client_supports_kind(
+///
+/// Shared with the report side (`status`'s configured-vs-recorded client
+/// drift), which must not count a client that was never going to record an
+/// output: the install side deciding one way and the report side the other is
+/// exactly the divergence this predicate closes. It takes `workspace`/`scope`
+/// rather than an [`InstallTarget`] so a read-only caller need not build one.
+pub fn client_supports_kind(
     client: crate::install::client_target::ClientTarget,
     kind: ArtifactKind,
-    target: &InstallTarget,
+    workspace: &Path,
+    scope: ConfigScope,
 ) -> bool {
     match kind {
-        ArtifactKind::Mcp => client
-            .vendor()
-            .mcp_config_path(target.workspace(), target.scope())
-            .is_some(),
+        ArtifactKind::Mcp => client.vendor().mcp_config_path(workspace, scope).is_some(),
+        // A bundle never materializes — it expands into members — so no client
+        // ever records an output for one. The installer never asks (it returns
+        // early for bundles); the report side does, for bundle declaration rows.
+        ArtifactKind::Bundle => false,
         // Every other kind gets the same scope-aware second half: a vendor may
         // host the kind and still have no directory for it at THIS scope
         // (Junie has `.junie/rules/` but no global one; OpenClaw has global
@@ -1030,7 +1038,7 @@ fn client_supports_kind(
         // gap is unaffected.
         kind => {
             client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined
-                && client.vendor().kind_surface(kind, target.scope())
+                && client.vendor().kind_surface(kind, scope)
         }
     }
 }
@@ -1154,12 +1162,12 @@ fn effective_supporting_clients(
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_supports_kind(*c, kind, target))
+        .filter(|c| client_supports_kind(*c, kind, target.workspace(), target.scope()))
         .collect();
     if let Some(rec) = recorded {
         for out in &rec.outputs {
             if let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>()
-                && client_supports_kind(client, kind, target)
+                && client_supports_kind(client, kind, target.workspace(), target.scope())
                 && out.target.anchor.root(roots).is_some()
                 && !set.contains(&client)
             {
@@ -1234,7 +1242,7 @@ fn integrity_gate(
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_supports_kind(*c, rec.kind, target))
+        .filter(|c| client_supports_kind(*c, rec.kind, target.workspace(), target.scope()))
         .collect();
     let covers_targets = !expected.is_empty()
         && expected.iter().all(|c| {

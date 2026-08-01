@@ -44,6 +44,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
+use crate::install::installer::client_supports_kind;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -252,7 +253,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         };
         let (clients_missing, clients_extra) =
             client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                client_hosts_kind(c, decl.kind, &scope.workspace, scope.scope)
+                client_supports_kind(c, decl.kind, &scope.workspace, scope.scope)
             });
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
         // A directly-declared registry-locked row is the only kind eligible
@@ -341,7 +342,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let outputs = record_outputs(record, &active, &scope.roots);
             let (clients_missing, clients_extra) =
                 client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                    client_hosts_kind(c, member.kind, &scope.workspace, scope.scope)
+                    client_supports_kind(c, member.kind, &scope.workspace, scope.scope)
                 });
             entries.push(StatusEntry {
                 kind: member.kind,
@@ -628,35 +629,6 @@ fn client_drift(
         hosting.difference(&recorded).cloned().collect(),
         recorded.difference(&configured).cloned().collect(),
     )
-}
-
-/// Whether `client` can host `kind` at `scope` — the read-side twin of
-/// `installer::client_supports_kind`, which is what decides whether an output
-/// is ever recorded.
-///
-/// Reimplemented rather than shared because the installer's copy is private;
-/// both consult the same public [`Vendor`](crate::install::vendor::Vendor)
-/// methods, so a vendor flipping a decline moves both at once. Keep them in
-/// lockstep: the install side deciding one way and the report side the other is
-/// exactly the divergence this predicate exists to close.
-fn client_hosts_kind(
-    client: ClientTarget,
-    kind: ArtifactKind,
-    workspace: &std::path::Path,
-    scope: crate::config::scope::ConfigScope,
-) -> bool {
-    match kind {
-        // MCP has no `kind_surface` half: a vendor hosts it exactly when it
-        // resolves an MCP config path at this scope.
-        ArtifactKind::Mcp => client.vendor().mcp_config_path(workspace, scope).is_some(),
-        // A bundle never materializes (it expands into members), so no client
-        // ever records an output for one. Bundle rows do not call this.
-        ArtifactKind::Bundle => false,
-        kind => {
-            client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined
-                && client.vendor().kind_surface(kind, scope)
-        }
-    }
 }
 
 /// Derive the reported state for one declared artifact.
@@ -1676,7 +1648,7 @@ mod tests {
         let desired = [ClientTarget::Claude, ClientTarget::Codex];
 
         let (missing, extra) = client_drift(Some(&desired), &recorded, |c| {
-            client_hosts_kind(c, ArtifactKind::Rule, ws, scope)
+            client_supports_kind(c, ArtifactKind::Rule, ws, scope)
         });
         assert!(
             missing.is_empty(),
@@ -1686,7 +1658,7 @@ mod tests {
 
         // A client that DOES host the kind is still reported.
         let (missing, _) = client_drift(Some(&desired), &recorded, |c| {
-            client_hosts_kind(c, ArtifactKind::Skill, ws, scope)
+            client_supports_kind(c, ArtifactKind::Skill, ws, scope)
         });
         assert_eq!(
             missing,
@@ -1701,16 +1673,31 @@ mod tests {
     fn client_hosts_kind_tracks_declines_and_mcp_surfaces() {
         let ws = std::path::Path::new("/ws");
         let scope = crate::config::scope::ConfigScope::Project;
-        assert!(!client_hosts_kind(ClientTarget::Codex, ArtifactKind::Rule, ws, scope));
-        assert!(!client_hosts_kind(ClientTarget::Kiro, ArtifactKind::Agent, ws, scope));
-        assert!(client_hosts_kind(ClientTarget::Claude, ArtifactKind::Rule, ws, scope));
+        assert!(!client_supports_kind(
+            ClientTarget::Codex,
+            ArtifactKind::Rule,
+            ws,
+            scope
+        ));
+        assert!(!client_supports_kind(
+            ClientTarget::Kiro,
+            ArtifactKind::Agent,
+            ws,
+            scope
+        ));
+        assert!(client_supports_kind(
+            ClientTarget::Claude,
+            ArtifactKind::Rule,
+            ws,
+            scope
+        ));
         assert_eq!(
-            client_hosts_kind(ClientTarget::Claude, ArtifactKind::Mcp, ws, scope),
+            client_supports_kind(ClientTarget::Claude, ArtifactKind::Mcp, ws, scope),
             ClientTarget::Claude.vendor().mcp_config_path(ws, scope).is_some(),
             "the MCP arm must track mcp_config_path, not kind_support"
         );
         assert!(
-            !client_hosts_kind(ClientTarget::Claude, ArtifactKind::Bundle, ws, scope),
+            !client_supports_kind(ClientTarget::Claude, ArtifactKind::Bundle, ws, scope),
             "a bundle never materializes, so no client hosts one"
         );
     }
