@@ -2079,6 +2079,21 @@ async fn run_batch_with_progress(
     }
 }
 
+/// Acquire the config-file advisory lock for the active scope, held for a
+/// read-modify-write window.
+///
+/// Unconditional: an absent `grimoire.toml` is the first-run state, not a
+/// reason to mutate unguarded — the lock lives on a sidecar, so only the
+/// parent directory has to exist. Gating on the config's existence let the
+/// TUI's first write to a fresh scope race a concurrent `grim` process
+/// last-writer-wins (the same defect as `lockable_config_path`'s old
+/// existence gate).
+fn config_guard(ctx: &TuiContext) -> anyhow::Result<ConfigFileLock> {
+    grim(ConfigFileLock::try_acquire(
+        &crate::command::scope_resolution::lockable_path(&ctx.config_path),
+    ))
+}
+
 /// Uninstall one catalog row through the shared seams: delete the
 /// materialized files and drop the install-state record
 /// ([`crate::install::uninstall`]), then undeclare the entry from the
@@ -2113,10 +2128,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     // closes a TOCTOU window where a concurrent `grim remove` of the bundle
     // (between the gate decision and the undeclare) would orphan the kept
     // files. Held to function end.
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    let _guard = config_guard(ctx)?;
 
     // For a bundle row the catalog repo's basename is NOT necessarily the
     // `[bundles]` binding name (`grim add --name`): resolve the real binding
@@ -2143,7 +2155,6 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let mut involved_clients: Vec<crate::install::client_target::ClientTarget> = Vec::new();
-    let mut any_removed = false;
     for (target_kind, target_name) in &targets {
         for client in install_state
             .get(*target_kind, target_name)
@@ -2161,15 +2172,19 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         }
         let result = crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots)
             .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
-        any_removed |= result.outcome == crate::install::uninstall::UninstallOutcome::Removed;
-    }
-    if any_removed {
-        // The single `persist` seam handles project-scope dir creation, the
-        // atomic write, and the conditional legacy-file reap (including the
-        // lossy-migration guard that was previously missing here).
-        install_state
-            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
-            .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+        if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+            // Persist per member, not once after the loop: a later member's
+            // failure returns early, and a batch-end persist would then throw
+            // away the removals already applied — leaving records pointing at
+            // files that are gone from disk (status reports them installed,
+            // re-install refuses them as modified). The single `persist` seam
+            // handles project-scope dir creation, the atomic write, and the
+            // conditional legacy-file reap (including the lossy-migration
+            // guard that was previously missing here).
+            install_state
+                .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+                .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+        }
     }
     // Converge vendor-owned config for every client the removed record
     // carried, mirroring `command::uninstall`. The files and install state are
@@ -2220,10 +2235,7 @@ fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()>
 
     // Hold the config flock for the whole read-modify-write (file deletion +
     // undeclare see one declaration snapshot), matching the registry path.
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    let _guard = config_guard(ctx)?;
 
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     // The clients whose vendor config must be re-synced after the record drops
@@ -2351,10 +2363,7 @@ async fn perform(
     // overwrite. The shared `declare` seam routes a bundle into
     // `[bundles]`, and `relock_declared` full-resolves it so its members
     // expand into the lock.
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    let _guard = config_guard(ctx)?;
     let (options, registries, mut set) = load_scope_declaration(ctx)?;
     declare(&mut set, kind, name.clone(), id);
     grim(write_config(&ctx.config_path, &options, &registries, &set))?;
@@ -2476,10 +2485,7 @@ async fn perform_local_declared(
     progress: &dyn InstallProgress,
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    let _guard = config_guard(ctx)?;
     let (_options, _registries, set) = load_scope_declaration(ctx)?;
     let previous = lock_io::load(&ctx.lock_path).ok();
     let anchor = ctx
@@ -2550,6 +2556,12 @@ async fn perform_local_dev(
     let crate::lock::locked_source::LockedSource::Path { path, .. } = source else {
         return Err(anyhow::anyhow!("dev record '{name}' has no path source"));
     };
+    // Hold the config flock across the load-modify-persist window, like every
+    // sibling handler. This path touches no declaration, but it read-modify-
+    // writes the same install state they do, so without the guard a TUI dev
+    // re-materialize could interleave with a concurrent `grim` mutation and
+    // lose its record set.
+    let _guard = config_guard(ctx)?;
     let anchor = ctx
         .config_path
         .parent()
@@ -3139,10 +3151,7 @@ async fn perform_member_uninstall(
     // declaration snapshot (closes the TOCTOU window where a concurrent
     // `grim remove` between the gate and the undeclare could orphan the kept
     // files). Held to function end.
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    let _guard = config_guard(ctx)?;
 
     // Delete materialized files + drop the install-state record — UNLESS a
     // declared bundle provides this artifact, in which case the files stay (it
@@ -4109,53 +4118,67 @@ mod tests {
     /// aliased-member case (a bundle referencing a skill whose repo is named
     /// differently from the skill itself).
     async fn registry_with_bundle_at(skill_segment: &str) -> Arc<dyn OciAccess> {
+        registry_with_bundle_members(&[("demo", skill_segment)]).await
+    }
+
+    /// As [`registry_with_bundle_at`], for a bundle of N members: each
+    /// `(name, repo_segment)` publishes a skill whose tar root (and lock /
+    /// install-state key) is `name` at repo `grimoire/skills/<repo_segment>`.
+    async fn registry_with_bundle_members(members: &[(&str, &str)]) -> Arc<dyn OciAccess> {
         use crate::oci::Algorithm;
         use crate::oci::access::memory_registry::MemoryRegistry;
         use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
         use crate::oci::manifest::{Descriptor, OciManifest};
 
         let reg = MemoryRegistry::new();
+        let mut bundle_members = Vec::new();
 
-        // The member skill: a tar tree rooted at `demo/`.
-        let body: &[u8] = b"---\nname: demo\ndescription: d\n---\n";
-        let mut header = tar::Header::new_gnu();
-        header.set_size(body.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        let mut builder = tar::Builder::new(Vec::new());
-        builder.append_data(&mut header, "demo/SKILL.md", body).unwrap();
-        let tar_blob = builder.into_inner().unwrap();
+        for (name, skill_segment) in members {
+            // The member skill: a tar tree rooted at `<name>/`.
+            let body = format!("---\nname: {name}\ndescription: d\n---\n").into_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let mut builder = tar::Builder::new(Vec::new());
+            builder
+                .append_data(&mut header, format!("{name}/SKILL.md"), &body[..])
+                .unwrap();
+            let tar_blob = builder.into_inner().unwrap();
 
-        let skill_repo = Identifier::new_registry(format!("grimoire/skills/{skill_segment}"), "localhost:5050");
-        let skill_layer = reg.push_blob(&skill_repo, &tar_blob).await.unwrap();
-        let skill_manifest = OciManifest {
-            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
-            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
-            // OCI empty config — the actual wire shape since
-            // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
-            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
-            layers: vec![Descriptor {
-                digest: skill_layer,
-                media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
-                size: tar_blob.len() as u64,
-            }],
-            annotations: Default::default(),
-        };
-        let skill_digest = reg.push_manifest(&skill_repo, &skill_manifest).await.unwrap();
-        reg.put_tag(&skill_repo, "1.0.0", &skill_digest).await.unwrap();
-        // A second tag at the SAME digest, so a standalone install can pin
-        // `:latest` while the bundle pins `:1.0.0` — a different identifier for
-        // the same artifact (exercises the id-mismatch declaration path).
-        reg.put_tag(&skill_repo, "latest", &skill_digest).await.unwrap();
+            let skill_repo = Identifier::new_registry(format!("grimoire/skills/{skill_segment}"), "localhost:5050");
+            let skill_layer = reg.push_blob(&skill_repo, &tar_blob).await.unwrap();
+            let skill_manifest = OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+                // OCI empty config — the actual wire shape since
+                // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers: vec![Descriptor {
+                    digest: skill_layer,
+                    media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                    size: tar_blob.len() as u64,
+                }],
+                annotations: Default::default(),
+            };
+            let skill_digest = reg.push_manifest(&skill_repo, &skill_manifest).await.unwrap();
+            reg.put_tag(&skill_repo, "1.0.0", &skill_digest).await.unwrap();
+            // A second tag at the SAME digest, so a standalone install can pin
+            // `:latest` while the bundle pins `:1.0.0` — a different identifier for
+            // the same artifact (exercises the id-mismatch declaration path).
+            reg.put_tag(&skill_repo, "latest", &skill_digest).await.unwrap();
 
-        // The bundle: a single members-layer naming the skill.
-        let members = BundleManifest::new(vec![BundleMember {
-            kind: ArtifactKind::Skill,
-            // The member name == the skill's tar root (`demo`), which the
-            // materializer requires; the skill's REPO segment may differ.
-            name: "demo".to_string(),
-            id: format!("localhost:5050/grimoire/skills/{skill_segment}:1.0.0"),
-        }]);
+            bundle_members.push(BundleMember {
+                kind: ArtifactKind::Skill,
+                // The member name == the skill's tar root, which the
+                // materializer requires; the skill's REPO segment may differ.
+                name: (*name).to_string(),
+                id: format!("localhost:5050/grimoire/skills/{skill_segment}:1.0.0"),
+            });
+        }
+
+        // The bundle: one members-layer naming every skill above.
+        let members = BundleManifest::new(bundle_members);
         let members_blob = members.to_layer_bytes().unwrap();
         let bundle_repo = Identifier::new_registry("grimoire/bundles/starter-pack", "localhost:5050");
         let members_layer = reg.push_blob(&bundle_repo, &members_blob).await.unwrap();
@@ -4329,6 +4352,59 @@ mod tests {
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
             ArtifactState::NotInstalled
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_delete_persists_each_member_before_a_later_failure() {
+        // Regression: the member loop persisted install state ONCE, after the
+        // whole loop. A member that fails mid-loop returns early, so every
+        // member already deleted from disk kept its record — `status` then
+        // reported a deleted artifact as installed and re-install refused it
+        // as modified, with only `--force` (the clobber flag) as a way out.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(
+            workspace,
+            registry_with_bundle_members(&[("alpha", "alpha"), ("omega", "omega")]).await,
+        );
+
+        let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        row.kind = "bundle".to_string();
+        row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &row, false, None, &SilentProgress, false)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/alpha/SKILL.md").is_file());
+        assert!(workspace.join(".claude/skills/omega/SKILL.md").is_file());
+
+        // Wedge the SECOND member — the delete targets are ordered by
+        // `(kind, name)`, so `alpha` is uninstalled before `omega`. A `..`
+        // component in the stored remainder fails the containment guard at
+        // resolve time, which is a hard uninstall error rather than one of
+        // the tolerated skips.
+        let mut state = load_state(&ctx).unwrap();
+        let mut wedged = state
+            .get(ArtifactKind::Skill, "omega")
+            .expect("omega is recorded")
+            .clone();
+        wedged.outputs[0].target.relative = "../escape".to_string();
+        state.record(wedged);
+        state
+            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+            .unwrap();
+
+        perform_uninstall(&ctx, &row).expect_err("the wedged member must fail the delete");
+
+        assert!(
+            !workspace.join(".claude/skills/alpha").exists(),
+            "precondition: the first member's files are deleted before the failure"
+        );
+        let after = load_state(&ctx).unwrap();
+        assert!(
+            after.get(ArtifactKind::Skill, "alpha").is_none(),
+            "a member whose files are gone must not keep a persisted install record"
         );
     }
 
