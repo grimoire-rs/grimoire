@@ -39,6 +39,15 @@ pub struct UninstallArgs {
 
     /// The config binding name to uninstall.
     pub name: String,
+
+    /// Remove a managed MCP config entry even when it no longer matches
+    /// what grim installed.
+    ///
+    /// Without it such an entry is refused (65) rather than discarded — it
+    /// may hold a local customization, or be an entry grim only adopted and
+    /// never wrote. Materialized files are deleted either way.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Run `grim uninstall`.
@@ -94,7 +103,8 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
             .unwrap_or_default();
         let result = super::grim(
-            uninstall(&mut state, kind, &args.name, &scope.roots).map_err(|e| uninstall_error(&scope.workspace, e)),
+            uninstall(&mut state, kind, &args.name, &scope.roots, args.force)
+                .map_err(|e| uninstall_error(&scope.workspace, e)),
         )?;
         file_removed = result.outcome == UninstallOutcome::Removed;
         retained = result.retained;
@@ -227,11 +237,21 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::install::i
 /// Map an [`UninstallError`] to the top-level [`crate::error::Error`] so the
 /// exit-code classifier sees the right tier: an anchor failure keeps its
 /// own taxonomy (65/74/1); an I/O failure becomes the install-tier
-/// `TargetIo` (74), matching `state_io`.
+/// `TargetIo` (74), matching `state_io`; the entry-integrity refusal reuses
+/// the install tier's `IntegrityMismatch` so it lands in the **existing**
+/// forceable-refusal family — `DataError` (65), reason `modified`,
+/// `forceable: true` — instead of minting a second envelope for the same
+/// "locally modified, rerun with --force" situation. The refused file and
+/// member are named in the warning the gate itself logs.
 fn uninstall_error(path: &std::path::Path, source: UninstallError) -> crate::error::Error {
     match source {
         UninstallError::Anchor(e) => crate::error::Error::from(e),
         UninstallError::Io(io) => crate::error::Error::from(state_io(path, io)),
+        UninstallError::EntryModified { recorded, actual, .. } => {
+            crate::error::Error::from(crate::install::install_error::InstallError::without_reference(
+                crate::install::install_error::InstallErrorKind::IntegrityMismatch { recorded, actual },
+            ))
+        }
     }
 }
 

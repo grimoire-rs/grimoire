@@ -2170,8 +2170,9 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
                 involved_clients.push(client);
             }
         }
-        let result = crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots)
-            .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
+        let result =
+            crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots, false)
+                .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
         if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
             // Persist per member, not once after the loop: a later member's
             // failure returns early, and a batch-end persist would then throw
@@ -2248,7 +2249,7 @@ fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()>
     // Delete the materialized files and drop the install-state record through
     // the shared `uninstall` seam — it handles both a declared path record and
     // a bare dev record (keyed on `(kind, name)`).
-    let removed = crate::install::uninstall::uninstall(&mut install_state, kind, &name, &ctx.roots)
+    let removed = crate::install::uninstall::uninstall(&mut install_state, kind, &name, &ctx.roots, false)
         .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?
         .outcome
         == crate::install::uninstall::UninstallOutcome::Removed;
@@ -3165,7 +3166,7 @@ async fn perform_member_uninstall(
             .get(member_kind, &name)
             .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
             .unwrap_or_default();
-        let result = crate::install::uninstall::uninstall(&mut install_state, member_kind, &name, &ctx.roots)
+        let result = crate::install::uninstall::uninstall(&mut install_state, member_kind, &name, &ctx.roots, false)
             .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
         if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
             install_state

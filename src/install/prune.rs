@@ -257,7 +257,7 @@ pub fn prune_orphans(
         // escape) is FATAL — it propagates as PruneError::Anchor (→
         // DataError(65)) and is NEVER reaped. A genuine I/O error
         // (PruneError::Io) still propagates too.
-        let (outcome, removed, retained, abandoned_entries) = match uninstall(state, kind, &name, roots) {
+        let (outcome, removed, retained, abandoned_entries) = match uninstall(state, kind, &name, roots, force) {
             Ok(result) => (
                 PruneOutcome::Pruned,
                 result.removed,
@@ -357,10 +357,21 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
 /// (not flattened to I/O) so `classify_error` maps a path-traversal to
 /// `DataError(65)` rather than `IoError(74)` — ARCH-4/SC-03. A plain I/O
 /// failure maps to [`PruneError::Io`].
+///
+/// [`UninstallError::EntryModified`] is unreachable from here by
+/// construction — the `is_modified` gate above already preserves a drifted
+/// orphan as `KeptModified`, and `force` is passed straight through, so the
+/// uninstall seam's own entry gate can never fire on this path. The arm
+/// exists for exhaustiveness and maps to the same I/O tier as any other
+/// unexpected failure to act on the recorded footprint.
 fn prune_error(path: PathBuf, source: UninstallError) -> PruneError {
     match source {
         UninstallError::Anchor(e) => PruneError::Anchor { path, source: e },
         UninstallError::Io(io) => PruneError::Io { path, source: io },
+        UninstallError::EntryModified { .. } => PruneError::Io {
+            path,
+            source: io::Error::new(io::ErrorKind::InvalidData, source.to_string()),
+        },
     }
 }
 

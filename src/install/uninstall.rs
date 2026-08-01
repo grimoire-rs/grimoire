@@ -13,15 +13,18 @@
 //! `uninstall` undeclares too; a TUI scope reset might not).
 //!
 //! Idempotent: a missing record, or already-absent target files, is not
-//! an error — uninstall converges on "not installed" from any state.
+//! an error — uninstall converges on "not installed" from any state. The
+//! one exception is the forceable integrity gate on `entry` outputs (see
+//! [`uninstall`]'s `force` parameter): a managed MCP config member that
+//! drifted from its recorded value is refused rather than discarded.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::install::install_state::InstallState;
+use crate::install::install_state::{InstallRecord, InstallState};
 use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
-use crate::oci::ArtifactKind;
+use crate::oci::{ArtifactKind, Digest};
 
 /// What [`uninstall`] did.
 ///
@@ -80,8 +83,9 @@ pub struct UninstallResult {
     pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
-/// A failure during uninstall: either resolving an anchored target failed
-/// (a corrupt/tampered `relative`) or deleting a present file did.
+/// A failure during uninstall: resolving an anchored target failed (a
+/// corrupt/tampered `relative`), deleting a present file did, or the
+/// integrity gate refused a drifted config entry.
 ///
 /// `thiserror`, `#[non_exhaustive]` (error-enum convention).
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +97,24 @@ pub enum UninstallError {
     /// Deleting a present target failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A managed config member (an MCP registration) no longer holds the
+    /// value grim recorded, so splicing it out would discard a local edit —
+    /// or, in the adoption case, an entry grim never wrote at all. Refused
+    /// unless forced, mirroring the install side's untracked-destination
+    /// gate.
+    #[error(
+        "managed entry '{pointer}' in '{path}' was modified locally: recorded {recorded}, found {actual}; rerun with --force to remove it"
+    )]
+    EntryModified {
+        /// The resolved config file holding the drifted member.
+        path: PathBuf,
+        /// The two-level JSON pointer of the managed member.
+        pointer: String,
+        /// The value hash recorded at install time.
+        recorded: Digest,
+        /// The value hash read back from the config file now.
+        actual: Digest,
+    },
 }
 
 /// Remove every recorded client output for `(kind, name)` from disk and
@@ -113,11 +135,18 @@ pub enum UninstallError {
 /// place. Reported divergence between state and disk is acceptable; a wedged
 /// record the user cannot remove (grimoire#57) is not.
 ///
+/// `force` bypasses the **entry-integrity gate**: without it, a managed MCP
+/// config member whose current value drifted from the recorded one refuses
+/// with [`UninstallError::EntryModified`] instead of being spliced away (see
+/// [`refuse_drifted_entries`]). File outputs are unaffected — deleting grim's
+/// own materialized footprint is uninstall's shipped contract either way.
+///
 /// # Errors
 ///
 /// A [`UninstallError`] from a genuine containment failure resolving an
-/// anchored target (a tampered `relative` — traversal), or
-/// from deleting a target that *is* present (other than not-found). A present
+/// anchored target (a tampered `relative` — traversal), from deleting a
+/// target that *is* present (other than not-found), or from the
+/// forceable entry-integrity gate. A present
 /// target is operated on through its resolved (canonicalized) path,
 /// guaranteed contained within its anchor root; a missing target is operated
 /// on via the raw anchor join. An anchor whose root is unresolvable is skipped
@@ -127,6 +156,7 @@ pub fn uninstall(
     kind: ArtifactKind,
     name: &str,
     roots: &AnchorRoots,
+    force: bool,
 ) -> Result<UninstallResult, UninstallError> {
     let Some(record) = state.get(kind, name).cloned() else {
         return Ok(UninstallResult {
@@ -136,6 +166,12 @@ pub fn uninstall(
             abandoned_entries: Vec::new(),
         });
     };
+
+    // Gate the WHOLE record before anything is deleted, so a refusal leaves
+    // the artifact untouched instead of half-uninstalled.
+    if !force {
+        refuse_drifted_entries(&record, roots)?;
+    }
 
     let mut removed = Vec::new();
     let mut retained = Vec::new();
@@ -258,6 +294,53 @@ pub fn uninstall(
     })
 }
 
+/// Refuse the uninstall when any `entry` output's managed member drifted
+/// from the value recorded at install time.
+///
+/// Only `entry` outputs are gated, and the asymmetry is deliberate. A file
+/// output is a footprint grim materialized itself, so deleting it is
+/// uninstall's shipped contract. A config member is not: it lives inside a
+/// shared, user-owned file, and the install-side untracked gate *adopts* a
+/// semantically identical pre-existing member without writing a byte — so a
+/// hash-blind removal would delete an entry the user (or another tool)
+/// authored and grim merely recorded. Drift also covers the ordinary case of
+/// a member the user edited in place after install.
+///
+/// An entry that cannot be read back — absent file, absent member,
+/// unparseable config — is **not** gated: there is nothing left to preserve,
+/// and the removal below is deliberately tolerant of exactly those states.
+///
+/// # Errors
+///
+/// [`UninstallError::EntryModified`] for the first drifted member found
+/// (forceable, exit 65), or [`UninstallError::Anchor`] if resolving that
+/// member's config path fails after its hash was already read.
+fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result<(), UninstallError> {
+    for out in &record.outputs {
+        let Some(pointer) = &out.entry else { continue };
+        let Ok(actual) = out.current_hash(roots, Containment::Strict) else {
+            continue;
+        };
+        if actual == out.content_hash {
+            continue;
+        }
+        let path = out.resolved_target(roots, Containment::Strict)?;
+        // The error carries the digests; this names the file and member,
+        // which the shared forceable-refusal envelope cannot.
+        tracing::warn!(
+            "refusing to remove managed entry '{pointer}' from '{}': it no longer matches what grim installed",
+            path.display()
+        );
+        return Err(UninstallError::EntryModified {
+            path,
+            pointer: pointer.clone(),
+            recorded: out.content_hash.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
 /// Splice the managed member `pointer` points at out of the config file at
 /// `path`, using the splice engine `format` names. Converges tolerantly
 /// (the OpenCode glob-removal contract): an absent file, an unparseable
@@ -349,6 +432,12 @@ mod tests {
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Digest, Identifier};
+
+    /// The semantic hash a real install records for a managed MCP member —
+    /// the same canonical-JSON hash the integrity gate recomputes.
+    fn entry_hash(value: &serde_json::Value) -> Digest {
+        crate::install::install_state::entry_value_hash(value).unwrap()
+    }
 
     fn pinned(name: &str) -> PinnedIdentifier {
         let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
@@ -452,13 +541,13 @@ mod tests {
         });
 
         let roots = roots(ws);
-        let r = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots).unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots, false).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert_eq!(r.removed, vec![skill_dir.clone()]);
         assert!(!skill_dir.exists());
         assert!(st.get(ArtifactKind::Skill, "hello").is_none());
 
-        let r = uninstall(&mut st, ArtifactKind::Rule, "style", &roots).unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Rule, "style", &roots, false).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert!(!rule_file.exists());
         assert!(st.get(ArtifactKind::Rule, "style").is_none());
@@ -493,7 +582,7 @@ mod tests {
         });
 
         let roots = roots(ws);
-        let r = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots).unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots, false).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert_eq!(r.removed, vec![index.clone(), support.clone()]);
         assert!(!index.exists(), "index file removed");
@@ -501,7 +590,7 @@ mod tests {
         assert!(st.get(ArtifactKind::Rule, "my-rule").is_none());
 
         // Idempotent: a second uninstall reports nothing left to do.
-        let again = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots).unwrap();
+        let again = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots, false).unwrap();
         assert_eq!(again.outcome, UninstallOutcome::NotInstalled);
     }
 
@@ -511,7 +600,7 @@ mod tests {
         let ws = dir.path();
         let mut st = InstallState::empty(&ws.join("s.json"));
         let roots = roots(ws);
-        let r = uninstall(&mut st, ArtifactKind::Skill, "nope", &roots).unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Skill, "nope", &roots, false).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::NotInstalled);
         assert!(r.removed.is_empty());
     }
@@ -532,7 +621,7 @@ mod tests {
         });
         // Files never existed on disk; record still drops cleanly.
         let roots = roots(ws);
-        let r = uninstall(&mut st, ArtifactKind::Skill, "ghost", &roots).unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Skill, "ghost", &roots, false).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert!(r.removed.is_empty());
         assert!(st.get(ArtifactKind::Skill, "ghost").is_none());
@@ -592,7 +681,7 @@ mod tests {
             claude_user_dir: None,
             agents_skills: None,
         };
-        let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots)
+        let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots, false)
             .expect("an unresolvable client anchor must be tolerated, not error");
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert!(!claude_file.exists(), "the resolvable claude file is removed");
@@ -616,7 +705,10 @@ mod tests {
         .unwrap();
 
         let mut state = InstallState::empty(&ws.join("state.json"));
-        let mut out = client_output_at(".mcp.json", Digest::Sha256("b".repeat(64)));
+        // The recorded hash is the managed member's real semantic hash — what
+        // a real install writes. An arbitrary placeholder would now read as
+        // local drift and hit the entry-integrity gate.
+        let mut out = client_output_at(".mcp.json", entry_hash(&serde_json::json!({"command": "grim"})));
         out.entry = Some("/mcpServers/grim".to_string());
         state.record(InstallRecord {
             kind: ArtifactKind::Mcp,
@@ -626,7 +718,7 @@ mod tests {
             outputs: vec![out],
         });
 
-        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).unwrap();
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert!(cfg.is_file(), "the shared config file must survive");
         let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
@@ -657,7 +749,7 @@ mod tests {
         // Absent file: converges.
         let mut state = InstallState::empty(&ws.join("state.json"));
         state.record(record.clone());
-        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).unwrap();
         assert_eq!(result.outcome, UninstallOutcome::Removed);
 
         // Unparseable file: never rewritten, never an error.
@@ -665,7 +757,7 @@ mod tests {
         std::fs::write(&cfg, "not json {{{").unwrap();
         let mut state = InstallState::empty(&ws.join("state.json"));
         state.record(record);
-        uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).unwrap();
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "not json {{{");
     }
 
@@ -692,7 +784,10 @@ mod tests {
                 anchor: PathAnchor::Workspace,
                 relative: "config.toml".to_string(),
             },
-            content_hash: Digest::Sha256("b".repeat(64)),
+            // See `uninstall_entry_output_removes_member_never_the_file`: the
+            // recorded hash must be the member's real semantic hash, or the
+            // entry-integrity gate reads the fixture as locally modified.
+            content_hash: entry_hash(&serde_json::json!({"command": "grim"})),
             support_dir: None,
             entry: None,
         };
@@ -705,7 +800,7 @@ mod tests {
             outputs: vec![out],
         });
 
-        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws)).unwrap();
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).unwrap();
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert!(cfg.is_file(), "the shared config.toml must survive");
 
@@ -724,6 +819,138 @@ mod tests {
             "foreign mcp_servers entry preserved"
         );
         assert!(text.contains("# user comment"), "unrelated comment preserved");
+        assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
+    }
+
+    // ── Entry-integrity gate (drifted / adopted managed members) ─────────
+
+    /// Build a state holding one MCP record whose recorded hash is
+    /// deliberately NOT the hash of what is in `cfg` — the shape both a
+    /// user in-place edit and the adoption case produce.
+    fn drifted_entry_state(ws: &std::path::Path, cfg_rel: &str) -> InstallState {
+        let mut out = client_output_at(cfg_rel, Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcpServers/grim".to_string());
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+        state
+    }
+
+    #[test]
+    fn uninstall_refuses_a_locally_modified_entry_without_force() {
+        // The managed member no longer holds what grim recorded — a user
+        // customization, or (the sharp case) an identical pre-existing entry
+        // adopted at install, which grim never wrote a byte of. Removing it
+        // hash-blind discards the user's own content, so refuse: every
+        // sibling removal path in the tree checks the recorded hash first.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".mcp.json");
+        let original =
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\", \"args\": [\"--mine\"]}\n  }\n}\n";
+        std::fs::write(&cfg, original).unwrap();
+
+        let mut state = drifted_entry_state(ws, ".mcp.json");
+        let err = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false)
+            .expect_err("a drifted managed entry must be refused, not silently discarded");
+        assert!(
+            matches!(err, UninstallError::EntryModified { .. }),
+            "expected the forceable drift refusal, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            original,
+            "the refused config must be byte-unchanged"
+        );
+        assert!(
+            state.get(ArtifactKind::Mcp, "grim").is_some(),
+            "the record must survive a refusal, or --force has nothing left to act on"
+        );
+    }
+
+    #[test]
+    fn uninstall_refusal_is_preflight_and_deletes_nothing() {
+        // The gate runs over the WHOLE record before any deletion, so a
+        // refusal leaves the artifact intact rather than half-uninstalled.
+        // The file output is listed FIRST: a mid-loop check would already
+        // have deleted it by the time it reached the drifted entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"edited\"}\n  }\n}\n",
+        )
+        .unwrap();
+        let file = ws.join(".claude/rules/grim.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# doc\n").unwrap();
+
+        let mut entry_out = client_output_at(".mcp.json", Digest::Sha256("b".repeat(64)));
+        entry_out.entry = Some("/mcpServers/grim".to_string());
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![
+                client_output_at(".claude/rules/grim.md", content_hash(&file).unwrap()),
+                entry_out,
+            ],
+        });
+
+        uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).expect_err("the drifted entry refuses");
+        assert!(file.is_file(), "a refusal must not leave the artifact half-uninstalled");
+    }
+
+    #[test]
+    fn uninstall_removes_a_locally_modified_entry_with_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"edited\"},\n    \"user-server\": {\"command\": \"x\"}\n  }\n}\n",
+        )
+        .unwrap();
+
+        let mut state = drifted_entry_state(ws, ".mcp.json");
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), true)
+            .expect("--force removes the drifted entry");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("grim").is_none(), "forced removal splices it out");
+        assert_eq!(
+            doc["mcpServers"]["user-server"]["command"], "x",
+            "foreign entry survives"
+        );
+        assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
+    }
+
+    #[test]
+    fn uninstall_gate_tolerates_a_hand_deleted_entry() {
+        // The member is already gone from a still-present config file: there
+        // is nothing left to preserve, so the gate must NOT refuse — that
+        // would wedge the record behind a --force the user cannot reason about.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"user-server\": {\"command\": \"x\"}\n  }\n}\n",
+        )
+        .unwrap();
+
+        let mut state = drifted_entry_state(ws, ".mcp.json");
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false)
+            .expect("an already-absent member must converge, not refuse");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "record dropped");
     }
 
@@ -766,7 +993,7 @@ mod tests {
             )],
         });
 
-        let result = uninstall(&mut st, ArtifactKind::Rule, "style", &roots(&ws))
+        let result = uninstall(&mut st, ArtifactKind::Rule, "style", &roots(&ws), false)
             .expect("a relocated ancestor must not wedge uninstall — that is the grimoire#57 deadlock");
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert!(
@@ -826,7 +1053,7 @@ mod tests {
             outputs: vec![out],
         });
 
-        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(&ws))
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(&ws), false)
             .expect("a relocated ancestor must not wedge uninstall");
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert_eq!(
@@ -906,7 +1133,7 @@ mod tests {
             ],
         });
 
-        let result = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots(&ws))
+        let result = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots(&ws), false)
             .expect("a relocated ancestor must not wedge uninstall");
         assert_eq!(result.outcome, UninstallOutcome::Removed);
         assert_eq!(
