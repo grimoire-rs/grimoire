@@ -104,13 +104,15 @@ pub fn derive_badge(
 
 /// Find the locked artifact whose pin is in `registry/repository`.
 ///
-/// Searches skills, rules, and agents so that installed agents are not
-/// incorrectly reported as `NotInstalled` (SC-04).
+/// Searches every lock list — skills, rules, agents, and mcp — so that an
+/// installed agent (SC-04) or MCP server is not incorrectly reported as
+/// `NotInstalled`.
 fn find_by_repo<'a>(lock: &'a GrimoireLock, registry: &str, repository: &str) -> Option<&'a LockedArtifact> {
     lock.skills
         .iter()
         .chain(lock.rules.iter())
         .chain(lock.agents.iter())
+        .chain(lock.mcp.iter())
         .find(|a| {
             a.source
                 .pinned()
@@ -343,6 +345,74 @@ mod tests {
             ),
             StatusBadge::Installed,
             "an installed agent must badge as Installed, not NotInstalled"
+        );
+    }
+
+    // Regression: `find_by_repo` chained skills+rules+agents but not `mcp`,
+    // so an installed MCP server always badged NotInstalled in `grim search`
+    // and the TUI — the same class of omission SC-04 fixed for agents.
+    #[test]
+    fn installed_mcp_server_derives_installed_badge() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+
+        // An mcp artifact materializes as a managed member inside a shared
+        // config file, so its output is `entry`-typed and its recorded hash
+        // is the member value's semantic hash.
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(
+            &cfg,
+            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"}\n  }\n}\n",
+        )
+        .unwrap();
+        let hash = crate::install::install_state::entry_value_hash(&serde_json::json!({"command": "grim"})).unwrap();
+
+        let p = pinned("acme/grim", 'a');
+        let mut st = InstallState::empty(std::path::Path::new("/tmp/s.json"));
+        st.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(p.clone()),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".mcp.json".to_string(),
+                },
+                content_hash: hash,
+                support_dir: None,
+                entry: Some("/mcpServers/grim".to_string()),
+            }],
+        });
+
+        // The lock lists the server ONLY in the mcp array.
+        let lk = GrimoireLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: 1,
+                declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                generated_by: "grim test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![LockedArtifact::direct("grim".to_string(), ArtifactKind::Mcp, p)],
+            bundles: vec![],
+        };
+
+        assert_eq!(
+            derive_badge(
+                "localhost:5000",
+                "acme/grim",
+                Some(&lk),
+                &st,
+                &roots(ws),
+                &[ClientTarget::Claude]
+            ),
+            StatusBadge::Installed,
+            "an installed MCP server must badge as Installed, not NotInstalled"
         );
     }
 
