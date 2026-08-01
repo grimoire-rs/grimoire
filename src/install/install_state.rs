@@ -897,6 +897,9 @@ impl InstallState {
         // when the V1→V2 conversion dropped any output/record, keeping the
         // legacy file as the sole recovery breadcrumb.
         let lossy = self.legacy_migration_lossy();
+        if lossy {
+            Self::snapshot_lossy_migration(&self.path);
+        }
         self.save().map_err(|source| PersistError::Save {
             path: self.path.clone(),
             source,
@@ -905,6 +908,64 @@ impl InstallState {
             Self::reap_legacy_project_state(grim_home, config_path);
         }
         Ok(())
+    }
+
+    /// Copy the pre-migration state file to `<file>.v1.bak` before a lossy
+    /// V1→V2 write overwrites it.
+    ///
+    /// A lossy conversion dropped records/outputs that exist in no other
+    /// place. Project scope already had a recovery breadcrumb — the legacy
+    /// `projects/<sha>.json` the reap guard leaves alone — but a **global**
+    /// V1 file *is* [`Self::path`], so the save destroyed the only copy of
+    /// exactly what the per-record warnings said had been lost. (Project scope
+    /// hits the same hole when the V1 document sits at the new path already.)
+    ///
+    /// Written with `create_new`, so the first snapshot always wins: a later
+    /// `persist` in the same run — `grim update` persists more than once —
+    /// would otherwise write the already-converted V2 bytes over it. An
+    /// absent file (project scope reading from the legacy path) is nothing to
+    /// preserve.
+    ///
+    /// Best-effort: a failure warns and the save proceeds. Refusing to persist
+    /// would leave freshly-installed artifacts unrecorded, which is the worse
+    /// outcome.
+    fn snapshot_lossy_migration(path: &Path) {
+        let Some(name) = path.file_name() else { return };
+        let mut backup_name = name.to_os_string();
+        backup_name.push(".v1.bak");
+        let backup = path.with_file_name(backup_name);
+
+        let snapshot = || -> std::io::Result<bool> {
+            let bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&backup) {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    file.write_all(&bytes)?;
+                    Ok(true)
+                }
+                // A snapshot is already there and it holds the pre-migration
+                // bytes; this one would not. Keep the older, better copy.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(e),
+            }
+        };
+
+        match snapshot() {
+            Ok(true) => tracing::warn!(
+                backup = %backup.display(),
+                "install-state migration dropped records; the original file was kept at this path"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not keep a copy of the install state before a lossy migration write"
+            ),
+        }
     }
 }
 
@@ -2098,6 +2159,102 @@ mod tests {
         assert!(
             st.legacy_migration_lossy(),
             "dropping a record must flag the migration lossy so the legacy file is not reaped"
+        );
+    }
+
+    /// A lossy V1→V2 **global** migration must copy the pre-migration file
+    /// aside before `persist` overwrites it.
+    ///
+    /// The dropped records survive nowhere else: project scope keeps the
+    /// legacy `projects/<sha>.json` (the reap guard skips it when lossy), but
+    /// a global V1 file **is** `self.path`, so the save destroyed the only
+    /// copy of what the warnings said had been dropped.
+    #[test]
+    fn lossy_global_migration_snapshots_the_original_before_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let grim_home = dir.path().join("grim");
+        let state_dir = grim_home.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Same shape as the (codex, rule) case above: representable in V1,
+        // unanchorable today, so the conversion drops it and flags lossy.
+        let global_path = InstallState::global_path(&state_dir);
+        let v1_json = format!(
+            r#"{{"version":1,"records":[{{"kind":"rule","name":"legacy-rule","pinned":"localhost:5000/legacy-rule@sha256:{sha}","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","clients":[{{"client":"codex","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","support_dir":null}}]}}]}}"#,
+            sha = "d".repeat(64),
+            hash = "c".repeat(64),
+        );
+        let original = v1_json.into_bytes();
+        std::fs::write(&global_path, &original).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: PathBuf::from("/unused"),
+            grim_home: grim_home.clone(),
+            vendor_roots: [("codex", PathBuf::from("/home/u/.codex"))].into(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        };
+        let st = InstallState::load_global(&global_path, &roots).unwrap();
+        assert!(st.legacy_migration_lossy(), "fixture must produce a lossy migration");
+
+        let workspace = dir.path().join("unused-ws");
+        let config_path = workspace.join("grimoire.toml");
+        st.persist(ConfigScope::Global, &workspace, &grim_home, &config_path)
+            .unwrap();
+
+        let backup = state_dir.join("global.json.v1.bak");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            original,
+            "the pre-migration bytes must survive the lossy write"
+        );
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&global_path).unwrap()).unwrap();
+        assert_eq!(written["version"], 2, "the state file itself is the converted V2 doc");
+
+        // A second persist in the same run (update persists twice) must not
+        // replace the snapshot with the already-converted bytes.
+        st.persist(ConfigScope::Global, &workspace, &grim_home, &config_path)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            original,
+            "an existing snapshot is never overwritten"
+        );
+    }
+
+    /// The snapshot is for lossy migrations only — an ordinary V2 save must
+    /// not litter the state directory with `.v1.bak` files.
+    #[test]
+    fn clean_save_writes_no_migration_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let grim_home = dir.path().join("grim");
+        let state_dir = grim_home.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let global_path = InstallState::global_path(&state_dir);
+
+        let state = InstallState::empty(&global_path);
+        let workspace = dir.path().join("unused-ws");
+        state
+            .persist(
+                ConfigScope::Global,
+                &workspace,
+                &grim_home,
+                &workspace.join("grimoire.toml"),
+            )
+            .unwrap();
+        state
+            .persist(
+                ConfigScope::Global,
+                &workspace,
+                &grim_home,
+                &workspace.join("grimoire.toml"),
+            )
+            .unwrap();
+
+        assert!(
+            !state_dir.join("global.json.v1.bak").exists(),
+            "a non-lossy save must not write a migration backup"
         );
     }
 
