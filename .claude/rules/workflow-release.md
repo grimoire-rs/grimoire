@@ -33,7 +33,7 @@ The docs site hosts version-less front doors at `docs/src/install.{sh,ps1}`
 that fetch `releases/latest/download/grimoire-installer.{sh,ps1}` at run
 time (the cargo-dist script bakes in a pinned version, so it cannot be
 copied verbatim to the site). The recommended install path is [ocx][ocx]
-(`ocx package install --select ocx.sh/grim`); the curl-installer is the
+(`ocx --global add grimoire/cli`); the curl-installer is the
 no-ocx fallback.
 
 [ocx]: https://ocx.sh
