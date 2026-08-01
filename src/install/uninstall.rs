@@ -226,17 +226,29 @@ pub fn uninstall(
             // member stays and only the record entry goes. The hash check
             // keeps that narrow: an adopted member the user has since edited
             // is drift, and `refuse_drifted_entries` has already refused it
-            // above unless `--force` was given, at which point removing it is
-            // what the user asked for.
-            if out.adopted
+            // above unless `--force` was given.
+            //
+            // `--force` removes it. Dropping the record is what makes this
+            // urgent: no later command can reach the member once nothing
+            // records it, so "grim never wrote it" must not become "grim
+            // cannot remove it". And when it IS kept, it goes into
+            // `abandoned_entries` — the record naming it is about to
+            // disappear, so this is the last moment the user can be told a
+            // live entry survives in their config.
+            if !force
+                && out.adopted
                 && out
                     .current_hash(roots, Containment::Strict)
                     .is_ok_and(|actual| actual == out.content_hash)
             {
                 tracing::warn!(
-                    "leaving managed entry '{pointer}' in '{}': grim adopted it rather than writing it, so it is not grim's to remove",
+                    "leaving managed entry '{pointer}' in '{}': grim adopted it rather than writing it, so it is not grim's to remove — `grim uninstall --force` removes it",
                     target.display()
                 );
+                abandoned_entries.push(AbandonedEntry {
+                    path: target,
+                    pointer: pointer.clone(),
+                });
                 continue;
             }
             // The splice engine is client-specific (Codex writes TOML, every

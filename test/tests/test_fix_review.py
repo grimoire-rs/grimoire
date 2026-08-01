@@ -57,3 +57,107 @@ def test_fresh_partial_install_does_not_report_itself_installed(
         "the retry claimed a clean install over a destination grim never "
         f"finished writing: rc={retry.returncode} state={row['state']}"
     )
+
+
+MCP_DESCRIPTOR = """\
+description = "Test MCP server."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+"""
+
+ADOPTED_CONFIG = (
+    '{\n  "mcpServers": {\n'
+    '    "grim-mcp": {"command": "grim", "args": ["mcp"]}\n'
+    "  }\n}\n"
+)
+
+
+def _install_adopted_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> Path:
+    """Install an MCP entry that was already in the config, byte-identical."""
+    src = project_dir / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    descriptor = src / "grim-mcp.toml"
+    descriptor.write_text(MCP_DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    config = project_dir / ".mcp.json"
+    config.write_text(ADOPTED_CONFIG)
+    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n[agents]\n")
+    runner.json("add", "--no-install", ref)
+    assert {r["status"] for r in runner.json("install")["items"]} == {"unchanged"}
+    return config
+
+
+def test_force_uninstall_can_remove_an_adopted_mcp_entry(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Leaving an adopted entry alone must not make it unremovable.
+
+    Without `--force` grim keeps it (it never wrote it). With `--force`
+    the user has said explicitly that they want it gone, and there is no
+    other command that can reach it once the record is dropped.
+    """
+    runner = grim_at(project_dir)
+    config = _install_adopted_mcp(runner, project_dir, registry, unique_repo)
+
+    runner.run("uninstall", "--force", "mcp", "grim-mcp")
+    assert "grim-mcp" not in json.loads(config.read_text()).get("mcpServers", {}), (
+        "--force must be able to remove an adopted entry; nothing else can "
+        "reach it after the record is gone"
+    )
+
+
+def test_uninstall_reports_the_adopted_entry_it_left_behind(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A kept adopted entry is reported, not silently dropped.
+
+    The record that named it is gone, so this is the last moment the user
+    can be told the member is still live in their config.
+    """
+    runner = grim_at(project_dir)
+    config = _install_adopted_mcp(runner, project_dir, registry, unique_repo)
+
+    report = runner.json("uninstall", "mcp", "grim-mcp")
+    assert "grim-mcp" in json.loads(config.read_text())["mcpServers"]
+    abandoned = report.get("abandoned_entries") or []
+    assert any(e["pointer"].endswith("grim-mcp") for e in abandoned), (
+        f"the kept entry must be reported so it is not invisible: {report}"
+    )
+
+
+def test_adopted_flag_survives_a_second_install_pass(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Re-running install must not turn an adopted entry into grim's own.
+
+    The second pass finds the member already tracked, so the fresh-adoption
+    branch never runs and the rebuilt record was written with adopted:false.
+    Uninstall then spliced out a member grim had never authored.
+    """
+    runner = grim_at(project_dir)
+    config = _install_adopted_mcp(runner, project_dir, registry, unique_repo)
+
+    # Widen the client set so the pass actually rebuilds the record (a
+    # no-op re-install short-circuits at the integrity gate and never
+    # reaches the write pass).
+    (project_dir / ".cursor").mkdir(exist_ok=True)
+    cfg = project_dir / "grimoire.toml"
+    cfg.write_text('[options]\nclients = ["claude", "cursor"]\n\n' + cfg.read_text())
+    runner.json("install")
+
+    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    record = next(r for r in state["records"] if r["name"] == "grim-mcp")
+    claude_out = next(o for o in record["outputs"] if o["client"] == "claude")
+    assert claude_out.get("adopted") is True, (
+        f"the flag must survive a rebuilding pass: {record}"
+    )
+
+    runner.run("uninstall", "mcp", "grim-mcp")
+    assert "grim-mcp" in json.loads(config.read_text())["mcpServers"], (
+        "a re-install must not convert the user's own entry into grim's"
+    )

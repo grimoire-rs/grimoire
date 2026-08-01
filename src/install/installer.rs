@@ -2145,14 +2145,25 @@ async fn install_mcp(
         // pointer, and require the member's semantic hash to be the one grim
         // recorded writing — the same doctrine as the file gate above.
         let existing_hash = existing_value.as_ref().and_then(|v| entry_value_hash(v).ok());
-        let tracked = recorded.as_ref().is_some_and(|rec| {
-            rec.outputs.iter().any(|out| {
+        let prior = recorded.as_ref().and_then(|rec| {
+            rec.outputs.iter().find(|out| {
                 out.target == anchored
                     && out.entry.as_deref() == Some(pointer.as_str())
                     && existing_hash.as_ref() == Some(&out.content_hash)
             })
         });
-        let mut adopted = false;
+        let tracked = prior.is_some();
+        // Carry the adoption flag forward while the member is still the one
+        // grim adopted. Rebuilding the record must not launder a user's own
+        // entry into grim's: the fresh-adoption branch below cannot re-fire
+        // (it needs `!tracked`), so without this any later pass that rebuilds
+        // the record — a widened client set, a pin roll — would drop the flag
+        // and the next uninstall would splice out a member grim never wrote.
+        //
+        // Only while `value` matches what is already there. If this pass is
+        // about to write something different, grim is authoring the member now
+        // and owns it from here.
+        let mut adopted = existing_value.as_ref() == Some(&value) && prior.is_some_and(|out| out.adopted);
         if !force
             && !tracked
             && let Some(existing) = &existing_value
