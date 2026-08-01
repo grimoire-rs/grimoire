@@ -622,6 +622,16 @@ materialized file to delete — grim splices only the managed entry back out
 of each client's config file, leaving the file itself and every other
 entry untouched.
 
+That splice is gated on the entry still matching what grim installed. If
+the managed entry has drifted — you edited it in place, or grim only
+*adopted* an identical entry that was already there and never wrote it —
+`uninstall` refuses the whole operation with exit 65 (`reason:
+"modified"`, `forceable: true`) and changes nothing, so nothing is
+half-removed. `grim uninstall --force <kind> <name>` removes it anyway.
+An entry that is already gone, or sits in a config file grim cannot
+parse, is not gated: there is nothing left to preserve. Materialized
+files are deleted either way — `--force` affects config entries only.
+
 The lock follows the same effective-declaration rule as
 [`grim remove`](#remove): when a declared bundle still names the artifact at
 the same identifier, the files are deleted (that is what you asked for) but
