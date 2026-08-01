@@ -239,9 +239,36 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             target: report_target,
             result,
         });
+        persist_progress(state, target);
     }
     progress.finish();
     results
+}
+
+/// Best-effort mid-run persist of install state, after every artifact.
+///
+/// The record `install_one` just wrote describes files that are already on
+/// disk, and the window to the caller's batch-end persist spans the next
+/// artifact's registry fetch. A crash (or a Ctrl-C) inside that window would
+/// otherwise leave the state file naming the old content — indistinguishable
+/// from a local modification, and refused by the integrity gate on every
+/// retry until `--force`.
+///
+/// The authoritative write stays [`InstallState::persist`] at the end of
+/// [`install_and_persist`]: it also reaps the pre-relocation legacy state
+/// file, which needs the config path this seam does not carry. A failure here
+/// is therefore logged, not surfaced — the same failure will surface from that
+/// write, and warning twice would only add noise to it.
+fn persist_progress(state: &InstallState, target: &InstallTarget) {
+    if target.scope() == ConfigScope::Project
+        && let Err(e) = InstallState::ensure_project_state_dir(target.workspace())
+    {
+        tracing::debug!("install-state directory not ready for a mid-run save: {e}");
+        return;
+    }
+    if let Err(e) = state.save() {
+        tracing::debug!("mid-run install-state save failed; deferred to the batch-end persist: {e}");
+    }
 }
 
 /// The OTHER scope's install state, for the cross-scope shadow check.
@@ -684,114 +711,197 @@ async fn install_one<M: ArtifactMaterializer>(
     // Small association list (dest → footprint hash); `materialize_set` holds at
     // most one entry per vendor, so a linear scan beats a map's overhead.
     let mut materialized: Vec<(PathBuf, Digest)> = Vec::new();
-    for client in &materialize_set {
-        let dest = target.path_for(*client, kind, &artifact.name);
-        // A global Copilot rule normally routes to the native
-        // `$COPILOT_HOME|~/.copilot/instructions/` dir. Only when no root
-        // resolves does it fall back to the (inert) workspace layout,
-        // which Copilot never scans — warn in that narrow sub-case.
-        if kind == ArtifactKind::Rule
-            && *client == crate::install::client_target::ClientTarget::Copilot
-            && target.scope() == crate::config::scope::ConfigScope::Global
-            && crate::install::vendor_copilot::global_native_root(
-                crate::install::vendor::env_dir("COPILOT_HOME"),
-                crate::install::vendor::home_dir(),
-            )
-            .is_none()
-        {
-            tracing::warn!(
-                "no resolvable Copilot root (COPILOT_HOME/HOME unset); global rule '{}' falls back to the workspace layout and will not be discovered by Copilot",
-                artifact.name
-            );
-        }
-        // A rule's support dir always lives at `<parent>/<name>/`, whether
-        // or not *this* version ships one. `cleanup` is that location (so a
-        // version that drops its support dir still reaps the stale one);
-        // `support_dest` is `Some` only when this version actually
-        // materializes one (so the record + footprint hash cover it).
-        let cleanup = match kind {
-            ArtifactKind::Rule => dest.parent().map(|parent| parent.join(&artifact.name)),
-            _ => None,
-        };
-        let support_dest = staged_support.as_ref().and(cleanup.clone());
+    // The client whose destructive swap is in flight, if any. `remove_path`
+    // below deletes the old copy before the new one is written, so on a
+    // failure this one client's destination is grim's own wreckage and its
+    // recorded hash describes bytes that no longer exist. Set when the swap
+    // begins, cleared once the fresh output is recorded.
+    let mut in_flight: Option<(crate::install::client_target::ClientTarget, PathBuf, Option<PathBuf>)> = None;
+    // Closure, not a bare loop: a hard failure on one client must not throw
+    // away the clients that already replaced their destinations. Their files
+    // are on disk, so the record has to describe them before the error
+    // surfaces — see the partial-record branch below the loop.
+    let materialize_result = (|| -> Result<(), crate::error::Error> {
+        for client in &materialize_set {
+            let dest = target.path_for(*client, kind, &artifact.name);
+            // A global Copilot rule normally routes to the native
+            // `$COPILOT_HOME|~/.copilot/instructions/` dir. Only when no root
+            // resolves does it fall back to the (inert) workspace layout,
+            // which Copilot never scans — warn in that narrow sub-case.
+            if kind == ArtifactKind::Rule
+                && *client == crate::install::client_target::ClientTarget::Copilot
+                && target.scope() == crate::config::scope::ConfigScope::Global
+                && crate::install::vendor_copilot::global_native_root(
+                    crate::install::vendor::env_dir("COPILOT_HOME"),
+                    crate::install::vendor::home_dir(),
+                )
+                .is_none()
+            {
+                tracing::warn!(
+                    "no resolvable Copilot root (COPILOT_HOME/HOME unset); global rule '{}' falls back to the workspace layout and will not be discovered by Copilot",
+                    artifact.name
+                );
+            }
+            // A rule's support dir always lives at `<parent>/<name>/`, whether
+            // or not *this* version ships one. `cleanup` is that location (so a
+            // version that drops its support dir still reaps the stale one);
+            // `support_dest` is `Some` only when this version actually
+            // materializes one (so the record + footprint hash cover it).
+            let cleanup = match kind {
+                ArtifactKind::Rule => dest.parent().map(|parent| parent.join(&artifact.name)),
+                _ => None,
+            };
+            let support_dest = staged_support.as_ref().and(cleanup.clone());
 
-        // Reuse a sibling pool client's footprint hash when this exact dest was
-        // already materialized this pass; otherwise do the copy + fsync + hash.
-        let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
-            hash.clone()
-        } else {
-            // `|| is_symlink()`: `exists()` is false for a DANGLING link, and
-            // without this the materialize below would write through it.
-            // `remove_path` unlinks the link itself, never its target. Pairs
-            // with the dangling-leaf refusal in the untracked gate above — the
-            // two must stay together, or `--force` re-emits that same refusal
-            // and the client's Overwrite dialog never terminates.
-            if dest.exists() || dest.is_symlink() {
-                remove_path(&dest).map_err(|e| target_io(&dest, e))?;
-            }
-            // Same `|| is_symlink()` reason one level down: `mkdir(2)` does
-            // NOT follow a dangling link, so leaving it makes the support
-            // dir's `create_dir_all` fail `EEXIST` forever — and gating the
-            // removal on `exists()` alone means `--force` cannot clear it
-            // either, which is the non-terminating dialog above.
-            if let Some(sd) = &cleanup
-                && (sd.exists() || sd.is_symlink())
-            {
-                remove_path(sd).map_err(|e| target_io(sd, e))?;
-            }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
-            }
-            client
-                .materialize(crate::install::client_target::MaterializeRequest {
+            // Reuse a sibling pool client's footprint hash when this exact dest was
+            // already materialized this pass; otherwise do the copy + fsync + hash.
+            let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
+                hash.clone()
+            } else {
+                in_flight = Some((*client, dest.clone(), support_dest.clone()));
+                // `|| is_symlink()`: `exists()` is false for a DANGLING link, and
+                // without this the materialize below would write through it.
+                // `remove_path` unlinks the link itself, never its target. Pairs
+                // with the dangling-leaf refusal in the untracked gate above — the
+                // two must stay together, or `--force` re-emits that same refusal
+                // and the client's Overwrite dialog never terminates.
+                if dest.exists() || dest.is_symlink() {
+                    remove_path(&dest).map_err(|e| target_io(&dest, e))?;
+                }
+                // Same `|| is_symlink()` reason one level down: `mkdir(2)` does
+                // NOT follow a dangling link, so leaving it makes the support
+                // dir's `create_dir_all` fail `EEXIST` forever — and gating the
+                // removal on `exists()` alone means `--force` cannot clear it
+                // either, which is the non-terminating dialog above.
+                if let Some(sd) = &cleanup
+                    && (sd.exists() || sd.is_symlink())
+                {
+                    remove_path(sd).map_err(|e| target_io(sd, e))?;
+                }
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+                }
+                client
+                    .materialize(crate::install::client_target::MaterializeRequest {
+                        kind,
+                        name: &artifact.name,
+                        artifact_root: &canonical,
+                        dest: &dest,
+                        scope: target.scope(),
+                        pinned: &pinned_str,
+                        support_dir: staged_support.as_deref(),
+                    })
+                    .map_err(crate::error::Error::from)?;
+                fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
+                if let Some(sd) = &support_dest {
+                    fsync_tree(sd).map_err(|e| target_io(sd, e))?;
+                }
+                #[cfg(unix)]
+                if let Some(parent) = dest.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::File::open(parent)
+                        .and_then(|f| f.sync_all())
+                        .map_err(|e| target_io(parent, e))?;
+                }
+                let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
+                materialized.push((dest.clone(), hash.clone()));
+                hash
+            };
+            // `dest` / `support_dest` are the non-canonicalized (pre-symlink)
+            // forms — the `from_target` caller invariant (§1.5). Computed per
+            // client so pool siblings resolving to one path each record their own
+            // (identical) output — the several-outputs-one-path refcount shape.
+            let anchored_target =
+                crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
+            let anchored_support = match &support_dest {
+                Some(sd) => Some(crate::install::path_anchor::AnchoredPath::from_target(
+                    sd,
+                    target.scope(),
+                    *client,
                     kind,
-                    name: &artifact.name,
-                    artifact_root: &canonical,
-                    dest: &dest,
-                    scope: target.scope(),
-                    pinned: &pinned_str,
-                    support_dir: staged_support.as_deref(),
-                })
-                .map_err(crate::error::Error::from)?;
-            fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
-            if let Some(sd) = &support_dest {
-                fsync_tree(sd).map_err(|e| target_io(sd, e))?;
+                    roots,
+                )?),
+                None => None,
+            };
+            client_records.push(ClientOutput {
+                client: client.to_string(),
+                target: anchored_target,
+                content_hash: installed_hash,
+                support_dir: anchored_support,
+                entry: None,
+            });
+            in_flight = None;
+        }
+        Ok(())
+    })();
+
+    // Partial pass: some clients replaced their destinations, one failed.
+    // Record what is actually on disk before surfacing the error, under the
+    // PRIOR pin — the clients that never ran are still at it. Claiming the new
+    // pin would make the next install's integrity gate answer
+    // `AlreadyInstalled` and strand them; recording nothing leaves the clients
+    // that DID move looking locally modified, which refuses every later
+    // install without `--force`. The old pin is the honest answer: `status`
+    // reads `outdated`, and the retry re-materializes every client.
+    //
+    // Both reapers are skipped here on purpose. They delete prior outputs the
+    // new set no longer produces, and on a partial pass "no longer produces"
+    // is indistinguishable from "not reached yet".
+    if let Err(error) = materialize_result {
+        let mut outputs = client_records;
+        // The in-flight client lost its old copy to `remove_path` before the
+        // failure, so its prior hash names bytes that are gone. Record the
+        // footprint that IS there — the retry then reads an intact (if
+        // wrong-version) output and re-materializes it, instead of reading
+        // grim's own wreckage as a local edit and refusing until `--force`.
+        // Nothing but grim has touched that path since the untracked gate
+        // vetted it a few lines above, so adopting it resets no user's drift
+        // baseline. An unanchorable destination is left out of the record
+        // entirely, exactly as the success path would have left it.
+        if let Some((client, dest, support)) = in_flight
+            && let Ok(anchored) =
+                crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, kind, roots)
+        {
+            let anchored_support = support.as_deref().and_then(|sd| {
+                crate::install::path_anchor::AnchoredPath::from_target(sd, target.scope(), client, kind, roots).ok()
+            });
+            // A support dir that fails to anchor drops out of the hash too,
+            // so the recorded footprint and the recorded shape agree.
+            let hashed_support = anchored_support.as_ref().and(support.as_deref());
+            if let Ok(content_hash) = footprint_hash(&dest, hashed_support) {
+                outputs.push(ClientOutput {
+                    client: client.to_string(),
+                    target: anchored,
+                    content_hash,
+                    support_dir: anchored_support,
+                    entry: None,
+                });
             }
-            #[cfg(unix)]
-            if let Some(parent) = dest.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::File::open(parent)
-                    .and_then(|f| f.sync_all())
-                    .map_err(|e| target_io(parent, e))?;
+        }
+        if let Some(rec) = &recorded {
+            for out in &rec.outputs {
+                if outputs.iter().any(|fresh| fresh.client == out.client) {
+                    continue;
+                }
+                // Out of scope on this machine — neither resolvable nor
+                // verifiable, exactly as the success path treats it.
+                if out.target.anchor.root(roots).is_none() {
+                    continue;
+                }
+                outputs.push(out.clone());
             }
-            let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
-            materialized.push((dest.clone(), hash.clone()));
-            hash
-        };
-        // `dest` / `support_dest` are the non-canonicalized (pre-symlink)
-        // forms — the `from_target` caller invariant (§1.5). Computed per
-        // client so pool siblings resolving to one path each record their own
-        // (identical) output — the several-outputs-one-path refcount shape.
-        let anchored_target =
-            crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
-        let anchored_support = match &support_dest {
-            Some(sd) => Some(crate::install::path_anchor::AnchoredPath::from_target(
-                sd,
-                target.scope(),
-                *client,
+        }
+        if !outputs.is_empty() {
+            state.record(InstallRecord {
                 kind,
-                roots,
-            )?),
-            None => None,
-        };
-        client_records.push(ClientOutput {
-            client: client.to_string(),
-            target: anchored_target,
-            content_hash: installed_hash,
-            support_dir: anchored_support,
-            entry: None,
-        });
+                name: artifact.name.clone(),
+                source: recorded.map_or_else(|| artifact.source.clone(), |rec| rec.source),
+                dev: intent.is_dev(),
+                outputs,
+            });
+        }
+        return Err(error);
     }
 
     // Merge with the prior record so an additive same-pin `--client` install (or
