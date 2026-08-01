@@ -146,6 +146,33 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     )
     .await;
 
+    // The single `persist` seam handles project-scope dir creation, the
+    // atomic write, and the conditional legacy-file reap in one place.
+    let persist_state = |state: &crate::install::install_state::InstallState| -> anyhow::Result<()> {
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .map_err(|e| match e {
+                crate::install::install_state::PersistError::EnsureDir { path, source }
+                | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+            })?;
+        Ok(())
+    };
+
+    // Persist before the reconciliation passes below, which can still fail:
+    // `install_all_with_progress` has already written the new content to disk
+    // and updated the in-memory records, so aborting on a prune/reap failure
+    // before the write left state.json at the old digests while the lock and
+    // the tree were at the new ones — every re-materialized artifact then read
+    // as `modified` and refused with IntegrityMismatch, and each retry failed
+    // on the same orphan. Same persist-before-surfacing doctrine the installer
+    // documents (`installer.rs`).
+    persist_state(&state)?;
+
     // Reconcile the materialized tree back to the new lock: an artifact the
     // resolve dropped (most visibly a bundle that stopped including a
     // member) is pruned from disk. A locally modified orphan is preserved
@@ -200,19 +227,9 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // dev marker. Report rows stay lock-driven; refreshes surface as logs.
     refresh_dev_installs(&scope, &new_lock, &access, &target, &mut state).await;
 
-    // The single `persist` seam handles project-scope dir creation, the
-    // atomic write, and the conditional legacy-file reap in one place.
-    state
-        .persist(
-            scope.scope,
-            &scope.workspace,
-            &scope.roots.grim_home,
-            &scope.config_path,
-        )
-        .map_err(|e| match e {
-            crate::install::install_state::PersistError::EnsureDir { path, source }
-            | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-        })?;
+    // Persist again: prune, reap, and the dev-install refresh all mutate the
+    // record set after the pre-prune write above.
+    persist_state(&state)?;
 
     // Converge vendor-owned config on the new state (covers both fresh
     // installs and pruned orphans in one pass) for every involved client.

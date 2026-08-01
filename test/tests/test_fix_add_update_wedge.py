@@ -9,9 +9,15 @@ same command could clear.
 from __future__ import annotations
 
 import json
+import os
+import stat
+import sys
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_artifact, make_bundle, write_config
+from src.registry import retag
 
 MCP_DESCRIPTOR = """\
 description = "Grimoire catalog search and install status over MCP."
@@ -141,3 +147,65 @@ def test_add_bundle_installs_its_mcp_member(
     rows = runner.json("status")["items"]
     member = next(r for r in rows if r["name"] == "grim-mcp")
     assert member["state"] != "missing", rows
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="needs POSIX directory permissions the caller cannot bypass",
+)
+def test_update_persists_records_when_prune_fails(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A prune failure must not discard the records for what already
+    installed.
+
+    `update` re-materializes first and persisted only after the prune/reap
+    pass, so an undeletable orphan left the lock and the disk at the new
+    digest while `state.json` still held the old one — reporting the healthy
+    artifact `modified` and failing every retry with IntegrityMismatch.
+    """
+    skill_repo = f"{unique_repo}/code-review"
+    make_artifact(skill_repo, "skill", {"code-review/SKILL.md": "v1\n"}, tag="stable")
+    rule = make_artifact(
+        f"{unique_repo}/rust-style", "rule", {"rust-style.md": "# v1\n"}, tag="v1"
+    )
+    write_config(
+        project_dir,
+        skills={"code-review": f"{registry}/{skill_repo}:stable"},
+        rules={"rust-style": rule.fq},
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.json("install")
+
+    # Undeclare the rule: its files and install record stay behind, so the
+    # next `update` prunes it as an orphan.
+    runner.json("remove", "rule", "rust-style")
+
+    # Roll the skill's floating tag onto new content so `update` has a real
+    # record change to persist.
+    v2 = make_artifact(skill_repo, "skill", {"code-review/SKILL.md": "v2\n"}, tag="2.0.0")
+    retag(skill_repo, "stable", v2.digest)
+
+    rules_dir = project_dir / ".claude/rules"
+    original_mode = stat.S_IMODE(rules_dir.stat().st_mode)
+    rules_dir.chmod(0o555)  # unlink inside needs write on the parent
+    try:
+        result = runner.run("update", check=False)
+        # 77 (PermissionDenied), the code this failure already carried —
+        # persisting earlier must not change what the user sees.
+        assert result.returncode == 77, (
+            "an undeletable orphan must still surface unchanged, got "
+            f"{result.returncode}; {result.stderr}"
+        )
+    finally:
+        rules_dir.chmod(original_mode)
+
+    assert (project_dir / ".claude/skills/code-review/SKILL.md").read_text() == "v2\n"
+
+    # The skill installed cleanly before the prune failed, so its record must
+    # be on disk at the new hash — anything else reports false drift.
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
+    assert row["state"] == "installed", (
+        f"the re-materialized artifact must not report drift after a prune failure: {row}"
+    )
