@@ -220,6 +220,12 @@ jobs:
         shell: bash
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+          # Announce re-observes every curated tag on the physical repository
+          # the index root points at, so it reads GHCR as well as writing the
+          # pull request — without this it is anonymous, and a package that is
+          # still private answers 403.
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${OCX_ANNOUNCE_TOKEN:-}" ]; then
