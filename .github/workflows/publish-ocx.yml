@@ -2,12 +2,13 @@ name: Publish to OCX
 
 # cargo-dist post-announce job (also manually dispatchable). After the GitHub
 # Release is published, repackage the freshly built musl / darwin / windows
-# archives as OCX packages and publish the multi-platform package to the
-# production registry `ocx.sh/grim` under a single frozen build-timestamp, then
-# push its catalog description + logo.
+# archives as OCX packages, push the multi-platform package to
+# `ghcr.io/grimoire-rs/grimoire/cli` under a single frozen build-timestamp,
+# push its catalog description + logo, then announce the published tags into
+# `ocx-sh/index` as `ocx.sh/grimoire/cli`.
 #
 # NOT a mirror — grimoire's own release pushed to OCX. Reference:
-# ocx/.github/workflows/oci-publish.yml (single-job repackage + push).
+# ocx/.github/workflows/oci-publish.yml (repackage + push + announce).
 #
 # One Linux runner does everything. macOS/Windows packages are built by
 # cargo-dist and repacked + published here, but are NOT natively smoke-tested:
@@ -32,6 +33,10 @@ on:
 
 permissions:
   contents: read
+  # The GHCR push authenticates as the job token. A called workflow can only
+  # narrow what its caller grants, so `release.yml` has to grant this too —
+  # via `github-custom-job-permissions` in dist-workspace.toml.
+  packages: write
 
 concurrency:
   # Serialize publishes per tag — never cancel a half-finished registry push.
@@ -40,15 +45,19 @@ concurrency:
 
 env:
   # Pin ocx so the package commands behave exactly as validated locally.
-  OCX_VERSION: "0.3.10"
+  OCX_VERSION: "0.5.0"
   # Make the implicit registry explicit (package test uses a registry-less id).
   OCX_DEFAULT_REGISTRY: ocx.sh
+  # Logical index name — what `ocx.sh/grimoire/cli` resolves through and what
+  # `package announce` names. The physical push path prepends the GHCR owner:
+  # GITHUB_TOKEN only authorizes packages owned by this repository's owner.
+  PACKAGE: grimoire/cli
+  PUSH_REPOSITORY: ghcr.io/grimoire-rs/grimoire/cli
 
 jobs:
   publish:
     if: ${{ !contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    environment: ocx.sh
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,6 +87,17 @@ jobs:
           echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare announce-tags scratch file
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Per-run scratch under $RUNNER_TEMP, truncated up front: GitHub reuses
+          # the directory across attempts of the same run, and a leftover file
+          # would resurrect tags this run did not publish.
+          tags_file="$RUNNER_TEMP/announce-tags-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          : > "$tags_file"
+          echo "TAGS_FILE=$tags_file" >> "$GITHUB_ENV"
+
       - name: Download release archives (musl + darwin + windows)
         shell: bash
         env:
@@ -94,12 +114,19 @@ jobs:
       - name: Repackage, smoke-test, and publish all platforms
         shell: bash
         env:
-          OCX_AUTH_ocx_sh_USER: ${{ secrets.REGISTRY_USER }}
-          OCX_AUTH_ocx_sh_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          # GHCR takes the workflow's own token; no registry credential to
+          # provision. Hostname dots become underscores in OCX_AUTH_<host>_*.
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
 
+          # The musl rows stay bare: cargo-dist's musl builds are fully static,
+          # so an empty `os.features` is a true claim of universality. `ocx
+          # package create` reads the binary and rejects a platform key that
+          # under- or over-claims what it links, so a toolchain change that made
+          # these dynamic would red here rather than ship a false claim.
           declare -A PLATFORM_MAP=(
             [x86_64-unknown-linux-musl]=linux/amd64
             [aarch64-unknown-linux-musl]=linux/arm64
@@ -112,7 +139,7 @@ jobs:
           # Freeze ONE UTC build-timestamp so every platform shares the published
           # tag and collapses into a single multi-platform OCI image index.
           ts="$(date -u +%Y%m%d%H%M%S)"
-          identifier="ocx.sh/grim:${VERSION}_${ts}"
+          identifier="${PUSH_REPOSITORY}:${VERSION}_${ts}"
           echo "publishing ${identifier}"
 
           # Phase 1 — repackage every platform into a bin/-layout OCX bundle;
@@ -144,39 +171,70 @@ jobs:
 
             if [ "$platform" = "linux/amd64" ]; then
               echo "==> native smoke test (${platform})"
+              # No --metadata: `create` wrote a sidecar beside the archive and
+              # `test` infers it by the same convention. Handing back the source
+              # metadata instead fails — only the sidecar records the platform.
               ocx package test \
                 --platform "$platform" \
                 --identifier "grim:${VERSION}" \
-                --metadata packaging/grim/metadata.json \
                 "pkg-${target}.tar.xz" \
                 -- grim --version
             fi
           done
 
           # Phase 2 — push every platform to the one frozen tag. --cascade then
-          # derives the rolling :X.Y.Z, :X.Y, :X and :latest tags users install.
+          # derives the rolling :X.Y.Z, :X.Y, :X and :latest tags users install,
+          # and --announce-file records every tag pushed or moved for the
+          # announce step below.
           for target in "${!PLATFORM_MAP[@]}"; do
             platform="${PLATFORM_MAP[$target]}"
             echo "==> push ${identifier} (${platform})"
+            # `image.source` is what links the GHCR package to this repository
+            # and lets it inherit the repository's permissions; a registry
+            # derives nothing from the path, so it has to be stated.
             ocx package push \
               --identifier "$identifier" \
               --platform "$platform" \
               --cascade \
               --new \
-              --metadata packaging/grim/metadata.json \
+              --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --announce-file "$TAGS_FILE" \
               "pkg-${target}.tar.xz"
           done
 
       - name: Push catalog description + logo
         shell: bash
         env:
-          OCX_AUTH_ocx_sh_USER: ${{ secrets.REGISTRY_USER }}
-          OCX_AUTH_ocx_sh_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ocx package describe ocx.sh/grim \
+          # Pushed BEFORE the announce so the announce observes `__ocx.desc` and
+          # carries the readme and logo into the index entry. CATALOG.md's
+          # frontmatter supplies title/description/keywords — no flags needed.
+          ocx package describe "$PUSH_REPOSITORY" \
             --readme CATALOG.md \
-            --logo assets/logo.png \
-            --title "Grimoire" \
-            --description "OCI-backed package manager for AI skills and rules" \
-            --keywords "grimoire,grim,ai,skills,rules,oci,package-manager,rust"
+            --logo assets/logo.png
+
+      - name: Announce published tags into ocx-sh/index
+        shell: bash
+        env:
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OCX_ANNOUNCE_TOKEN:-}" ]; then
+            echo "::error::OCX_ANNOUNCE_TOKEN is unset; the release published but the index was not told"
+            exit 1
+          fi
+          if [ ! -s "$TAGS_FILE" ]; then
+            echo "::error::no published tags recorded; refusing to announce nothing"
+            exit 1
+          fi
+          # No --fork: the token pushes the announce branch straight to
+          # ocx-sh/index and opens the pull request from there. It still lands as
+          # a pull request — that is what the index's governance gate and its
+          # refresh/new-package labelling run on.
+          ocx package announce \
+            --package "$PACKAGE" \
+            --tags-from-file "$TAGS_FILE" \
+            --index-repo ocx-sh/index
