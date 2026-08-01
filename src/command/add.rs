@@ -20,7 +20,9 @@
 //! churn for a provisional milestone), then re-resolves just that entry
 //! under the config flock: a partial relock when a previous lock exists, a
 //! full resolve otherwise. The new lock is saved with `generated_at`
-//! preservation for the untouched entries.
+//! preservation for the untouched entries. A failed relock rolls the config
+//! back to its pre-write bytes, so an unresolvable reference leaves the
+//! project exactly as it was rather than declared-but-unlockable.
 //!
 //! The declared `(kind, name)` pair is a per-scope-unique key: declaring a
 //! name that already exists under a *different* identifier refuses (exit
@@ -228,32 +230,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         )));
     }
 
-    // Persist the edited config (re-serialize the parsed declaration).
-    super::grim(write_config(
-        &scope.config_path,
-        &scope.options,
-        &scope.registries,
-        &set,
-    ))?;
-
-    // Relock: a partial relock of just this entry when a previous lock
-    // exists and is not stale; a full resolve otherwise (or when the
-    // partial stale guard fires — caught and retried as a full resolve so
-    // `add` always leaves a consistent lock).
-    let previous = lock_io::load(&scope.lock_path).ok();
-    let new_lock = super::grim(
-        relock_declared(
-            &set,
-            previous.as_ref(),
-            kind,
-            &name,
-            &access,
-            scope.scope,
-            scope.config_dir(),
-        )
-        .await,
-    )?;
-    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
+    // Persist the edited config, then relock — rolling the config back if
+    // the relock fails.
+    let new_lock = write_config_and_relock(&scope, &set, kind, &name, &access).await?;
 
     // Default: materialize the freshly-declared artifact into the detected
     // clients right away (opt out with `--no-install`). Declare + relock
@@ -277,6 +256,100 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// Write the edited declaration to `scope.config_path`, then re-lock it —
+/// rolling the config back to its pre-write bytes if the relock fails.
+///
+/// The shared sequence behind both `add` entry points (registry reference
+/// and local path source). Committing the declaration first and only then
+/// resolving wedged the project on any relock failure: the declaration hash
+/// no longer matched the lock, so `grim install` refused every artifact with
+/// `LockStale` (65), `grim lock` failed on the same unresolvable reference,
+/// and re-running `add` with a *corrected* reference was refused by the
+/// declare-conflict guard (64) — leaving `grim remove` as the only escape,
+/// mentioned in no error message. The rollback keeps the failure inert: the
+/// resolve error surfaces unchanged and nothing on disk moved.
+///
+/// The resolve deliberately still runs against the *written* config: a
+/// bundle expands from the declared set, so the declaration has to be on
+/// disk (and in `set`) before it can be resolved.
+///
+/// # Errors
+///
+/// An unreadable config (74/78), the config write, or any
+/// [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
+/// relock — the latter after the rollback has run.
+async fn write_config_and_relock(
+    scope: &scope_resolution::ResolvedScope,
+    set: &crate::config::declaration::DesiredSet,
+    kind: ArtifactKind,
+    name: &str,
+    access: &Arc<dyn OciAccess>,
+) -> anyhow::Result<GrimoireLock> {
+    // Snapshot the pre-write config. Absence is the legitimate "nothing to
+    // put back" case (a scope whose config `add` is creating); any other
+    // read failure aborts rather than risking a rollback that deletes a
+    // file it could not snapshot.
+    let original = match std::fs::read(&scope.config_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(anyhow::Error::from(crate::error::Error::from(
+                crate::config::ConfigError::new(scope.config_path.clone(), crate::config::ConfigErrorKind::Io(e)),
+            )));
+        }
+    };
+
+    super::grim(write_config(&scope.config_path, &scope.options, &scope.registries, set))?;
+
+    // Relock: a partial relock of just this entry when a previous lock
+    // exists and is not stale; a full resolve otherwise (or when the
+    // partial stale guard fires — caught and retried as a full resolve so
+    // `add` always leaves a consistent lock).
+    let previous = lock_io::load(&scope.lock_path).ok();
+    let new_lock = match relock_declared(
+        set,
+        previous.as_ref(),
+        kind,
+        name,
+        access,
+        scope.scope,
+        scope.config_dir(),
+    )
+    .await
+    {
+        Ok(lock) => lock,
+        Err(e) => {
+            restore_config(&scope.config_path, original.as_deref());
+            return super::grim(Err(e));
+        }
+    };
+    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
+    Ok(new_lock)
+}
+
+/// Put the pre-write config back at `path` after a failed relock: the
+/// snapshot bytes, or removal of the file `add` had just created.
+///
+/// Best-effort by design — the resolve failure is what the user must act on,
+/// so a rollback that itself fails only warns (and names the manual escape)
+/// rather than masking the real error with an I/O one.
+fn restore_config(path: &std::path::Path, original: Option<&[u8]>) {
+    let rolled_back = match original {
+        Some(bytes) => crate::store::atomic_write::atomic_write(path, bytes),
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    };
+    if let Err(e) = rolled_back {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not roll back the declaration after a failed relock; run `grim remove <kind> <name>` to drop it"
+        );
+    }
 }
 
 /// Reject a declaration whose `(kind, name)` collides with an existing
@@ -448,28 +521,8 @@ async fn add_path_source(
         )));
     }
 
-    super::grim(write_config(
-        &scope.config_path,
-        &scope.options,
-        &scope.registries,
-        &set,
-    ))?;
-
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
-    let previous = lock_io::load(&scope.lock_path).ok();
-    let new_lock = super::grim(
-        relock_declared(
-            &set,
-            previous.as_ref(),
-            kind,
-            &name,
-            &access,
-            scope.scope,
-            scope.config_dir(),
-        )
-        .await,
-    )?;
-    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
+    let new_lock = write_config_and_relock(scope, &set, kind, &name, &access).await?;
 
     if args.install.enabled() {
         install_added(ctx, scope, kind, &name, &new_lock, &access, args.force).await?;
