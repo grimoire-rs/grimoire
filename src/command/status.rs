@@ -103,9 +103,10 @@ pub struct StatusArgs {
 ///
 /// # Errors
 ///
-/// A config (78/79) or lock-parse (78) load failure, or an invalid
-/// configured client name in `[options].clients` (65, same as `grim
-/// context`); artifact state itself is data and never fails the command.
+/// A config (78/79), lock-parse (78), or install-state load failure, or an
+/// invalid configured client name in `[options].clients` (65, same as `grim
+/// context`). An **absent** lock or state file is not a failure; per-artifact
+/// state is data and never fails the command.
 pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve_in(
         ctx,
@@ -123,11 +124,21 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         Err(e) => return Err(crate::error::Error::from(e).into()),
     };
 
-    // A corrupt state file degrades to "nothing installed" for a
-    // read-only report rather than failing the command (state is data).
+    // An *absent* state file is not a failure — the loaders return empty state
+    // for `NotFound`, so a fresh project reports every artifact `missing`, as
+    // it should. A state file that exists but cannot be read or parsed is a
+    // load failure and propagates, exactly like the corrupt lock above and
+    // exactly like `grim install`/`update`/`uninstall` on the same file.
+    //
+    // This used to be swallowed with `unwrap_or_else(|_| empty)`: `status`
+    // then reported a fully-installed project as entirely `missing`, exit 0,
+    // with nothing on stderr — while every mutating command hard-failed on the
+    // same bytes. Two commands, opposite verdicts, and the silent one pushed
+    // the user away from the one that names the real problem.
     // Routes through the scope seam so a project legacy file (or a V1 global
-    // file) migrates in memory; any load failure degrades to empty.
-    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    // file) migrates in memory.
+    let state =
+        super::grim(scope_resolution::load_state(&scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
 
     let lock_matches_config =
         lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
@@ -239,7 +250,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
-        let (clients_missing, clients_extra) = client_drift(desired_clients.as_deref(), recorded_clients(record));
+        let (clients_missing, clients_extra) =
+            client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
+                client_hosts_kind(c, decl.kind, &scope.workspace, scope.scope)
+            });
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
         // A directly-declared registry-locked row is the only kind eligible
         // for a fresh update re-resolution (issue #43): path/dev rows carry no
@@ -325,7 +339,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             let record = state.get(member.kind, &member.name);
             let outputs = record_outputs(record, &active, &scope.roots);
-            let (clients_missing, clients_extra) = client_drift(desired_clients.as_deref(), recorded_clients(record));
+            let (clients_missing, clients_extra) =
+                client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
+                    client_hosts_kind(c, member.kind, &scope.workspace, scope.scope)
+                });
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -504,7 +521,8 @@ fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots
     let Some(record) = record else {
         return Vec::new();
     };
-    active_outputs(&record.outputs, active)
+    reportable_outputs(record, active)
+        .into_iter()
         .filter_map(|out| {
             out.resolved_target(roots, Containment::AllowRelocatedAncestor)
                 .ok()
@@ -534,7 +552,8 @@ fn unresolved_clients(record: Option<&InstallRecord>, active: &[ClientTarget], r
     let Some(record) = record else {
         return Vec::new();
     };
-    active_outputs(&record.outputs, active)
+    reportable_outputs(record, active)
+        .into_iter()
         .filter(|out| out.resolved_target(roots, Containment::AllowRelocatedAncestor).is_err())
         .map(|out| out.client.clone())
         .collect::<BTreeSet<_>>()
@@ -583,16 +602,61 @@ fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
 /// client wants"), not a client-level set difference — and it must respect
 /// pool sharing (`prune.rs::shared_by_surviving_sibling`), since one
 /// `.agents/skills` tree backs four vendors at once.
-fn client_drift(desired: Option<&[ClientTarget]>, recorded: &[ClientOutput]) -> (Vec<String>, Vec<String>) {
+/// `hosts_kind` filters the **missing** side only: a configured client whose
+/// vendor cannot host this artifact's kind at this scope never gets an output
+/// recorded — the installer drops it from the materialize set before any write
+/// — so counting it missing reports drift that no `grim install`, `--force`, or
+/// `update` can ever clear. `clients_extra` keeps diffing against the *whole*
+/// configured set: a recorded client the user configured is not "extra"
+/// whatever its kind support says.
+fn client_drift(
+    desired: Option<&[ClientTarget]>,
+    recorded: &[ClientOutput],
+    hosts_kind: impl Fn(ClientTarget) -> bool,
+) -> (Vec<String>, Vec<String>) {
     let Some(desired) = desired else {
         return (Vec::new(), Vec::new());
     };
-    let desired: BTreeSet<String> = desired.iter().map(ToString::to_string).collect();
+    let hosting: BTreeSet<String> = desired
+        .iter()
+        .filter(|c| hosts_kind(**c))
+        .map(ToString::to_string)
+        .collect();
+    let configured: BTreeSet<String> = desired.iter().map(ToString::to_string).collect();
     let recorded: BTreeSet<String> = recorded.iter().map(|o| o.client.clone()).collect();
     (
-        desired.difference(&recorded).cloned().collect(),
-        recorded.difference(&desired).cloned().collect(),
+        hosting.difference(&recorded).cloned().collect(),
+        recorded.difference(&configured).cloned().collect(),
     )
+}
+
+/// Whether `client` can host `kind` at `scope` — the read-side twin of
+/// `installer::client_supports_kind`, which is what decides whether an output
+/// is ever recorded.
+///
+/// Reimplemented rather than shared because the installer's copy is private;
+/// both consult the same public [`Vendor`](crate::install::vendor::Vendor)
+/// methods, so a vendor flipping a decline moves both at once. Keep them in
+/// lockstep: the install side deciding one way and the report side the other is
+/// exactly the divergence this predicate exists to close.
+fn client_hosts_kind(
+    client: ClientTarget,
+    kind: ArtifactKind,
+    workspace: &std::path::Path,
+    scope: crate::config::scope::ConfigScope,
+) -> bool {
+    match kind {
+        // MCP has no `kind_surface` half: a vendor hosts it exactly when it
+        // resolves an MCP config path at this scope.
+        ArtifactKind::Mcp => client.vendor().mcp_config_path(workspace, scope).is_some(),
+        // A bundle never materializes (it expands into members), so no client
+        // ever records an output for one. Bundle rows do not call this.
+        ArtifactKind::Bundle => false,
+        kind => {
+            client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined
+                && client.vendor().kind_surface(kind, scope)
+        }
+    }
 }
 
 /// Derive the reported state for one declared artifact.
@@ -620,39 +684,94 @@ fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
-    // Reconcile the record's per-client outputs against the currently-active
-    // client set: an output for a client the user removed since install must
-    // be ignored, not flagged `missing`. With no output for any active client
-    // the artifact is genuinely not present here ⇒ `missing`.
-    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
-    if outputs.is_empty() {
-        return ArtifactStatus::Missing;
+    match footprint(record, roots, active) {
+        Footprint::Missing => ArtifactStatus::Missing,
+        Footprint::Modified => ArtifactStatus::Modified,
+        Footprint::Intact if record.source.eq_content(&locked.source) => ArtifactStatus::Installed,
+        Footprint::Intact => ArtifactStatus::Outdated,
     }
-    // An unresolvable anchored target (corrupt/tampered `relative`, or an
-    // anchor root absent on this machine) is degraded to `Missing` for a
-    // read-only report — never `?`-propagated (state is data; status exits 0).
-    // A present (active) client whose file — or managed config entry — is
-    // missing still flags `missing`.
-    for out in &outputs {
-        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => return ArtifactStatus::Missing,
+}
+
+/// What an install record's recorded outputs look like on disk.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Footprint {
+    /// Every present output matches its recorded hash.
+    Intact,
+    /// At least one present output drifted from its recorded hash.
+    Modified,
+    /// Nothing is on disk, or an output an active client still wants is gone.
+    Missing,
+}
+
+/// Classify an install record against what is actually on disk.
+///
+/// `active` is consulted for exactly one decision: whether an output that is
+/// **absent** is the user's doing (they removed that client, taking its files
+/// with it) or real drift. It never decides which outputs to *look at*.
+///
+/// That distinction is the whole point. Filtering the outputs through live
+/// detection first — as this did — is unsound in both directions, because
+/// several vendors materialize outside the directory their own `detect()`
+/// checks: copilot writes `.github/skills` but detects on
+/// `.github/copilot-instructions.md`, and codex/gemini/zed/amp write the
+/// shared `.agents/skills` pool but detect on their own root. A healthy,
+/// byte-intact install whose only client is one of those therefore reported
+/// `missing`; worse, a **hand-edited** one reported `missing` too — telling
+/// the user there is nothing to lose immediately before `grim install`
+/// refuses the same file as `modified` and steers them to `--force`.
+/// The installer's integrity gate walks the unfiltered `rec.outputs`, so this
+/// must as well or the two commands disagree about the same bytes.
+///
+/// An unresolvable anchored target (corrupt/tampered `relative`, an anchor
+/// root absent on this machine) degrades to `Missing` for a read-only report
+/// rather than `?`-propagating — state is data, and `status` exits 0.
+fn footprint(record: &InstallRecord, roots: &AnchorRoots, active: &[ClientTarget]) -> Footprint {
+    // Reuse the reconciliation predicate rather than restating it, so a change
+    // to what counts as active cannot drift between here and the installer.
+    let client_is_active = |out: &ClientOutput| active_outputs(std::slice::from_ref(out), active).next().is_some();
+
+    let mut any_present = false;
+    let mut modified = false;
+    for out in &record.outputs {
+        if !matches!(out.is_present(roots, Containment::AllowRelocatedAncestor), Ok(true)) {
+            if client_is_active(out) {
+                return Footprint::Missing;
+            }
+            continue;
         }
-    }
-    // Any drifted client output (canonical OR generated — the recorded
-    // hash for a generated target is over its expected bytes) ⇒ modified.
-    for out in &outputs {
+        any_present = true;
+        // Any drifted client output (canonical OR generated — the recorded
+        // hash for a generated target is over its expected bytes) ⇒ modified.
         match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
-            Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
+            Ok(actual) if actual != out.content_hash => modified = true,
             Ok(_) => {}
-            // An unreadable / unresolvable target is effectively gone.
-            Err(_) => return ArtifactStatus::Missing,
+            // Present but unreadable / unresolvable: effectively gone.
+            Err(_) if client_is_active(out) => return Footprint::Missing,
+            Err(_) => {}
         }
     }
-    if record.source.eq_content(&locked.source) {
-        ArtifactStatus::Installed
+    match (any_present, modified) {
+        (false, _) => Footprint::Missing,
+        (true, true) => Footprint::Modified,
+        (true, false) => Footprint::Intact,
+    }
+}
+
+/// The record's outputs to *report*: those whose client is still active, or —
+/// when detection filters every one away — all of them.
+///
+/// Same unsound-oracle problem as [`footprint`]: an empty active set is a
+/// detection artifact for the vendors that write outside their own marker
+/// directory, not proof the artifact is gone, and a row that reports a state
+/// without naming the file it is about is not actionable.
+fn reportable_outputs<'a>(record: &'a InstallRecord, active: &'a [ClientTarget]) -> Vec<&'a ClientOutput> {
+    let reconciled: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    if reconciled.is_empty() {
+        record.outputs.iter().collect()
     } else {
-        ArtifactStatus::Outdated
+        reconciled
     }
 }
 
@@ -695,22 +814,10 @@ async fn derive_dev_state(
     active: &[ClientTarget],
     anchor: &std::path::Path,
 ) -> ArtifactStatus {
-    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
-    if outputs.is_empty() {
-        return ArtifactStatus::Missing;
-    }
-    for out in &outputs {
-        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => return ArtifactStatus::Missing,
-        }
-    }
-    for out in &outputs {
-        match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
-            Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
-            Ok(_) => {}
-            Err(_) => return ArtifactStatus::Missing,
-        }
+    match footprint(record, roots, active) {
+        Footprint::Missing => return ArtifactStatus::Missing,
+        Footprint::Modified => return ArtifactStatus::Modified,
+        Footprint::Intact => {}
     }
     let crate::lock::locked_source::LockedSource::Path { path, hash } = &record.source else {
         return ArtifactStatus::Installed;
@@ -947,7 +1054,7 @@ mod tests {
     #[test]
     fn client_drift_narrowed_desired_reports_extra() {
         let recorded = [client_output("claude"), client_output("opencode")];
-        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude]), &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude]), &recorded, |_| true);
         assert_eq!(missing, Vec::<String>::new());
         assert_eq!(extra, vec!["opencode".to_string()]);
     }
@@ -957,7 +1064,9 @@ mod tests {
     #[test]
     fn client_drift_widened_desired_reports_missing() {
         let recorded = [client_output("claude")];
-        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded, |_| {
+            true
+        });
         assert_eq!(missing, vec!["opencode".to_string()]);
         assert_eq!(extra, Vec::<String>::new());
     }
@@ -965,7 +1074,9 @@ mod tests {
     #[test]
     fn client_drift_matching_sets_are_both_empty() {
         let recorded = [client_output("claude"), client_output("opencode")];
-        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded);
+        let (missing, extra) = client_drift(Some(&[ClientTarget::Claude, ClientTarget::OpenCode]), &recorded, |_| {
+            true
+        });
         assert!(missing.is_empty());
         assert!(extra.is_empty());
     }
@@ -977,6 +1088,7 @@ mod tests {
         let (missing, _extra) = client_drift(
             Some(&[ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode]),
             &recorded,
+            |_| true,
         );
         assert_eq!(
             missing,
@@ -994,7 +1106,7 @@ mod tests {
     #[test]
     fn client_drift_none_desired_is_no_drift() {
         let recorded = [client_output("claude"), client_output("opencode")];
-        let (missing, extra) = client_drift(None, &recorded);
+        let (missing, extra) = client_drift(None, &recorded, |_| true);
         assert!(missing.is_empty());
         assert!(extra.is_empty());
     }
@@ -1376,26 +1488,24 @@ mod tests {
         );
     }
 
-    /// W7: when the record contains outputs only for clients that are NOT in
-    /// the active set (e.g., the only recorded client was `opencode` but the
-    /// active set is `[claude]`), `derive_state` must return `Missing`.
+    /// W7, **corrected**: when every recorded client is outside the active set
+    /// but the file is still on disk and intact, `derive_state` reports
+    /// `Installed` — the state of the bytes, not of client detection.
     ///
-    /// This prevents BLOCK-1 status lying: after a partial-client version bump
-    /// (pre-fix) copilot was left at A while `record.pinned==B`; when copilot
-    /// is the only remaining recorded client and claude is the active one, the
-    /// artifact must not report `Installed` — it is genuinely not present for
-    /// the active client.
+    /// The original W7 asserted `Missing` here, and that was the bug: `active`
+    /// comes from `detect_clients_or_all`, which is an unsound oracle for
+    /// "grim installed here" (copilot writes `.github/skills` but detects on
+    /// `.github/copilot-instructions.md`; codex/gemini/zed/amp write the shared
+    /// `.agents/skills` pool but detect on their own root). A healthy install
+    /// targeting one of those reported `missing` while `grim install` on the
+    /// same state reported `unchanged`, and a hand-edited one reported
+    /// `missing` while `install` refused it as `modified` — telling the user
+    /// there was nothing to lose right before steering them at `--force`.
     ///
-    /// This is a regression anchor: the C4 `active_outputs` filter already
-    /// returns `Missing` here (opencode is not in the active set), so the test
-    /// passes on the current implementation. It exists to catch a future
-    /// regression that weakened `active_outputs` — e.g. treating an empty
-    /// active set as "all clients".
-    ///
-    /// Per the plan: "W7 no all-clients-removed → Missing test (status.rs)".
-    /// The spec says: record `[opencode]` only, active set `[Claude]` → Missing.
+    /// What `active` still governs is the sibling test below: an output that
+    /// is **absent** flags `missing` only when its client is still active.
     #[test]
-    fn all_clients_removed_yields_missing() {
+    fn intact_output_of_an_inactive_client_reports_installed_not_missing() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path();
         let roots = roots(ws);
@@ -1426,10 +1536,7 @@ mod tests {
             }],
         });
 
-        // Active set is [Claude] only — opencode was removed.
-        // active_outputs filters to only the intersection of record clients and
-        // active set; since the record only has opencode and active is [claude],
-        // the result is empty ⇒ Missing.
+        // Active set is [Claude] only — opencode does not detect.
         let state = derive_state(
             ArtifactKind::Rule,
             "x",
@@ -1441,9 +1548,161 @@ mod tests {
         );
         assert_eq!(
             state,
+            ArtifactStatus::Installed,
+            "an intact recorded output must report its real state even when its \
+             client does not detect — `grim install` sees the same bytes"
+        );
+
+        // And a hand edit to that same file surfaces as `modified` — the
+        // verdict `install`'s integrity gate reaches, which the detection
+        // filter used to hide behind `missing`.
+        std::fs::write(&opencode_target, b"hand edited\n").unwrap();
+        assert_eq!(
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true,
+            ),
+            ArtifactStatus::Modified,
+            "a drifted output must not be hidden as `missing` by client detection"
+        );
+    }
+
+    /// The complement: an output that is **gone** from disk reports `missing`
+    /// only when its client is still active. A client the user removed took
+    /// its files with it, and that is not this artifact's drift — but with
+    /// nothing left on disk anywhere, the artifact really is missing.
+    #[test]
+    fn absent_output_reports_missing_only_for_an_active_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+
+        let claude_target = ws.join(".claude/rules/x.md");
+        std::fs::create_dir_all(claude_target.parent().unwrap()).unwrap();
+        std::fs::write(&claude_target, b"canonical\n").unwrap();
+        let claude_hash = crate::install::content_hash::content_hash(&claude_target).unwrap();
+
+        let output = |client: &str, relative: &str, hash: Digest| ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            },
+            content_hash: hash,
+            support_dir: None,
+            entry: None,
+        };
+
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![
+                output("claude", ".claude/rules/x.md", claude_hash),
+                // Never written / already deleted with its client.
+                output("opencode", ".opencode/rules/x.md", Digest::Sha256("b".repeat(64))),
+            ],
+        });
+
+        assert_eq!(
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                true,
+            ),
+            ArtifactStatus::Installed,
+            "an absent output for an INACTIVE client must not flag missing"
+        );
+        assert_eq!(
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Claude, ClientTarget::OpenCode],
+                true,
+            ),
             ArtifactStatus::Missing,
-            "W7: record with only out-of-scope clients must report Missing \
-             (not Installed) when the active set is entirely different"
+            "an absent output for an ACTIVE client still flags missing"
+        );
+
+        // Nothing left on disk for any client ⇒ missing, whatever detects.
+        std::fs::remove_file(&claude_target).unwrap();
+        assert_eq!(
+            derive_state(
+                ArtifactKind::Rule,
+                "x",
+                Some(&locked('a')),
+                &st,
+                &roots,
+                &[ClientTarget::Cursor],
+                true,
+            ),
+            ArtifactStatus::Missing,
+            "no recorded output present anywhere ⇒ missing"
+        );
+    }
+
+    /// F4 regression: a configured client whose vendor **declines** the
+    /// artifact's kind can never have an output recorded, so counting it
+    /// `clients_missing` reports drift no grim command can clear. Codex
+    /// declines rules; kiro declines agents.
+    #[test]
+    fn client_drift_skips_a_client_that_declines_the_kind() {
+        let ws = std::path::Path::new("/ws");
+        let scope = crate::config::scope::ConfigScope::Project;
+        let recorded = [client_output("claude")];
+        let desired = [ClientTarget::Claude, ClientTarget::Codex];
+
+        let (missing, extra) = client_drift(Some(&desired), &recorded, |c| {
+            client_hosts_kind(c, ArtifactKind::Rule, ws, scope)
+        });
+        assert!(
+            missing.is_empty(),
+            "codex declines rules — it is not actionable drift: {missing:?}"
+        );
+        assert!(extra.is_empty());
+
+        // A client that DOES host the kind is still reported.
+        let (missing, _) = client_drift(Some(&desired), &recorded, |c| {
+            client_hosts_kind(c, ArtifactKind::Skill, ws, scope)
+        });
+        assert_eq!(
+            missing,
+            vec!["codex".to_string()],
+            "codex hosts skills — a genuinely uninstalled one is real drift"
+        );
+    }
+
+    /// The same gate for the two other decline shapes: an agent kind the
+    /// vendor declines outright, and an MCP kind with no config surface.
+    #[test]
+    fn client_hosts_kind_tracks_declines_and_mcp_surfaces() {
+        let ws = std::path::Path::new("/ws");
+        let scope = crate::config::scope::ConfigScope::Project;
+        assert!(!client_hosts_kind(ClientTarget::Codex, ArtifactKind::Rule, ws, scope));
+        assert!(!client_hosts_kind(ClientTarget::Kiro, ArtifactKind::Agent, ws, scope));
+        assert!(client_hosts_kind(ClientTarget::Claude, ArtifactKind::Rule, ws, scope));
+        assert_eq!(
+            client_hosts_kind(ClientTarget::Claude, ArtifactKind::Mcp, ws, scope),
+            ClientTarget::Claude.vendor().mcp_config_path(ws, scope).is_some(),
+            "the MCP arm must track mcp_config_path, not kind_support"
+        );
+        assert!(
+            !client_hosts_kind(ClientTarget::Claude, ArtifactKind::Bundle, ws, scope),
+            "a bundle never materializes, so no client hosts one"
         );
     }
 
