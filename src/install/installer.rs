@@ -881,7 +881,18 @@ async fn install_one<M: ArtifactMaterializer>(
         // vetted it a few lines above, so adopting it resets no user's drift
         // baseline. An unanchorable destination is left out of the record
         // entirely, exactly as the success path would have left it.
-        if let Some((client, dest, support)) = in_flight
+        //
+        // **Only when a prior record exists.** That record is what makes this
+        // recoverable: it carries the OLD pin, so the retry's integrity gate
+        // sees `rec.source != source`, falls through, and re-materializes. On
+        // a FIRST install there is no old pin to fall back to, so the wreckage
+        // would be recorded at the NEW pin — intact, fully covering, matching
+        // the lock — and the retry would answer `AlreadyInstalled` over a
+        // destination grim never finished writing. Recording nothing for it
+        // leaves the half-written dest untracked, which is the forceable
+        // refusal the untracked gate exists to produce.
+        if recorded.is_some()
+            && let Some((client, dest, support)) = in_flight
             && let Ok(anchored) =
                 crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, kind, roots)
         {
