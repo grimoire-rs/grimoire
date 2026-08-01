@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter};
+use crate::store::atomic_write::atomic_write;
 
 use super::install_error::{InstallError, InstallErrorKind};
 
@@ -408,7 +409,7 @@ impl ClientTarget {
             };
             if let Some(text) = generated_doc {
                 let index_dest = dest.join("SKILL.md");
-                std::fs::write(&index_dest, text.as_bytes()).map_err(|e| target_io(&index_dest, e))?;
+                atomic_write(&index_dest, text.as_bytes()).map_err(|e| target_io(&index_dest, e))?;
                 for file in &mut out {
                     if file.path == index_dest {
                         file.generated = true;
@@ -449,7 +450,7 @@ impl ClientTarget {
         let mut out = match rendered {
             // Canonical bytes are what this vendor reads — verbatim copy.
             None => {
-                std::fs::write(dest, &bytes).map_err(|e| target_io(dest, e))?;
+                atomic_write(dest, &bytes).map_err(|e| target_io(dest, e))?;
                 vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: false,
@@ -459,7 +460,7 @@ impl ClientTarget {
                 for warning in &rendered.warnings {
                     tracing::warn!("{warning}");
                 }
-                std::fs::write(dest, rendered.document.as_bytes()).map_err(|e| target_io(dest, e))?;
+                atomic_write(dest, rendered.document.as_bytes()).map_err(|e| target_io(dest, e))?;
                 vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: true,
@@ -505,7 +506,7 @@ impl ClientTarget {
         let out = match rendered {
             // Canonical bytes are what this vendor reads — verbatim copy.
             None => {
-                std::fs::write(dest, &bytes).map_err(|e| target_io(dest, e))?;
+                atomic_write(dest, &bytes).map_err(|e| target_io(dest, e))?;
                 vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: false,
@@ -515,7 +516,7 @@ impl ClientTarget {
                 for warning in &rendered.warnings {
                     tracing::warn!("{warning}");
                 }
-                std::fs::write(dest, rendered.document.as_bytes()).map_err(|e| target_io(dest, e))?;
+                atomic_write(dest, rendered.document.as_bytes()).map_err(|e| target_io(dest, e))?;
                 vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: true,
@@ -551,12 +552,29 @@ fn copy_tree(src: &Path, dst: &Path, out: &mut Vec<MaterializedFile>) -> Result<
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
         }
-        std::fs::copy(src, dst).map_err(|e| target_io(dst, e))?;
+        atomic_copy(src, dst).map_err(|e| target_io(dst, e))?;
         out.push(MaterializedFile {
             path: dst.to_path_buf(),
             generated: false,
         });
     }
+    Ok(())
+}
+
+/// Copy `src` onto `dst` through a sibling temp file, so an interrupted copy
+/// leaves the previous destination in place instead of a truncated one.
+///
+/// [`atomic_write`] is the equivalent for generated text, but it caps the
+/// mode at `0o644`: a skill tree carries executable scripts, and copying
+/// verbatim has to mean the permission bits too. `std::fs::copy` applies the
+/// source's bits to the file it writes, so the mode rides along to the temp
+/// and survives the rename.
+fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::Builder::new()
+        .prefix(".grim-tmp-")
+        .make_in(parent, |path| std::fs::copy(src, path).map(|_| ()))?;
+    tmp.persist(dst).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -1131,6 +1149,103 @@ mod tests {
                 home.join(".copilot/instructions/r.instructions.md")
             );
         }
+    }
+
+    /// Every destination write goes through a sibling temp + rename, so an
+    /// interrupted one cannot leave a truncated file the untracked gate then
+    /// refuses forever. Two properties that would break if a future change
+    /// swapped the copy for `atomic_write` (mode capped at `0o644`) or left a
+    /// temp behind (it would land in the footprint hash).
+    #[cfg(unix)]
+    #[test]
+    fn materialize_skill_preserves_exec_bits_and_leaves_no_temp_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("code-review");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: code-review\n---\n# CR\n").unwrap();
+        let script = src.join("scripts/run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let dest = tmp.path().join(".claude/skills/code-review");
+        ClientTarget::Claude
+            .materialize(MaterializeRequest {
+                kind: ArtifactKind::Skill,
+                name: "code-review",
+                artifact_root: &src,
+                dest: &dest,
+                scope: ConfigScope::Project,
+                pinned: "pin",
+                support_dir: None,
+            })
+            .unwrap();
+
+        let mode = std::fs::metadata(dest.join("scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "executable bits must survive the copy, got 0o{:o}",
+            mode & 0o777
+        );
+        for dir in [&dest, &dest.join("scripts")] {
+            let leftovers: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .filter(|name| name.to_string_lossy().starts_with(".grim-tmp-"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "temp files left in {}: {leftovers:?}",
+                dir.display()
+            );
+        }
+    }
+
+    /// Writing through a temp + rename replaces a symlink at the destination
+    /// instead of following it. The installer unlinks symlinked destinations
+    /// before it materializes, so this only shows up on the `grim render`
+    /// path, where the destination directory is the user's own and may hold
+    /// anything — and there, landing the rule outside the directory the user
+    /// named is never the intent.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_rule_replaces_a_symlinked_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("rust-style.md");
+        std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\n").unwrap();
+        let outside = tmp.path().join("outside.md");
+        std::fs::write(&outside, "untouched\n").unwrap();
+        let dest = tmp.path().join("render/rust-style.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &dest).unwrap();
+
+        ClientTarget::Claude
+            .materialize(MaterializeRequest {
+                kind: ArtifactKind::Rule,
+                name: "rust-style",
+                artifact_root: &src,
+                dest: &dest,
+                scope: ConfigScope::Project,
+                pinned: "p",
+                support_dir: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "untouched\n",
+            "the write must not follow the link out of the destination directory"
+        );
+        assert!(!dest.is_symlink(), "the link itself must be replaced");
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "---\npaths: [\"a\"]\n---\n# R\n"
+        );
     }
 
     #[test]

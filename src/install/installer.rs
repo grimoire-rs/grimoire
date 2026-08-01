@@ -750,6 +750,10 @@ async fn install_one<M: ArtifactMaterializer>(
     // away the clients that already replaced their destinations. Their files
     // are on disk, so the record has to describe them before the error
     // surfaces — see the partial-record branch below the loop.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the enclosing async fn returns this same error without tripping the lint (its signature is a Future, which the lint does not inspect); a closure signature is inspected, so the suppression lives here rather than reshaping the shared error type"
+    )]
     let materialize_result = (|| -> Result<(), crate::error::Error> {
         for client in &materialize_set {
             let dest = target.path_for(*client, kind, &artifact.name);
@@ -2143,6 +2147,10 @@ async fn install_mcp(
     // Same partial-pass doctrine as `install_one`: a write failure part-way
     // through leaves earlier clients spliced, and an unrecorded splice is the
     // orphan entry this whole restructure exists to prevent.
+    #[allow(
+        clippy::result_large_err,
+        reason = "same as the materialize closure in install_one — the enclosing async fn escapes the lint, a closure signature does not"
+    )]
     let write_result = (|| -> Result<(), crate::error::Error> {
         for plan in plans {
             if plan.adopted {
