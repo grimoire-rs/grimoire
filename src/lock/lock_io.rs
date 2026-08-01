@@ -101,6 +101,7 @@ fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
     lists_content_equal(&a.skills, &b.skills)
         && lists_content_equal(&a.rules, &b.rules)
         && lists_content_equal(&a.agents, &b.agents)
+        && lists_content_equal(&a.mcp, &b.mcp)
         && bundles_content_equal(&a.bundles, &b.bundles)
 }
 
@@ -294,6 +295,48 @@ mod tests {
         let path = dir.path().join("grimoire.lock");
         save(&path, &next, Some(&prev)).unwrap();
         assert_ne!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_updated_when_mcp_content_differs() {
+        // Regression: `content_equal` compared skills/rules/agents/bundles
+        // but never `mcp`, so an mcp-only pin change preserved the previous
+        // `generated_at` and the relock looked like a no-op in diffs.
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.mcp = vec![LockedArtifact::direct(
+            "grim".to_string(),
+            ArtifactKind::Mcp,
+            pinned("acme/grim", None, 'a'),
+        )];
+        let mut next = lock_with("2026-06-01T12:00:00Z", vec![]);
+        next.mcp = vec![LockedArtifact::direct(
+            "grim".to_string(),
+            ArtifactKind::Mcp,
+            pinned("acme/grim", None, 'b'),
+        )];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_ne!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_preserved_when_mcp_content_unchanged() {
+        let mcp = || {
+            vec![LockedArtifact::direct(
+                "grim".to_string(),
+                ArtifactKind::Mcp,
+                pinned("acme/grim", None, 'a'),
+            )]
+        };
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.mcp = mcp();
+        let mut next = lock_with("2099-12-31T23:59:59Z", vec![]);
+        next.mcp = mcp();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
     }
 
     #[test]
