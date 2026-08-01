@@ -60,25 +60,46 @@ pub async fn run(ctx: &Context, args: &InitArgs) -> anyhow::Result<(InitReport, 
         (cwd.join("grimoire.toml"), ConfigScope::Project)
     };
 
-    if path.exists() {
-        return Err(crate::error::Error::from(ConfigError::new(path, ConfigErrorKind::ConfigAlreadyExists)).into());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| crate::error::Error::from(ConfigError::new(&path, ConfigErrorKind::Io(e))))?;
-    }
-
     // Detect against the directory the config will govern, so a project init
     // reads the workspace's vendor dirs and a global init reads `$HOME`'s.
-    let workspace = path.parent().unwrap_or(&path);
-    let detected = crate::install::target::detect_clients(workspace, scope);
+    let workspace = path.parent().unwrap_or(&path).to_path_buf();
+    let detected = crate::install::target::detect_clients(&workspace, scope);
 
     let body = render_config(snapshot_registry(ctx, args.registry.as_deref()), &detected);
-    std::fs::write(&path, body)
-        .map_err(|e| crate::error::Error::from(ConfigError::new(&path, ConfigErrorKind::Io(e))))?;
+    create_config(&path, &body)?;
 
     let report = InitReport::new(path, scope, InitStatus::Created);
     Ok((report, ExitCode::Success))
+}
+
+/// Create `path` with `body`, refusing to overwrite an existing config.
+///
+/// The refusal is a check-then-act, so it is only sound under the config
+/// advisory lock — acquired first, exactly like every other config writer
+/// (`add`, `config`, the TUI). Unlocked, two racing inits both passed the
+/// existence check and the last write won silently. The lock lives on a
+/// sidecar, so it works on a config that does not exist yet.
+///
+/// The write goes through the shared atomic seam (temp file + rename), so
+/// an interrupted init leaves either no file or a complete one — never a
+/// truncated `grimoire.toml` that the existence check above would then
+/// protect forever, wedging the workspace at exit 78.
+///
+/// # Errors
+///
+/// [`ConfigErrorKind::ConfigAlreadyExists`] (exit 64) when the file is
+/// already there, a lock error (exit 75) when another writer holds the
+/// config lock, or [`ConfigErrorKind::Io`] (74) for a failed write.
+fn create_config(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
+    let _guard = super::grim(crate::lock::file_lock::ConfigFileLock::try_acquire(
+        &super::scope_resolution::lockable_path(path),
+    ))?;
+    if path.exists() {
+        return Err(crate::error::Error::from(ConfigError::new(path, ConfigErrorKind::ConfigAlreadyExists)).into());
+    }
+    crate::store::atomic_write::atomic_write(path, body.as_bytes())
+        .map_err(|e| crate::error::Error::from(ConfigError::new(path, ConfigErrorKind::Io(e))))?;
+    Ok(())
 }
 
 /// The registry to snapshot into the seed config: `--registry` on `init`
@@ -146,6 +167,35 @@ fn render_config(registry: Option<&str>, clients: &[crate::install::ClientTarget
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_config_refuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.toml");
+        create_config(&path, "[skills]\n").expect("first create succeeds");
+
+        let err = create_config(&path, "[rules]\n").expect_err("second create must refuse");
+        assert_eq!(crate::error::classify(&err).exit, ExitCode::UsageError);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[skills]\n",
+            "the refused init must leave the first config untouched"
+        );
+    }
+
+    #[test]
+    fn create_config_refuses_while_another_writer_holds_the_config_lock() {
+        // Regression: init was the one config writer that took no flock, so
+        // two racing inits both passed the existence check and the last write
+        // won silently. It must now contend like every other config writer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.toml");
+        let _held = crate::lock::file_lock::ConfigFileLock::try_acquire(&path).expect("hold the config lock");
+
+        let err = create_config(&path, "[skills]\n").expect_err("a held config lock must refuse the write");
+        assert_eq!(crate::error::classify(&err).exit, ExitCode::TempFail);
+        assert!(!path.exists(), "a refused init must write nothing");
+    }
 
     #[test]
     fn render_seeds_schema_directive_first_and_parses() {

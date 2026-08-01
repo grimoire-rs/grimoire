@@ -237,17 +237,39 @@ pub fn load_state(scope: &ResolvedScope) -> std::io::Result<InstallState> {
     }
 }
 
-/// Whether the config-file flock can be acquired: a global config that
-/// does not exist yet has no file to lock, which is benign for read-only
-/// commands and for a first `grim lock` (the lock file write is still
-/// atomic). Returns the path to lock, or `None` when there is nothing to
-/// lock.
+/// The config-file flock target for a resolved scope — always `Some`.
+///
+/// An absent config file is **not** a reason to skip the lock: the lock
+/// lives on a `<file>.lock` sidecar, so only the parent directory has to
+/// exist ([`crate::lock::advisory_lock::AdvisoryFileLock::try_acquire`]),
+/// and an absent `$GRIM_HOME/grimoire.toml` is the universal first-run
+/// state ([`GlobalConfig::load`] treats it as an empty declaration). Gating
+/// on existence therefore ran every *first* global-scope mutation
+/// unguarded: two concurrent first-run writers both read the empty config
+/// and raced last-writer-wins, both exiting 0 with one declaration silently
+/// dropped.
+///
+/// The `Option` is retained so the call sites keep compiling unchanged;
+/// their `None` arms are now unreachable.
 pub fn lockable_config_path(scope: &ResolvedScope) -> Option<PathBuf> {
-    if scope.config_path.exists() {
-        Some(scope.config_path.clone())
-    } else {
-        None
+    Some(lockable_path(&scope.config_path))
+}
+
+/// Prepare `config_path` for the advisory flock and hand it back.
+///
+/// The sidecar is created beside the guarded file, so the parent directory
+/// must exist even when the config does not (first run under a fresh
+/// `$GRIM_HOME`). A `create_dir_all` failure is deliberately not surfaced
+/// here — the very next `try_acquire` reports it as a lock error keyed to
+/// the config path the user knows about, rather than a second error shape
+/// for the same condition.
+pub fn lockable_path(config_path: &Path) -> PathBuf {
+    if let Some(parent) = config_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
     }
+    config_path.to_path_buf()
 }
 
 /// Map a missing-explicit-config discovery failure to the user-facing
@@ -287,6 +309,24 @@ mod tests {
         assert!(scope.set.skills.is_empty());
         assert!(scope.lock_path.ends_with("grimoire.lock"));
         assert!(scope.state_path.ends_with("global.json"));
+    }
+
+    #[test]
+    fn absent_first_run_config_is_still_lockable() {
+        // Regression: `lockable_config_path` gated on `config_path.exists()`,
+        // so every mutation against a fresh `$GRIM_HOME` (the universal
+        // first-run state) skipped the flock entirely and two concurrent
+        // writers raced last-writer-wins.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("fresh-grim-home");
+        let ctx = Context::hermetic(home.clone());
+        let scope = resolve(&ctx, true, None).expect("global resolves with no config file");
+        assert!(!scope.config_path.exists(), "precondition: no config file yet");
+
+        let path = lockable_config_path(&scope).expect("an absent config must still be lockable");
+        assert_eq!(path, scope.config_path);
+        assert!(home.is_dir(), "the sidecar's parent directory must be created");
+        crate::lock::file_lock::ConfigFileLock::try_acquire(&path).expect("the returned path must lock");
     }
 
     #[test]
