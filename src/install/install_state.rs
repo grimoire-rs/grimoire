@@ -828,10 +828,20 @@ impl InstallState {
     /// within each record, `outputs` is sorted by `client` ascending. This
     /// guarantees identical JSON regardless of insertion order.
     ///
+    /// A lossy V1→V2 migration is snapshotted here, immediately before the
+    /// write — **not** in [`Self::persist`]. This is the only chokepoint every
+    /// write passes through, and the installer's mid-run progress save reaches
+    /// it directly: snapshotting one layer up let that first write destroy the
+    /// V1 original, after which `persist` copied the already-converted bytes
+    /// into `.v1.bak` and announced that the original had been kept.
+    ///
     /// # Errors
     ///
     /// Serialization or atomic-write I/O failure.
     pub fn save(&self) -> std::io::Result<()> {
+        if self.legacy_migration_lossy() {
+            Self::snapshot_lossy_migration(&self.path);
+        }
         let mut records: Vec<InstallRecord> = self.records.values().cloned().collect();
         // Sort records by `(name, kind)` ascending, and each record's outputs
         // by `client` ascending, so the serialized bytes are identical
@@ -905,13 +915,11 @@ impl InstallState {
                 source,
             })?;
         }
-        // Capture the lossy flag before the write — the reap below is skipped
-        // when the V1→V2 conversion dropped any output/record, keeping the
-        // legacy file as the sole recovery breadcrumb.
+        // The reap below is skipped when the V1→V2 conversion dropped any
+        // output/record, keeping the legacy file as the sole recovery
+        // breadcrumb. (`save` owns the `.v1.bak` snapshot — it is the one
+        // chokepoint every write passes through.)
         let lossy = self.legacy_migration_lossy();
-        if lossy {
-            Self::snapshot_lossy_migration(&self.path);
-        }
         self.save().map_err(|source| PersistError::Save {
             path: self.path.clone(),
             source,
@@ -2259,6 +2267,49 @@ mod tests {
             std::fs::read(&backup).unwrap(),
             original,
             "an existing snapshot is never overwritten"
+        );
+    }
+
+    /// The snapshot must hang off `save`, not `persist`: the installer's
+    /// mid-run progress save writes through `save` directly, and it runs
+    /// BEFORE any `persist`. Snapshotting only in `persist` let that first
+    /// write destroy the V1 original, after which `persist` faithfully copied
+    /// the already-migrated V2 bytes into `.v1.bak` and warned that "the
+    /// original file was kept" — a falsified backup, with the dropped V1
+    /// records surviving nowhere.
+    #[test]
+    fn lossy_migration_snapshots_on_a_bare_save_not_just_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let grim_home = dir.path().join("grim");
+        let state_dir = grim_home.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let global_path = InstallState::global_path(&state_dir);
+        let v1_json = format!(
+            r#"{{"version":1,"records":[{{"kind":"rule","name":"legacy-rule","pinned":"localhost:5000/legacy-rule@sha256:{sha}","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","clients":[{{"client":"codex","target":"/home/u/.codex/rules/legacy-rule.md","content_hash":"sha256:{hash}","support_dir":null}}]}}]}}"#,
+            sha = "d".repeat(64),
+            hash = "c".repeat(64),
+        );
+        let original = v1_json.into_bytes();
+        std::fs::write(&global_path, &original).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: PathBuf::from("/unused"),
+            grim_home: grim_home.clone(),
+            vendor_roots: [("codex", PathBuf::from("/home/u/.codex"))].into(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        };
+        let st = InstallState::load_global(&global_path, &roots).unwrap();
+        assert!(st.legacy_migration_lossy(), "fixture must produce a lossy migration");
+
+        st.save().unwrap();
+
+        assert_eq!(
+            std::fs::read(state_dir.join("global.json.v1.bak")).unwrap(),
+            original,
+            "a bare save must snapshot the original before overwriting it"
         );
     }
 
