@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-08-02
+
+### Added
+
+- Record whether an output was adopted or written *(install)*
+
+### Changed
+
+- Share one client-hosts-kind predicate with the installer *(status)*
+
+### Documentation
+
+- Document the --force gate on managed MCP entries *(uninstall)*
+- Record the two contract changes the code already made *(status)*
+- Drop hardcoded version from the interface spec row *(landing)*
+
+### Fixed
+
+- Lock the config file even when it does not exist yet *(config)*
+- Guard and persist install-state mutations correctly *(tui)*
+- Roll the declaration back when the relock fails *(add)*
+- Install a bundle's mcp members *(add)*
+- Persist install state before the prune and reap passes *(update)*
+- Keep the original file after a lossy migration *(install-state)*
+- Evict mcp entries when a declaration or bundle is removed *(lock)*
+- Compare mcp pins when deciding to preserve generated_at *(lock)*
+- Badge an installed MCP server as installed *(search)*
+- Refuse to discard a locally modified MCP entry *(uninstall)*
+- Keep a partial install pass recoverable *(install)*
+- Gate every MCP client before splicing any of them *(install)*
+- Make the untracked gate verify content, not just the path *(install)*
+- Write materialized files through a temp and rename *(install)*
+- Keep a hand-authored container header in the Codex TOML splice *(mcp)*
+- Splice the managed instructions entry and anchor its MCP config *(opencode)*
+- Classify from the recorded footprint, not from client detection *(status)*
+- Stop conscripting a dropped client's edited copy *(update)*
+- Never record a first install's half-written destination *(install)*
+- Snapshot a lossy migration in save, not in persist *(state)*
+- Make an adopted MCP entry reportable and forceable *(uninstall)*
+- Converge the instructions removal and harden the temp copy *(install)*
+- Stop writing the adopted flag on file outputs *(install)*
+
 ## [0.12.0] - 2026-08-01
 
 ### Added
@@ -644,6 +686,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.12.1]: https://github.com/grimoire-rs/grimoire/compare/v0.12.0..v0.12.1
 [0.12.0]: https://github.com/grimoire-rs/grimoire/compare/v0.11.1..v0.12.0
 [0.11.1]: https://github.com/grimoire-rs/grimoire/compare/v0.11.0..v0.11.1
 [0.11.0]: https://github.com/grimoire-rs/grimoire/compare/v0.10.0..v0.11.0
