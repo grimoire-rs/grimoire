@@ -64,7 +64,7 @@ jobs:
       # index.hbs byte for byte. Bumping the pin needs a re-copy via
       # `mdbook init --theme` and a re-diff, or it silently drifts from upstream.
       - name: Install mdBook
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: mdbook@0.5.3
       # Builds grim, regenerates docs/src/schemas/*.json from the parser,
