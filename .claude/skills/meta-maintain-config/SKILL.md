@@ -23,11 +23,11 @@ Keep `.claude/` directory living knowledge base. Stay current with project + AI 
 
 ### `create` — New Artifact
 
-1. **Discover + Research** — Invoke canonical multi-agent research primitive from `/swarm-plan` (Phases 1-2). Spawn workers parallel:
-   - `worker-explorer` (1-2): existing `.claude/` patterns, conventions, cross-references, neighbors of artifact
-   - `worker-researcher` (1-3, split by axis): Claude Code docs (`code.claude.com/docs`), domain best practices, community patterns for artifact topic
+1. **Discover + Research** — Invoke canonical multi-agent research primitive from `/hex-plan` (Phases 1-2). Spawn workers parallel:
+   - an explorer pass (1-2): existing `.claude/` patterns, conventions, cross-references, neighbors of artifact
+   - researcher pass (1-3, split by axis): Claude Code docs (`code.claude.com/docs`), domain best practices, community patterns for artifact topic
 
-   Persist substantial findings as `.claude/artifacts/research_[topic].md` for reuse. See `/swarm-plan` "Research as a Reusable Primitive".
+   Persist substantial findings as `.agents/research/research_[topic].md` for reuse. See `/hex-plan` "Research as a Reusable Primitive".
 
 2. **Draft** — Follow `meta-ai-config.md` conventions:
    - Respect context budget (<200 lines rules, <500 lines skills)
@@ -36,14 +36,14 @@ Keep `.claude/` directory living knowledge base. Stay current with project + AI 
    - Use progressive disclosure — SKILL.md overview, reference files for detail
    - Add `disable-model-invocation: true` for action skills with side effects
 
-3. **Integrate** — Update CLAUDE.md tables, meta-rule inventory
+3. **Integrate** — Update AGENTS.md tables, meta-rule inventory
 
 4. **Validate** — Run audit checks (see below)
 
 ### `audit` — Check All Artifacts
 
 **Context budget audit:**
-- CLAUDE.md under 200 lines?
+- AGENTS.md under 280 lines?
 - Each global rule under 200 lines?
 - Count global rules — too many degrades performance
 - Skill descriptions total within 2% context budget?
@@ -64,19 +64,19 @@ Keep `.claude/` directory living knowledge base. Stay current with project + AI 
 - Agents referencing rules → still valid?
 
 **Duplication audit:**
-- Same instruction in CLAUDE.md AND rule? (single source of truth)
+- Same instruction in AGENTS.md AND rule? (single source of truth)
 - Same domain knowledge in skill AND rule? (skill for on-demand, rule for always-on)
 
 ### `refresh` — Sync AI Knowledge with Codebase
 
-1. **Detect drift** — Spawn `worker-explorer` agents:
+1. **Detect drift** — explorer pass:
    - Public types in `subsystem-*.md` still exist in code?
    - New modules/crates lacking subsystem rules?
    - Error variants, trait names, method signatures still match?
    - CLI commands changed (new flags, subcommands)?
    - `deny.toml` / `.licenserc.toml` changed?
 
-2. **Research updates** — Spawn `worker-researcher`:
+2. **Research updates** — researcher pass:
    - Claude Code docs for new features (hooks, frontmatter, agents)
    - New best practices in Rust, async, testing, security
    - Check if `meta-ai-config.md` needs updating
@@ -105,24 +105,24 @@ When auditing AI config, verify `.claude/rules.md` reflects reality:
 
 1. Every rule in `.claude/rules/*.md` has entry in `.claude/rules.md`
 2. Every catalog entry resolves to real file
-3. `CLAUDE.md` still links to catalog
+3. `AGENTS.md` still links to catalog (`CLAUDE.md` only forwards via `@AGENTS.md`)
 4. "By concern" table reflects current development axes (add rows for new concerns; remove for retired)
 5. "By auto-load path" table matches actual `paths:` frontmatter in each rule file
 
-Run `task claude:tests` — structural tests catch most drift automatically (`test_catalog_covers_all_rules`, `test_catalog_references_resolve`, `test_claude_md_points_to_catalog`). Manual review catches semantic drift (e.g., new concern worth catalog row even if no test complains).
+Run `task claude:tests` — structural tests catch most drift automatically (`test_catalog_covers_all_rules`, `test_catalog_references_resolve`, `test_context_md_points_to_catalog`). Manual review catches semantic drift (e.g., new concern worth catalog row even if no test complains).
 
 ### `research` — Deep-Dive Topic
 
-Invoke canonical multi-agent research primitive from `/swarm-plan` (Phases 1-2). No reinvent.
+Invoke canonical multi-agent research primitive from `/hex-plan` (Phases 1-2). No reinvent.
 
-1. **Spawn workers parallel** — per `/swarm-plan` Phase 2 axis-splitting:
-   - `worker-researcher` × 2-3, split by axis:
+1. **Spawn workers parallel** — per `/hex-plan` Phase 2 axis-splitting:
+   - researchers × 2-3, split by axis:
      - *Tooling axis* — Claude Code / AI tooling best practices
      - *Domain axis* — Rust patterns, OCI spec, cargo-deny, etc.
      - *Community axis* — how other projects handle this
-   - `worker-explorer` (optional) — ground external findings in existing `.claude/` artifacts
+   - explorer (optional) — ground external findings in existing `.claude/` artifacts
 
-2. **Synthesize** → Actionable guidance. Persist as `.claude/artifacts/research_[topic].md`
+2. **Synthesize** → Actionable guidance. Persist as `.agents/research/research_[topic].md`
 3. **Apply** → Update relevant artifacts
 
 ## Refresh Targets
@@ -133,9 +133,8 @@ Invoke canonical multi-agent research primitive from `/swarm-plan` (Phases 1-2).
 | `quality-rust.md` (+ other `quality-*.md`) | Language anti-patterns, async conventions, 2026 updates | After edition/release updates, new tooling |
 | `arch-principles.md` | Design principles, ADR index, code style conventions | After new patterns, new modules |
 | Persona skills | Implementation patterns, fixtures, commands | After new commands, workflows |
-| Agent definitions | Patterns, self-review checklists | After `quality-*.md` changes |
 | `deps` | License allowlist, tool versions | After deny.toml changes |
-| `CLAUDE.md` | Build commands, env vars, layout | After new crates, env vars |
+| `AGENTS.md` | Build commands, env vars, layout | After new crates, env vars |
 | `meta-ai-config.md` | Conventions, budget numbers, anti-patterns | After Claude Code releases |
 | **This skill** | Modes, workflow, refresh targets | After Claude Code releases |
 
@@ -152,7 +151,7 @@ Invoke canonical multi-agent research primitive from `/swarm-plan` (Phases 1-2).
 ## Constraints
 
 - ALWAYS research online before creating AI artifacts
-- ALWAYS spawn at least one `worker-researcher` for domain knowledge
+- ALWAYS run at least one research pass for domain knowledge
 - ALWAYS check context budget impact (adding always-loaded context?)
 - NEVER remove artifacts without checking cross-references first
 - NEVER edit `settings.json` hooks without testing hook script

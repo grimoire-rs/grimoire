@@ -7,7 +7,7 @@
 //! **offline**: `remove`/`uninstall`/the TUI delete action derive the
 //! before/after effective desired sets from the cached member lists
 //! instead of re-fetching bundle manifests. See
-//! `.claude/artifacts/adr_effective_set_mutations.md`.
+//! `.agents/adr/adr_effective_set_mutations.md`.
 //!
 //! A bundle is pinned from one of two sources, mirroring [`LockedSource`]:
 //! an OCI registry reference (`repo` + `tag` + manifest `pinned` digest) or

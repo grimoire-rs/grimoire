@@ -2,8 +2,8 @@
 
 <!--
 Visual/UI Design Specification
-Filename: artifacts/design_spec_[component].md
-Owner: Architect (/architect)
+Filename: .agents/specs/design_spec_[component].md
+Owner: Architect (/hex-architect)
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer) for accessibility testing
 Related Skills: interface-design, accessibility, design-systems, visual-assets
 

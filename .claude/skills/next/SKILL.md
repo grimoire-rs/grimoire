@@ -51,8 +51,8 @@ Free-text intent (optional): {intent}
 - `git diff --stat main...HEAD 2>/dev/null`       # changed-files summary
 - `gh pr view --json number,state,baseRefName,headRefName 2>/dev/null` # open PR for branch
 - `cat .claude/state/current_plan.md 2>/dev/null`                           # pointer to active plan (primary signal)
-- `ls -t .claude/state/plans/*.md 2>/dev/null | head -10`              # recent plans (mtime)
-- `ls -t .claude/state/plans/meta-plan_*.md 2>/dev/null | head -5`     # recent meta-plans
+- `ls -t .agents/plans/*.md 2>/dev/null | head -10`              # recent plans (mtime)
+- `ls -t .agents/plans/meta-plan_*.md 2>/dev/null | head -5`     # recent meta-plans
 
 ## Step 2 — Resolve active plan (Status block is primary signal)
 
@@ -64,13 +64,13 @@ If `current_plan.md` exists, parse it for the `**Plan:**` line. If the reference
 
 ### Step 2b — Status block on most-recent plan
 
-If `current_plan.md` absent, glob `.claude/state/plans/plan_*.md` (mtime desc). For each, grep for `## Status` block. First match wins — use its fields. Don't read the whole plan, just the first 30 lines.
+If `current_plan.md` absent, glob `.agents/plans/plan_*.md` (mtime desc). For each, grep for `## Status` block. First match wins — use its fields. Don't read the whole plan, just the first 30 lines.
 
 ### Step 2c — Inferred-state fallback (state-fixer)
 
 If steps 2a+2b both fail (legacy plan with no Status block, or stale state, or no plan file matches), fall back to **commit-subject heuristic**:
 
-1. Identify newest plan via mtime: `ls -t .claude/state/plans/plan_*.md`
+1. Identify newest plan via mtime: `ls -t .agents/plans/plan_*.md`
 2. Grep `^## Phase` headers in that plan to enumerate phases
 3. Grep commit subjects in `main..HEAD` (`git log --format=%s main..HEAD`)
 4. Cross-reference: a phase is **done** if its title (or commit-subject keywords from it, e.g. "load_exclusive", "grimoire lock") appears in any commit subject. The first phase with no commit-subject match is **active**.
@@ -90,8 +90,8 @@ If `--list` flag set, do not prompt — present the inferred phase as candidate 
 
 If user picks "No active plan" in Step 2c, or no plan files exist at all:
 
-- `commits-ahead-of-main = 0` AND clean tree → say so explicitly, suggest browsing open issues/PRs (`gh issue list --state open --limit 5` or `/swarm-plan "<task>"` for new work)
-- `commits-ahead > 0` AND no plan → suggest `/swarm-plan` to capture the in-flight work as a tracked plan, OR `/commit` if there's a Checkpoint
+- `commits-ahead-of-main = 0` AND clean tree → say so explicitly, suggest browsing open issues/PRs (`gh issue list --state open --limit 5` or `/hex-plan "<task>"` for new work)
+- `commits-ahead > 0` AND no plan → suggest `/hex-plan` to capture the in-flight work as a tracked plan, OR `/commit` if there's a Checkpoint
 - Right after `/finalize` clears `current_plan.md` → "feature just landed, pick next PR/issue"
 
 Empty state is a **valid outcome**, not an error.
@@ -102,16 +102,16 @@ Apply the first matching row. **Status-block fields beat heuristic table** when 
 
 | Observed state                                                          | Suggest                                       |
 |---|---|
-| Status `Step: /swarm-execute → ...` OR plan-approved OR phase done with next phase | `/swarm-execute <tier> <plan-path>` |
-| Status `Step: /swarm-review → round N`                                  | `/swarm-review` (continue same round)         |
+| Status `Step: /hex-execute → ...` OR plan-approved OR phase done with next phase | `/hex-execute <tier> <plan-path>` |
+| Status `Step: /hex-review → round N`                                  | `/hex-review` (continue same round)         |
 | Status all phases done, dirty tree                                      | `/commit`                                     |
-| Status all phases done, clean tree, no PR                               | `/swarm-review` then `/finalize`              |
-| On `main`                                                               | `/swarm-plan "<task>"` — never work on main   |
-| Branch exists, no plan, no commits ahead                                | `/swarm-plan "<task>"` (ask if no task named) |
-| Meta-plan exists, no `plan_*.md` yet                                    | Awaiting plan approval — print `/swarm-plan`  |
-| Plan exists, 0 commits ahead, clean tree                                | `/swarm-execute <plan-path>`                  |
+| Status all phases done, clean tree, no PR                               | `/hex-review` then `/finalize`              |
+| On `main`                                                               | `/hex-plan "<task>"` — never work on main   |
+| Branch exists, no plan, no commits ahead                                | `/hex-plan "<task>"` (ask if no task named) |
+| Meta-plan exists, no `plan_*.md` yet                                    | Awaiting plan approval — print `/hex-plan`  |
+| Plan exists, 0 commits ahead, clean tree                                | `/hex-execute <plan-path>`                  |
 | Plan exists, commits ahead, dirty tree                                  | `/commit`                                     |
-| PR exists (state OPEN)                                                  | `/swarm-review #<N>`                          |
+| PR exists (state OPEN)                                                  | `/hex-review #<N>`                          |
 | Worktree branch (goat/evelynn/sion/soraka), multiple Checkpoints, clean | `/finalize` (only if Status confirms phases done) |
 | HEAD subject == `Checkpoint`, clean tree                                | `/commit` (will draft + amend)                |
 
@@ -121,11 +121,11 @@ When two rows tie, pick the earlier (correctness > convenience). **Never suggest
 
 Rules — strictly enforced when `--clear` is set; recommended otherwise:
 
-- Use absolute paths to plan artifacts (`.claude/state/plans/plan_X.md`).
-- Inline tier and overlay flags from the plan's handoff block when known (`/swarm-execute max .claude/state/plans/plan_X.md`).
-- For `/swarm-review`, prefer a PR number (`#61`) when an open PR exists; otherwise the branch name.
+- Use absolute paths to plan artifacts (`.agents/plans/plan_X.md`).
+- Inline tier and overlay flags from the plan's handoff block when known (`/hex-execute max .agents/plans/plan_X.md`).
+- For `/hex-review`, prefer a PR number (`#61`) when an open PR exists; otherwise the branch name.
 - For `/commit` and `/finalize`, no arguments — they snapshot state themselves.
-- For `/swarm-plan`, include a 1-line task description in quotes.
+- For `/hex-plan`, include a 1-line task description in quotes.
 - NEVER reference "the previous work" / "what we just discussed" / "the bug from earlier".
 - NEVER suggest a slash command that is not present in `.claude/rules.md` "Skills by task topic" — read that table if uncertain.
 
@@ -167,10 +167,10 @@ Candidates:
 ## Edge cases
 
 - No git repo → reply: "not in a git repo — nothing to suggest". Exit.
-- Detached HEAD → suggest `git checkout <branch>` first; do not propose a swarm skill.
+- Detached HEAD → suggest `git checkout <branch>` first; do not propose a hex command.
 - `gh` unavailable / unauthenticated → skip PR detection, fall through to branch baseline.
 - Multiple plans with mtime within 1h → list them, ask the user to pick (still one Candidates block).
-- Skill list expanded recently → re-read `.claude/rules.md` "Skills by task topic" before mapping. Never invent a skill.
+- Skill list expanded recently → re-read `.claude/rules.md` "Skills by task topic" before mapping. Never invent a skill. The `/hex-*` commands listed there are user-level and will not appear under `.claude/skills/` — that is expected.
 
 Keep your reply under 12 lines. The user will copy-paste from your output directly.
 ```
@@ -186,7 +186,7 @@ If subagent report hard error (no git repo, detached HEAD, etc.), print message 
 - NEVER edit code, commit, push.
 - May write `.claude/state/current_plan.md` and inject `## Status` block into a plan **only via user-confirmed Step 2c state-fixer path**. Never silently mutate state. The user's `AskUserQuestion` answer is consent.
 - NEVER run inspection commands in main session — subagent's job. Skip delegation = defeat context-isolation.
-- NEVER suggest slash command not in `.claude/skills/`. Subagent cross-checks `.claude/rules.md`; main session no second-guess.
+- NEVER suggest a slash command that is neither in `.claude/skills/` nor a hex command (`/hex-init`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`) — hex ships at user level, so its absence from `.claude/skills/` is expected, not an invented skill. Subagent cross-checks `.claude/rules.md`; main session no second-guess.
 - ALWAYS spawn exactly one subagent. No parallelism — only one question asked.
 - NEVER suggest `/finalize` without confirming via Status block that all phases are marked done. (See Step 3 table — premature finalize was the regression that motivated this skill's redesign.)
 
@@ -196,4 +196,4 @@ If subagent report hard error (no git repo, detached HEAD, etc.), print message 
 - `.claude/rules/workflow-intent.md` — work-type router
 - `.claude/rules/workflow-git.md` — branching, two-phase commit/finalize
 - `.claude/rules/meta-ai-config.md` "Plan Status Protocol" — schema + per-skill mutation table; `.claude/state/` tree is gitignored (per-worktree)
-- `.claude/skills/swarm-execute/SKILL.md` "Next Step" — handoff pattern this skill emulates
+- `/hex-execute`'s closing handoff — the pattern this skill emulates

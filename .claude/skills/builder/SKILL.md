@@ -57,6 +57,6 @@ Follow **contract-first TDD** phases in `.claude/rules/workflow-feature.md`:
 ## Handoff
 
 - To QA Engineer — test coverage review
-- To Swarm Review — code review
+- To /hex-review — code review
 
 $ARGUMENTS

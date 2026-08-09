@@ -2,7 +2,7 @@
 
 <!--
 Bug Fix Plan
-Filename: artifacts/bugfix_plan_[topic].md
+Filename: .agents/plans/bugfix_plan_[topic].md
 Owner: Builder (/builder)
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
 Related Skills: builder, qa-engineer
@@ -12,7 +12,7 @@ Related Skills: builder, qa-engineer
 
 <!--
 Status block — mandatory for every plan.
-Read+mutated by /swarm-plan, /swarm-execute, /swarm-review, /commit, /finalize, /next.
+Read+mutated by /hex-plan, /hex-execute, /hex-review, /commit, /finalize, /next.
 First 20 lines of plan must contain this block — /next reads it via grep.
 Schema enforced by .claude/tests/test_ai_config.py::TestPlanStatusBlock.
 See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
@@ -20,7 +20,7 @@ See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
 
 - **Plan:** bugfix_[topic]
 - **Active phase:** 1 — Reproduce
-- **Step:** /swarm-plan → plan-approved
+- **Step:** /hex-plan → plan-approved
 - **Last update:** [YYYY-MM-DD] (initialized)
 
 ---

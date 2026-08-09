@@ -300,7 +300,7 @@ class StateManager:
 
 # ---------------------------------------------------------------------------
 # Cross-Session Learnings Store (Phase 4)
-# See .claude/artifacts/adr_ai_config_cross_session_learnings_store.md
+# See .agents/adr/adr_ai_config_cross_session_learnings_store.md
 # ---------------------------------------------------------------------------
 
 _LEARNING_MARKER_RE = re.compile(
@@ -334,7 +334,7 @@ class LearningsStore:
           "schema_version": 1,
           "id": "uuid-v4",
           "created_at": "ISO-8601 UTC",
-          "source_agent": "worker-reviewer | worker-builder | etc.",
+          "source_agent": "reviewer | builder | etc.",
           "source_session": "session_id string",
           "category": "rust|python|ts|oci|test|clippy|mirror|build|other",
           "fingerprint": "sha256(category|normalized_summary)[:16]",

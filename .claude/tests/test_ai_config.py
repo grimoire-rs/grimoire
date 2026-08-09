@@ -19,6 +19,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_DIR = ROOT / ".claude"
+CONTEXT_MD = ROOT / "AGENTS.md"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
 
@@ -28,13 +29,13 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 
 
 @pytest.fixture(scope="module")
-def claude_md_text() -> str:
-    return CLAUDE_MD.read_text()
+def context_md_text() -> str:
+    return CONTEXT_MD.read_text()
 
 
 @pytest.fixture(scope="module")
-def claude_md_lines() -> list[str]:
-    return CLAUDE_MD.read_text().splitlines()
+def context_md_lines() -> list[str]:
+    return CONTEXT_MD.read_text().splitlines()
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ class TestShareableQualityRules:
         After the reorg, `.claude/skills/{python,rust,typescript,bash,vite}/`
         are gone. Any remaining reference is a broken link.
 
-        Historical artifacts (`.claude/artifacts/`) and ephemeral plan
+        Historical artifacts (`.agents/`) and ephemeral plan
         scratch (`.claude/state/`) are exempt — they preserve prior-state
         references intentionally with header notes.
         """
@@ -320,20 +321,37 @@ class TestRuleGlobs:
 
 
 # ---------------------------------------------------------------------------
-# CLAUDE.md consistency
+# AGENTS.md consistency
 # ---------------------------------------------------------------------------
 
 
-class TestClaudeMd:
-    """CLAUDE.md must be internally consistent."""
+class TestContextMd:
+    """AGENTS.md must be internally consistent."""
 
-    def test_line_budget(self, claude_md_lines: list[str]) -> None:
-        """CLAUDE.md must stay under 200 lines (context budget rule)."""
-        assert len(claude_md_lines) <= 200, (
-            f"CLAUDE.md is {len(claude_md_lines)} lines (budget: 200)"
+    def test_claude_md_is_a_thin_import_of_agents_md(self) -> None:
+        """`CLAUDE.md` holds no content of its own — it imports `AGENTS.md`.
+
+        Project context lives in exactly one file so it cannot drift. The
+        Claude Code harness auto-loads `CLAUDE.md`, so a one-line `@` import
+        is all it may contain.
+        """
+        text = CLAUDE_MD.read_text()
+        lines = text.splitlines()
+        assert "@AGENTS.md" in text, (
+            "CLAUDE.md must import AGENTS.md via the `@AGENTS.md` syntax"
+        )
+        assert len(lines) <= 12, (
+            f"CLAUDE.md is {len(lines)} lines — it must stay a pointer, not a "
+            f"second copy of project context. Put the content in AGENTS.md."
         )
 
-    def test_principle_count_matches_headings(self, claude_md_text: str) -> None:
+    def test_line_budget(self, context_md_lines: list[str]) -> None:
+        """AGENTS.md must stay under 280 lines (context budget rule)."""
+        assert len(context_md_lines) <= 280, (
+            f"AGENTS.md is {len(context_md_lines)} lines (budget: 280)"
+        )
+
+    def test_principle_count_matches_headings(self, context_md_text: str) -> None:
         """The stated number of principles must match the actual count.
 
         Bug captured: Says 'seven principles' but there are eight headings
@@ -342,12 +360,12 @@ class TestClaudeMd:
         # Find the stated count. Match both "These eight principles distill ..."
         # (canonical form) and "Eight principles distill ..." (caveman-compressed
         # form, with the leading "These" filler dropped).
-        match = re.search(r"(?:These\s+)?(\w+) principles distill\b", claude_md_text)
-        assert match, "Could not find 'N principles distill' in CLAUDE.md"
+        match = re.search(r"(?:These\s+)?(\w+) principles distill\b", context_md_text)
+        assert match, "Could not find 'N principles distill' in AGENTS.md"
         stated = match.group(1)
 
         # Count actual principle headings (### N.)
-        headings = re.findall(r"^### \d+\.", claude_md_text, re.MULTILINE)
+        headings = re.findall(r"^### \d+\.", context_md_text, re.MULTILINE)
         actual = len(headings)
 
         word_to_num = {
@@ -356,23 +374,23 @@ class TestClaudeMd:
         }
         stated_num = word_to_num.get(stated.lower(), int(stated) if stated.isdigit() else None)
         assert stated_num == actual, (
-            f"CLAUDE.md says '{stated}' principles but has {actual} headings"
+            f"AGENTS.md says '{stated}' principles but has {actual} headings"
         )
 
-    def test_worktrees_documented_as_ad_hoc(self, claude_md_text: str) -> None:
+    def test_worktrees_documented_as_ad_hoc(self, context_md_text: str) -> None:
         """Worktrees are created ad hoc (../grimoire-wt-<topic>), not a fixed
-        roster — CLAUDE.md must not reassert a stale fixed count/table.
+        roster — AGENTS.md must not reassert a stale fixed count/table.
 
         Bug captured: a fixed "N git worktrees" + table pattern drifts out of
         sync with reality (the prior table named worktrees that no longer
         exist) and needs re-verifying by hand on every worktree churn. The
         ad hoc convention makes the count itself not a fact to state.
         """
-        assert "grimoire-wt-" in claude_md_text, (
-            "CLAUDE.md should document the ../grimoire-wt-<topic> worktree convention"
+        assert "grimoire-wt-" in context_md_text, (
+            "AGENTS.md should document the ../grimoire-wt-<topic> worktree convention"
         )
-        assert not re.search(r"\*\*Worktrees\*\*: \w+ git worktrees", claude_md_text), (
-            "CLAUDE.md should not reassert a fixed worktree count/table"
+        assert not re.search(r"\*\*Worktrees\*\*: \w+ git worktrees", context_md_text), (
+            "AGENTS.md should not reassert a fixed worktree count/table"
         )
 
 
@@ -384,7 +402,7 @@ class TestClaudeMd:
 class TestFeatureWorkflow:
     """workflow-feature.md must have sequential step numbers."""
 
-    def test_swarm_workflow_step_numbers_are_sequential(self) -> None:
+    def test_hex_workflow_step_numbers_are_sequential(self) -> None:
         """Bug captured: Steps go 1, 2, 3, 3, 4, 5, 6, 7 (duplicate 3)."""
         path = CLAUDE_DIR / "rules" / "workflow-feature.md"
         text = path.read_text()
@@ -394,7 +412,7 @@ class TestFeatureWorkflow:
         numbers = [int(s) for s in steps]
 
         # Check first workflow section only (before "## Agent Team")
-        agent_team_idx = text.index("## Agent Team")
+        agent_team_idx = text.find("## Agent Team")
         first_section = text[:agent_team_idx]
         first_steps = re.findall(r"^(\d+)\.\s+\*\*", first_section, re.MULTILINE)
         first_numbers = [int(s) for s in first_steps]
@@ -416,133 +434,19 @@ class TestArtifactPaths:
 
     def test_security_auditor_artifact_path(self) -> None:
         """Bug captured: security-auditor says './artifacts/' instead of
-        '.claude/artifacts/'."""
+        '.agents/'."""
         path = CLAUDE_DIR / "skills" / "security-auditor" / "SKILL.md"
         text = path.read_text()
 
         # Must not reference ./artifacts/ (wrong path)
         wrong_refs = re.findall(r"\./artifacts/", text)
-        correct_refs = re.findall(r"\.claude/artifacts/", text)
+        correct_refs = re.findall(r"\.agents/", text)
 
         assert not wrong_refs, (
             f"security-auditor references wrong artifact path './artifacts/' "
-            f"(should be '.claude/artifacts/')"
+            f"(should be '.agents/')"
         )
-        assert correct_refs, "security-auditor should reference .claude/artifacts/"
-
-
-# ---------------------------------------------------------------------------
-# Agent tool consistency
-# ---------------------------------------------------------------------------
-
-
-class TestAgentDefinitions:
-    """Agent frontmatter must be consistent with body content."""
-
-    @staticmethod
-    def _parse_agent_tools(agent_path: Path) -> set[str]:
-        """Extract tools from agent frontmatter."""
-        text = agent_path.read_text()
-        if not text.startswith("---"):
-            return set()
-        _, front, _ = text.split("---", 2)
-        for line in front.splitlines():
-            if line.strip().startswith("tools:"):
-                tools_str = line.split(":", 1)[1].strip()
-                return {t.strip() for t in tools_str.split(",")}
-        return set()
-
-    def test_architecture_explorer_no_bash_in_body_without_tool(self) -> None:
-        """Bug captured: worker-architecture-explorer has ls commands in body
-        but no Bash tool in frontmatter."""
-        agent = CLAUDE_DIR / "agents" / "worker-architecture-explorer.md"
-        tools = self._parse_agent_tools(agent)
-        body = agent.read_text()
-
-        has_bash_tool = "Bash" in tools
-        # Check for shell commands in code blocks
-        has_shell_commands = bool(re.search(r"```bash\n.*\bls\b", body, re.DOTALL))
-
-        if has_shell_commands:
-            assert has_bash_tool, (
-                "worker-architecture-explorer.md has bash commands in body "
-                "but 'Bash' is not in its tools frontmatter"
-            )
-
-    def test_worker_tester_mentions_verify(self) -> None:
-        """Bug captured: worker-tester.md doesn't mention 'task verify' as
-        required by workflow-swarm.md coordination protocol."""
-        agent = CLAUDE_DIR / "agents" / "worker-tester.md"
-        text = agent.read_text()
-        assert "task verify" in text, (
-            "worker-tester.md must mention 'task verify' per the "
-            "workflow-swarm.md coordination protocol"
-        )
-
-    def test_worker_reviewer_inlines_quality_rules(self) -> None:
-        """worker-reviewer.md must inline a minimal tagged preamble of
-        block-tier quality anchors — not the full checklist.
-
-        Updated for rule catalog refactor: the agent no longer inlines the
-        full 20-item checklist. Instead it cites a short "Always Apply"
-        preamble (≤5 anchors) plus a pointer to `.claude/rules.md`. Each
-        block-tier anchor must cite its source rule file so drift is
-        visible at review.
-        """
-        agent = CLAUDE_DIR / "agents" / "worker-reviewer.md"
-        text = agent.read_text()
-
-        # Must point at the rule catalog
-        assert "rules.md" in text, (
-            "worker-reviewer.md must point at `.claude/rules.md` so the "
-            "reviewer can discover rules that don't auto-load."
-        )
-
-        # Must have an "Always Apply" block-tier preamble
-        assert "Always Apply" in text, (
-            "worker-reviewer.md must have an 'Always Apply' section with "
-            "block-tier anchors that fire at attention."
-        )
-
-        # Must cite source rule files in the preamble (visible drift)
-        assert "quality-rust.md" in text, (
-            "worker-reviewer.md preamble must cite `quality-rust.md` as "
-            "the source of Rust block-tier anchors."
-        )
-
-        # Minimum anchor set — must cover the highest-severity Rust rules
-        minimum_anchors = [".unwrap()", "MutexGuard", "blocking I/O"]
-        missing = [a for a in minimum_anchors if a not in text]
-        assert not missing, (
-            f"worker-reviewer.md preamble must include block-tier anchors. "
-            f"Missing: {missing}"
-        )
-
-    def test_worker_builder_reads_quality_rules_before_writes(self) -> None:
-        """worker-builder.md must point at `.claude/rules.md` and ship a
-        minimal tagged "Always Apply" preamble BEFORE the on-completion
-        section. The catalog replaces the old "read the rule file first"
-        step since path-scoped rules auto-load while the agent writes.
-        """
-        agent = CLAUDE_DIR / "agents" / "worker-builder.md"
-        text = agent.read_text()
-
-        assert "rules.md" in text, (
-            "worker-builder.md must point at `.claude/rules.md` so the "
-            "builder can discover rules that don't auto-load."
-        )
-        assert "Always Apply" in text, (
-            "worker-builder.md must have an 'Always Apply' preamble that "
-            "fires at attention even when path-scoped rules don't load."
-        )
-
-        catalog_pointer = text.find("rules.md")
-        completion_header = text.find("On Completion")
-        assert catalog_pointer >= 0 and completion_header >= 0
-        assert catalog_pointer < completion_header, (
-            "worker-builder.md must reference the catalog before the "
-            "On Completion section (rules come before reporting)."
-        )
+        assert correct_refs, "security-auditor should reference .agents/"
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +467,7 @@ class TestRuleCatalog:
     def test_catalog_exists(self) -> None:
         assert self.CATALOG.exists(), (
             "`.claude/rules.md` must exist — it is the authoritative "
-            "rule catalog pointed to from CLAUDE.md."
+            "rule catalog pointed to from AGENTS.md."
         )
 
     def test_catalog_covers_all_rules(self) -> None:
@@ -595,17 +499,17 @@ class TestRuleCatalog:
         )
 
     def test_claude_md_points_to_catalog(self) -> None:
-        """CLAUDE.md must link to `.claude/rules.md` so the catalog stays
+        """AGENTS.md must link to `.claude/rules.md` so the catalog stays
         discoverable for every session."""
-        text = CLAUDE_MD.read_text()
+        text = CONTEXT_MD.read_text()
         assert ".claude/rules.md" in text, (
-            "CLAUDE.md must contain a link to `.claude/rules.md` — the "
+            "AGENTS.md must contain a link to `.claude/rules.md` — the "
             "catalog is only valuable if every session sees the pointer."
         )
 
     def test_all_markdown_refs_resolve(self) -> None:
         """Every backticked `*.md` reference in `.claude/**/*.md` and
-        `CLAUDE.md` must resolve to a real file on disk.
+        `AGENTS.md` must resolve to a real file on disk.
 
         Catches drift after renames: if a rule is renamed but a worker,
         skill, or catalog still points at the old name, that reference
@@ -623,7 +527,6 @@ class TestRuleCatalog:
         # Candidate directories for resolving a bare filename
         search_dirs = [
             CLAUDE_DIR / "rules",
-            CLAUDE_DIR / "agents",
             CLAUDE_DIR / "references",
             CLAUDE_DIR / "hooks",
             CLAUDE_DIR / "templates",
@@ -641,7 +544,7 @@ class TestRuleCatalog:
             "CHANGELOG.md",
             # Generated at build time, not in repo
             "dependencies.md",
-            # Runtime state file written by /swarm-plan, deleted by /finalize
+            # Runtime state file written by /hex-plan, deleted by /finalize
             "current_plan.md",
         }
 
@@ -678,7 +581,7 @@ class TestRuleCatalog:
 
         ref_pattern = re.compile(r"`([a-z][a-z0-9_-]*\.md)`")
 
-        targets: list[Path] = [CLAUDE_MD]
+        targets: list[Path] = [CONTEXT_MD, CLAUDE_MD]
         for md in CLAUDE_DIR.rglob("*.md"):
             if "artifacts" in md.parts or "state" in md.parts:
                 continue  # historical/ephemeral — preserves old references
@@ -702,21 +605,21 @@ class TestRuleCatalog:
         )
 
     def test_catalog_subsystem_coverage(self) -> None:
-        """Every subsystem listed in CLAUDE.md's subsystem table must also
+        """Every subsystem listed in AGENTS.md's subsystem table must also
         appear in the catalog's `By subsystem` section. The catalog is
-        allowed to list more subsystems than CLAUDE.md (it's the fuller
+        allowed to list more subsystems than AGENTS.md (it's the fuller
         reference), but it must never list fewer."""
-        claude_text = CLAUDE_MD.read_text()
+        context_text = CONTEXT_MD.read_text()
         catalog_text = self.CATALOG.read_text()
 
-        # Extract rule names from CLAUDE.md subsystem table rows
+        # Extract rule names from AGENTS.md subsystem table rows
         # Lines look like: "| OCI registry/index | `subsystem-oci.md` | ... |"
-        claude_rules = set(re.findall(r"`(subsystem-[a-z-]+\.md)`", claude_text))
-        catalog_rules = set(re.findall(r"`(subsystem-[a-z-]+\.md)`", catalog_text))
+        context_rules = set(re.findall(r"\[?(subsystem-[a-z-]+\.md)", context_text))
+        catalog_rules = set(re.findall(r"\[?(subsystem-[a-z-]+\.md)", catalog_text))
 
-        missing = claude_rules - catalog_rules
+        missing = context_rules - catalog_rules
         assert not missing, (
-            f"Subsystems listed in CLAUDE.md but missing from catalog "
+            f"Subsystems listed in AGENTS.md but missing from catalog "
             f"`By subsystem` section: {missing}"
         )
 
@@ -839,169 +742,6 @@ class TestTaskfileLint:
 
 
 # ---------------------------------------------------------------------------
-# Swarm tier dispatch: progressive disclosure invariants
-# Parametrized across all tiered swarm skills.
-# ---------------------------------------------------------------------------
-
-
-# Skills that use the progressive-disclosure tier dispatch pattern.
-# Each entry: (skill-dir name, flag grammar that must appear verbatim in
-# both SKILL.md and overlays.md). The flag grammar is the subset unique
-# to that skill — `--codex` is shared and always required.
-_TIERED_SWARM_SKILLS = [
-    (
-        "swarm-plan",
-        (
-            "--architect=inline|sonnet|opus",
-            "--research=skip|1|3",
-            "--codex",
-        ),
-    ),
-    (
-        "swarm-execute",
-        (
-            "--builder=sonnet|opus",
-            "--loop-rounds=1|2|3",
-            "--review=minimal|full|adversarial",
-            "--codex",
-        ),
-    ),
-    (
-        "swarm-review",
-        (
-            "--breadth=minimal|full|adversarial",
-            "--rca=on|off",
-            "--codex",
-        ),
-    ),
-]
-
-
-class TestSwarmTiers:
-    """Tiered swarm skills use progressive disclosure — SKILL.md is a
-    thin dispatch layer that reads one of `tier-{low,high,max}.md`. The
-    classifier and overlay axis definitions live in their own files.
-    These tests lock in the structural invariants of that layout across
-    every tiered swarm skill."""
-
-    _TIER_FILES = ("tier-low.md", "tier-high.md", "tier-max.md")
-    _SUPPORT_FILES = ("classify.md", "overlays.md")
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_skill_md_under_200_lines(self, skill_name: str) -> None:
-        """SKILL.md must stay under 200 lines — dispatch-only.
-
-        Per meta-ai-config.md, SKILL.md bodies should stay ≤500, but
-        tiered swarm skills adopt a tighter ceiling since phase content
-        has been extracted into tier files. 200 is the hard ceiling.
-        """
-        skill = CLAUDE_DIR / "skills" / skill_name / "SKILL.md"
-        line_count = len(skill.read_text().splitlines())
-        assert line_count < 200, (
-            f"{skill_name}/SKILL.md is {line_count} lines (ceiling: 199). "
-            f"Phase plans belong in tier-*.md; shared content here."
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_tier_files_exist(self, skill_name: str) -> None:
-        """Each tier file referenced by SKILL.md must exist on disk."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        missing = [t for t in self._TIER_FILES if not (skill_dir / t).exists()]
-        # SKILL.md must reference them by name (dispatch contract)
-        unreferenced = [
-            t for t in self._TIER_FILES
-            if t not in skill_text and t.replace("-", "") not in skill_text
-        ]
-        assert not missing, f"{skill_name} tier files missing from disk: {missing}"
-        assert not unreferenced, (
-            f"{skill_name}/SKILL.md must reference each tier file by name: "
-            f"{unreferenced}"
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_support_files_exist(self, skill_name: str) -> None:
-        """classify.md and overlays.md must exist and be referenced
-        from SKILL.md."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        for name in self._SUPPORT_FILES:
-            path = skill_dir / name
-            assert path.exists(), f"Missing {skill_name} support file: {name}"
-            assert name in skill_text, (
-                f"{skill_name}/SKILL.md must reference {name} so the "
-                f"dispatch knows to Read it."
-            )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_classify_has_example_per_tier(self, skill_name: str) -> None:
-        """classify.md must show at least one example per tier (low /
-        high / max) so the classifier has concrete anchors."""
-        text = (CLAUDE_DIR / "skills" / skill_name / "classify.md").read_text()
-        missing = [
-            t for t in ("**low**", "**high**", "**max**")
-            if t not in text
-        ]
-        assert not missing, (
-            f"{skill_name}/classify.md missing examples for: {missing}. "
-            f"Each tier needs at least one example signal."
-        )
-
-    @pytest.mark.parametrize(
-        ("skill_name", "required_forms"), _TIERED_SWARM_SKILLS
-    )
-    def test_overlays_match_skill_flag_grammar(
-        self, skill_name: str, required_forms: tuple[str, ...]
-    ) -> None:
-        """overlays.md axis values must match the flag grammar declared
-        in SKILL.md. Drift between the two produces parser bugs."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        overlays_text = (skill_dir / "overlays.md").read_text()
-
-        drift = []
-        for form in required_forms:
-            if form not in skill_text:
-                drift.append((skill_name, "SKILL.md", form))
-            if form not in overlays_text:
-                drift.append((skill_name, "overlays.md", form))
-        assert not drift, (
-            f"Flag grammar drift between SKILL.md and overlays.md: "
-            f"{drift}. Keep the two in lockstep."
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_tier_files_preserve_contract_first_tdd(
-        self, skill_name: str
-    ) -> None:
-        """Every tier must preserve the contract-first TDD skeleton
-        (Stub → Specify → Implement → Review). Dropping it at any tier
-        breaks the plan→execute handoff contract."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skeleton_anchors = ["Stub", "Specify", "Implement", "Review"]
-        violations = []
-        for tier in self._TIER_FILES:
-            text = (skill_dir / tier).read_text()
-            missing = [a for a in skeleton_anchors if a not in text]
-            if missing:
-                violations.append((skill_name, tier, missing))
-        assert not violations, (
-            f"Tier files must keep the contract-first TDD skeleton. "
-            f"Missing anchors: {violations}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # AI config overhaul — Phase 1 invariants
 # ---------------------------------------------------------------------------
 
@@ -1011,7 +751,7 @@ class TestAiConfigOverhaulPhase1:
 
     Locks in the path-scope correction (workflow rules scoped, not global),
     the 3-global enumeration in meta-ai-config.md, and the declared overlap
-    table in rules.md. See .claude/artifacts/plan_ai_config_overhaul.md.
+    table in rules.md. See .agents/plans/plan_ai_config_overhaul.md.
     """
 
     def test_workflow_rules_have_paths(self) -> None:
@@ -1039,7 +779,7 @@ class TestAiConfigOverhaulPhase1:
         A global rule is any `.claude/rules/*.md` file without a non-empty
         `paths:` frontmatter entry. Post Phase 1 of the AI config overhaul,
         the authoritative count is 3 and the list appears in meta-ai-config.md
-        under `### Current Global Rules`. `rules.md` and `CLAUDE.md` reach
+        under `### Current Global Rules`. `rules.md` and `AGENTS.md` reach
         Claude by a different mechanism (`@`-import / root instructions) and
         are not counted here.
         """
@@ -1129,7 +869,7 @@ class TestAiConfigOverhaulPhase2:
     Locks in the Contextual Signal Only (CSO) policy for skill descriptions:
     descriptions describe trigger conditions (what the user says / what the
     task looks like), never the workflow itself. See
-    `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`.
+    `.agents/adr/adr_ai_config_skill_description_csopolicy.md`.
     """
 
     # Hyphen-aware word boundary: require a whitespace / punctuation boundary
@@ -1146,25 +886,17 @@ class TestAiConfigOverhaulPhase2:
         # Action skills with side effects — must disable auto-invocation
         "commit": True,
         "finalize": True,
-        "codex-adversary": True,
-        "meta-maintain-config": True,
-        "grimoire-create-mirror": True,
-        "grimoire-sync-roadmap": True,
-        "swarm-plan": True,
-        "swarm-execute": True,
-        # Pure analysis / advisory — auto-invocation safe
-        "architect": False,
-        "bugfix": False,
+            "meta-maintain-config": True,
+                        # Pure analysis / advisory — auto-invocation safe
+            "bugfix": False,
         "builder": False,
         "code-check": False,
-        "deps": False,
-        "docs": False,
+            "docs": False,
         "meta-validate-context": False,
         "next": True,
         "qa-engineer": False,
         "security-auditor": False,
-        "swarm-review": False,
-    }
+        }
 
     @staticmethod
     def _parse_frontmatter(skill_md: Path) -> dict[str, str]:
@@ -1215,7 +947,7 @@ class TestAiConfigOverhaulPhase2:
                 )
         assert not violations, (
             f"Skill descriptions violate CSO policy: {violations}. "
-            f"See `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`."
+            f"See `.agents/adr/adr_ai_config_skill_description_csopolicy.md`."
         )
 
     def test_skill_description_budget_under_cap(self) -> None:
@@ -1280,7 +1012,7 @@ class TestAiConfigOverhaulPhase4:
 
     Locks in the project-local learnings store location and the
     `meta-ai-config.md` Cross-Session Learnings section. See
-    `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`.
+    `.agents/adr/adr_ai_config_cross_session_learnings_store.md`.
     """
 
     def test_gitignore_contains_state_dir(self) -> None:
@@ -1296,7 +1028,7 @@ class TestAiConfigOverhaulPhase4:
         assert ".claude/state/" in text, (
             "`.gitignore` must contain `.claude/state/` — per-worktree "
             "learnings store / context samples must not be committed. "
-            "See `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`."
+            "See `.agents/adr/adr_ai_config_cross_session_learnings_store.md`."
         )
 
     def test_meta_ai_config_has_cross_session_learnings_section(self) -> None:
@@ -1322,28 +1054,21 @@ class TestAiConfigOverhaulPhase4:
 class TestAiConfigOverhaulPhase5:
     """Post-Phase-5 invariants for the AI config overhaul.
 
-    Locks in the three-carrier byte-identical Review-Fix Loop parity
-    (`workflow-swarm.md`, `workflow-bugfix.md`, `workflow-refactor.md`)
+    Locks in the two-carrier byte-identical Review-Fix Loop parity
+    (`workflow-bugfix.md` is canonical, `workflow-refactor.md` mirrors it)
     and the 200-line ceiling for every `SKILL.md`. See
-    `.claude/artifacts/adr_ai_config_review_loop_dedup.md` and
-    `.claude/artifacts/plan_ai_config_overhaul.md` (Phase 5).
+    `.agents/adr/adr_ai_config_review_loop_dedup.md` and
+    `.agents/plans/plan_ai_config_overhaul.md` (Phase 5).
     """
 
     _CANONICAL_CARRIERS = (
-        CLAUDE_DIR / "rules" / "workflow-swarm.md",
         CLAUDE_DIR / "rules" / "workflow-bugfix.md",
         CLAUDE_DIR / "rules" / "workflow-refactor.md",
     )
 
     # Files that must point at the canonical Review-Fix Loop but NOT contain
     # the canonical markers themselves. Prevents accidental fourth carrier.
-    _POINTER_ONLY_FILES = (
-        CLAUDE_DIR / "rules" / "workflow-feature.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "SKILL.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-low.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-high.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-max.md",
-    )
+    _POINTER_ONLY_FILES = (CLAUDE_DIR / "rules" / "workflow-feature.md",)
 
     _BEGIN_MARKER = "<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->"
     _END_MARKER = "<!-- REVIEW_FIX_LOOP_CANONICAL_END -->"
@@ -1354,14 +1079,12 @@ class TestAiConfigOverhaulPhase5:
     _SKILL_BODY_BUDGET_EXCEPTIONS: tuple[str, ...] = ()
 
     def test_review_fix_loop_parity(self) -> None:
-        """The three canonical carriers must contain byte-identical
-        Review-Fix Loop blocks between the HTML comment markers.
+        """Both canonical carriers must contain byte-identical Review-Fix
+        Loop blocks between the HTML comment markers.
 
-        Carriers: `workflow-swarm.md`, `workflow-bugfix.md`,
-        `workflow-refactor.md`. Pointer-only files (workflow-feature.md,
-        swarm-execute SKILL + tier files) must NOT contain the markers
-        (they link to the canonical) and MUST contain a pointer to
-        `workflow-swarm.md#review-fix-loop`.
+        Carriers: `workflow-bugfix.md` (canonical source) and
+        `workflow-refactor.md`. Pointer-only files must NOT contain the
+        markers — they link to the canonical block instead.
         """
         # Every carrier must have exactly one BEGIN and one END marker
         carrier_blocks: dict[str, str] = {}
@@ -1395,9 +1118,9 @@ class TestAiConfigOverhaulPhase5:
             f"Canonical Review-Fix Loop blocks diverged across carriers. "
             f"Every carrier must contain byte-identical prose between the "
             f"markers. Divergent carriers: {divergent}. "
-            f"See `.claude/artifacts/adr_ai_config_review_loop_dedup.md`. "
+            f"See `.agents/adr/adr_ai_config_review_loop_dedup.md`. "
             f"Quick fix: `task claude:fix:canonical-block` (re-syncs from "
-            f"workflow-swarm.md into the other two carriers)."
+            f"workflow-bugfix.md into workflow-refactor.md)."
         )
 
         # Pointer-only files must NOT contain the markers (no fourth carrier)
@@ -1410,23 +1133,10 @@ class TestAiConfigOverhaulPhase5:
         assert not illegal_carriers, (
             f"Pointer-only files contain canonical Review-Fix Loop markers "
             f"(would create a fourth carrier): {illegal_carriers}. "
-            f"Replace the marker block with a pointer to "
-            f"`workflow-swarm.md#review-fix-loop`."
+            f"Replace the marker block with a pointer to the canonical "
+            f"Review-Fix Loop in `workflow-bugfix.md`."
         )
 
-        # Pointer-only files must link to the canonical anchor (or equivalent)
-        missing_pointer: list[str] = []
-        for pointer in self._POINTER_ONLY_FILES:
-            text = pointer.read_text()
-            # Accept any reference to the canonical carrier's Review-Fix Loop
-            # section — anchor slug `#review-fix-loop` or direct filename
-            # pointer is sufficient.
-            if "workflow-swarm.md#review-fix-loop" not in text:
-                missing_pointer.append(str(pointer.relative_to(ROOT)))
-        assert not missing_pointer, (
-            f"Pointer-only files missing a link to "
-            f"`workflow-swarm.md#review-fix-loop`: {missing_pointer}."
-        )
 
     def test_skill_body_budget(self) -> None:
         """Every `.claude/skills/*/SKILL.md` must be ≤200 lines.
@@ -1707,11 +1417,11 @@ class TestUserPromptRouter:
 
 
 class TestPlanStatusBlock:
-    """Every plan file in `.claude/state/plans/plan_*.md` must carry a `## Status`
+    """Every plan file in `.agents/plans/plan_*.md` must carry a `## Status`
     block at the top with the four mandatory fields. Schema and protocol live in
     `.claude/rules/meta-ai-config.md` "Plan Status Protocol".
 
-    The `.claude/state/` directory is gitignored — plans are local per-worktree.
+    `.agents/plans/` is committed — plans are team-shared, not per-worktree.
     Tests skip silently when no plan files exist (fresh checkout).
     Excludes `meta-plan_*.md` files (skill-internal scratch artifacts).
     """
@@ -1724,7 +1434,7 @@ class TestPlanStatusBlock:
     )
 
     def _plan_files(self) -> list[Path]:
-        plans_dir = CLAUDE_DIR / "state" / "plans"
+        plans_dir = ROOT / ".agents" / "plans"
         if not plans_dir.exists():
             return []
         return [
@@ -1754,7 +1464,7 @@ class TestPlanStatusBlock:
         """Each plan_*.md must contain a `## Status` heading."""
         plans = self._plan_files()
         if not plans:
-            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+            pytest.skip("No plan files in .agents/plans/ (fresh checkout)")
         missing = [
             p.relative_to(ROOT) for p in plans if "## Status" not in p.read_text()
         ]
@@ -1768,7 +1478,7 @@ class TestPlanStatusBlock:
         """Status block must contain Plan / Active phase / Step / Last update."""
         plans = self._plan_files()
         if not plans:
-            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+            pytest.skip("No plan files in .agents/plans/ (fresh checkout)")
         violations: list[tuple[Path, list[str]]] = []
         for plan in plans:
             block = self._extract_status_block(plan.read_text())
@@ -1787,7 +1497,7 @@ class TestPlanStatusBlock:
         """Status block must be near the top — /next reads first 30 lines only."""
         plans = self._plan_files()
         if not plans:
-            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+            pytest.skip("No plan files in .agents/plans/ (fresh checkout)")
         too_late: list[tuple[Path, int]] = []
         for plan in plans:
             lines = plan.read_text().splitlines()

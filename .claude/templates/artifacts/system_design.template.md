@@ -2,10 +2,10 @@
 
 <!--
 System Design Document (Technical Architecture)
-Filename: artifacts/system_design_[system].md
-Owner: Architect (/architect)
+Filename: .agents/specs/system_design_[system].md
+Owner: Architect (/hex-architect)
 Handoff to: Builder (/builder), Security Auditor (/security-auditor)
-Related Skills: architect
+Related Skills: hex-architect
 
 Covers TECHNICAL architecture. UI/visual design → design_spec.template.md
 Uses C4 model (Context → Container → Component → Code)

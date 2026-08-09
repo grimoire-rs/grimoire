@@ -2,12 +2,12 @@
 paths:
   - ".github/workflows/**"
   - ".github/actions/**"
-  - "dependabot.yml"
+  - ".github/dependabot.yml"
 ---
 
 # Security Standards
 
-Deep-dive reference for security reviews. See Core Principle 3 ("Keep It Safe") in CLAUDE.md for essentials.
+Deep-dive reference for security reviews. See Core Principle 3 ("Keep It Safe") in AGENTS.md for essentials.
 
 ## Security Checklist
 

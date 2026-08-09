@@ -2,9 +2,9 @@
 
 <!--
 Press Release / Frequently Asked Questions
-Filename: artifacts/pr_faq_[feature].md
-Owner: Architect (/architect)
-Handoff to: Architect (/architect) for feasibility, then PRD creation
+Filename: .agents/pr_faq_[feature].md
+Owner: Architect (/hex-architect)
+Handoff to: Architect (/hex-architect) for feasibility, then PRD creation
 Related Skills: writing-pr-faqs, brainstorming, requirements-analysis
 
 Doc come BEFORE PRD in planning. Use Amazon "Working Backwards" method.

@@ -8,7 +8,7 @@ Not part of `task verify` -- this file sits outside the acceptance suite's
 collects it. Run explicitly via `task demo` (see `test/taskfile.yml`). Uses
 `grim_binary` (session fixture) and `GrimRunner` (helper) from the
 acceptance suite instead of standing up a separate harness -- see
-`.claude/artifacts/research_promotion_positioning.md` "Demo asset" and the
+`.agents/research/research_promotion_positioning.md` "Demo asset" and the
 W6 sub-plan.
 
 Records straight against the real `ghcr.io/grimoire-rs/skills/grim-usage`

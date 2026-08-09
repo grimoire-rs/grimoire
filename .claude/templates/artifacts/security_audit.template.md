@@ -2,9 +2,9 @@
 
 <!--
 Security Audit Report
-Filename: artifacts/security_audit_[date].md
+Filename: .agents/security_audit_[date].md
 Owner: Security Auditor (/security-auditor)
-Handoff to: Builder (/builder) for remediation, Architect (/architect) for design changes
+Handoff to: Builder (/builder) for remediation, Architect (/hex-architect) for design changes
 Related Skills: application-security, threat-modeling, security-review, compliance, identity-access
 
 Methodology:

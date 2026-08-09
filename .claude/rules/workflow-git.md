@@ -48,7 +48,7 @@ Full cheat sheet: [`commit_reference.md`](../skills/commit/commit_reference.md) 
 
 - Format: `<type>[optional scope]: <description>`
 - Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`
-- **`chore:`** for AI/tooling files (`.claude/`, `CLAUDE.md`, skills, rules, hooks, taskfiles) — keeps out of user-facing changelog
+- **`chore:`** for AI/tooling files (`.claude/`, `AGENTS.md`, `CLAUDE.md`, skills, rules, hooks, taskfiles) — keeps out of user-facing changelog
 - Imperative mood, lowercase description, no trailing period, subject ≤72 chars
 - Body explains **why**, not what. Only when non-obvious.
 - Breaking changes: `!` before colon **and** `BREAKING CHANGE:` footer
@@ -101,4 +101,4 @@ Code in `external/` (e.g., `rust-oci-client`) is fork of upstream repo. Three ru
 - [`commit_reference.md`](../skills/commit/commit_reference.md) — Conventional Commits v1.0.0 cheat sheet
 - [workflow-feature.md](./workflow-feature.md) — where commits fit in broader feature flow
 - [workflow-release.md](./workflow-release.md) — release-time branch handling
-- `CLAUDE.md` — worktree layout, "Landing a feature" section
+- `AGENTS.md` — worktree layout, "Landing a feature" section

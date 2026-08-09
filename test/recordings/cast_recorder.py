@@ -6,7 +6,7 @@ can replay.
 
 Ported and trimmed from the OCX project's ``test/recordings/cast_recorder.py``
 (a much larger tested-doc-command pipeline — see
-``.claude/artifacts/research_promotion_positioning.md`` "Demo asset" and the
+``.agents/research/research_promotion_positioning.md`` "Demo asset" and the
 W6 plan for the source). grim's plain-text tables carry no ANSI color and no
 progress-spinner redraws (no ``comfy-table``/``indicatif`` in this codebase —
 confirmed by manual PTY probe before writing this), so the color-aware

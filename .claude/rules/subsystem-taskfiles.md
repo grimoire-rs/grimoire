@@ -98,7 +98,8 @@ x-shared:
   claude-sources: &claude-sources
     - '**/*'
     - '../CLAUDE.md'
-    - exclude: 'artifacts/**'
+    - '../AGENTS.md'
+    - '../.agents/plans/*.md'
     - exclude: '**/__pycache__/**'
 
 tasks:

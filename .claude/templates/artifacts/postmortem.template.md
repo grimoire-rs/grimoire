@@ -2,9 +2,9 @@
 
 <!--
 Incident Post-Mortem Report
-Filename: artifacts/postmortem_[incident-id].md
-Owner: Architect (/architect)
-Handoff to: Architect (/architect) for design changes, Builder (/builder) for fixes
+Filename: .agents/postmortem_[incident-id].md
+Owner: Architect (/hex-architect)
+Handoff to: Architect (/hex-architect) for design changes, Builder (/builder) for fixes
 Related Skills: incident-management, observability, infrastructure
 
 Blameless culture: Focus on systems and processes, not individuals.

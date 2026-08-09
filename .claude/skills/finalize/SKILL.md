@@ -89,7 +89,7 @@ For every commit in `main..HEAD`, assign one category:
 
 - Subject line first. Non-conventional → Reword candidate.
 - `git show --stat <sha>` for diff shape. Small diff, one module → likely Keep/Reword. Large diff, many modules → inspect body for multi-concern signals (`- bullet lists`, `and`, `also`, `plus`, bundle language).
-- `chore(claude):` commits touching only `.claude/` or `CLAUDE.md` belong in working-phase, but on finalized branch should still be individually legitimate `chore(claude):` entries, not bundles.
+- `chore(claude):` commits touching only `.claude/`, `AGENTS.md` or `CLAUDE.md` belong in working-phase, but on finalized branch should still be individually legitimate `chore(claude):` entries, not bundles.
 - `git log --format=%B <sha> -1` for full message when subject ambiguous.
 
 ### 3. Draft the rebase plan
@@ -193,4 +193,4 @@ Starting → final commit count, whether `task verify` passed, whether Status wa
 - [workflow-git.md](../../rules/workflow-git.md) — shared branch/commit hygiene: branching model, two-phase model, Checkpoint convention, land-ready definition
 - [`commit_reference.md`](../commit/commit_reference.md) — Conventional Commits v1.0.0 cheat sheet (types, scopes, footers, breaking changes)
 - `/commit` skill (`../commit/SKILL.md`) — working-phase sibling
-- CLAUDE.md "Landing a feature" — manual procedure this skill automates
+- AGENTS.md "Landing a feature" — manual procedure this skill automates

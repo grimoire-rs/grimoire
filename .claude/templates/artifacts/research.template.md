@@ -2,10 +2,10 @@
 
 <!--
 Technology Landscape Research
-Filename: artifacts/research_[topic].md
-Owner: Researcher (worker-researcher)
-Handoff to: Architect (/architect), Swarm Plan (/swarm-plan)
-Related Skills: architect, swarm-plan
+Filename: .agents/research/research_[topic].md
+Owner: Researcher (hex research phase)
+Handoff to: Architect (/hex-architect), /hex-plan
+Related Skills: hex-architect, hex-plan
 
 Purpose: Persist tech landscape findings to inform ADRs, plans, design decisions.
 Artifacts decay — check dates before trusting findings.

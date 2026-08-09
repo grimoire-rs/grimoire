@@ -87,7 +87,7 @@ documentation-only edit — the matching `Vendor` change (`kind_support`,
 `mcp_config_path`) must land in the **same commit**, or the build breaks.
 The `docs/src/agents.md` / `docs/src/mcp-servers.md` emit matrices carry the
 same row-presence invariant (every `ClientTarget` must appear).
-`worker-doc-reviewer` inherits this duty. Underlying rationale for each
+hex's `doc-reviewer` worker inherits this duty. Underlying rationale for each
 `◐`/`✗` lives in `.claude/rules/vendor-capability-watchlist.md`.
 
 ## Internal Links

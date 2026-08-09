@@ -14,7 +14,7 @@ Single binary crate:
 |------|---------|
 | `src/` | The `grim` CLI (clap-based) |
 | `test/` | Python (pytest) black-box acceptance suite |
-| `.claude/` | AI-assisted development config (rules, skills, agents, hooks) |
+| `.claude/` | AI-assisted development config (rules, skills, hooks) |
 | `taskfiles/` | Task automation modules |
 
 ## Building

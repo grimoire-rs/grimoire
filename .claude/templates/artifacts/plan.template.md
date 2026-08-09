@@ -2,8 +2,8 @@
 
 <!--
 Implementation Plan
-Filename: .claude/state/plans/plan_[task].md
-Owner: Builder (/builder) or Architect (/architect)
+Filename: .agents/plans/plan_[task].md
+Owner: Builder (/builder) or Architect (/hex-architect)
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
 Related Skills: builder, qa-engineer
 -->
@@ -12,7 +12,7 @@ Related Skills: builder, qa-engineer
 
 <!--
 Status block — mandatory for every plan.
-Read+mutated by /swarm-plan, /swarm-execute, /swarm-review, /commit, /finalize, /next.
+Read+mutated by /hex-plan, /hex-execute, /hex-review, /commit, /finalize, /next.
 First 20 lines of plan must contain this block — /next reads it via grep.
 Schema enforced by .claude/tests/test_ai_config.py::TestPlanStatusBlock.
 See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
@@ -20,7 +20,7 @@ See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
 
 - **Plan:** plan_[task]
 - **Active phase:** 1 — [first phase title]
-- **Step:** /swarm-plan → plan-approved
+- **Step:** /hex-plan → plan-approved
 - **Last update:** [YYYY-MM-DD] (initialized)
 
 ---
@@ -52,7 +52,7 @@ See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
 
 ## Research
 
-**Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
+**Research artifact:** [`.agents/research/research_[topic].md`](./research_[topic].md) or N/A
 
 [Tech landscape research summary. Trending tools, design patterns, industry signals informing plan? Alternatives considered from current adoption trends?]
 
@@ -90,7 +90,7 @@ Make type signatures, trait definitions, function shells. Bodies use `unimplemen
 
 ### Phase 2: Architecture Review
 
-Review stubs against design record (`worker-reviewer`, focus: `spec-compliance`, phase: `post-stub`). Verify:
+Review stubs against design record (reviewer worker, focus: `spec-compliance`, phase: `post-stub`). Verify:
 - Type signatures match documented API contract
 - Module boundaries align with architecture section above
 - Error types cover all documented failure modes

@@ -606,7 +606,7 @@ class TestPostToolUseContextSampling:
     `.claude/state/context-samples.jsonl` when the `CLAUDECODE_CONTEXT_REMAINING`
     env var is present. The full context-advisory hook is deferred pending
     measurement data — see
-    `.claude/artifacts/adr_ai_config_context_monitor_hook.md`.
+    `.agents/adr/adr_ai_config_context_monitor_hook.md`.
     """
 
     def test_context_sampling_writes_jsonl_when_env_present(
@@ -668,7 +668,7 @@ class TestPostToolUseContextSampling:
 class TestLearningsStore:
     """Phase 4 of the AI config overhaul introduces a project-local JSONL
     store of cross-session learnings. See
-    `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`.
+    `.agents/adr/adr_ai_config_cross_session_learnings_store.md`.
 
     Stage 1 (first 30 days) is logging-only — no promotion candidates.
     These tests cover schema validation, fingerprint dedup, TTL prune,
@@ -692,7 +692,7 @@ class TestLearningsStore:
             "schema_version": 1,
             "id": "11111111-1111-1111-1111-111111111111",
             "created_at": created_at or now,
-            "source_agent": "worker-reviewer",
+            "source_agent": "reviewer",
             "source_session": "sess-test",
             "category": category,
             "fingerprint": LearningsStore.fingerprint(category, summary),
@@ -1121,7 +1121,7 @@ class TestStopValidatorLearnings:
             "schema_version": 1,
             "id": "33333333-3333-3333-3333-333333333333",
             "created_at": now,
-            "source_agent": "worker-reviewer",
+            "source_agent": "reviewer",
             "source_session": "sess-end",
             "category": "rust",
             "fingerprint": LearningsStore.fingerprint("rust", summary),

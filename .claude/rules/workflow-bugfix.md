@@ -95,7 +95,7 @@ Classify each finding:
 
 **Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Codex model scales with tier (`low→luna`, `high→terra`, `max→sol`) — see "Cross-model model tiers" in `workflow-swarm.md`. Skipped gracefully if Codex unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single cross-model adversarial review against the diff as the final gate. One-shot, no looping — two-family stylistic thrash = failure mode. The adversary skill and its per-tier model are configured in `.agents/memory/hex.md` › Preferences (`adversary:`). Skipped gracefully when the adversary is unavailable.
 
 **Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
@@ -114,8 +114,8 @@ Close loop so fix traceable.
 | Scope | Artifact |
 |-------|----------|
 | Trivial (obvious cause, < 30 min) | No artifact — follow phases inline |
-| Non-trivial (unclear cause, multi-file, or high risk) | Create `.claude/artifacts/bugfix_plan_[topic].md` from `bugfix_plan.template.md` |
-| Post-incident (production impact, security) | Create `.claude/artifacts/postmortem_[topic].md` from `postmortem.template.md` |
+| Non-trivial (unclear cause, multi-file, or high risk) | Create `.agents/plans/bugfix_plan_[topic].md` from `bugfix_plan.template.md` |
+| Post-incident (production impact, security) | Create `.agents/postmortem_[topic].md` from `postmortem.template.md` |
 
 Bug-fix plans created from the template carry a `## Status` block at the top — same schema and mutation protocol as feature plans. See [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
 

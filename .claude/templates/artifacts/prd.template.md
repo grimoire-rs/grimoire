@@ -2,9 +2,9 @@
 
 <!--
 Product Requirements Document
-Filename: artifacts/prd_[feature].md
-Owner: Architect (/architect)
-Handoff to: Architect (/architect)
+Filename: .agents/prd_[feature].md
+Owner: Architect (/hex-architect)
+Handoff to: Architect (/hex-architect)
 Related Skills: writing-prds, decomposing-tasks, requirements-analysis
 -->
 
@@ -141,16 +141,16 @@ Use INVEST criteria for all stories:
 After PRD approved:
 
 1. [ ] **Architect Review**: Technical feasibility check
-   - Trigger: `/architect`
+   - Trigger: `/hex-architect`
    - Output: ADR (`artifacts/adr_[topic].md`)
 
 2. [ ] **Design Spec**: Visual design + wireframes
-   - Trigger: `/architect`
+   - Trigger: `/hex-architect`
    - Output: Design Spec (`artifacts/design_spec_[component].md`)
 
 3. [ ] **Engineering Estimate**: Effort sizing + decomposition
-   - Trigger: `/builder` or `/architect`
-   - Output: Implementation Plan (`.claude/state/plans/plan_[task].md`)
+   - Trigger: `/builder` or `/hex-architect`
+   - Output: Implementation Plan (`.agents/plans/plan_[task].md`)
 
 4. [ ] **Create Beads Issues**: Decompose to trackable work items
    - Command: `bd create "Title" -t feature`

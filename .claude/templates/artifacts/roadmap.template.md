@@ -2,8 +2,8 @@
 
 <!--
 Project Roadmap
-Filename: artifacts/roadmap_[project].md
-Owner: Architect (/architect)
+Filename: .agents/roadmap_[project].md
+Owner: Architect (/hex-architect)
 Handoff to: All personas as needed
 Related Skills: execution-roadmaps, decomposing-tasks, estimating-work, agile-methodology
 -->

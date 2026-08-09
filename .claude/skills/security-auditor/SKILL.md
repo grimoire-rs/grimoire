@@ -21,7 +21,7 @@ Role: security compliance, threat modeling, vulnerability assessment for Grimoir
 2. **Enumerate threats** — STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation)
 3. **Trace data** — follow flow through handlers
 4. **Document** — findings with severity + CWE IDs
-5. **Report** — save to `.claude/artifacts/security_audit_[date].md` (template at `.claude/templates/artifacts/security_audit.template.md`)
+5. **Report** — save to `.agents/security_audit_[date].md` (template at `.claude/templates/artifacts/security_audit.template.md`)
 6. **Track** — create GitHub issues for Critical/High findings
 
 ## Relevant Rules (load explicitly for planning)
@@ -45,6 +45,6 @@ Role: security compliance, threat modeling, vulnerability assessment for Grimoir
 ## Handoff
 
 - To Builder — remediation
-- To Architect — design changes
+- To /hex-architect — design changes
 
 $ARGUMENTS

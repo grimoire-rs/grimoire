@@ -89,7 +89,7 @@ Classify each finding:
 
 **Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Codex model scales with tier (`low→luna`, `high→terra`, `max→sol`) — see "Cross-model model tiers" in `workflow-swarm.md`. Skipped gracefully if Codex unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single cross-model adversarial review against the diff as the final gate. One-shot, no looping — two-family stylistic thrash = failure mode. The adversary skill and its per-tier model are configured in `.agents/memory/hex.md` › Preferences (`adversary:`). Skipped gracefully when the adversary is unavailable.
 
 **Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
@@ -108,8 +108,8 @@ Commit transformation, start next cycle if more transformations.
 | Scope | Artifact |
 |-------|----------|
 | Single transformation | No artifact — follow phases inline |
-| Multi-step refactor (3+ transformations) | Create `.claude/state/plans/plan_refactor_[topic].md` from `plan.template.md` — list transformations in order |
-| Cross-subsystem refactor | Use `/swarm-plan` — multiple subsystem rules may apply |
+| Multi-step refactor (3+ transformations) | Create `.agents/plans/plan_refactor_[topic].md` from `plan.template.md` — list transformations in order |
+| Cross-subsystem refactor | Use `/hex-plan` — multiple subsystem rules may apply |
 
 ## Red Flags — Recognize Rationalizations Before Acting on Them
 

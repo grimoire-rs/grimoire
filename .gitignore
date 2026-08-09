@@ -35,19 +35,9 @@ CLAUDE.local.md
 .claude/state/
 
 # =============================================================================
-# Claude Agent Worktrees — ephemeral working copies spawned by agents.
-# =============================================================================
-.claude/worktrees/
-
-# =============================================================================
 # Claude Lint Reports — build artifacts from `task claude:lint:links`, etc.
 # =============================================================================
 .claude/reports/
-
-# =============================================================================
-# Swarm Runtime
-# =============================================================================
-.swarm/
 
 # =============================================================================
 # OS Files
@@ -118,6 +108,9 @@ docs/book/
 docs/src/schemas/
 
 # =============================================================================
-# Agent Worktrees — ephemeral per-issue working copies (.agents/worktrees/*).
+# Agent Worktrees — ephemeral per-issue working copies, and agent scratch.
+# Narrow by design: `.agents/memory/`, `.agents/plans/`, `.agents/adr/`,
+# `.agents/research/` and `.agents/specs/` are team-shared and committed.
 # =============================================================================
-.agents/
+.agents/worktrees/
+.agents/.tmp/

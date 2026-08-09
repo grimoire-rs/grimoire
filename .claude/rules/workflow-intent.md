@@ -27,7 +27,7 @@ Type ambiguous? Ask user. Mixed tasks (e.g., "fix bug + refactor nearby code") s
 
 - **Start**: GitHub context check (above), branch confirm (never commit on `main`)
 - **End**: `task verify` passes, changes committed per [workflow-git.md](./workflow-git.md)
-- **Planning artifacts**: stored in `.claude/artifacts/`, templates from `.claude/templates/artifacts/`
+- **Planning artifacts**: stored under `.agents/` (plans `.agents/plans/`, ADRs `.agents/adr/`, research `.agents/research/`, specs `.agents/specs/`), templates from `.claude/templates/artifacts/`
 
 ## Scope Escalation
 
@@ -35,4 +35,4 @@ Type ambiguous? Ask user. Mixed tasks (e.g., "fix bug + refactor nearby code") s
 |-------|--------|
 | Trivial (< 1 hour, ≤ 3 files) | Follow workflow inline, no plan artifact |
 | Small–Medium (1 hour – 2 weeks) | Create plan artifact from template |
-| Large (2+ weeks) | Use `/swarm-plan` for multi-agent planning |
+| Large (2+ weeks) | Use `/hex-plan` for multi-agent planning |

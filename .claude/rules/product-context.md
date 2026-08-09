@@ -1,18 +1,14 @@
 ---
 paths:
   - docs/**
-  - .claude/artifacts/**
-  - .claude/agents/worker-researcher.md
-  - .claude/agents/worker-architect.md
-  - .claude/agents/worker-doc-writer.md
-  - .claude/skills/architect/**
+  - .agents/plans/**
+  - .agents/adr/**
+  - .agents/specs/**
+  - .agents/research/**
   - .claude/skills/builder/**
   - .claude/skills/code-check/**
   - .claude/skills/qa-engineer/**
   - .claude/skills/security-auditor/**
-  - .claude/skills/swarm-execute/**
-  - .claude/skills/swarm-plan/**
-  - .claude/skills/swarm-review/**
   - .claude/skills/docs/**
 ---
 
@@ -113,6 +109,41 @@ Global flags: `--offline`, `--global`, `--config <path>`,
 - **Testing**: pytest acceptance tests under `test/` against a real OCI
   registry
 
+## Related Repositories
+
+| Repo | Relationship |
+|---|---|
+| `grimoire-vscode` | VS Code extension — browses the catalog and drives `grim` through its JSON interface |
+| `grimoire-index` | The public package index served at `index.grimoire.rs` — a phone book of pointers, not a catalog |
+| `grimoire-components` | Reusable CI/CD components for grim-based pipelines |
+| `arcana` | First-party skill/agent bundles published *with* grim (e.g. the `hex` swarm bundle) |
+| `external/rust-oci-client` | OCI transport, `ocx-sh` fork, submodule pinned to `ocx/integration` |
+| `external/docker_credential` | Credential-helper reads, `ocx-sh` fork, submodule pinned to `feat/store-erase-list` |
+| `ghcr.io/grimoire-rs/*` | Published first-party catalog packages (source in `catalog/`) |
+| `ocx-sh/index` | Sibling prior art — sparse static HTTP index for the OCX package manager; index-tooling architecture reference |
+
+## Comparable Tools
+
+Verified landscape, with signal counts and gaps, lives in
+`.agents/research/research_promotion_positioning.md` › "Competitive
+landscape" (re-verify after 2027-01-26). Nearest comparables: Vercel
+`skills.sh`, Tessl, ClawHub, `skillctl`, `jeffreytse/grimoire`. Structural
+prior art rather than competitors: ORAS (OCI artifact transport), Helm's
+OCI chart distribution, npm/cargo lockfile UX, Claude Code plugin
+marketplaces. The differentiator ranking lives in that same artifact —
+do not restate it here, it moves fast.
+
+## Research Keywords
+
+For researchers scoping a new axis: `OCI artifactType` + `subject`
+referrers · `agent skills specification` / `agentskills.io` · `OCI Agent
+Skills Artifacts` (Vitale draft spec) · `AGENTS.md` / `CLAUDE.md`
+cross-vendor rule formats · `claude code plugin marketplace.json` ·
+registry `_catalog` gating on GHCR / Docker Hub / GitLab · lockfile and
+digest pinning · `SKILL.md` GitHub code search. Each
+`.agents/research/research_*.md` ends with its own durable search-term
+list — check there before inventing queries.
+
 ## Update Protocol
 
 This file is the single source of truth for Grimoire product identity.
@@ -127,12 +158,11 @@ framing, doc narratives). Keep it current.
 4. A scope decision reframes positioning
 5. A CLI-level UX change visible to positioning
 
-**Who must check** — every agent at product level re-reads this file when
-work could shift positioning: `worker-researcher` after evaluating a
-library/tool; `worker-architect` after an ADR or design spec;
-`worker-doc-writer` after user-guide edits; `worker-builder` /
-`worker-reviewer` if implementation exposes a capability gap or breaks a
-stated principle.
+**Who must check** — any agent working at product level re-reads this file
+when work could shift positioning: a researcher after evaluating a
+library/tool; an architect after an ADR or design spec; a doc writer after
+user-guide edits; a builder or reviewer if implementation exposes a
+capability gap or breaks a stated principle.
 
 **Validation** — `/meta-maintain-config refresh` spot-checks this file
 against current CLI help, source code, and recent ADRs.

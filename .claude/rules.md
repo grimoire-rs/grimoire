@@ -30,7 +30,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Product vision / positioning | [product-context.md](./rules/product-context.md) — canonical identity doc; update when positioning shifts (see Update Protocol section at bottom) |
 | Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), `quality-{lang}.md` |
 | Starting any task (work-type routing) | [workflow-intent.md](./rules/workflow-intent.md) (global) — classifies work, checks GitHub context, routes to correct workflow |
-| Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
+| Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, `/hex-architect` |
 | Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Documentation work | [docs-style.md](./rules/docs-style.md), skill `docs` |
@@ -42,8 +42,8 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
 | GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
-| Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", skills `swarm-plan`, `swarm-execute`, `swarm-review`, `commit`, `finalize`, `next` |
-| Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `swarm-plan`, `swarm-execute`, `swarm-review` |
+| Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", `/hex-plan`, `/hex-execute`, `/hex-review`, skills `commit`, `finalize`, `next` |
+| Multi-agent orchestration | [workflow-feature.md](./rules/workflow-feature.md) — the **hex** bundle (`/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`), installed at user level; swarm memory `.agents/memory/hex.md` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
 | Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |
 | CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
@@ -60,7 +60,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 
 ## By subsystem
 
-Catalog = single source of truth — `CLAUDE.md` may summarize or reference by pointer.
+Catalog = single source of truth — `AGENTS.md` may summarize or reference by pointer.
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
@@ -91,14 +91,14 @@ provisional; the coupling is intended (declared below).
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
 | `docs/**` | [docs-style.md](./rules/docs-style.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
-| `.github/workflows/**`, `.github/actions/**`, `dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
+| `.github/workflows/**`, `.github/actions/**`, `.github/dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
+| `.agents/plans/**`, `.agents/adr/**`, `.agents/specs/**`, `.agents/research/**` | [product-context.md](./rules/product-context.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
-| `.claude/agents/**`, `.claude/skills/swarm-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
-Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
+Globals (always loaded or imported into `AGENTS.md`): [quality-core.md](./rules/quality-core.md),
 [product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
 
 Scoped workflow rules (loaded by path match, consumed by skills on demand):
@@ -119,10 +119,9 @@ Exempt from overlap detection (intended broad coupling):
 |---|---|
 | `quality-security.md` + `subsystem-ci.md` | `.github/workflows/**`, `.github/actions/**` |
 | `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
-| `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
+| `product-context.md` + `workflow-feature.md` | `.agents/plans/**`, `.agents/adr/**`, `.agents/specs/**`, `.agents/research/**` |
 | `docs-style.md` + `product-context.md` | `docs/**` |
 | `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**` (single provisional binary crate) |
-| `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/swarm-*/**` |
 
 ## Skills by task topic
 
@@ -130,14 +129,14 @@ Exempt from overlap detection (intended broad coupling):
 |---|---|
 | Writing docs | `docs` |
 | Security review | `security-auditor` |
-| Architecture decision | `architect` |
+| Architecture decision | `/hex-architect` (hex bundle) |
 | Code quality audit | `code-check` |
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
 | Fixing a bug (guided, failing-test-first) | `bugfix` |
-| Planning a feature (multi-agent) | `swarm-plan` |
-| Executing a feature (multi-agent) | `swarm-execute` |
-| Adversarial review | `swarm-review`, `codex-adversary` |
+| Planning a feature (multi-agent) | `/hex-plan` (hex bundle) |
+| Executing a feature (multi-agent) | `/hex-execute` (hex bundle) |
+| Adversarial review | `/hex-review` (hex bundle; cross-model adversary configured in `.agents/memory/hex.md`) |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Commits (working phase) | `commit` |

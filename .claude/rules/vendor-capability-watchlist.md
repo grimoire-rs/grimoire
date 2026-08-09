@@ -22,7 +22,7 @@ features continuously, and a decline can silently rot into a grim regression
    (`docs/src/vendor-metadata.md` / `docs/src/mcp-servers.md`) + tests in
    **one commit** (parity tests require doc row and registry change
    together), then move/update the row here in the same commit.
-3. Compatibility doctrine applies (CLAUDE.md principle 9): additive-only,
+3. Compatibility doctrine applies (AGENTS.md principle 9): additive-only,
    never remove accepted literals, layout moves ship migration + reaper.
 
 ## Watchlist

@@ -90,7 +90,7 @@ On `main`: stop. Tell user create feature branch first.
 
 Follow **Conventional Commits v1.0.0**. See [`commit_reference.md`](./commit_reference.md) for full cheat sheet and [workflow-git.md](../../rules/workflow-git.md) for quick rules. Key points for working phase:
 
-- `chore:` for AI/tooling files (`.claude/`, `CLAUDE.md`, skills, rules, hooks, taskfiles) — keeps out of changelog
+- `chore:` for AI/tooling files (`.claude/`, `AGENTS.md`, `CLAUDE.md`, skills, rules, hooks, taskfiles) — keeps out of changelog
 - Imperative mood, lowercase description, no trailing period, subject ≤72 chars
 - Body explains **why**, not what, when non-obvious
 - Breaking: `!` before colon **and** `BREAKING CHANGE:` footer
@@ -145,7 +145,7 @@ After successful commit, if `.claude/state/current_plan.md` exists and reference
 
 - Bump `Last update:` line in the Status block to today's date with the new HEAD sha:
   `- **Last update:** YYYY-MM-DD (after <sha-short>: <subject>)`
-- Do NOT advance `Active phase:` — phase advancement is the plan author's decision (next phase entry in `/swarm-execute`), not an automatic side-effect of commits.
+- Do NOT advance `Active phase:` — phase advancement is the plan author's decision (next phase entry in `/hex-execute`), not an automatic side-effect of commits.
 - Skip silently when no `current_plan.md`, no plan match, no Status block.
 
 This keeps `/next`'s staleness check (plan-mtime-vs-`Last update`) accurate without surprising the user.
@@ -159,4 +159,4 @@ One or two sentences: commit hash, subject, whether stranded-Checkpoint case han
 - [workflow-git.md](../../rules/workflow-git.md) — shared branch/commit hygiene: branching model, two-phase model, Checkpoint convention, land-ready definition
 - [`commit_reference.md`](./commit_reference.md) — Conventional Commits v1.0.0 cheat sheet
 - `/finalize` skill (`../finalize/SKILL.md`) — rebasing-phase sibling for cleaning `main..HEAD` before landing
-- CLAUDE.md — worktree layout, "Landing a feature" section
+- AGENTS.md — worktree layout, "Landing a feature" section

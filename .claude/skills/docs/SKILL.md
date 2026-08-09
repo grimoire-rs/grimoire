@@ -41,7 +41,7 @@ Role: write user-facing docs for Grimoire (Markdown under `docs/`).
 
 ## Handoff
 
-- To Architect — docs revealing design ambiguity
+- To /hex-architect — docs revealing design ambiguity
 - To Builder — code changes uncovered while writing docs
 
 $ARGUMENTS

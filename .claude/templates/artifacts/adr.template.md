@@ -2,10 +2,10 @@
 
 <!--
 Architecture Decision Record
-Filename: artifacts/adr_NNNN_[topic].md (e.g., adr_0001_database_choice.md)
-Owner: Architect (/architect)
+Filename: .agents/adr/adr_NNNN_[topic].md (e.g., adr_0001_database_choice.md)
+Owner: Architect (/hex-architect)
 Handoff to: Builder (/builder), Security Auditor (/security-auditor)
-Related Skills: architect
+Related Skills: hex-architect
 
 Format: Based on MADR (Markdown Any Decision Records) - https://adr.github.io/madr/
 Best Practices:
@@ -44,7 +44,7 @@ Best Practices:
 
 [Tech landscape research before decision. Include trending alternatives, adoption signals, design patterns. Reference research artifacts if available.]
 
-**Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
+**Research artifact:** [`.agents/research/research_[topic].md`](./research_[topic].md) or N/A
 **Trending approaches:** [Where industry moving]
 **Key insight:** [Top finding driving decision]
 

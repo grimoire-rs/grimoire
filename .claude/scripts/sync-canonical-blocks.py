@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Propagate the canonical Review-Fix Loop block from `workflow-swarm.md`
-to `workflow-bugfix.md` and `workflow-refactor.md`.
+"""Propagate the canonical Review-Fix Loop block from `workflow-bugfix.md`
+to `workflow-refactor.md`.
+
+`workflow-bugfix.md` became the canonical carrier when `workflow-swarm.md` was
+retired in favour of the user-level hex bundle.
 
 Compression (e.g. `caveman:compress`) rewrites prose independently per file
 and breaks the byte-identity contract enforced by
 `adr_ai_config_review_loop_dedup.md` and `test_review_fix_loop_parity`.
 
-Run this after any pass that may have touched one of the three carriers.
+Run this after any pass that may have touched either carrier.
 """
 
 from pathlib import Path
@@ -16,9 +19,8 @@ BEGIN = "<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->"
 END = "<!-- REVIEW_FIX_LOOP_CANONICAL_END -->"
 
 REPO = Path(__file__).resolve().parents[2]
-SOURCE = REPO / ".claude/rules/workflow-swarm.md"
+SOURCE = REPO / ".claude/rules/workflow-bugfix.md"
 TARGETS = [
-    REPO / ".claude/rules/workflow-bugfix.md",
     REPO / ".claude/rules/workflow-refactor.md",
 ]
 

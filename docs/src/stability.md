@@ -174,7 +174,7 @@ detection rather than the user's config.)
 
 The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout
-stability (`.claude/artifacts/adr_render_layout_stability.md`).
+stability (`.agents/adr/adr_render_layout_stability.md`).
 
 ## Known limitations {#limitations}
 

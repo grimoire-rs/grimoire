@@ -4,7 +4,7 @@
 """SubagentStop hook: logs subagent completion, trims the log, and captures
 learnings emitted by the subagent via `[LEARNING]` JSON markers.
 
-Per .claude/artifacts/adr_ai_config_cross_session_learnings_store.md, captured
+Per .agents/adr/adr_ai_config_cross_session_learnings_store.md, captured
 learnings go to `.state/learnings-pending.jsonl` and are merged into the
 project-local canonical store (`.claude/state/learnings.jsonl`) at session end
 by stop_validator.py.

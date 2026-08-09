@@ -14,8 +14,8 @@ Claude Code have three rule-activation mechanisms. Each different purpose — co
 | Layer | Activation | Use for | Example |
 |---|---|---|---|
 | **Rule** (`.claude/rules/*.md`) | `paths:` glob — fire when edit match file | Standards/context need *while writing* file | `quality-rust.md` on `**/*.rs` |
-| **Skill** (`.claude/skills/<name>/SKILL.md`) | `description` match by LLM vs current task | Workflow + criteria for task topic | `deps` for "add a crate" |
-| **Catalog** (`.claude/rules.md`) | Read-on-demand during planning, point from CLAUDE.md | Discover what rules exist *before* file open | — |
+| **Skill** (`.claude/skills/<name>/SKILL.md`) | `description` match by LLM vs current task | Workflow + criteria for task topic | `bugfix` for "something is broken" |
+| **Catalog** (`.claude/rules.md`) | Read-on-demand during planning, point from AGENTS.md | Discover what rules exist *before* file open | — |
 
 Path-scoped rules no fire during plan/research/architecture — no file open. Skills need LLM already know skill exist. Catalog (`.claude/rules.md`) close gap: authoritative map browse during plan/research. Any `.claude/rules/` change must reflect in catalog same commit; structural tests enforce parity.
 
@@ -29,8 +29,8 @@ Three rules under `.claude/rules/` no `paths:` frontmatter, load unconditional e
 
 Two more always-load files reach Claude by different mechanism, *not* count here because no use path-scope frontmatter layer:
 
-- `.claude/rules.md` — catalog itself; `@`-import from `CLAUDE.md`
-- `CLAUDE.md` — project root instructions; load by Claude Code direct
+- `.claude/rules.md` — catalog itself; `@`-import from `AGENTS.md`
+- `AGENTS.md` — the single project-context file, every agent; `CLAUDE.md` is a `@AGENTS.md` import stub loaded by Claude Code direct
 
 `meta-ai-config.md` path-scoped to `.claude/**` (not true global); load when AI config files edit.
 
@@ -38,11 +38,11 @@ If strict count drift from 3, `test_global_rule_count_matches` fail.
 
 ## Core Principle: Context Budget
 
-Every rule, skill description, CLAUDE.md line compete same context window. Bloat config = Claude ignore instructions.
+Every rule, skill description, AGENTS.md line compete same context window. Bloat config = Claude ignore instructions.
 
 | Artifact | Budget | Impact |
 |----------|--------|--------|
-| CLAUDE.md | <200 lines | Load every request — every line cost attention |
+| AGENTS.md | <280 lines | Load every request — every line cost attention. `CLAUDE.md` holds no content: ≤12 lines, `@AGENTS.md` only |
 | Rules (global) | <200 lines each | Load every request — minimize globals |
 | Rules (scoped) | <200 lines each | Load only on path match — prefer scoping |
 | Skill descriptions | 2% of context window total | All descriptions load at session start |
@@ -56,7 +56,7 @@ Every rule, skill description, CLAUDE.md line compete same context window. Bloat
 Must Claude know it every session?
 ├─ Yes → Is it file/directory-specific?
 │  ├─ Yes → .claude/rules/ with paths: scoping
-│  └─ No → CLAUDE.md (only if removing it causes mistakes)
+│  └─ No → AGENTS.md (only if removing it causes mistakes)
 └─ No → Is it invoked manually or auto-triggered?
    ├─ Manual with side effects → Skill with disable-model-invocation: true
    ├─ Auto-triggered by context → Skill with good description
@@ -65,19 +65,19 @@ Must Claude know it every session?
 
 ## Research Protocol
 
-**Every edit to AI config must be research-informed.** AI config work use **canonical multi-agent research pattern** define in `/swarm-plan` (Phases 1-2: Discover + Research). No reinvent — delegate.
+**Every edit to AI config must be research-informed.** AI config work use **canonical multi-agent research pattern** define in `/hex-plan` (Phases 1-2: Discover + Research). No reinvent — delegate.
 
-Spawn workers parallel before write:
+Delegate to `/hex-plan`'s Discover + Research phases rather than reinventing a spawn pattern. Axes worth splitting when the change is non-trivial:
 
-- **`worker-explorer`** (1-2 agents) — Check existing `.claude/` artifacts for conventions, cross-refs, prior decisions. Map neighborhood of artifact create or change.
-- **`worker-researcher`** (1-3 agents, split by axis when non-trivial):
-  - *Claude Code / tooling axis* — `code.claude.com/docs`, frontmatter conventions, new hook/skill/agent features
-  - *Domain axis* — best practices for artifact subject (Rust patterns, OCI spec, cargo-deny, testing, etc.)
-  - *Community axis* — how other projects structure similar artifacts
+- *Claude Code / tooling axis* — `code.claude.com/docs`, frontmatter conventions, new hook/skill/agent features
+- *Domain axis* — best practices for the artifact's subject (Rust patterns, OCI spec, cargo-deny, testing, etc.)
+- *Community axis* — how other projects structure similar artifacts
 
-Persist substantial findings as `.claude/artifacts/research_[topic].md` so future AI config sessions reuse. Never author skill, rule, agent from memory alone.
+An explorer pass over existing `.claude/` artifacts (conventions, cross-refs, prior decisions) grounds the external findings before anything is written.
 
-See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
+Persist substantial findings as `.agents/research/research_[topic].md` so future AI config sessions reuse. Never author skill, rule, agent from memory alone.
+
+hex's own reference files define the research contract; do not restate it here.
 
 ## Artifact Conventions
 
@@ -91,7 +91,7 @@ See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
 
 ### Skills (`.claude/skills/<name>/SKILL.md` — canonical flat layout)
 
-- `description` = #1 discovery factor — write trigger phrasing (Contextual Signal Only / CSO policy, see `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`). Forbidden verbs: `dispatches|runs|iterates|orchestrates|performs|executes|handles` — cause Claude read description as workflow and skip body. Front-load discriminating keywords (truncation cut from end). Max 1024 chars per skill.
+- `description` = #1 discovery factor — write trigger phrasing (Contextual Signal Only / CSO policy, see `.agents/adr/adr_ai_config_skill_description_csopolicy.md`). Forbidden verbs: `dispatches|runs|iterates|orchestrates|performs|executes|handles` — cause Claude read description as workflow and skip body. Front-load discriminating keywords (truncation cut from end). Max 1024 chars per skill.
 - `argument-hint` must be quoted string
 - `allowed-tools` NOT supported in frontmatter
 - `disable-model-invocation: true` for action skills with side effects (commit, deploy, release)
@@ -100,12 +100,9 @@ See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
 - `context: fork` to run in isolated subagent (protect main context)
 - **No category subdirectories.** Claude Code discover skills at `.claude/skills/<name>/SKILL.md` exact, no recurse deeper for in-project skills. Nest for grouping (e.g., `personas/`, `operations/`) silently break `/slash-command` discovery. Enforce at test layer.
 
-### Agents (`.claude/agents/worker-{name}.md`)
+### Agents
 
-- `model`: haiku (exploration), sonnet (implementation/review), opus (architecture)
-- `tools`: minimum need for role
-- Keep concise — agents inherit project rules auto
-- **Minimal anchored preamble + catalog pointer.** Agents point at `.claude/rules.md` for full rule catalog, then inline short "Always Apply" preamble (≤5 block-tier anchors, each tag with source rule file). Preamble fire at attention even when path-scoped auto-load no trigger yet. Anchors must cite source file so drift visible at review. Replace earlier "deliberate redundancy" pattern where entire rule checklists duplicate into agent bodies — that approach cause drift and heavy maintenance cost.
+Grimoire authors **no** project-local subagents. Multi-agent work runs on the user-level **hex** bundle, which ships its own worker personas; project-local overrides, if ever needed, belong in `.agents/workers/` per hex's spawn-selection precedence — not in `.claude/agents/`.
 
 ### Hooks (`.claude/hooks/*.py`)
 
@@ -119,7 +116,7 @@ See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
 
 ## Plan Status Protocol
 
-Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the top — first 30 lines after H1 — so `/next` and the user can read current state at a glance without scanning the full plan.
+Every plan in `.agents/plans/plan_*.md` carries a `## Status` block at the top — first 30 lines after H1 — so `/next` and the user can read current state at a glance without scanning the full plan.
 
 ### Schema
 
@@ -128,16 +125,16 @@ Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the
 
 - **Plan:** plan_<slug>
 - **Active phase:** <N> — <phase title>
-- **Step:** <skill or activity, e.g. /swarm-execute → implementation>
+- **Step:** <skill or activity, e.g. /hex-execute → implementation>
 - **Last update:** <YYYY-MM-DD> (after <commit-sha-short>: <subject>)
 ```
 
 Allowed `Step` values:
-- `/swarm-plan → plan-approved`
-- `/swarm-execute → <stage>` (Stub, Specify, Implement, Review-Fix Loop)
-- `/swarm-review → round N`
-- `awaiting /swarm-review`
-- `awaiting /swarm-execute (review-fix loop)`
+- `/hex-plan → plan-approved`
+- `/hex-execute → <stage>` (Stub, Specify, Implement, Review-Fix Loop)
+- `/hex-review → round N`
+- `awaiting /hex-review`
+- `awaiting /hex-execute (review-fix loop)`
 - `awaiting /finalize`
 - `finalized` (terminal — `/finalize` writes this then deletes `current_plan.md`)
 
@@ -148,7 +145,7 @@ Allowed `Step` values:
 ```markdown
 # Current Plan Pointer
 
-- **Plan:** .claude/state/plans/plan_<slug>.md
+- **Plan:** .agents/plans/plan_<slug>.md
 - **Branch:** <branch-name>
 - **Updated:** <YYYY-MM-DD HH:MM UTC>
 ```
@@ -159,9 +156,9 @@ Allowed `Step` values:
 
 | Skill | Reads | Writes |
 |---|---|---|
-| `/swarm-plan` | — | Init Status in new plan; write `current_plan.md` |
-| `/swarm-execute` | Status | Flip `Step` on phase entry/advance; bump `Last update` |
-| `/swarm-review` | Status | Flip `Step` on round entry; set `awaiting /finalize` or `awaiting /swarm-execute` on verdict |
+| `/hex-plan` | — | Init Status in new plan; write `current_plan.md` |
+| `/hex-execute` | Status | Flip `Step` on phase entry/advance; bump `Last update` |
+| `/hex-review` | Status | Flip `Step` on round entry; set `awaiting /finalize` or `awaiting /hex-execute` on verdict |
 | `/commit` | Status | Bump `Last update` only (no phase advance) |
 | `/finalize` | Status | **Refuse if Step ≠ `finalized` and `Active phase` not last** (`--force` overrides); on success set `Step: finalized`, delete `current_plan.md` |
 | `/next` | `current_plan.md` then Status | Read-only fast path; falls back to commit-subject heuristic with `AskUserQuestion`, then writes `current_plan.md` + injects Status block (state-fixer path) |
@@ -190,7 +187,7 @@ A plan may spawn a subplan (e.g. a high-tier review opens its own `plan_review_*
 - **Plan:** plan_review_X
 - **Parent plan:** plan_project_toolchain (resume after Step: finalized)
 - **Active phase:** 1 — Findings triage
-- **Step:** /swarm-review → round 1
+- **Step:** /hex-review → round 1
 - **Last update:** 2026-04-25 (after 9c2b4c9: ...)
 ```
 
@@ -205,7 +202,7 @@ This keeps the common (single-plan) case zero-cost while making nested workflows
 
 ## Cross-Session Learnings Store
 
-Project-local JSONL store for recurring technical patterns (oci-client quirks, clippy suppressions, test flakiness). Separate from human-author `MEMORY.md`. Full schema + policy in `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`.
+Project-local JSONL store for recurring technical patterns (oci-client quirks, clippy suppressions, test flakiness). Separate from human-author `MEMORY.md`. Full schema + policy in `.agents/adr/adr_ai_config_cross_session_learnings_store.md`.
 
 - **Canonical:** `.claude/state/learnings.jsonl` (per-worktree, gitignored); pending queue at `.claude/hooks/.state/learnings-pending.jsonl`; schema-mismatches quarantine to `learnings-orphan.jsonl`
 - **Capture:** subagent emit `[LEARNING] { ... }` JSON → `subagent_stop_logger.py` parse + redact secrets + append → `stop_validator.py` merge at session end with fingerprint dedup, then TTL prune + confidence decay
@@ -216,9 +213,9 @@ Project-local JSONL store for recurring technical patterns (oci-client quirks, c
 
 ## Anti-Patterns
 
-1. **Global rule >200 lines** — same problem as bloat CLAUDE.md
-2. **Rules match `src/**/*`** — too broad, effectively another CLAUDE.md
-3. **Duplicate content** across CLAUDE.md, rules, skills — single source of truth
+1. **Global rule >200 lines** — same problem as bloat AGENTS.md
+2. **Rules match `src/**/*`** — too broad, effectively another AGENTS.md
+3. **Duplicate content** across AGENTS.md, rules, skills — single source of truth
 4. **Verbose SKILL.md** without progressive disclosure — move reference material to support files
 5. **No `disable-model-invocation`** on action skills — Claude trigger unpredictable
 6. **Too many auto-trigger skills** — description budget fill up, skills excluded
@@ -236,7 +233,7 @@ When edit any `.claude/` artifact:
 - [ ] Frontmatter follow conventions for artifact type
 - [ ] Cross-refs point to existing files
 - [ ] New rules reference subsystem context rules where relevant
-- [ ] CLAUDE.md stay under 200 lines
+- [ ] AGENTS.md stay under 280 lines; CLAUDE.md stays a `@AGENTS.md` stub
 - [ ] Global rules total manageable (current 3 — monitor growth; see `### Current Global Rules` above for strict definition)
 - [ ] AI config structural tests pass: `task claude:tests`
 
@@ -245,9 +242,8 @@ When edit any `.claude/` artifact:
 `.claude/tests/test_ai_config.py` = automated enforcement layer for checklist above. Tests live alongside config they validate (not in `test/`, which for Grimoire binary acceptance tests). Run as part of `task verify` (via `claude:tests`) and catch:
 
 - **Rule glob validity**: every `paths:` glob in scoped rules match at least one file on disk (dead glob detection)
-- **CLAUDE.md consistency**: line budget, stated principle count match headings, stated worktree count match table rows
+- **AGENTS.md consistency**: line budget, stated principle count match headings, worktree convention documented ad hoc
 - **Cross-reference accuracy**: workflow filenames in rules exist on disk, artifact paths in skills use correct directories
-- **Agent correctness**: tool/body consistency (no commands need tools not in frontmatter), completion protocol compliance
 - **Hook safety**: no `set -e` in PostToolUse hooks, conditional log trim
 - **Taskfile robustness**: empty file list guards for lint tasks
 
@@ -258,8 +254,7 @@ When edit any `.claude/` artifact:
 | New skill added | Cover auto (orphan detection + path existence) |
 | New scoped rule added | Cover auto (glob match validation) |
 | New keyword trigger | Cover auto (overlap + noise detection) |
-| New agent with tool restrictions | Add test verify body no use commands outside `tools:` |
-| New convention in CLAUDE.md | Add test count/validate stated fact |
+| New convention in AGENTS.md | Add test count/validate stated fact |
 | New hook script | Add safety tests (no `set -e` for PostToolUse, exit code discipline) |
 | New cross-reference pattern | Add test resolve reference to real file |
 
@@ -290,7 +285,7 @@ PostToolUse hook (`post-tool-use-tracker.sh`) fire on every `Edit|Write` and out
 | New subsystem created | Add `subsystem-{name}.md` scoped rule |
 | Codebase pattern changed | Update affected subsystem rules |
 | New tool integrated | Add to relevant skills, `quality-core.md`, and `config_reminder` in hook |
-| Taskfile changed | Update CLAUDE.md, quality-core.md, relevant skill Task Runner sections |
+| Taskfile changed | Update AGENTS.md, quality-core.md, relevant skill Task Runner sections |
 | Documentation conventions changed | Update `docs-style.md`, documentation skill |
 | CI workflow changed | Update `subsystem-ci.md` rule |
 | Claude Code new release | Run `/meta-maintain-config research "Claude Code features"` |

@@ -1,65 +1,53 @@
 ---
 paths:
-  - ".claude/agents/**"
-  - ".claude/skills/swarm-*/**"
-  - ".claude/artifacts/**"
+  - ".agents/plans/**"
+  - ".agents/adr/**"
+  - ".agents/specs/**"
+  - ".agents/research/**"
 ---
 
 # Feature Development Workflow
 
-Two workflows for feature impl, planning through quality gates. Use `plan.template.md` from `.claude/templates/artifacts/` for plan artifacts. Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as feature.
+Planning through quality gates for feature work. Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a feature. Plan artifacts use `plan.template.md` from `.claude/templates/artifacts/`.
 
-## Swarm Workflow (Primary)
+## hex Workflow (Primary)
 
-Proven approach: subagent orchestration + **contract-first TDD**.
+Multi-agent orchestration is the **hex** bundle, installed at user level (not in this repo). Its contracts — tier grammar, worker personas, the Review-Fix Loop, the adversary gate — live in the bundle's own reference files, not here; this rule only states how Grimoire uses it. Project-specific settings (model matrix, always-on review perspectives, research axes, cross-model adversary) live in `.agents/memory/hex.md`, written by `/hex-init`.
 
 ### Planning Phase
-1. **Plan** — Human describe feature. Invoke `/architect` or `/swarm-plan`. `/swarm-plan` accepts tier arg (`low | auto | high | max`) scaling worker count, research depth, review adversariness to scope; `auto` (default) classifies from prompt signals. See `workflow-swarm.md` "Tier & Overlay Vocabulary".
-2. **Research** — Launch `worker-researcher` to scout tech landscape. Persist as `.claude/artifacts/research_[topic].md`.
-3. **Design** — Architect reads subsystem context rules + code + research artifacts, writes plan in `.claude/artifacts/`. Plan must include testable component contracts + UX scenarios. At `max` tier (or `--codex` overlay), `/swarm-plan` runs optional Codex plan-artifact review as cross-model final gate before handoff — see `workflow-swarm.md` "Codex Plan Review".
-4. **Review** — Human review + approve plan.
+
+1. **Plan** — Human describes the feature. Run `/hex-plan` (tier `low | medium | high`, `auto` by default — scales research depth, whether an architect designs, and review breadth). For a standalone architecture decision, run `/hex-architect` instead; it produces an ADR.
+2. **Research** — hex spawns researchers per axis. Persist substantial findings as `.agents/research/research_[topic].md`.
+3. **Design** — the architect reads subsystem context rules, code and research artifacts, then writes the plan to `.agents/plans/`. A plan must carry testable component contracts and UX scenarios.
+4. **Review** — human reviews and approves the plan at hex's meta-plan gate.
 
 ### Execution Phase (Contract-First TDD)
 
-Run `/swarm-execute` (optional tier `low | high | max`; `auto` default reads plan header). Tier scales stub/impl builder model, Review-Fix Loop rounds, Stage 2 perspective breadth, Codex code-diff review trigger. See `workflow-swarm.md` "Tier & Overlay Vocabulary".
+Run `/hex-execute` (tier `auto` by default, read from the plan header). Tier scales review breadth, Review-Fix Loop rounds, and the cross-model code-diff gate. File-disjoint work packages run in parallel worktrees under `.agents/worktrees/` and merge onto the feature branch in topological order.
 
-5. **Stub** — `worker-builder` (focus: `stubbing`) creates type sigs, traits, function shells with `unimplemented!()` / `raise NotImplementedError`. Gate: `cargo check` passes.
-6. **Verify Architecture** — `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) validates stubs match design record. Gate: reviewer passes. *Optional for features touching ≤3 files.*
-7. **Specify** — `worker-tester` (focus: `specification`) writes unit + acceptance tests from design record. Tests fail against stubs. Gate: tests compile + fail with `unimplemented`.
-8. **Implement** — `worker-builder` (focus: `implementation`) fills stub bodies until all tests pass. Gate: subsystem verify succeeds (e.g., `task rust:verify` for Rust — see Quality Gate section in each `subsystem-*.md` rule).
-9. **Review-Fix Loop** — Apply canonical Review-Fix Loop to feature diff. See [`workflow-swarm.md`](./workflow-swarm.md#review-fix-loop). Run **subsystem verify** for changed area, NOT full `task verify`.
-10. **Cross-Model Adversarial Pass** — Documented inside canonical Review-Fix Loop (see [`workflow-swarm.md`](./workflow-swarm.md#review-fix-loop)). Opt-out flag: `--no-cross-model` on `/swarm-execute`.
-11. **Commit** — All changes committed on feature branch, conventional commit message. Deferred findings printed as summary.
-12. **Push** — Human decides when to push (CI cost real).
+5. **Stub** — type signatures, traits, function shells with `unimplemented!()` / `raise NotImplementedError`. Gate: `cargo check` passes.
+6. **Specify** — unit + acceptance tests written from the design record, not from the stubs. Gate: tests compile and fail with `unimplemented`.
+7. **Implement** — stub bodies filled until all tests pass. Gate: **subsystem verify** for the changed area (e.g. `task rust:verify`), not full `task verify`.
+8. **Review-Fix Loop** — bounded, diff-scoped, tier-capped rounds. Always-on perspectives for this repo (security on credential/publish paths, doc-reviewer on `src/command/**`) are declared in `.agents/memory/hex.md`.
+9. **Commit** — changes committed on the feature branch with a Conventional Commit message; deferred findings printed as a summary.
+10. **Push** — the human decides when to push (CI cost is real).
+
+Before landing, run `/hex-review` on the branch diff, then `/finalize`.
 
 ## Agent Team Workflow (Experimental)
 
-Enable `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Multiple Claude sessions coordinate via shared task lists, contract-first TDD:
-
-1. **Create team** — Human creates team: architect + builder + tester + reviewer.
-2. **Architect plans** — Reads subsystem context, writes plan with testable contracts + UX scenarios.
-3. **Builder stubs** — Creates type sigs, trait impls, function shells with `unimplemented!()`. Marks for reviewer.
-4. **Reviewer verifies** — Validates stubs against design record (spec-compliance, post-stub). Reports issues or approves.
-5. **Tester specifies** — Writes tests from design record (not stubs). Tests must fail against stubs. Marks for builder.
-6. **Builder implements** — Fills stub bodies until all tests pass. Marks for reviewer.
-7. **Reviewer checks** — Diff-scoped review: spec-compliance, quality, security. Classifies findings as actionable or deferred. Reports actionable findings to builder.
-8. **Iterate** — Builder fixes actionable findings, reviewer re-checks only perspectives with findings. Loop until no actionable findings (max 3 rounds). Deferred findings reported to human.
-9. **Complete** — All teammates commit on feature branch. Human reviews deferred findings, decides push.
+Enable `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Multiple Claude sessions coordinate via shared task lists, same contract-first TDD order: architect plans → builder stubs → reviewer verifies stubs against the design record → tester specifies → builder implements → reviewer checks the diff → iterate on actionable findings (max 3 rounds) → all teammates commit on the feature branch, human decides push.
 
 ### Team Sizing
 
-- 3-5 teammates optimal (coordination overhead grows w/ size)
+- 3-5 teammates optimal (coordination overhead grows with size)
 - ~5-6 tasks per teammate
-- Avoid two teammates editing same file
-
-## Worker Assignment Guide
-
-See `.claude/rules/workflow-swarm.md` for worker types, models, tools, focus modes.
+- Avoid two teammates editing the same file
 
 ## Plan Status Tracking
 
-Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the top (after H1, before first content section). Block fields: `Plan`, `Active phase`, `Step`, `Last update`. Read+mutated by `/swarm-plan` (init), `/swarm-execute` (phase entry/advance), `/swarm-review` (round/verdict), `/commit` (Last update), `/finalize` (refuse if active, mark `finalized` on done), `/next` (read primary signal, state-fix fallback). Global pointer `.claude/state/current_plan.md` (gitignored) names the active plan. Schema + mutation table → [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
+Every plan in `.agents/plans/plan_*.md` carries a `## Status` block at the top (after H1, before the first content section). Block fields: `Plan`, `Active phase`, `Step`, `Last update`. Written by `/hex-plan` (init) and advanced by `/hex-execute` and `/hex-review`; `/commit` bumps `Last update`, `/finalize` refuses while a plan is active and marks it `finalized` on completion, `/next` reads it as its primary signal. Global pointer `.claude/state/current_plan.md` (gitignored) names the active plan; hex additionally tracks the active plan in `.agents/memory/hex.md` › Memory. Schema + mutation table → [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
 
 ## Quality Gates
 
-Run `task verify` (fmt check + clippy + build + unit tests + acceptance tests). See `.claude/rules/quality-core.md` for canonical gate list.
+Run `task verify` (fmt check + clippy + build + unit tests + acceptance tests). See `.claude/rules/quality-core.md` for the canonical gate list.

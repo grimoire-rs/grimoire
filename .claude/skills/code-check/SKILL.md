@@ -17,7 +17,7 @@ Role: audit Grimoire code for Clean Code, SOLID, DRY, pattern consistency.
 
 ## Workflow
 
-1. **Swarm** — launch parallel `worker-reviewer` agents per audit dimension
+1. **Fan out** — launch one reviewer per audit dimension in parallel
 2. **Audit** — SOLID, DRY, smells, consistency, context-rule freshness
 3. **Report** — prioritized findings with file:line refs + remediation
 
@@ -73,6 +73,6 @@ Role: audit Grimoire code for Clean Code, SOLID, DRY, pattern consistency.
 ## Handoff
 
 - To Builder — with specific fixes + refactoring items
-- To Architect — for systemic architectural issues
+- To /hex-architect — for systemic architectural issues
 
 $ARGUMENTS

@@ -58,6 +58,6 @@ Analyze → plan → write → run → cover happy, error, edge cases.
 ## Handoff
 
 - To Builder — for bugs found during testing
-- To Swarm Review — after suite passes
+- To /hex-review — after suite passes
 
 $ARGUMENTS

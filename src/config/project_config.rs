@@ -635,7 +635,7 @@ impl BundleSource {
 ///
 /// MUST NOT gain a top-level `registry` key — D7 disambiguation in
 /// `grim publish` / `grim release` guards depend on its absence; see
-/// `.claude/artifacts/adr_grim_publish.md` D7.
+/// `.agents/adr/adr_grim_publish.md` D7.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBundleSource {

@@ -40,7 +40,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     (
         "taskfile.yml",
         (
-            "- CLAUDE.md (Build & Development Commands section)\n"
+            "- AGENTS.md (Build & Development Commands section)\n"
             "- .claude/rules/quality-core.md (task verify pipeline)\n"
             "- .claude/skills/builder/SKILL.md (Task Runner section)\n"
             "- .claude/skills/qa-engineer/SKILL.md (Task Runner section)"
@@ -50,7 +50,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     (
         "taskfiles/*",
         (
-            "- CLAUDE.md (Build & Development Commands section)\n"
+            "- AGENTS.md (Build & Development Commands section)\n"
             "- .claude/rules/quality-core.md (task verify pipeline)"
         ),
         "an included Taskfile",
@@ -113,7 +113,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     ),
     (
         "Cargo.toml",
-        "- CLAUDE.md (Architecture section, if the crate structure changed)",
+        "- AGENTS.md (Architecture section, if the crate structure changed)",
         "Cargo.toml",
     ),
     (
@@ -127,7 +127,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "a subsystem context rule — verify architecture principles are still accurate",
     ),
     (
-        ".claude/artifacts/adr_*.md",
+        ".agents/adr/adr_*.md",
         "- .claude/rules/arch-principles.md (ADR Index table)",
         "an ADR — update the ADR Index in arch-principles.md",
     ),
@@ -140,7 +140,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "an AI config rule — update the catalog and meta-ai-config if scoping or globals changed",
     ),
     (
-        ".claude/state/plans/plan_*.md",
+        ".agents/plans/plan_*.md",
         (
             "- Plan `## Status` block — bump `Last update:` line if implementation advanced\n"
             "- `.claude/state/current_plan.md` — refresh pointer if active plan or branch changed\n"
@@ -159,7 +159,6 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
 _AI_CONFIG_MD_PREFIXES = (
     ".claude/rules/",
     ".claude/skills/",
-    ".claude/agents/",
 )
 
 
@@ -174,7 +173,7 @@ def _sample_context_budget(session_id: str, tool_name: str, project_dir: str) ->
     """Append a context-budget sample to `.claude/state/context-samples.jsonl`.
 
     Phase 3 measurement instrumentation per
-    `.claude/artifacts/adr_ai_config_context_monitor_hook.md`. Only fires when
+    `.agents/adr/adr_ai_config_context_monitor_hook.md`. Only fires when
     the `CLAUDECODE_CONTEXT_REMAINING` env var is present and numeric; the
     full advisory-emitting hook is deferred pending ≥2/10 sessions crossing
     the 35% remaining threshold.

@@ -27,7 +27,7 @@ Reference for `/commit` skill. Full spec: https://www.conventionalcommits.org/en
 | `test` | Tests only | Yes |
 | `build` | Build system, deps, Cargo.toml | Yes |
 | `ci` | CI config (workflows, actions) | Yes |
-| `chore` | **AI/tooling files, `.claude/`, CLAUDE.md, skills, rules, hooks, taskfiles** | **No** |
+| `chore` | **AI/tooling files, `.claude/`, `AGENTS.md`, `CLAUDE.md`, skills, rules, hooks, taskfiles** | **No** |
 | `style` | Formatting only (prefer skip — `cargo fmt` handles) | No |
 
 Grimoire rule: `chore:` for anything under `.claude/` or AI-config files so stay out of user changelog.
