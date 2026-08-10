@@ -754,7 +754,7 @@ def test_registry_fields_works_without_config(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config registry fields`` lists the 3 addressable per-registry field
+    """``config registry fields`` lists the 5 addressable per-registry field
     names and their metadata, and works in a directory with no
     ``grimoire.toml`` at all — it is static metadata, not a config read.
 
@@ -768,17 +768,28 @@ def test_registry_fields_works_without_config(
     result = runner.json("config", "registry", "fields")
     items = result["items"]
 
-    assert len(items) == 3, (
-        f"registry fields must list exactly the 3 per-registry fields; got: {items!r}"
+    assert len(items) == 5, (
+        f"registry fields must list exactly the 5 per-registry fields; got: {items!r}"
     )
     keys = [i.get("key") for i in items]
-    assert keys == ["oci", "index", "default"], (
-        f"fields must be oci, index, default in that order; got: {keys!r}"
+    assert keys == ["oci", "index", "default", "include", "exclude"], (
+        f"fields must be oci, index, default, include, exclude in that order; "
+        f"got: {keys!r}"
     )
+    # The browse filters were appended after `default` partly to keep this
+    # index stable.
     default_field = items[2]
     assert default_field.get("type") == "boolean", (
         f"'default' field's type must be 'boolean'; got: {default_field!r}"
     )
+    # Both browse filters are string lists — the schema and the JSON shape
+    # ARE arrays of strings, even though the CLI `set` write path stores
+    # exactly one pattern (a comma is glob alternation, never a separator).
+    by_key = {i["key"]: i for i in items}
+    for field in ("include", "exclude"):
+        assert by_key[field].get("type") == "string-list", (
+            f"'{field}' must be typed as a string list; got: {by_key[field]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -811,6 +822,259 @@ def test_dotted_alias_roundtrips_via_get(
     )
     assert "ghcr.io/dotted" in result.stdout, (
         f"get must return the URL; got: {result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-registry browse filters (`include` / `exclude`)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_add_accumulates_repeated_filter_flags(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``registry add --include x --include y`` keeps both patterns (S-008).
+
+    ``registry add`` is the only CLI path that writes a multi-pattern list,
+    and it is the shareable one-liner the feature exists for.  Repeating a
+    flag accumulates; the flags do not replace each other, and neither one is
+    ever comma-split — a comma is glob alternation syntax, so a value
+    containing one must survive as a single pattern.
+
+    ``--format json`` is the authoritative shape: it returns the true array,
+    unlike the comma-joined display value ``config get`` renders.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "acme/platform/**",
+        "--include", "acme/{tools,labs}/**",
+        "--exclude", "acme/platform/legacy/**",
+    )
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["acme/platform/**", "acme/{tools,labs}/**"], (
+        f"repeated --include flags must accumulate in order, and brace "
+        f"alternation must survive intact; got: {shown!r}"
+    )
+    assert shown["exclude"] == ["acme/platform/legacy/**"], (
+        f"--exclude must land on the exclude side, not the include side; got: {shown!r}"
+    )
+
+
+def test_registry_add_never_comma_splits_a_filter_flag(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A comma inside one ``--include`` value is data, not a separator (C-013).
+
+    ``--registry``'s house style is repeatable-or-comma-separated; the filter
+    flags deliberately diverge, because splitting on a comma would make
+    ``acme/{platform,tools}/**`` unwritable — and would split it into two
+    fragments that fail glob compilation.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "a,b",
+    )
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["a,b"], (
+        f"a comma must never split a filter flag into two patterns; got: {shown!r}"
+    )
+
+
+def test_set_registry_include_replaces_the_list_with_exactly_one_pattern(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config set registry.<alias>.include`` stores one pattern, unsplit (S-007).
+
+    ``set`` replaces the whole list with exactly one pattern.  This diverges
+    from the ``StringList`` house comma-split (``options.clients``,
+    ``options.tui.tree_separators``) on purpose: the value here is a glob, and
+    a comma is alternation syntax.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "stale/**",
+        "--include", "also-stale/**",
+    )
+    runner.run("config", "set", "registry.acme.include", "acme/{platform,tools}/**")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["acme/{platform,tools}/**"], (
+        f"set must replace the whole list with exactly one unsplit pattern; got: {shown!r}"
+    )
+
+
+def test_get_registry_include_on_an_empty_list_exits_1_with_no_output(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """An empty filter list reads as unset: exit 1, empty stdout (S-009, S-010).
+
+    Empty and absent are the same state for these lists, so ``get`` must use
+    the existing unset semantics rather than printing an empty string — a
+    migration script distinguishes "unset" from "set to nothing" by the exit
+    code, and ``""`` on stdout would look like a value.
+
+    The same entry's ``registry show --format json`` must nonetheless carry
+    both keys as ``[]``: an always-present empty array, never an absent key
+    (S-010).
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+
+    for field in ("include", "exclude"):
+        result = runner.plain("config", "get", f"registry.acme.{field}", check=False)
+        assert result.returncode == 1, (
+            f"get on an empty {field} list must exit 1 (unset); "
+            f"got {result.returncode}; stderr: {result.stderr.strip()}"
+        )
+        assert result.stdout == "", (
+            f"an unset key must print nothing at all; got: {result.stdout!r}"
+        )
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == [] and shown["exclude"] == [], (
+        f"both filter keys must be present as empty arrays on an unfiltered "
+        f"entry; got: {shown!r}"
+    )
+
+
+def test_set_registry_include_with_a_bad_pattern_writes_nothing(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A rejected pattern exits 65 and leaves ``grimoire.toml`` byte-unchanged (S-016).
+
+    Three rejected shapes, one contract: an uncompilable glob, an empty value,
+    and a whitespace-only value (which compiles to a valid glob matching
+    nothing, so it would silently empty the browse set).  Each must fail at
+    the CLI write boundary with ``DataError`` — 65, not the load-time 78 — and
+    the file must be identical afterwards, not merely semantically equivalent.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "acme/platform/**",
+    )
+    cfg_path = project_dir / "grimoire.toml"
+    before = cfg_path.read_bytes()
+
+    for bad in ("acme{unclosed", "", "   "):
+        result = runner.run(
+            "config", "set", "registry.acme.include", bad, check=False
+        )
+        assert result.returncode == 65, (
+            f"a rejected browse pattern {bad!r} must exit 65 (DataError); "
+            f"got {result.returncode}; stderr: {result.stderr.strip()}"
+        )
+        assert cfg_path.read_bytes() == before, (
+            f"nothing may be written when {bad!r} is rejected; config is now:\n"
+            f"{cfg_path.read_text()}"
+        )
+
+    # The surviving value is the one that was there before the failed writes.
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["acme/platform/**"], (
+        f"the pre-existing pattern must be untouched; got: {shown!r}"
+    )
+
+
+def test_registry_add_over_the_aggregate_pattern_budget_exits_65(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """The whole-list budget fails at the CLI boundary too — 65, not 78 (C-006).
+
+    ``MAX_PATTERN_LIST_BYTES`` (64 KiB summed across one entry's list) is the
+    one rejection ``registry add``'s per-pattern loop cannot see, because no
+    single pattern is over any per-pattern cap.  Before this it surfaced only
+    from ``commit_config`` → ``validate_registries``: exit **78**, naming the
+    ``grimoire.toml`` path as the offender for a value that arrived through
+    ``--include`` flags, on a file the user never edited.
+
+    Every other ``registry add`` rejection is 65 (S-016), and the plan's error
+    taxonomy is frozen for ``case $?`` consumers — one command returning 65 or
+    78 depending on *which* cap it trips is the inconsistency this closes.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    cfg_path = project_dir / "grimoire.toml"
+    before = cfg_path.read_bytes()
+
+    # 65 x 1024 = 66560 bytes, over the 65536-byte list budget — while every
+    # pattern is legal alone (1024 is the inclusive per-pattern cap), which is
+    # exactly why the per-pattern loop cannot catch it.
+    flags: list[str] = []
+    for _ in range(65):
+        flags += ["--include", "a" * 1024]
+
+    result = runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        *flags,
+        check=False,
+    )
+    assert result.returncode == 65, (
+        f"an over-budget pattern LIST must exit 65 at the CLI write boundary, "
+        f"like every other pattern rejected there; got {result.returncode}; "
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert "registry.acme.include" in result.stderr, (
+        f"the message must name the CLI key the value arrived through, not the "
+        f"config file; stderr: {result.stderr.strip()}"
+    )
+    assert cfg_path.read_bytes() == before, (
+        f"nothing may be written when the list is rejected; config is now:\n"
+        f"{cfg_path.read_text()}"
+    )
+
+
+def test_unset_registry_include_clears_the_list_and_keeps_the_entry(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``unset`` empties a filter list without removing the registry (C-012).
+
+    Unlike ``oci``/``index`` — where clearing the last locator would leave the
+    entry sourceless, so ``unset`` exits 64 — a filter has an empty state that
+    means "unfiltered", which is a legitimate place to land.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "acme/platform/**",
+    )
+    runner.run("config", "unset", "registry.acme.include")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == [], f"unset must clear the list; got: {shown!r}"
+    assert shown["oci"] == "ghcr.io/acme", (
+        f"the entry itself must survive an unset of one filter; got: {shown!r}"
     )
 
 

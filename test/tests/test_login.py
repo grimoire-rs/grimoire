@@ -483,6 +483,68 @@ def test_logout_resolves_registries_alias(
     assert "registry.corp.example" not in _read_config(docker_config).get("auths", {})
 
 
+# Valid TOML, compilable patterns, two entries claiming the default — so
+# `GlobalConfig::load` fails in `validate_registries`, not in the parser.
+# Any of the three shapes in `test_registries.py::_BROKEN_GLOBAL_CONFIGS`
+# reaches the same code path; one is enough here, because this test is about
+# which *tier* survives the degrade, not about how the file got broken.
+_BROKEN_GLOBAL_CONFIG = (
+    '[[registries]]\nalias = "a"\noci = "ghcr.io/a"\ndefault = true\n\n'
+    '[[registries]]\nalias = "b"\noci = "ghcr.io/b"\ndefault = true\n'
+)
+
+
+def test_logout_resolves_a_project_alias_despite_broken_global_config(
+    grim_at, project_dir: Path, grim_home: Path, docker_config: Path
+) -> None:
+    """The lenient `logout` path drops the global tier — and only that tier.
+
+    `logout` degrades instead of exiting 78 so a leaked credential can always
+    be erased. The degrade must stay surgical: if it dropped the whole
+    registry set rather than the unreadable global slice, `grim logout acme`
+    would fail to find the alias, fall through to treating `acme` as a
+    literal hostname, and erase **nothing at exit 0** — the same failure as
+    the 78 it replaced, just quieter.
+
+    Nothing else pins this. `login_registries` resolves the project scope by
+    walking up from the process CWD (`scope_resolution::resolve(ctx, false,
+    None)`), which no unit test can inject, so it takes a real project
+    directory and a real `grim` run to reach.
+
+    The login happens **before** the global config is broken on purpose:
+    `login` is deliberately strict and would exit 78 afterwards. It also
+    means the test never hard-codes the canonical credential key — it asserts
+    against whatever key `login` itself wrote.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "acme"\noci = "ghcr.io/acme"\ndefault = true\n'
+    )
+    runner = grim_at(project_dir)
+
+    _login(
+        runner,
+        "-u", "alice", "--password-stdin", "--allow-insecure-store", "--no-verify",
+        docker_config=docker_config,
+        stdin="hunter2\n",
+    )
+    auths = _read_config(docker_config).get("auths", {})
+    assert len(auths) == 1, f"setup: login must store exactly one credential; got {auths}"
+    key = next(iter(auths))
+
+    (grim_home / "grimoire.toml").write_text(_BROKEN_GLOBAL_CONFIG)
+
+    res = _logout(runner, "acme", docker_config=docker_config)
+    assert res.returncode == 0, (
+        f"a broken global config must not block `logout <project-alias>`; "
+        f"got {res.returncode}; stderr: {res.stderr}"
+    )
+    assert key not in _read_config(docker_config).get("auths", {}), (
+        f"the project [[registries]] tier must survive the degrade: without it "
+        f"'acme' resolves to itself as a literal host and {key!r} is never "
+        f"erased, at exit 0"
+    )
+
+
 def test_login_no_registry_anywhere_is_config_error(
     grim_at, project_dir: Path, docker_config: Path
 ) -> None:

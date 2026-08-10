@@ -114,6 +114,32 @@ def _wait_registry_ready(host: str, timeout_s: float = 30.0) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
+    """Resolve the registry host, then refuse to run without one.
+
+    Split in two on purpose: ``_resolve_registry_host`` is best-effort (it
+    may legitimately fail to start a container), ``_require_registry`` is
+    the gate that turns that failure into a red run instead of a silently
+    skipped suite.  The gate runs once per process tree — probing once per
+    xdist worker would only add a way for the run to die on a transient blip.
+
+    "Once" is keyed on ``_GRIM_REGISTRY_VERIFIED``, which **this hook sets
+    for itself** after the gate passes; workers inherit it at fork exactly
+    like ``GRIM_TEST_REGISTRY_HOST``.  It deliberately is *not* keyed on
+    ``PYTEST_XDIST_WORKER``, which is an **inherited** variable no process
+    here sets: with it merely present in the ambient environment the gate
+    skipped and an unreachable registry went back to ``21 passed, 21
+    skipped``, exit 0 — the exact silently-green signature this gate exists
+    to remove, reachable without anyone opting out (round-3 review, T-5).
+    A process that has not verified for itself now always checks.
+    """
+    _resolve_registry_host()
+    if not os.environ.get("_GRIM_REGISTRY_VERIFIED"):
+        _require_registry(os.environ.get("GRIM_TEST_REGISTRY_HOST", ""))
+        # Only after it returns: a raise must not mark the tree verified.
+        os.environ["_GRIM_REGISTRY_VERIFIED"] = "1"
+
+
+def _resolve_registry_host() -> None:
     """Resolve the registry host before any test module imports ``src.registry``.
 
     ``pytest_configure`` runs before test collection, which is when test
@@ -154,7 +180,7 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
         ok = _start_registry_container(default_port, _REGISTRY_CONTAINER)
         if ok and _wait_registry_ready(default_host):
             os.environ["GRIM_TEST_REGISTRY_HOST"] = default_host
-        # If startup failed, leave env unset; the `registry` fixture skips.
+        # If startup failed, leave env unset; `_require_registry` aborts.
         return
 
     # Case 3: reachable and small enough → reuse.
@@ -177,6 +203,46 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
         # Fall back to the polluted registry and warn.
         _warn_polluted_registry(default_host, count)
         os.environ["GRIM_TEST_REGISTRY_HOST"] = default_host
+
+
+def _require_registry(host: str) -> None:
+    """Abort the whole session when no registry answers at *host*.
+
+    Skipping instead is what this replaces, and skipping was indistinguishable
+    from passing: with an unreachable host ``tests/test_registries.py`` reported
+    ``9 passed, 21 skipped`` and **exit 0**, and CI runs plain ``task test``
+    with no ``services:`` block — so a runner where the best-effort
+    ``docker run registry:2`` fails produced a green Acceptance Tests job over
+    a suite that exercised none of the registry-backed behaviour.
+
+    Raised from ``pytest_configure``, so the failure is **one** message before
+    collection (``ERROR: …``, exit 4) rather than one identical traceback per
+    affected test — a session-scoped ``pytest.fail`` re-reports at every
+    setup, which is 55 of the 66 test modules here.
+
+    ``GRIM_ALLOW_NO_REGISTRY`` is the deliberate escape hatch for a machine
+    with no docker: it restores the old skip-and-pass behaviour, which is why
+    the message says outright that it is not a valid gate.
+    """
+    if host and _host_reachable(host):
+        return
+    if os.environ.get("GRIM_ALLOW_NO_REGISTRY"):
+        # Opt-out taken: the `registry` fixture skips, as it always did.
+        return
+    where = host or "localhost:5000"
+    raise pytest.UsageError(
+        f"no OCI registry answers at {where}, and this suite could not start "
+        f"one itself (is docker running?).\n"
+        f"\n"
+        f"Every registry-backed test would skip and the run would still exit "
+        f"0 — a green gate over nothing. Refusing to start instead.\n"
+        f"\n"
+        f"  start one:     docker run -d --rm -p 5000:5000 "
+        f"--name {_REGISTRY_CONTAINER} registry:2\n"
+        f"  use another:   GRIM_TEST_REGISTRY_HOST=<host:port> uv run pytest\n"
+        f"  skip them all: GRIM_ALLOW_NO_REGISTRY=1 uv run pytest   "
+        f"(NOT a valid quality gate — most of the suite will not run)\n"
+    )
 
 
 def _warn_polluted_registry(host: str, count: int) -> None:
@@ -242,12 +308,17 @@ def registry() -> str:  # type: ignore[return]
     import ``src.registry`` with the correct value.
 
     **Teardown**: ``pytest_unconfigure`` handles container cleanup.
+
+    **The skip below is only reachable under ``GRIM_ALLOW_NO_REGISTRY``.**
+    ``_require_registry`` has already aborted the session otherwise, so a
+    skipped registry test now means someone asked for it explicitly — it can
+    no longer be the silent default that made a broken runner look green.
     """
     from src.registry import REGISTRY_HOST
 
     host = os.environ.get("GRIM_TEST_REGISTRY_HOST", REGISTRY_HOST)
     if not _host_reachable(host):
-        pytest.skip(f"no registry reachable at {host}")
+        pytest.skip(f"no registry reachable at {host} (GRIM_ALLOW_NO_REGISTRY)")
     yield host
 
 
