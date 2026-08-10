@@ -131,7 +131,7 @@ The supported dotted keys are:
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
-| `registry.<alias>.include` | one glob pattern | A [browse filter](./configuration.md#browse-filters) narrowing what this registry shows in `grim search`, the TUI, and `grim_search`. `set` stores **exactly one** pattern, replacing the whole list — a comma is glob alternation syntax, never a separator, so nothing is split on one; a pattern carrying a comma outside a `{…}` group is stored verbatim and warned about. `set` on an entry that already carries more than one pattern **discards the rest** — exit `0`, with a warning naming the count. Write several patterns with repeated `grim config registry add --include` flags, or by hand. A pattern that is empty, whitespace-only, carries a control character, exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile exits `65` — the same set a config-file read rejects with `78`, since both compile the pattern the way the browse filter itself is built. A sixth cap bounds the whole list rather than one pattern — 64 KiB summed as compiled — reachable only through `registry add`'s accumulated flags (exit `65`) or a hand-edited file (exit `78`); a single `set` call writes one pattern and can never trip it alone. `unset` clears the list; `get` on an empty list exits `1`. |
+| `registry.<alias>.include` | one glob pattern | A [browse filter](./configuration.md#browse-filters) narrowing what this registry shows in `grim search`, the TUI, and `grim_search`. `set` stores **exactly one** pattern, replacing the whole list — a comma is glob alternation syntax, never a separator, so nothing is split on one; a pattern carrying a comma outside a `{…}` group is stored verbatim and warned about. `set` on an entry that already carries more than one pattern **discards the rest** — exit `0`, with a warning naming the count. Write several patterns with repeated `--include` flags on `grim config registry add` (new entry) or `grim config registry set` (existing one), or by hand. A pattern that is empty, whitespace-only, carries a control character, exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile exits `65` — the same set a config-file read rejects with `78`, since both compile the pattern the way the browse filter itself is built. A sixth cap bounds the whole list rather than one pattern — 64 KiB summed as compiled — reachable only through `registry add`/`set`'s accumulated flags (exit `65`) or a hand-edited file (exit `78`); a single `set` call writes one pattern and can never trip it alone. `unset` clears the list; `get` on an empty list exits `1`. |
 | `registry.<alias>.exclude` | one glob pattern | Same shape and rules as `include`, hiding matching repositories instead. Combines with `include` on the same entry and wins wherever both match. |
 
 Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
@@ -147,6 +147,9 @@ grim config registry add  hub  --index https://index.grimoire.rs
 grim config registry add  acme --oci ghcr.io/acme \
   --include 'acme/platform/**' --include 'acme/tools/**' \
   --exclude 'acme/platform/legacy/**'
+grim config registry set  acme --include 'acme/platform/**' \
+  --include 'acme/tools/**'        # edit in place; unnamed fields keep their value
+grim config registry set  acme --index https://index.acme.internal
 grim config registry use  acme     # mark as default; clears the prior default
 grim config registry show acme     # print one registry's fields
 grim config registry rm   acme
@@ -158,17 +161,34 @@ grim config registry fields        # per-registry field metadata; works with no 
 entry lists via the OCI `_catalog` endpoint, an index entry lists from a
 [package index](./package-index.md). (`--url` remains a hidden alias for
 `--oci` from before 0.7.0.) Adding an alias that already exists
-exits `64` — update the locator with `grim config set
-registry.<alias>.oci <new-ref>`, or remove and re-add.
+exits `64` — edit it with `grim config registry set <alias>` instead.
 
 `--include` / `--exclude` seed the entry's
 [browse filter](./configuration.md#browse-filters). Both are repeatable and
 accumulate; neither is ever comma-split, because a comma is glob alternation
 syntax — `--include 'acme/{platform,tools}/**'` is one pattern, not two.
-This is the only CLI path that writes a multi-pattern list: `grim config set
+These flags — on `add` for a new entry, on `set` for an existing one — are
+the only CLI path that writes a multi-pattern list: `grim config set
 registry.<alias>.include` replaces the list with exactly one pattern. Both
 flags are inert on an alias that already exists, since `add` rejects a
 duplicate with exit `64`.
+
+`registry set` edits an existing entry **in place**. It takes the same
+`--oci` / `--index` / `--include` / `--exclude` / `--default` flags as `add`,
+and applies only the ones given: an omitted flag leaves that field exactly as
+it was. A repeatable list flag replaces that whole list, so this is how a
+browse filter grows past one pattern after the entry exists. `--oci` and
+`--index` swap the entry's kind, clearing the other side. `--default` sets
+the flag and clears every other entry's, like `registry use`; it cannot
+*unset* one, since the default has to live somewhere — move it by naming
+another entry. Clearing a filter is `grim config unset
+registry.<alias>.include`, which `set` deliberately cannot express, since a
+flag given zero times means "leave it alone". An alias that does not exist
+exits `64`, as does a `set` naming no field at all.
+
+Unlike the `rm` + re-`add` round-trip it replaces, `set` keeps the entry's
+position in `[[registries]]`. That matters: when no entry declares `default`,
+the *first* one wins, so re-creating an entry could silently move the default.
 
 `registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
 
@@ -203,7 +223,7 @@ filter as a `Filters` cell carrying **counts** (`2 include, 1 exclude`, or
 `—` when unfiltered); the patterns themselves are read from `--format json`,
 which has no width to lose.
 
-The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
+The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set`. The `scope` field is `project` or `global`.
 
 ### Exit codes {#config-exit-codes}
 

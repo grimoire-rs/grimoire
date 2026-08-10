@@ -271,7 +271,7 @@ pub(crate) fn compile_pattern(pattern: &str) -> Result<Glob, globset::Error> {
 /// list, so the per-pattern caps name the offending pattern) and once over
 /// the whole list, which is the only call that can trip
 /// `MAX_PATTERN_LIST_BYTES`. An over-budget list is therefore exit **78** from
-/// a config file and exit **65** from `grim config registry add`, whose
+/// a config file and exit **65** from `grim config registry add`/`set`, whose
 /// repeated `--include`/`--exclude` flags accumulate into one list at the CLI
 /// write boundary, where nothing is written.
 ///

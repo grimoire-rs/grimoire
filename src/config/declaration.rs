@@ -265,11 +265,11 @@ pub struct RegistryConfig {
     /// repository from this registry. Affects browsing only; a direct
     /// reference to a hidden package still resolves and installs.
     ///
-    /// Several patterns need repeated `--include` flags on `grim config
-    /// registry add`; to change them on an existing entry, re-create it
-    /// with `grim config registry rm <alias>`, then `grim config registry
-    /// add`. The browsing surfaces are `grim search`, the TUI, and the MCP
-    /// `grim_search` tool.
+    /// Several patterns need repeated `--include` flags, on `grim config
+    /// registry add` for a new entry or `grim config registry set` for an
+    /// existing one — the latter edits in place, keeping the entry's
+    /// position and every field it does not name. The browsing surfaces are
+    /// `grim search`, the TUI, and the MCP `grim_search` tool.
     ///
     /// A pattern with none of `* ? [ ] { } \` auto-expands to also match
     /// everything beneath it (`acme` behaves as `acme{,/**}`); every other

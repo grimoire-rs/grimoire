@@ -1167,3 +1167,302 @@ def test_registry_add_duplicate_hostile_alias_exits_64_without_raw_override(
         f"error must still name the duplicated alias, escaped; "
         f"got: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# `registry set` — in-place edit
+# ---------------------------------------------------------------------------
+
+
+def test_registry_set_accumulates_repeated_filter_flags(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``registry set --include x --include y`` grows the list after creation.
+
+    The gap this verb closes: ``config set registry.<alias>.include`` writes
+    exactly ONE pattern and replaces the whole list, so before ``set`` there
+    was no way to author a multi-pattern filter on an entry that already
+    existed.  Repeating a flag accumulates, and a comma inside one value is
+    glob alternation that must survive as a single pattern — the same
+    contract ``registry add`` holds.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+    runner.run(
+        "config", "registry", "set", "acme",
+        "--include", "acme/platform/**",
+        "--include", "acme/{tools,labs}/**",
+        "--exclude", "acme/platform/legacy/**",
+    )
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["acme/platform/**", "acme/{tools,labs}/**"], (
+        f"repeated --include flags must accumulate in order, and brace "
+        f"alternation must survive intact; got: {shown!r}"
+    )
+    assert shown["exclude"] == ["acme/platform/legacy/**"], (
+        f"--exclude must land on the exclude side, not the include side; got: {shown!r}"
+    )
+
+
+def test_registry_set_leaves_fields_it_was_not_given(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Patch semantics: an omitted flag leaves that field exactly as it was.
+
+    A filter-only edit must not disturb the locator, the default flag, or the
+    other filter side.  This is what makes the verb safe to call from a UI
+    that only knows about the field the user touched.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme", "--default",
+        "--include", "stale/**",
+        "--exclude", "legacy/**",
+    )
+    runner.run("config", "registry", "set", "acme", "--include", "platform/**")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["platform/**"], (
+        f"the named list is replaced wholesale; got: {shown!r}"
+    )
+    assert shown["exclude"] == ["legacy/**"], (
+        f"the other filter side must be untouched; got: {shown!r}"
+    )
+    assert shown["oci"] == "ghcr.io/acme", (
+        f"an omitted locator flag must leave the locator alone; got: {shown!r}"
+    )
+    assert shown["default"] is True, (
+        f"an omitted --default must not clear the flag; got: {shown!r}"
+    )
+
+
+def test_registry_set_keeps_the_entry_in_place_so_the_default_cannot_move(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Editing the first of several entries must not move the default.
+
+    The regression this verb exists to prevent.  The previous remedy for a
+    multi-pattern edit was ``registry rm`` + re-``add``, but ``add`` appends,
+    so re-creating the FIRST entry moved it last — and with no entry
+    declaring ``default``, ``resolve_registries`` falls back to "first entry
+    wins".  A user editing a browse filter would have silently changed which
+    registry short identifiers expand against.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    for alias in ("first", "second", "third"):
+        runner.run("config", "registry", "add", alias, "--oci", f"ghcr.io/{alias}")
+
+    before = runner.json("context")["default_registry"]
+    runner.run("config", "registry", "set", "first", "--include", "platform/**")
+
+    order = [r["alias"] for r in runner.json("config", "registry", "list")["items"]]
+    assert order == ["first", "second", "third"], (
+        f"an in-place edit must not reorder [[registries]]; got: {order!r}"
+    )
+    assert runner.json("context")["default_registry"] == before, (
+        f"the implicit default must not move when an entry is edited; "
+        f"was {before!r}"
+    )
+
+
+def test_registry_set_swaps_the_locator_kind(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``--index`` on an OCI entry swaps the kind, clearing ``oci``.
+
+    ``config set registry.<alias>.index`` refuses this and tells the user to
+    unset ``oci`` first.  Here the locator flag is the whole declaration, so
+    there is nothing ambiguous to refuse.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+    runner.run(
+        "config", "registry", "set", "acme",
+        "--index", "https://index.acme.internal",
+    )
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["index"] == "https://index.acme.internal", (
+        f"the new locator must be written; got: {shown!r}"
+    )
+    assert shown["oci"] is None, (
+        f"swapping the kind must clear the other side; got: {shown!r}"
+    )
+
+
+def test_registry_set_default_leaves_exactly_one_default(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``--default`` holds the at-most-one invariant, like ``registry use``."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme", "--default",
+    )
+    runner.run("config", "registry", "add", "corp", "--oci", "registry.corp/team")
+
+    runner.run("config", "registry", "set", "corp", "--default")
+
+    items = runner.json("config", "registry", "list")["items"]
+    defaults = [r for r in items if r.get("default") is True]
+    assert len(defaults) == 1, (
+        f"exactly one registry may carry the flag; got {len(defaults)}: {defaults}"
+    )
+    assert defaults[0].get("alias") == "corp", (
+        f"'corp' must be the new default; got: {defaults[0]!r}"
+    )
+
+
+def test_registry_set_missing_alias_exits_64(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``registry set`` on an alias that does not exist exits 64.
+
+    ``set`` edits, it never creates — ``registry add`` stays the one path
+    that declares an entry, so validation lives in one place.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "registry", "set", "ghost", "--include", "a/**",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"set on a missing alias must exit 64 (UsageError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+
+
+def test_registry_set_naming_no_field_exits_64(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A ``set`` that names no field is refused rather than rewriting the file.
+
+    It would take the lock, rewrite ``grimoire.toml`` and report a change that
+    never happened.  The message routes the adjacent intent — clearing a
+    filter — to ``config unset``, which is the one edit patch semantics
+    deliberately cannot express.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+    result = runner.run("config", "registry", "set", "acme", check=False)
+
+    assert result.returncode == 64, (
+        f"a set naming no field must exit 64 (UsageError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "grim config unset" in result.stderr, (
+        f"the message must route clearing a filter to unset; "
+        f"got: {result.stderr!r}"
+    )
+
+
+def test_registry_set_with_a_bad_pattern_writes_nothing(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A rejected pattern exits 65 and leaves the entry exactly as it was.
+
+    Validation runs before the lock, so the same exit-65 gate ``registry add``
+    and ``config set`` share applies here — and a partially applied edit is
+    never observable.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme", "--include", "good/**",
+    )
+    before = (project_dir / "grimoire.toml").read_text()
+
+    result = runner.run(
+        "config", "registry", "set", "acme", "--include", "acme{unclosed",
+        check=False,
+    )
+    assert result.returncode == 65, (
+        f"an invalid pattern must exit 65 (DataError); "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert (project_dir / "grimoire.toml").read_text() == before, (
+        "a rejected pattern must leave grimoire.toml byte-identical"
+    )
+
+
+def test_registry_set_then_unset_clears_the_list_and_keeps_the_entry(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Clearing a filter is ``config unset``, and it leaves the entry intact.
+
+    ``set`` reads a flag given zero times as "leave it alone", so it cannot
+    express an empty list.  The pair is the full editing surface: ``set`` to
+    write patterns, ``unset`` to clear them.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+    runner.run(
+        "config", "registry", "set", "acme",
+        "--include", "a/**", "--include", "b/**",
+        "--exclude", "legacy/**",
+    )
+    runner.run("config", "unset", "registry.acme.include")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == [], f"unset must clear the list; got: {shown!r}"
+    assert shown["exclude"] == ["legacy/**"], (
+        f"unset must not disturb the other side; got: {shown!r}"
+    )
+    assert shown["oci"] == "ghcr.io/acme", f"the entry survives; got: {shown!r}"
+
+
+def test_registry_set_reports_registry_set_action(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """The write confirmation carries the new ``registry-set`` action.
+
+    ``value`` is single-valued, so a filter-only edit reports ``null`` rather
+    than echoing a locator the call never touched.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+
+    doc = runner.json("config", "registry", "set", "acme", "--include", "a/**")
+    assert doc["action"] == "registry-set", f"got: {doc!r}"
+    assert doc["key"] == "registry.acme", f"got: {doc!r}"
+    assert doc["value"] is None, (
+        f"a filter-only edit has no single value to report; got: {doc!r}"
+    )
+    assert doc["dry_run"] is False, f"got: {doc!r}"
+
+    doc = runner.json("config", "registry", "set", "acme", "--oci", "ghcr.io/other")
+    assert doc["value"] == "ghcr.io/other", (
+        f"a locator edit reports the new locator; got: {doc!r}"
+    )

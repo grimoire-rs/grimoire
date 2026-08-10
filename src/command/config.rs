@@ -124,6 +124,33 @@ pub enum RegistryCommand {
         #[arg(long)]
         default: bool,
     },
+    /// Edit an existing registry entry in place, leaving unnamed fields alone.
+    Set {
+        /// Alias of the registry to edit (must already exist).
+        alias: String,
+        /// Replace the OCI registry ref, clearing any `index` on the entry.
+        #[arg(long)]
+        oci: Option<String>,
+        /// Replace the package-index locator, clearing any `oci` on the entry.
+        #[arg(long, conflicts_with = "oci")]
+        index: Option<String>,
+        /// Replace the whole include list with these patterns. Repeatable and
+        /// never comma-separated, exactly as on `add`. Given zero times the
+        /// list is left untouched — clear it with `grim config unset
+        /// registry.<alias>.include`.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Replace the whole exclude list with these patterns. Same repeat and
+        /// clearing rules as `--include`.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Make this registry the default (clears any prior default). Absent
+        /// leaves the current default flag as it is — this flag cannot unset
+        /// one, because the default has to live somewhere; move it by naming
+        /// another entry.
+        #[arg(long)]
+        default: bool,
+    },
     /// Remove a registry entry by alias.
     Rm {
         /// Alias of the registry to remove.
@@ -171,6 +198,14 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 exclude,
                 default,
             } => run_registry_add(ctx, alias, oci.as_deref(), index.as_deref(), *default, include, exclude),
+            RegistryCommand::Set {
+                alias,
+                oci,
+                index,
+                include,
+                exclude,
+                default,
+            } => run_registry_set(ctx, alias, oci.as_deref(), index.as_deref(), *default, include, exclude),
             RegistryCommand::Rm { alias } => run_registry_rm(ctx, alias),
             RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
             RegistryCommand::Show { alias } => run_registry_show(ctx, alias),
@@ -507,6 +542,34 @@ fn check_set_filter_pattern(value: &str, key: &str) -> anyhow::Result<()> {
     check_filter_pattern(value, key, WriteSite::Set)
 }
 
+/// Validate the repeatable `--include` / `--exclude` values that
+/// `registry add` and `registry set` share (plan C-013).
+///
+/// Runs before the lock so a bad pattern is exit 65 with nothing written
+/// (S-016). Each flag is repeatable and accumulates; values are never split
+/// on a comma, which is glob alternation syntax — these two flags are the
+/// only CLI path that writes a multi-pattern list.
+fn check_filter_flags(alias: &str, include: &[String], exclude: &[String]) -> anyhow::Result<()> {
+    for (field, patterns) in [("include", include), ("exclude", exclude)] {
+        let key = format!("registry.{alias}.{field}");
+        for pattern in patterns {
+            check_filter_pattern(pattern, &key, WriteSite::Add)?;
+        }
+        // C-006's fourth check — the whole-list budget, which the per-pattern
+        // loop structurally cannot see: no single pattern is over any
+        // per-pattern cap. Without it the aggregate rejection reached the user
+        // only from `commit_config` → `validate_registries`, as exit **78**
+        // naming the `grimoire.toml` path for a value that arrived through
+        // `--include`/`--exclude` flags on a file nobody edited. `compile_set`
+        // is the same seam load-time validation uses, so what the two accept
+        // cannot drift; `commit_config`'s check stays the backstop for a
+        // hand-edited file.
+        crate::config::registry_filter::compile_set(patterns)
+            .map_err(|reason| super::config_value(format!("invalid value for {key}: {reason}")))?;
+    }
+    Ok(())
+}
+
 /// Warn when a one-pattern `set` discards a multi-pattern browse filter.
 ///
 /// `set` writes exactly one pattern and replaces the whole list (C-012), so
@@ -522,9 +585,9 @@ fn warn_on_discarded_patterns(alias: &str, field: RegistryField, previous: &[Str
         let shown = alias.escape_debug();
         tracing::warn!(
             "registry.{shown}.{}: `grim config set` writes ONE pattern and replaces the whole list — \
-             the {} patterns already stored are discarded, not appended to. To keep them, re-create \
-             the entry: `grim config registry rm {shown}`, then `grim config registry add` with \
-             repeated --include/--exclude flags; or edit `grimoire.toml` by hand.",
+             the {} patterns already stored are discarded, not appended to. To write several, use \
+             `grim config registry set {shown}` with repeated --include/--exclude flags, which edits \
+             the entry in place; or edit `grimoire.toml` by hand.",
             field.field_name(),
             previous.len()
         );
@@ -1257,39 +1320,19 @@ fn run_registry_add(
         // The filter clause is not decoration: this message is where a user
         // adding a second `--include` to an existing entry lands, and
         // without it they read "use `config set` instead" — which replaces
-        // the whole list rather than appending to it (B-2). Re-creating the
-        // entry is the only sequence that writes a multi-pattern filter.
+        // the whole list rather than appending to it (B-2). `registry set`
+        // takes the same repeated flags this invocation already carries, so
+        // naming it turns the error into a one-word edit.
         return Err(super::config_usage(format!(
-            "registry '{shown}' already exists; use `grim config set registry.{shown}.oci <ref>` \
-             to update or `grim config registry rm {shown}` to remove — and to change its browse \
-             filter, re-create it with `grim config registry rm {shown}` then `grim config \
-             registry add` with repeated --include/--exclude flags, since `grim config set \
-             registry.{shown}.include` writes ONE pattern and replaces the whole list"
+            "registry '{shown}' already exists; edit it in place with `grim config registry set \
+             {shown}`, which takes these same --oci/--index/--include/--exclude/--default flags, \
+             or remove it with `grim config registry rm {shown}`. To change its browse filter use \
+             that verb's repeated --include/--exclude flags, not `grim config set \
+             registry.{shown}.include`, which writes ONE pattern and replaces the whole list"
         )));
     }
 
-    // Browse filters (plan C-013), validated before the lock so a bad pattern
-    // is exit 65 with nothing written (S-016). Each flag is repeatable and
-    // accumulates; values are never split on a comma, which is glob
-    // alternation syntax — this is the only CLI path that writes a
-    // multi-pattern list.
-    for (field, patterns) in [("include", include), ("exclude", exclude)] {
-        let key = format!("registry.{alias}.{field}");
-        for pattern in patterns {
-            check_filter_pattern(pattern, &key, WriteSite::Add)?;
-        }
-        // C-006's fourth check — the whole-list budget, which the per-pattern
-        // loop structurally cannot see: no single pattern is over any
-        // per-pattern cap. Without it the aggregate rejection reached the user
-        // only from `commit_config` → `validate_registries`, as exit **78**
-        // naming the `grimoire.toml` path for a value that arrived through
-        // `--include`/`--exclude` flags on a file nobody edited. `compile_set`
-        // is the same seam load-time validation uses, so what the two accept
-        // cannot drift; `commit_config`'s check stays the backstop for a
-        // hand-edited file.
-        crate::config::registry_filter::compile_set(patterns)
-            .map_err(|reason| super::config_value(format!("invalid value for {key}: {reason}")))?;
-    }
+    check_filter_flags(alias, include, exclude)?;
 
     let _guard = acquire_config_lock(&scope)?;
 
@@ -1316,6 +1359,125 @@ fn run_registry_add(
             action: WriteAction::RegistryAdded,
             key: format!("registry.{alias}"),
             value: Some(locator.to_string()),
+            scope: origin,
+            dry_run: false,
+        }),
+        ExitCode::Success,
+    ))
+}
+
+/// Edit an existing registry entry **in place**, leaving unnamed fields alone.
+///
+/// Patch semantics: a flag given replaces its field, a flag absent leaves it
+/// untouched. A repeatable list flag replaces that whole list, so this is the
+/// one write path that can grow a browse filter past a single pattern —
+/// `config set registry.<alias>.include` writes exactly one and discards the
+/// rest (C-012).
+///
+/// Holding the entry's index is the point of the verb. The old remedy for a
+/// multi-pattern edit was `registry rm` + re-`add`, but `add` *pushes*, so
+/// re-creating an entry moves it last, and `resolve_registries` falls back to
+/// "first entry wins" when no entry declares `default` — the round-trip could
+/// silently move the default out from under a config that never named one.
+/// `set_registry_field` mutates the entry where it already sits, so it cannot.
+///
+/// `--default` only ever *sets* the flag (clearing every other entry's, like
+/// `registry use`). There is deliberately no way to unset it here: the default
+/// has to live somewhere, so it moves by naming another entry.
+fn run_registry_set(
+    ctx: &Context,
+    alias: &str,
+    oci: Option<&str>,
+    index: Option<&str>,
+    make_default: bool,
+    include: &[String],
+    exclude: &[String],
+) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    // Unlike `add`, neither locator flag is the "leave it alone" case; clap's
+    // `conflicts_with` rejects both at once, so only three shapes reach here.
+    let locator = match (oci, index) {
+        (Some(u), None) => Some((u, false)),
+        (None, Some(i)) => Some((i, true)),
+        _ => None,
+    };
+
+    // A `set` naming no field would take the lock, rewrite the file and report
+    // a change that never happened. Exit 64 instead — the same class as a
+    // missing alias, and the one thing clap cannot express as an arg rule.
+    if locator.is_none() && !make_default && include.is_empty() && exclude.is_empty() {
+        return Err(super::config_usage(format!(
+            "nothing to change for registry '{}'; name at least one of \
+             --oci/--index, --include, --exclude, --default. To clear a browse \
+             filter use `grim config unset registry.{}.include`",
+            alias.escape_debug(),
+            alias.escape_debug()
+        )));
+    }
+
+    if let Some((locator, is_index)) = locator {
+        reject_control_chars(locator, if is_index { "registry.index" } else { "registry.oci" })?;
+        if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
+            // Escaped like its `add` and `apply_set` twins: the control-char
+            // guard on the line before does not match bidi and zero-width
+            // format characters, which reach this message intact.
+            return Err(super::config_value(format!(
+                "invalid index locator '{}': must be an http(s):// base or a \
+                 git repository (git+…, ssh://, git@…, or ending in .git)",
+                locator.escape_debug()
+            )));
+        }
+    }
+
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
+    let origin = scope_to_origin(scope.scope);
+
+    // Before the pattern checks, mirroring `add`'s duplicate-alias ordering:
+    // `registry set <missing> --include '<malformed>'` is a usage error about
+    // the alias, not a value error about a pattern with nowhere to go.
+    if !scope.registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
+        return Err(super::config_usage(format!(
+            "no registry '{}'; add it with `grim config registry add`",
+            alias.escape_debug()
+        )));
+    }
+
+    check_filter_flags(alias, include, exclude)?;
+
+    let _guard = acquire_config_lock(&scope)?;
+
+    let mut registries = scope.registries.clone();
+
+    if make_default {
+        clear_all_defaults(&mut registries);
+        set_registry_default(&mut registries, alias, true);
+    }
+    if let Some((locator, is_index)) = locator {
+        // Swapping the kind clears the other side. `config set
+        // registry.<a>.index` refuses this and tells the user to unset `oci`
+        // first; here the locator flag *is* the whole declaration, so there is
+        // nothing ambiguous to refuse — and an entry carrying both would fail
+        // `validate_registries` on the way out anyway.
+        set_registry_field(&mut registries, alias, |rc| {
+            rc.oci = (!is_index).then(|| locator.to_string());
+            rc.index = is_index.then(|| locator.to_string());
+        });
+    }
+    if !include.is_empty() {
+        set_registry_field(&mut registries, alias, |rc| rc.include = include.to_vec());
+    }
+    if !exclude.is_empty() {
+        set_registry_field(&mut registries, alias, |rc| rc.exclude = exclude.to_vec());
+    }
+
+    commit_config(&scope, &scope.options, &registries)?;
+
+    Ok((
+        ConfigReport::Write(ConfigWriteReport {
+            action: WriteAction::RegistrySet,
+            key: format!("registry.{alias}"),
+            // The locator is the only single-valued field a caller can have
+            // changed; a filter-only edit has no one value to report.
+            value: locator.map(|(l, _)| l.to_string()),
             scope: origin,
             dry_run: false,
         }),
@@ -2778,8 +2940,12 @@ mod tests {
         );
         assert!(logs.contains('2'), "the discarded count must be named: {logs}");
         assert!(
-            logs.contains("grim config registry rm acme"),
-            "the only sequence that rebuilds a multi-pattern list must be named: {logs}"
+            logs.contains("grim config registry set acme"),
+            "the verb that writes a multi-pattern list must be named: {logs}"
+        );
+        assert!(
+            logs.contains("--include"),
+            "and the repeated flags that do it, since the verb alone is not the fix: {logs}"
         );
         assert_eq!(
             registries[0].include,
@@ -3218,9 +3384,10 @@ mod tests {
     fn duplicate_alias_message_names_the_browse_filter_path() {
         // B-2: the message named only `oci` and `rm`, so a user adding a
         // second `--include` to an existing entry read it as "use `config
-        // set` instead" — and that path replaces the whole list. The one
-        // sequence that rebuilds a multi-pattern filter has to be here,
-        // because this is where the user lands.
+        // set` instead" — and that path replaces the whole list. The verb
+        // that rebuilds a multi-pattern filter has to be here, because this
+        // is where the user lands. It now names `registry set`, which takes
+        // the very flags the refused invocation already carried.
         let (_tmp, _config_path, ctx) = project_scope();
         run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
             .map(|_| ())
@@ -3243,7 +3410,290 @@ mod tests {
         );
         assert!(
             msg.contains("--include"),
-            "re-creating with repeated flags is the only working sequence: {msg}"
+            "repeated flags are the only sequence that writes a multi-pattern list: {msg}"
+        );
+        assert!(
+            msg.contains("registry set"),
+            "the in-place edit verb is where the user has to be sent: {msg}"
+        );
+    }
+
+    /// Three aliased entries, none of them declaring `default` — the shape
+    /// where position is load-bearing, since `resolve_registries` falls back
+    /// to "first entry wins".
+    fn three_entries(ctx: &Context) {
+        for alias in ["first", "second", "third"] {
+            run_registry_add(ctx, alias, Some(&format!("ghcr.io/{alias}")), None, false, &[], &[])
+                .map(|_| ())
+                .expect("seed add must succeed");
+        }
+    }
+
+    #[test]
+    fn registry_set_keeps_the_entry_where_it_was() {
+        // The reason this verb exists. The old remedy was `rm` + re-`add`,
+        // but `add` pushes, so editing the FIRST of three would land it last
+        // — and with no entry declaring `default`, "first entry wins" would
+        // hand the default to a registry the user never named. Editing in
+        // place cannot, so the assertion is on the index, not the value.
+        let (_tmp, config_path, ctx) = project_scope();
+        three_entries(&ctx);
+        run_registry_set(&ctx, "first", None, None, false, &["platform/**".to_string()], &[])
+            .map(|_| ())
+            .expect("editing the first entry must succeed");
+
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        let order: Vec<_> = scope.registries.iter().filter_map(|r| r.alias.as_deref()).collect();
+        assert_eq!(
+            order,
+            vec!["first", "second", "third"],
+            "an in-place edit must not reorder `[[registries]]`"
+        );
+        assert_eq!(scope.registries[0].include, vec!["platform/**".to_string()]);
+    }
+
+    #[test]
+    fn registry_set_leaves_every_field_it_was_not_given() {
+        // Patch semantics: the locator, the default flag and the untouched
+        // filter side all survive an edit that names only `include`.
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(
+            &ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            true,
+            &["old/**".to_string()],
+            &["legacy/**".to_string()],
+        )
+        .map(|_| ())
+        .expect("seed add must succeed");
+
+        run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            None,
+            false,
+            &["platform/**".to_string(), "{tools,libs}/**".to_string()],
+            &[],
+        )
+        .map(|_| ())
+        .expect("a filter-only edit must succeed");
+
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        let rc = find_registry(&scope.registries, "acme").expect("entry survives");
+        assert_eq!(
+            rc.include,
+            vec!["platform/**".to_string(), "{tools,libs}/**".to_string()],
+            "the whole include list is replaced, and the comma must not split"
+        );
+        assert_eq!(rc.exclude, vec!["legacy/**".to_string()], "the other side is untouched");
+        assert_eq!(rc.oci.as_deref(), Some("ghcr.io/acme"), "the locator is untouched");
+        assert!(rc.default, "an absent --default must not clear the flag");
+    }
+
+    #[test]
+    fn registry_set_swaps_the_locator_kind() {
+        // `config set registry.<a>.index` refuses this and tells the user to
+        // unset `oci` first. Here the flag is the whole declaration, so the
+        // other side is cleared rather than refused — an entry carrying both
+        // would fail `validate_registries` on the way out.
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            .map(|_| ())
+            .expect("seed add must succeed");
+        run_registry_set(&ctx, "acme", None, Some("https://index.acme.internal"), false, &[], &[])
+            .map(|_| ())
+            .expect("swapping to an index must succeed");
+
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        let rc = find_registry(&scope.registries, "acme").expect("entry survives");
+        assert_eq!(rc.index.as_deref(), Some("https://index.acme.internal"));
+        assert!(rc.oci.is_none(), "the previous locator kind must be cleared");
+    }
+
+    #[test]
+    fn registry_set_default_clears_every_other_entry() {
+        // Same invariant `registry use` holds: exactly one default.
+        let (_tmp, config_path, ctx) = project_scope();
+        three_entries(&ctx);
+        run_registry_set(&ctx, "second", None, None, true, &[], &[])
+            .map(|_| ())
+            .expect("promoting an entry must succeed");
+        run_registry_set(&ctx, "third", None, None, true, &[], &[])
+            .map(|_| ())
+            .expect("promoting another entry must succeed");
+
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        let defaults: Vec<_> = scope
+            .registries
+            .iter()
+            .filter(|r| r.default)
+            .filter_map(|r| r.alias.as_deref())
+            .collect();
+        assert_eq!(defaults, vec!["third"], "exactly one entry may carry the flag");
+    }
+
+    #[test]
+    fn registry_set_on_a_missing_alias_is_a_usage_error_whatever_the_pattern() {
+        // The mirror of `add`'s duplicate-alias ordering: the alias check
+        // runs before the pattern loop, so a malformed pattern cannot turn a
+        // 64 into a 65. Both directions pinned, as there.
+        for pattern in ["platform/**", "acme{unclosed"] {
+            let (_tmp, config_path, ctx) = project_scope();
+            let before = std::fs::read_to_string(&config_path).expect("config readable");
+            let err = run_registry_set(&ctx, "ghost", None, None, false, &[pattern.to_string()], &[])
+                .map(|_| ())
+                .expect_err("a missing alias must be refused");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                ExitCode::UsageError,
+                "the missing alias must win over the pattern check for {pattern:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config_path).expect("config readable"),
+                before,
+                "a refused set must write nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_set_rejects_an_invalid_pattern_before_writing() {
+        // The same exit-65 gate `add` and `config set` share, and the file
+        // must be untouched — validation runs before the lock.
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            .map(|_| ())
+            .expect("seed add must succeed");
+        let before = std::fs::read_to_string(&config_path).expect("config readable");
+        let err = run_registry_set(&ctx, "acme", None, None, false, &["acme{unclosed".to_string()], &[])
+            .map(|_| ())
+            .expect_err("an invalid pattern must be rejected");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            before,
+            "nothing may be written when a pattern is rejected"
+        );
+    }
+
+    #[test]
+    fn registry_set_naming_no_field_is_a_usage_error() {
+        // A no-op `set` would take the lock, rewrite the file and report a
+        // change that never happened. Clap cannot express "at least one of
+        // these", so the check lives in the handler — and the message has to
+        // name `unset`, since "give me an empty list" is the one edit the
+        // patch semantics deliberately cannot express.
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            .map(|_| ())
+            .expect("seed add must succeed");
+        let before = std::fs::read_to_string(&config_path).expect("config readable");
+        let err = run_registry_set(&ctx, "acme", None, None, false, &[], &[])
+            .map(|_| ())
+            .expect_err("a set naming no field must be refused");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
+        assert!(
+            err.to_string().contains("grim config unset"),
+            "clearing a filter is the adjacent intent, so the message must route it: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            before,
+            "a refused set must write nothing"
+        );
+    }
+
+    #[test]
+    fn registry_set_reports_the_locator_only_when_it_changed() {
+        // `ConfigWriteReport.value` is single-valued, so a filter-only edit
+        // has nothing honest to put there — null beats echoing a locator the
+        // call never touched.
+        let (_tmp, _config_path, ctx) = project_scope();
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            .map(|_| ())
+            .expect("seed add must succeed");
+
+        let (report, code) = run_registry_set(&ctx, "acme", None, None, false, &["a/**".to_string()], &[])
+            .expect("a filter-only edit must succeed");
+        assert_eq!(code, ExitCode::Success);
+        match report {
+            ConfigReport::Write(w) => {
+                assert!(matches!(w.action, WriteAction::RegistrySet));
+                assert_eq!(w.key, "registry.acme");
+                assert_eq!(w.value, None, "a filter-only edit reports no value");
+                assert!(!w.dry_run);
+            }
+            _ => panic!("expected a write report"),
+        }
+
+        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], &[])
+            .expect("a locator edit must succeed");
+        match report {
+            ConfigReport::Write(w) => assert_eq!(w.value.as_deref(), Some("ghcr.io/other")),
+            _ => panic!("expected a write report"),
+        }
+    }
+
+    #[test]
+    fn registry_set_parses_repeated_filter_flags() {
+        // The clap half of the contract, mirroring `registry add`'s: repeated
+        // flags accumulate and a comma inside a value is glob alternation,
+        // never a separator.
+        let a = parse(&[
+            "registry",
+            "set",
+            "acme",
+            "--include",
+            "acme/platform/**",
+            "--include",
+            "acme/{tools,labs}/**",
+            "--exclude",
+            "acme/platform/legacy/**",
+        ])
+        .expect("repeated filter flags must parse");
+        match a.command {
+            ConfigCommand::Registry(r) => match r.command {
+                RegistryCommand::Set {
+                    alias,
+                    oci,
+                    index,
+                    include,
+                    exclude,
+                    default,
+                } => {
+                    assert_eq!(alias, "acme");
+                    assert!(oci.is_none() && index.is_none() && !default);
+                    assert_eq!(
+                        include,
+                        vec!["acme/platform/**".to_string(), "acme/{tools,labs}/**".to_string()],
+                        "repeated --include must accumulate, and the comma must not split"
+                    );
+                    assert_eq!(exclude, vec!["acme/platform/legacy/**".to_string()]);
+                }
+                _ => panic!("expected Set"),
+            },
+            _ => panic!("expected Registry"),
+        }
+    }
+
+    #[test]
+    fn registry_set_rejects_both_locator_flags() {
+        // `conflicts_with`, same as `add` — an entry may carry only one.
+        assert!(
+            parse(&[
+                "registry",
+                "set",
+                "acme",
+                "--oci",
+                "ghcr.io/acme",
+                "--index",
+                "https://x.test"
+            ])
+            .is_err(),
+            "--oci and --index are mutually exclusive"
         );
     }
 

@@ -482,12 +482,16 @@ catalog listing capped at 500 repositories; results may be incomplete — narrow
 ```
 
 **Writing the patterns.** Hand-editing `grimoire.toml` is one way;
-[`grim config`](./commands.md#config) is the other. `grim config registry
-add <alias> --oci … --include <glob> --exclude <glob>` takes both flags
-repeatably and is the only CLI path that writes a multi-pattern list.
+[`grim config`](./commands.md#config) is the other. The repeatable
+`--include` / `--exclude` flags — on `grim config registry add <alias>` for a
+new entry, on `grim config registry set <alias>` for one that already exists —
+are the only CLI path that writes a multi-pattern list. `set` edits in place
+and applies only the flags it is given, so it changes a filter without
+disturbing the entry's locator, default flag, or position.
 `grim config set registry.<alias>.include <glob>` replaces the whole list
 with **exactly one** pattern — a comma is glob alternation syntax, never a
-separator, so nothing is ever split on one.
+separator, so nothing is ever split on one. Clearing a list is `grim config
+unset registry.<alias>.include`.
 
 Calling `set` on an entry that already carries more than one pattern
 **discards the rest**: exit `0`, with a warning naming how many were
@@ -495,7 +499,7 @@ dropped, because the surviving pattern makes the result read as an edit
 rather than a partial wipe.
 
 ```text
-registry.acme.include: `grim config set` writes ONE pattern and replaces the whole list — the 2 patterns already stored are discarded, not appended to. To keep them, re-create the entry: `grim config registry rm acme`, then `grim config registry add` with repeated --include/--exclude flags; or edit `grimoire.toml` by hand.
+registry.acme.include: `grim config set` writes ONE pattern and replaces the whole list — the 2 patterns already stored are discarded, not appended to. To write several, use `grim config registry set acme` with repeated --include/--exclude flags, which edits the entry in place; or edit `grimoire.toml` by hand.
 ```
 
 That is the same reason the `filter admitted M of N` diagnostic goes quiet
@@ -528,10 +532,11 @@ alone.
 Every one of the six is exit **78** (`EX_CONFIG`) when grim reads it from a
 config file — project or global, at either scope. At the CLI write
 boundary the split matters: the five per-pattern caps reject at exit **65**
-(`EX_DATAERR`) from either `grim config set` or `grim config registry add`,
-which write nothing in that case; the list-byte budget is reachable only
-through `grim config registry add`'s repeated `--include`/`--exclude` flags
-(also exit **65**) — a single `grim config set` call writes exactly one
+(`EX_DATAERR`) from `grim config set` or from `grim config registry
+add`/`set`, which write nothing in that case; the list-byte budget is
+reachable only through the repeated `--include`/`--exclude` flags on
+`registry add`/`set` (also exit **65**) — a single `grim config set` call
+writes exactly one
 pattern, capped well under the list budget, so it can never trip the sixth
 cap by itself. Every cap accepts the same set on both paths, because both
 run the pattern through the same compilation the browse filter itself is

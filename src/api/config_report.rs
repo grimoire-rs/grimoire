@@ -151,6 +151,8 @@ pub enum WriteAction {
     RegistryRemoved,
     /// `grim config registry use <alias>` (made default).
     RegistryDefault,
+    /// `grim config registry set <alias>` (edited in place).
+    RegistrySet,
 }
 
 impl fmt::Display for WriteAction {
@@ -161,12 +163,13 @@ impl fmt::Display for WriteAction {
             Self::RegistryAdded => "registry-added",
             Self::RegistryRemoved => "registry-removed",
             Self::RegistryDefault => "registry-default",
+            Self::RegistrySet => "registry-set",
         })
     }
 }
 
 /// Confirmation for any config write: `set`, `unset`, and the registry
-/// lifecycle verbs (`add`, `rm`, `use`).
+/// lifecycle verbs (`add`, `rm`, `use`, `set`).
 ///
 /// Plain format: one-row table — `Action | Key | Value | Scope | Dry Run`.
 ///
