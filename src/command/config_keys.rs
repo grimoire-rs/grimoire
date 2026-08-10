@@ -248,15 +248,11 @@ impl RegistryField {
             value_type: ValueType::StringList { default: None },
             title: "Include patterns",
             description: "Narrows registry browsing to repositories matching at least one of these \
-                           glob patterns. Values are never comma-split — a comma is glob alternation \
-                           — so `grim config set` writes exactly one pattern and replaces the whole \
-                           list. Several patterns need repeated `--include` flags on `grim config \
-                           registry add`; to change them on an existing entry, re-create it with \
-                           `grim config registry rm <alias>`, then `grim config registry add`. \
-                           Combines with `exclude` on the same entry — unlike Cargo's mutually \
-                           exclusive `include`/`exclude` fields. Unset (the default) shows every \
-                           repository from this registry. Affects browsing only — `grim search`, the \
-                           TUI, and `grim_search`; a direct reference to a hidden package still \
+                           glob patterns. Values are never comma-split (a comma is glob alternation), so `grim \
+                           config set` writes exactly one pattern and replaces the whole list. Combines \
+                           with `exclude` on the same entry, unlike Cargo's mutually exclusive \
+                           fields. Unset (the default) shows every repository from this registry. \
+                           Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
         };
@@ -265,15 +261,11 @@ impl RegistryField {
             value_type: ValueType::StringList { default: None },
             title: "Exclude patterns",
             description: "Hides repositories matching any of these glob patterns from registry \
-                           browsing. Values are never comma-split — a comma is glob alternation — so \
-                           `grim config set` writes exactly one pattern and replaces the whole list. \
-                           Several patterns need repeated `--exclude` flags on `grim config registry \
-                           add`; to change them on an existing entry, re-create it with `grim config \
-                           registry rm <alias>`, then `grim config registry add`. Combines with \
-                           `include` on the same entry — unlike Cargo's mutually exclusive \
-                           `include`/`exclude` fields, and wins when a repository matches both. Unset \
-                           (the default) hides nothing. Affects browsing only — `grim search`, the \
-                           TUI, and `grim_search`; a direct reference to a hidden package still \
+                           browsing. Values are never comma-split (a comma is glob alternation), so `grim \
+                           config set` writes exactly one pattern and replaces the whole list. Combines with \
+                           `include` on the same entry, unlike Cargo's mutually exclusive fields, and \
+                           wins when a repository matches both. Unset (the default) hides nothing. \
+                           Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
         };

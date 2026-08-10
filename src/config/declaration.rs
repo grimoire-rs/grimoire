@@ -258,17 +258,18 @@ pub struct RegistryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
     /// Narrows registry browsing to repositories matching at least one of
-    /// these glob patterns. Values are never comma-split — a comma is glob
-    /// alternation — so `grim config set` writes exactly one pattern and
-    /// replaces the whole list. Several patterns need repeated `--include`
-    /// flags on `grim config registry add`; to change them on an existing
-    /// entry, re-create it with `grim config registry rm <alias>`, then
-    /// `grim config registry add`. Combines with `exclude` on the same
-    /// entry — unlike Cargo's mutually exclusive `include`/`exclude`
-    /// fields. Unset (the default) shows every repository from this
-    /// registry. Affects browsing only — `grim search`, the TUI, and
-    /// `grim_search`; a direct reference to a hidden package still
-    /// resolves and installs.
+    /// these glob patterns. Values are never comma-split (a comma is glob
+    /// alternation), so `grim config set` writes exactly one pattern and
+    /// replaces the whole list. Combines with `exclude` on the same entry, unlike
+    /// Cargo's mutually exclusive fields. Unset (the default) shows every
+    /// repository from this registry. Affects browsing only; a direct
+    /// reference to a hidden package still resolves and installs.
+    ///
+    /// Several patterns need repeated `--include` flags on `grim config
+    /// registry add`; to change them on an existing entry, re-create it
+    /// with `grim config registry rm <alias>`, then `grim config registry
+    /// add`. The browsing surfaces are `grim search`, the TUI, and the MCP
+    /// `grim_search` tool.
     ///
     /// A pattern with none of `* ? [ ] { } \` auto-expands to also match
     /// everything beneath it (`acme` behaves as `acme{,/**}`); every other
@@ -282,17 +283,19 @@ pub struct RegistryConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// Hides repositories matching any of these glob patterns from
-    /// registry browsing. Values are never comma-split — a comma is glob
-    /// alternation — so `grim config set` writes exactly one pattern and
-    /// replaces the whole list. Several patterns need repeated `--exclude`
-    /// flags on `grim config registry add`; to change them on an existing
-    /// entry, re-create it with `grim config registry rm <alias>`, then
-    /// `grim config registry add`. Combines with `include` on the same
-    /// entry — unlike Cargo's mutually exclusive `include`/`exclude`
-    /// fields, and wins when a repository matches both. Unset (the
-    /// default) hides nothing. Affects browsing only — `grim search`, the
-    /// TUI, and `grim_search`; a direct reference to a hidden package
-    /// still resolves and installs.
+    /// registry browsing. Values are never comma-split (a comma is glob
+    /// alternation), so `grim config set` writes exactly one pattern and
+    /// replaces the whole list. Combines with `include` on the same entry, unlike
+    /// Cargo's mutually exclusive fields, and wins when a repository
+    /// matches both. Unset (the default) hides nothing. Affects browsing
+    /// only; a direct reference to a hidden package still resolves and
+    /// installs.
+    ///
+    /// Several patterns need repeated `--exclude` flags on `grim config
+    /// registry add`; to change them on an existing entry, re-create it
+    /// with `grim config registry rm <alias>`, then `grim config registry
+    /// add`. The browsing surfaces are `grim search`, the TUI, and the MCP
+    /// `grim_search` tool.
     ///
     /// Same auto-expansion and match-candidate rules as `include`; see its
     /// doc comment.
