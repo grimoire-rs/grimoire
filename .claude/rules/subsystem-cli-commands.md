@@ -48,9 +48,22 @@ Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
 `--offline`, `--log-level`, `--config <path>`, `--global`,
 `--registry <ref>` (repeatable / comma-separated).
 
-`login`/`logout` resolve the registry from the positional argument, else
-`--registry` / `GRIM_DEFAULT_REGISTRY` — the config `default_registry`
-option is not consulted on this path (`Context::default_registry()`).
+`login`/`logout` resolve the registry from the positional argument when
+given: an argument matching a `[[registries]]` alias substitutes that
+entry's locator, anything else is taken as a literal hostname. With no
+argument, the resolved scope's registry set supplies the primary —
+`--registry` flag > `[[registries]]` default > `GRIM_DEFAULT_REGISTRY` >
+project then global `[options].default_registry` — the same
+`resolve_registries` chain `add`/`search` use, with `--config`/`--global`
+selecting the scope as they do for every other command. Config **is**
+consulted on this path; `Context::default_registry()` is a superseded
+accessor with no production caller, so do not cite it as evidence
+otherwise. The built-in `ghcr.io/grimoire-rs` fallback is deliberately not
+substituted here — storing or erasing a credential for a registry the user
+never named is a silent surprise — so an otherwise-unresolved set exits 78.
+A global config that fails to load is fatal for `login` (78) and degrades
+for `logout`, which still recovers the alias map when the file parsed and
+only validation failed.
 They read and write the docker config at `$DOCKER_CONFIG/config.json`
 (default `~/.docker/config.json`) — the same file the credential read path
 consults — so credentials round-trip with `docker login`.
