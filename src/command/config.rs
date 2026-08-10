@@ -110,7 +110,10 @@ pub enum RegistryCommand {
         /// prefix stripped: under `--oci ghcr.io/acme`, write
         /// 'platform/**', not 'acme/platform/**'. An --index entry has no
         /// registry root to strip, so its patterns match the whole
-        /// 'registry/repository' ref instead.
+        /// 'registry/repository' ref instead. Every pattern anchors at the
+        /// START of that candidate — a wildcard-free one expands downward
+        /// only ('hex' means 'hex{,/**}'), so to match a name wherever it
+        /// sits write '**/hex'.
         #[arg(long)]
         include: Vec<String>,
         /// Browse-filter glob hiding matching repositories from this
@@ -3742,6 +3745,15 @@ mod tests {
         assert!(
             collapsed.contains("--index"),
             "the index exception must be stated, or the rule is half true:\n{collapsed}"
+        );
+        // The other half of "anchored", and the one a bare name hides: the
+        // wildcard-free expansion is a SUFFIX, so `hex` never matches
+        // `ghcr.io/acme/arcana/hex`. On an index entry — whose candidate is
+        // the whole ref — that makes a bare name match nothing at all, which
+        // reads as the filter being broken rather than mis-anchored.
+        assert!(
+            collapsed.contains("'**/hex'"),
+            "the help must give the leading-`**/` form for 'match it wherever it sits':\n{collapsed}"
         );
     }
 

@@ -394,6 +394,28 @@ auto-expands to also match everything beneath it, so `acme/platform` behaves
 as `acme/platform{,/**}` — the common case needs no wildcards at all. Every
 other pattern is used verbatim.
 
+**The expansion grows downward only, never leftward.** `acme/platform`
+becomes `acme/platform{,/**}` — a suffix — so it still has to match the
+candidate from its very first segment. It is not a search for a name
+appearing anywhere. This is the shape that surprises people, because a bare
+name reads like one:
+
+| Pattern | Candidate | Matches? |
+|---|---|---|
+| `hex` | `hex` | yes |
+| `hex` | `hex/core` | yes — the `{,/**}` half |
+| `hex` | `ghcr.io/acme/arcana/hex` | **no** — nothing expands to the left |
+| `**/hex` | `ghcr.io/acme/arcana/hex` | yes |
+| `**/hex*` | `ghcr.io/acme/arcana/hex-core` | yes |
+
+Write a leading `**/` when you mean "wherever it lives". The trap bites
+hardest on an [index](./package-index.md) entry, whose candidate is the whole
+`registry/repository` reference (see "Patterns are relative to their own
+entry's locator" below): there, a bare `hex` matches nothing at all, and
+`ghcr.io/acme/**` or `**/hex*` is what you meant. grim says so when it
+happens — `filter admitted 0 of 12 repositories` — so treat that warning as
+this table.
+
 A backslash escapes the metacharacter after it — `acme\*x` matches the
 literal `acme*x` — and it does so **identically on every platform**,
 including Windows. `grimoire.toml` is a file teams commit and share, so one
