@@ -18,9 +18,12 @@
 //!
 //! Because `set_global_default` is one-shot, the [`SwitchableWriter`] is
 //! installed once at startup and mutated in place — no double-init and no
-//! new subscriber ever created. Tests that call `init_tracing` in the same
-//! process must guard against the one-shot panic, hence
-//! [`init_tracing_for_tests`].
+//! new subscriber ever created. Tests never reach that path: `init_tracing`
+//! is private to `main.rs` and runs once per process, so a capture test
+//! installs a *scoped* subscriber with `tracing::subscriber::set_default`
+//! instead — after calling [`tracing_capture::arm`], which keeps the
+//! one-shot interest cache from memoizing `never` before that subscriber
+//! exists.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -461,6 +464,13 @@ mod tests {
     /// prevent, one level up: a capture helper added in an unlisted file would
     /// go unguarded with the list — and the whole suite — still green.
     /// Deriving the set means a new call site is covered the moment it lands.
+    ///
+    /// Both needles are **assembled at runtime** for the same reason. Written
+    /// as literals they occur in this file, which forced the walk to skip
+    /// `log_switch.rs` — exempting the one file where an unguarded helper is
+    /// most likely to appear, since it owns the guard and the harness. Split
+    /// across a `concat`, neither full needle occurs in any source file, so
+    /// nothing is exempt and this file is scanned like every other.
     #[test]
     fn every_capture_helper_arms_the_interest_guard_t2() {
         fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -480,16 +490,16 @@ mod tests {
             &mut files,
         );
 
+        // Assembled, never written whole — see the doc comment. `concat` runs
+        // at test time, so neither string below appears in any source file.
+        let helper_needle = ["tracing::subscriber::", "set_default("].concat();
+        let guard_needle = ["tracing_capture::", "arm();"].concat();
+
         let mut total_helpers = 0;
         for path in files {
-            // This file spells both needles as literals; counting itself would
-            // only assert on the assertion.
-            if path.ends_with("log_switch.rs") {
-                continue;
-            }
             let source = std::fs::read_to_string(&path).expect("every source file is UTF-8");
-            let helpers = source.matches("tracing::subscriber::set_default(").count();
-            let guards = source.matches("tracing_capture::arm();").count();
+            let helpers = source.matches(helper_needle.as_str()).count();
+            let guards = source.matches(guard_needle.as_str()).count();
             assert_eq!(
                 helpers,
                 guards,
