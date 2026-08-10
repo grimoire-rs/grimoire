@@ -461,43 +461,40 @@ impl RegistryFilter {
     }
 }
 
-/// Derive the source-relative match candidate for one catalog row (plan
-/// C-005, ADR D3):
+/// The match candidate for one catalog row: **the repository path**, with the
+/// registry host and nothing else removed.
 ///
 /// ```text
-/// repo      = "{registry}/{repository}"
-/// candidate = repo.strip_prefix("{source_url}/").unwrap_or(repo)
+/// candidate = repository        // "ghcr.io/acme/platform/foo" -> "acme/platform/foo"
 /// ```
 ///
-/// Equals the second element of `tree::display_split`
-/// (`src/tui/tree.rs:592`) for the same row **only when no other configured
-/// source's url is a prefix of this row** — a later WP asserts that case in
-/// a test so the two cannot drift. `display_split` strips the longest match
-/// across the *whole* configured set, this strips the declaring entry's own
-/// url, so with both `ghcr.io` and `ghcr.io/acme` configured
-/// `ghcr.io/acme/tools/foo` displays as `tools/foo` while the `ghcr.io`
-/// entry matches it as `acme/tools/foo`. Deliberate: a pattern means the
-/// same thing wherever its entry's url points (plan C-005, ADR D3).
+/// One rule for both source kinds. The entry's own `oci`/`index` locator is
+/// deliberately NOT an input, which is the whole point:
 ///
-/// An index source has no single registry root to be relative to, so its
-/// candidate is the fully-qualified ref (the `strip_prefix` falls through
-/// to `repo` unchanged).
-pub(crate) fn browse_candidate(source_url: &str, registry: &str, repository: &str) -> String {
-    let repo = format!("{registry}/{repository}");
-    // `oci = "ghcr.io/acme/"` passes validation, and an unstripped trailing
-    // slash made the `strip_prefix('/')` below fail — every candidate fell
-    // through to the fully-qualified ref, silently disabling the entry's
-    // filter (an exclude-only entry then fails OPEN, with no diagnostic).
-    // Same normalization `registry_resolve::normalize_locator` already
-    // applies for dedup, so this introduces no new concept.
-    let source_url = source_url.trim_end_matches('/');
-    // Two `strip_prefix` calls rather than one against `format!("{source_url}/")`:
-    // same result, one allocation instead of three on the fall-through, and
-    // this runs per catalog row.
-    match repo.strip_prefix(source_url).and_then(|r| r.strip_prefix('/')) {
-        Some(relative) => relative.to_string(),
-        None => repo,
-    }
+/// - Editing a locator can no longer re-aim the patterns written against it.
+///   Under the old locator-relative rule, moving `oci = "ghcr.io/acme"` to
+///   `oci = "ghcr.io"` silently turned `include = ["platform/**"]` into a
+///   filter matching nothing — a valid config, exit 0, empty catalog.
+/// - A case difference between the locator and the row's registry can no
+///   longer make the strip quietly not fire, disabling an entry's filter (an
+///   exclude-only entry then failed OPEN, with no diagnostic).
+/// - An `oci` and an `index` entry now agree, so one pattern means one thing
+///   wherever it is written — the goal ADR D3 stated and locator-relativity
+///   only approximated, since `platform/**` meant different rows on
+///   `ghcr.io/acme` than on `ghcr.io`.
+///
+/// Accepted cost: an index whose rows span two registry HOSTS cannot tell them
+/// apart — `ghcr.io/acme/tools` and `quay.io/acme/tools` are both
+/// `acme/tools`. Confined to that case: a filter is only ever applied to rows
+/// from its own source (`catalog_service`), so two `[[registries]]` entries
+/// never contend, whatever they point at.
+///
+/// This does **not** equal `tree::display_split`'s second element, which
+/// strips the longest locator across the whole configured set. The tree is a
+/// display; this is a path matcher. They agreed only conditionally before, so
+/// dropping the pretence removes a caveat rather than a guarantee.
+pub(crate) fn browse_candidate(repository: &str) -> String {
+    repository.to_string()
 }
 
 #[cfg(test)]
@@ -1009,40 +1006,36 @@ mod tests {
     // ── C-005: candidate derivation ──────────────────────────────────
 
     #[test]
-    fn browse_candidate_three_row_table() {
-        // Plan C-005 / ADR D3, the plan's own worked table. The drift
-        // assertion against `tree::display_split` for the same row cannot
-        // be authored from this file: `display_split` is `pub(super)`
-        // (visible only inside `crate::tui`, not from `crate::config`), and
-        // `src/tui/tree.rs` is WP-D's file in the plan's parallelization
-        // table (test-only), not WP-A's — see the specify-phase report's
-        // design-gap section.
-        assert_eq!(
-            browse_candidate("ghcr.io", "ghcr.io", "acme/platform/foo"),
-            "acme/platform/foo"
-        );
-        assert_eq!(
-            browse_candidate("ghcr.io/acme", "ghcr.io", "acme/platform/foo"),
-            "platform/foo"
-        );
-        assert_eq!(
-            browse_candidate("https://index.grimoire.rs", "ghcr.io", "acme/foo"),
-            "ghcr.io/acme/foo"
-        );
+    fn browse_candidate_is_the_repository_path_whatever_the_source() {
+        // The rule, and the fact that it is ONE rule: an `oci` entry at any
+        // depth and an `index` entry all yield the same candidate for the
+        // same row, because the entry's own locator is not an input.
+        assert_eq!(browse_candidate("acme/platform/foo"), "acme/platform/foo");
+        assert_eq!(browse_candidate("acme/foo"), "acme/foo");
     }
 
     #[test]
-    fn browse_candidate_ignores_a_trailing_slash_on_the_source_url() {
-        // `oci = "ghcr.io/acme/"` passes validation, and without the trim
-        // the second `strip_prefix('/')` failed and every candidate fell
-        // through to the fully-qualified ref — silently disabling an
-        // exclude-only filter, which fails OPEN with no diagnostic.
-        for source_url in ["ghcr.io/acme", "ghcr.io/acme/", "ghcr.io/acme//"] {
-            assert_eq!(
-                browse_candidate(source_url, "ghcr.io", "acme/platform/foo"),
-                "platform/foo",
-                "a trailing '/' on {source_url:?} must not change the candidate"
+    fn browse_candidate_never_carries_the_registry_host() {
+        // The host is what an index's rows differ in, and the one thing this
+        // rule gives up. Pinned so a future "just prepend the registry for
+        // index rows" cannot reintroduce the oci/index asymmetry unnoticed.
+        for repository in ["acme/platform/foo", "michael-herwig/arcana/hex"] {
+            let candidate = browse_candidate(repository);
+            assert!(
+                !candidate.contains("ghcr.io") && !candidate.contains('.'),
+                "the candidate must be a bare repository path; got {candidate:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_locator_edit_cannot_re_aim_an_existing_pattern() {
+        // The footgun this rule exists to remove: under locator-relativity,
+        // moving `oci = "ghcr.io/acme"` to `oci = "ghcr.io"` re-pointed every
+        // pattern in the entry, so `include = ["acme/platform/**"]` silently
+        // matched nothing — valid config, exit 0, empty catalog. The locator
+        // is no longer an input, so there is nothing left to re-aim.
+        let filter = RegistryFilter::new(&["acme/platform/**".to_string()], &[]).expect("the pattern must compile");
+        assert!(filter.matches(&browse_candidate("acme/platform/foo")));
     }
 }

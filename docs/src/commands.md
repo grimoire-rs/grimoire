@@ -740,7 +740,7 @@ naming the source and the counts, but **only on the unqueried browse** —
 `grim search` with no query, or a TUI load:
 
 ```text
-registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+registry 'acme': filter admitted 0 of 148 repositories; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters
 ```
 
 That line fires when a non-empty `include` list contributed **nothing** from

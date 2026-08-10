@@ -314,15 +314,13 @@ index; each consumer declares what it wants to see:
 [[registries]]
 alias = "acme"
 index = "https://index.acme.internal"
-include = ["ghcr.io/acme/platform/**", "ghcr.io/acme/tools/**"]
-exclude = ["ghcr.io/acme/platform/legacy/**"]
+include = ["acme/platform/**", "acme/tools/**"]
+exclude = ["acme/platform/legacy/**"]
 ```
 
-The patterns above are fully qualified with the registry the index points
-into (`ghcr.io`) rather than written as bare `acme/platform/**` — an index
-entry's own locator never appears in the string a pattern is matched
-against, for reasons "Patterns are relative to their own entry's locator"
-further down explains in full.
+The patterns above carry no registry host: a pattern is matched against the
+row's repository path, whatever the entry's own locator is, as "Patterns
+match the repository path" further down explains in full.
 
 A repository is shown when the `include` list is empty **or** at least one
 `include` pattern matches it, **and** no `exclude` pattern matches. The two
@@ -404,17 +402,16 @@ name reads like one:
 |---|---|---|
 | `hex` | `hex` | yes |
 | `hex` | `hex/core` | yes — the `{,/**}` half |
-| `hex` | `ghcr.io/acme/arcana/hex` | **no** — nothing expands to the left |
-| `**/hex` | `ghcr.io/acme/arcana/hex` | yes |
-| `**/hex*` | `ghcr.io/acme/arcana/hex-core` | yes |
+| `hex` | `acme/arcana/hex` | **no** — nothing expands to the left |
+| `**/hex` | `acme/arcana/hex` | yes |
+| `**/hex*` | `acme/arcana/hex-core` | yes |
+| `acme/**` | `acme/arcana/hex` | yes |
 
-Write a leading `**/` when you mean "wherever it lives". The trap bites
-hardest on an [index](./package-index.md) entry, whose candidate is the whole
-`registry/repository` reference (see "Patterns are relative to their own
-entry's locator" below): there, a bare `hex` matches nothing at all, and
-`ghcr.io/acme/**` or `**/hex*` is what you meant. grim says so when it
-happens — `filter admitted 0 of 12 repositories` — so treat that warning as
-this table.
+Write a leading `**/` when you mean "wherever it lives", and a namespace
+prefix when you mean "everything under this owner". A bare name only ever
+means "this exact path, and what is beneath it". grim says so when a filter
+misses everything — `filter admitted 0 of 12 repositories` — so treat that
+warning as this table.
 
 A backslash escapes the metacharacter after it — `acme\*x` matches the
 literal `acme*x` — and it does so **identically on every platform**,
@@ -423,46 +420,50 @@ pattern has to mean one thing on every checkout; grim pins that rather than
 inheriting the platform-dependent default its glob engine would otherwise
 apply.
 
-**Patterns are relative to their own entry's locator.** A pattern is matched
-against the row's `registry/repository` with *this* entry's own `oci` /
-`index` url stripped from the front — never against the fully-qualified
-reference:
+**Patterns match the repository path.** A pattern is tested against the
+row's `repository` — the reference with the registry host removed, and
+nothing else removed. The entry's own `oci` / `index` locator is not an
+input:
 
 | This entry's locator | Catalog row | Pattern matches against |
 |---|---|---|
 | `ghcr.io` | `ghcr.io/acme/platform/foo` | `acme/platform/foo` |
-| `ghcr.io/acme` | `ghcr.io/acme/platform/foo` | `platform/foo` |
-| `https://index.grimoire.rs` | `ghcr.io/acme/foo` | `ghcr.io/acme/foo` |
+| `ghcr.io/acme` | `ghcr.io/acme/platform/foo` | `acme/platform/foo` |
+| `https://index.grimoire.rs` | `ghcr.io/acme/foo` | `acme/foo` |
 
-An index source has no single registry root to be relative to, so its
-candidate is the whole reference — which is also what its tree root already
-shows.
+One rule for both source kinds, and the same answer at every locator depth.
+The practical consequences are all of the "it silently stopped matching"
+class, and they are gone:
 
-That is usually the same string the [TUI][grim-tui] tree prints beneath the
-source's root, but the two are not the same rule and they diverge when one
-configured locator nests inside another. The tree strips the **longest**
-locator across every configured entry; a pattern strips only its **own**.
-With both `ghcr.io` and `ghcr.io/acme` declared, the row
-`ghcr.io/acme/tools/foo` *displays* under the `ghcr.io/acme` root as
-`tools/foo`, while the `ghcr.io` entry's filter sees `acme/tools/foo` — so a
-pattern on the `ghcr.io` entry must be written `acme/tools/**`, not
-`tools/**`. The locality is deliberate: a pattern means the same thing
-wherever its own entry points, so adding or removing an unrelated
-`[[registries]]` entry can never silently re-aim a filter you already wrote.
+- **Editing an entry's own locator cannot re-aim its patterns.** Moving
+  `oci = "ghcr.io/acme"` to `oci = "ghcr.io"` used to change what every
+  pattern in that entry was matched against, so an `include` that had worked
+  for months began matching nothing — valid config, exit `0`, empty catalog.
+- **A case difference between locator and row no longer matters.** It used to
+  make the prefix strip quietly not fire, disabling the entry's filter.
+- **A pattern is portable.** Copying `acme/platform/**` between two entries —
+  at different depths, or from an `oci` entry to an `index` one — means the
+  same thing in both.
 
-Editing an entry's **own** locator does re-aim every pattern in it. Moving
-`oci = "ghcr.io/acme"` to `oci = "ghcr.io"` turns the candidate
-`platform/foo` into `acme/platform/foo`, and `include = ["platform/**"]`
-then matches nothing. A difference in **case** has the same effect — it
-passes validation untouched, and the prefix strip simply never fires.
-(A trailing slash, `oci = "ghcr.io/acme/"`, is *not* one of these: it is
-trimmed before the strip, so the entry filters exactly as it would without
-one.) Copying a pattern between two entries whose locators differ in depth
-fails the same way as a depth change. The one signal is a warning naming the
-source and the counts:
+The accepted cost is narrow: an index whose rows span two registry **hosts**
+cannot tell them apart, since `ghcr.io/acme/tools` and `quay.io/acme/tools`
+are both `acme/tools`. Two `[[registries]]` entries never contend, whatever
+they point at — a filter is only ever applied to rows served by its own
+source.
+
+This is deliberately **not** the string the [TUI][grim-tui] tree prints
+beneath a source's root. The tree attributes a row to the **longest**
+configured locator, so with both `ghcr.io` and `ghcr.io/acme` declared the
+row `ghcr.io/acme/tools/foo` *displays* as `tools/foo` while every filter
+matches it as `acme/tools/foo`. The tree is a display and reshapes itself as
+you add sources; a pattern must not. Write patterns from the reference, not
+from the tree.
+
+When a pattern does miss, the signal is a warning naming the source and the
+counts:
 
 ```text
-registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+registry 'acme': filter admitted 0 of 148 repositories; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters
 ```
 
 grim emits it once per affected source per browse, for **one shape only**: a

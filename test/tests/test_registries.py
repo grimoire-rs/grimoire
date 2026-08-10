@@ -884,6 +884,18 @@ def _toml_list(patterns: tuple[str, ...]) -> str:
     return "[" + ", ".join(f'"{p}"' for p in patterns) + "]"
 
 
+def _ns_rel(ns: str, *patterns: str) -> tuple[str, ...]:
+    """Anchor ns-relative patterns onto the repository path grim matches.
+
+    A pattern is tested against the row's repository path — the reference
+    with the registry HOST removed and nothing else removed — so a filter on
+    a source rooted at ``<host>/<ns>`` still has to name ``<ns>`` itself. The
+    entry's own locator is not an input, which is why this is spelled at the
+    call site rather than derived from it.
+    """
+    return tuple(f"{ns}/{p}" for p in patterns)
+
+
 def _filtered_config(
     project_dir: Path,
     ns: str,
@@ -962,7 +974,12 @@ def test_browse_filter_narrows_search_to_the_declared_patterns(
     """
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_filter_tree(ns)
-    _filtered_config(project_dir, ns, include=include, exclude=exclude)
+    _filtered_config(
+        project_dir,
+        ns,
+        include=_ns_rel(ns, *include),
+        exclude=_ns_rel(ns, *exclude),
+    )
 
     runner = grim_at(project_dir)
     assert _visible_candidates(runner, ns) == expected
@@ -990,7 +1007,7 @@ def test_zero_match_filter_warns_on_stderr_and_still_exits_zero(
     _publish_skill(f"{ns}/internal/thing", "thing")
     # Nothing under this namespace is called `nope`, so the include list
     # admits 0 of the 2 repositories the source lists.
-    _filtered_config(project_dir, ns, include=("nope/**",))
+    _filtered_config(project_dir, ns, include=_ns_rel(ns, "nope/**"))
 
     runner = grim_at(project_dir)
     result = runner.run("--format", "json", "search", "--refresh", check=False)
@@ -1046,7 +1063,7 @@ def test_status_check_ignores_the_browse_filter(
         annotations={"com.grimoire.deprecated": "use new-skill instead"},
     )
     _publish_skill(f"{ns}/keeper", "keeper")
-    _filtered_config(project_dir, ns, exclude=("old-skill",))
+    _filtered_config(project_dir, ns, exclude=_ns_rel(ns, "old-skill"))
 
     runner = grim_at(project_dir)
 
@@ -1059,7 +1076,7 @@ def test_status_check_ignores_the_browse_filter(
     assert_dir_exists(project_dir / ".claude" / "skills" / "old-skill")
     # `grim add` re-serializes grimoire.toml; the filter must survive that
     # round-trip, or the rest of this test would pass for the wrong reason.
-    assert 'exclude = ["old-skill"]' in (project_dir / "grimoire.toml").read_text(), (
+    assert f'exclude = ["{ns}/old-skill"]' in (project_dir / "grimoire.toml").read_text(), (
         "write_config must preserve the authored browse filter"
     )
 
@@ -1093,7 +1110,7 @@ def test_registry_flag_bypasses_the_configured_filter(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_skill(f"{ns}/platform/foo", "foo")
     _publish_skill(f"{ns}/internal/thing", "thing")
-    _filtered_config(project_dir, ns, include=("nope/**",))
+    _filtered_config(project_dir, ns, include=_ns_rel(ns, "nope/**"))
 
     runner = grim_at(project_dir)
     rows = runner.json("search", "--registry", f"{REGISTRY_HOST}/{ns}", "--refresh")["items"]
@@ -1305,7 +1322,7 @@ def test_zero_match_warning_never_pairs_with_the_catalog_gate_hint_h4(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_skill(f"{ns}/platform/foo", "foo")
     _publish_skill(f"{ns}/internal/thing", "thing")
-    _filtered_config(project_dir, ns, include=("nope/**",))
+    _filtered_config(project_dir, ns, include=_ns_rel(ns, "nope/**"))
 
     runner = grim_at(project_dir)
     filtered = runner.run("search", "--refresh", check=False)
@@ -1363,7 +1380,9 @@ def test_exclude_that_removes_nothing_stays_silent(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_skill(f"{ns}/platform/foo", "foo")
     _publish_skill(f"{ns}/platform/bar", "bar")
-    _filtered_config(project_dir, ns, exclude=("grim-test/**",))
+    # Written without the namespace the repository path actually carries, so
+    # it looks like it should match every row and matches none.
+    _filtered_config(project_dir, ns, exclude=("platform/**",))
 
     runner = grim_at(project_dir)
     result = runner.run("search", "--refresh", check=False)
@@ -1449,7 +1468,9 @@ def test_excluded_reference_still_locks_and_installs_s015(
         "[[registries]]\n"
         'alias = "acme"\n'
         f'oci = "{REGISTRY_HOST}/{ns}"\n'
-        'exclude = ["hidden/**"]\n'
+        # Anchored on the repository path, which carries the namespace — the
+        # entry's own locator is not what a pattern is matched against.
+        f'exclude = ["{ns}/hidden/**"]\n'
         "default = true\n"
         "\n[skills]\n"
         f'secret-skill = "{REGISTRY_HOST}/{ns}/hidden/secret-skill:latest"\n'

@@ -106,14 +106,14 @@ pub enum RegistryCommand {
         /// direct reference to a hidden package still resolves and installs.
         /// Repeatable, never comma-separated — a comma is glob alternation
         /// syntax, so `--include '{platform,tools}/**'` is one pattern.
-        /// Matched against the repository path with this entry's own --oci
-        /// prefix stripped: under `--oci ghcr.io/acme`, write
-        /// 'platform/**', not 'acme/platform/**'. An --index entry has no
-        /// registry root to strip, so its patterns match the whole
-        /// 'registry/repository' ref instead. Every pattern anchors at the
-        /// START of that candidate — a wildcard-free one expands downward
-        /// only ('hex' means 'hex{,/**}'), so to match a name wherever it
-        /// sits write '**/hex'.
+        /// Matched against the row's REPOSITORY PATH — the reference with the
+        /// registry host removed and nothing else removed. Under
+        /// `--oci ghcr.io/acme` and under `--index`, alike, the row
+        /// 'ghcr.io/acme/platform/foo' is matched as 'acme/platform/foo', so
+        /// this entry's own locator never changes what a pattern means. Every
+        /// pattern anchors at the START of that path — a wildcard-free one
+        /// expands downward only ('hex' means 'hex{,/**}'), so to match a name
+        /// wherever it sits write '**/hex'.
         #[arg(long)]
         include: Vec<String>,
         /// Browse-filter glob hiding matching repositories from this
@@ -3730,21 +3730,24 @@ mod tests {
 
     #[test]
     fn registry_add_help_states_how_a_pattern_is_anchored() {
-        // W-16 / H-2: locator-relativity is the rule users get wrong most —
-        // the project's own docs taught `acme/platform/**` against an entry
-        // whose own locator is `ghcr.io/acme`, which matches nothing. The
-        // help must say what a pattern is matched against, for BOTH source
-        // kinds: `--oci` strips its own prefix, `--index` has no registry
-        // root to strip so its candidate stays fully qualified
-        // (`registry_filter::browse_candidate`).
+        // W-16 / H-2: what a pattern is matched against is the rule users get
+        // wrong most, so `--help` has to state it rather than defer to the
+        // docs. Both halves are pinned: the candidate is the repository path
+        // (`registry_filter::browse_candidate`), and it is the SAME for an
+        // `--oci` and an `--index` entry — the asymmetry that used to exist
+        // here is exactly what sent people to a pattern matching nothing.
         let collapsed = registry_add_help().split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            collapsed.contains("'platform/**', not 'acme/platform/**'"),
-            "the --oci example must show the stripped form beside the wrong one:\n{collapsed}"
+            collapsed.contains("'ghcr.io/acme/platform/foo' is matched as 'acme/platform/foo'"),
+            "the help must show a worked row, not just name the rule:\n{collapsed}"
         );
         assert!(
             collapsed.contains("--index"),
-            "the index exception must be stated, or the rule is half true:\n{collapsed}"
+            "both source kinds must be named, or the reader assumes one differs:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("locator never changes what a pattern means"),
+            "locator-independence is the property people rely on when editing:\n{collapsed}"
         );
         // The other half of "anchored", and the one a bare name hides: the
         // wildcard-free expansion is a SUFFIX, so `hex` never matches

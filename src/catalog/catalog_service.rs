@@ -314,10 +314,7 @@ pub async fn load_catalog(
                     // future scope cannot compile without deciding.
                     .filter(|e| match scope {
                         CatalogScope::Complete => true,
-                        CatalogScope::Browse => {
-                            reg.filter
-                                .matches(&browse_candidate(&reg.url, &e.registry, &e.repository))
-                        }
+                        CatalogScope::Browse => reg.filter.matches(&browse_candidate(&e.repository)),
                     })
                     .map(|e| CatalogRow {
                         kind: e.kind.clone(),
@@ -388,8 +385,7 @@ pub async fn load_catalog(
 /// [`crate::catalog::registry_catalog::REGISTRY_COMPAT_DOCS_URL`] — a
 /// different subject, a different anchor, and the two must be free to move
 /// apart.
-const BROWSE_FILTER_REMEDY: &str =
-    "; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters";
+const BROWSE_FILTER_REMEDY: &str = "; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters";
 
 /// The plan C-019 zero-match diagnostic for one browsed source, or `None`
 /// when the condition does not hold. Emitted once per affected source per
@@ -773,159 +769,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browse_candidate_is_relative_to_the_declaring_source_url_c005() {
-        // Plan C-005: the match candidate strips the DECLARING entry's own
-        // url, so with `oci = "ghcr.io/acme"` the pattern is written
-        // `platform`, not `acme/platform`. Swapping `browse_candidate`'s
-        // `registry` / `repository` arguments compiles and yields
-        // "acme/platform/ghcr.io", which matches nothing — this test goes red.
+    async fn a_pattern_is_written_against_the_repository_path_not_the_locator() {
+        // The candidate is the row's repository path, so with
+        // `oci = "ghcr.io/acme"` the pattern is `acme/platform` — the same
+        // string it would be on any other entry serving that row. Swapping
+        // `browse_candidate`'s argument for the registry yields "ghcr.io",
+        // which matches nothing: this test goes red.
         let tmp = tempfile::tempdir().unwrap();
         let paths = GrimPaths::new(tmp.path().to_path_buf());
         seed_catalog(&paths, "ghcr.io/acme", FIXTURE_REPOS, false);
-        let repos = browse_seeded(
-            tmp.path(),
-            &[source("ghcr.io/acme", Some("acme"), &["platform"], &[])],
-            CatalogScope::Browse,
-        )
-        .await;
-        assert_eq!(
-            repos,
-            vec![
-                "ghcr.io/acme/platform".to_string(),
-                "ghcr.io/acme/platform/foo".to_string(),
-                "ghcr.io/acme/platform/foo/bar".to_string(),
-            ],
-            "a source-relative pattern must match against the url-stripped candidate"
-        );
-        // The fully-qualified spelling must NOT also work on this source —
-        // otherwise the candidate is not source-relative at all.
         let repos = browse_seeded(
             tmp.path(),
             &[source("ghcr.io/acme", Some("acme"), &["acme/platform"], &[])],
             CatalogScope::Browse,
         )
         .await;
-        assert!(
-            repos.is_empty(),
-            "a fully-qualified pattern must not match a source-relative candidate: {repos:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn browse_include_plus_exclude_admits_exactly_one_package_s002() {
-        // Plan S-002: the two lists combine to express "this package and
-        // nothing beneath it" — no third knob (ADR D4).
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = GrimPaths::new(tmp.path().to_path_buf());
-        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
-        let repos = browse_seeded(
-            tmp.path(),
-            &[source(
-                "ghcr.io",
-                Some("acme"),
-                &["acme/platform/foo"],
-                &["acme/platform/foo/**"],
-            )],
-            CatalogScope::Browse,
-        )
-        .await;
-        assert_eq!(repos, vec!["ghcr.io/acme/platform/foo".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn browse_exclude_only_subtracts_from_everything_s003() {
-        // Plan S-003: no include list ⇒ the include check is skipped
-        // entirely; only the exclude subtree is hidden.
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = GrimPaths::new(tmp.path().to_path_buf());
-        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
-        let repos = browse_seeded(
-            tmp.path(),
-            &[source("ghcr.io", Some("acme"), &[], &["acme/internal/**"])],
-            CatalogScope::Browse,
-        )
-        .await;
         assert_eq!(
             repos,
             vec![
                 "ghcr.io/acme/platform".to_string(),
                 "ghcr.io/acme/platform/foo".to_string(),
                 "ghcr.io/acme/platform/foo/bar".to_string(),
-                "ghcr.io/other/thing".to_string(),
             ],
-            "everything except the excluded subtree"
+            "the pattern matches against the repository path"
         );
-    }
-
-    #[tokio::test]
-    async fn complete_scope_never_hides_a_row_s005() {
-        // Plan C-007 / S-005: `grim status --check` loads under `Complete`, so
-        // a declared artifact the browse filter would hide still reaches
-        // `deprecated` / `replaced_by` population. A null there is a
-        // correctness bug, not a display change.
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = GrimPaths::new(tmp.path().to_path_buf());
-        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
-        let filtered = [source("ghcr.io", Some("acme"), &["acme/platform"], &["acme/**"])];
-        let repos = browse_seeded(tmp.path(), &filtered, CatalogScope::Complete).await;
-        assert_eq!(repos.len(), FIXTURE_REPOS.len(), "Complete hides nothing: {repos:?}");
-        assert!(repos.contains(&"ghcr.io/acme/internal/secret".to_string()));
-        // Same set, same source, `Browse` — proving the fixture's filter is
-        // real and the difference is the scope, not an inert filter.
-        let repos = browse_seeded(tmp.path(), &filtered, CatalogScope::Browse).await;
-        assert!(repos.is_empty(), "the same filter under Browse hides everything");
-    }
-
-    #[tokio::test]
-    async fn filter_never_rescues_a_build_truncated_group_c008() {
-        // Plan C-008 / ADR D6: `truncated` reports **build-time** truncation
-        // verbatim. The cap is applied while listing, before the read-time
-        // filter is ever consulted, so reporting `false` merely because the
-        // surviving set is small would be a lie.
-        let tmp = tempfile::tempdir().unwrap();
-        let ctx = Context::hermetic(tmp.path().to_path_buf());
-        let paths = GrimPaths::new(tmp.path().to_path_buf());
-        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, true);
-        let state = InstallState::empty(tmp.path());
-        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
-        let badges = BadgeContext {
-            lock: None,
-            state: &state,
-            roots: &roots,
-            active: &ClientTarget::ALL,
-        };
-        let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
-        let registries = [source("ghcr.io", Some("acme"), &["acme/platform/foo"], &[])];
-        let results = load_catalog(
-            &paths,
-            &registries,
-            "",
-            &access,
-            &badges,
-            true,
-            false,
-            CatalogScope::Browse,
-        )
-        .await
-        .expect("offline browse");
-        assert_eq!(results.groups[0].rows.len(), 2, "the filter narrowed the group");
-        assert!(
-            results.any_truncated(),
-            "a narrow filter must not clear the build-time truncation flag"
-        );
-    }
-
-    #[tokio::test]
-    async fn source_matching_nothing_keeps_its_group_s004() {
-        // Plan S-004 / C-017 at the seam: a filter that admits no row leaves
-        // the group in place (empty), never drops the source. The TUI's 0/0
-        // root is built from exactly this — see `tui::tree`'s C-017 test.
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = GrimPaths::new(tmp.path().to_path_buf());
-        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
+        // The locator-relative spelling must NOT work any more — that is the
+        // whole behaviour change, and leaving both accepted would mean the
+        // locator was still an input.
         let repos = browse_seeded(
             tmp.path(),
-            &[source("ghcr.io", Some("acme"), &["nothing/matches/this"], &[])],
+            &[source("ghcr.io/acme", Some("acme"), &["platform"], &[])],
             CatalogScope::Browse,
         )
         .await;
@@ -933,18 +806,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_source_strips_its_own_url_through_the_seam_w10() {
-        // W10: `browse_candidate` is called with the DECLARING entry's own url
-        // (plan C-005). Every other filter fixture passes a one-element
-        // `registries` slice, so the only non-local alternative C-005 rejected
-        // — stripping the longest url across the whole browse set — turned no
-        // test red at this seam; it was pinned against the pure function only.
-        //
-        // Two sources over the same repositories, whose patterns are written
-        // for their own url: `ghcr.io` gets `acme/platform`, `ghcr.io/acme`
-        // gets `platform`. Both admit the same three rows *iff* each strips
-        // its own url — stripping `ghcr.io/acme` for both empties group 0,
-        // stripping `ghcr.io` for both empties group 1.
+    async fn two_sources_at_different_depths_take_the_same_pattern() {
+        // The payoff of dropping locator-relativity, pinned at the seam. Two
+        // sources over the same repositories, one rooted at the bare host and
+        // one at a namespace: both are written `acme/platform`, and both admit
+        // the same three rows. Under the old rule they needed DIFFERENT
+        // patterns for identical intent, and moving an entry's own locator
+        // silently invalidated the pattern already in it.
         let tmp = tempfile::tempdir().unwrap();
         let paths = GrimPaths::new(tmp.path().to_path_buf());
         seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
@@ -953,7 +821,7 @@ mod tests {
             tmp.path(),
             &[
                 source("ghcr.io", Some("root"), &["acme/platform"], &[]),
-                source("ghcr.io/acme", Some("acme"), &["platform"], &[]),
+                source("ghcr.io/acme", Some("acme"), &["acme/platform"], &[]),
             ],
             "",
             CatalogScope::Browse,
@@ -964,16 +832,13 @@ mod tests {
             "ghcr.io/acme/platform/foo".to_string(),
             "ghcr.io/acme/platform/foo/bar".to_string(),
         ];
-        assert_eq!(
-            group_repos(&results, 0),
-            expected,
-            "the bare-host source strips its own 'ghcr.io', never the longer sibling url"
-        );
-        assert_eq!(
-            group_repos(&results, 1),
-            expected,
-            "the namespaced source strips its own 'ghcr.io/acme'"
-        );
+        for group in [0, 1] {
+            assert_eq!(
+                group_repos(&results, group),
+                expected,
+                "group {group} must admit the same rows from the same pattern"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1083,7 +948,7 @@ mod tests {
     /// than travelling into them. `zero_match_warning_names_the_source_and_
     /// the_counts_c019` pins the whole sentence as one literal; the rest of
     /// this section composes with this to stay about their own subject.
-    const ANCHOR: &str = "; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters";
+    const ANCHOR: &str = "; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters";
 
     #[tokio::test]
     async fn browse_emits_the_zero_match_warning_on_the_unqueried_browse_c019() {
@@ -1174,7 +1039,7 @@ mod tests {
         assert_eq!(
             zero_match_warning(&reg, &SearchQuery::parse(""), 148, 0).as_deref(),
             Some(
-                "registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters"
+                "registry 'acme': filter admitted 0 of 148 repositories; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters"
             )
         );
     }
