@@ -133,8 +133,17 @@ fn resolve_login_registry_reporting(
 ) -> anyhow::Result<(String, bool)> {
     let (registries, global_config_dropped) = login_registries(ctx, policy)?;
     if let Some(reg) = explicit.filter(|r| !r.is_empty()) {
-        let matched = registries.iter().find(|r| r.alias.as_deref() == Some(reg));
-        if matched.is_none() && global_config_dropped {
+        if let Some(matched) = registries.iter().find(|r| r.alias.as_deref() == Some(reg)) {
+            return Ok((matched.url.clone(), global_config_dropped));
+        }
+        if global_config_dropped {
+            if let Some(url) = salvaged_alias(ctx, reg) {
+                tracing::warn!(
+                    "'{}' resolved from the invalid global config's [[registries]]; only its alias map was used",
+                    reg.escape_debug()
+                );
+                return Ok((url, global_config_dropped));
+            }
             // The degrade WARN above says an alias declared in the global
             // config "will not substitute" — in the abstract. It never says
             // *this* invocation is that case, which is the one where exit 0
@@ -145,8 +154,7 @@ fn resolve_login_registry_reporting(
                 reg.escape_debug()
             );
         }
-        let registry = matched.map_or_else(|| reg.to_string(), |r| r.url.clone());
-        return Ok((registry, global_config_dropped));
+        return Ok((reg.to_string(), global_config_dropped));
     }
     match crate::config::registry_resolve::primary_registry(&registries) {
         "" => Err(anyhow::Error::from(crate::error::Error::from(
@@ -154,6 +162,30 @@ fn resolve_login_registry_reporting(
         ))),
         primary => Ok((primary.to_string(), global_config_dropped)),
     }
+}
+
+/// The url an alias names in a global config that **parsed** but failed
+/// validation, or `None` when there is nothing to salvage.
+///
+/// The narrow half of the `Lenient` degrade. Dropping the whole global tier
+/// made `grim logout <alias>` fall through to a host literally named
+/// `<alias>`, erase nothing, and exit **0** — success reported for work not
+/// done, on a credential path. The alias map does not depend on the rules
+/// `validate_registries` enforces: at most one default, unique aliases and
+/// one locator per entry say nothing about which url a given alias names.
+///
+/// **Only the alias map is recovered, never a primary registry.** Which
+/// entry is primary *is* decided by the rule that failed — and
+/// [`crate::config::resolve_registries`] falls back to "first entry wins"
+/// when none sets `default`, so feeding these entries back into it would let
+/// a broken file elect a primary. A bare `logout` against a broken global
+/// config therefore still resolves nothing and exits 78, exactly as before.
+fn salvaged_alias(ctx: &crate::context::Context, alias: &str) -> Option<String> {
+    crate::config::global_config::GlobalConfig::registries_unvalidated(&ctx.paths().global_config())
+        .into_iter()
+        .find(|entry| entry.alias.as_deref() == Some(alias))
+        .map(|entry| entry.locator().to_string())
+        .filter(|url| !url.is_empty())
 }
 
 /// The registry set `login`/`logout` resolve aliases and the configured
@@ -178,7 +210,7 @@ fn login_registries(
     ctx: &crate::context::Context,
     policy: GlobalConfigPolicy,
 ) -> anyhow::Result<(Vec<crate::config::ResolvedRegistry>, bool)> {
-    let scope = scope_resolution::resolve(ctx, false, None).ok();
+    let scope = scope_resolution::resolve(ctx, ctx.global(), ctx.config()).ok();
     let assembled = match &scope {
         Some(scope) => registries_for_scope(ctx, scope),
         None => registries_global_fallback(ctx),
@@ -850,6 +882,13 @@ mod tests {
     const INVALID_GLOBAL_CONFIG: &str = "[[registries]]\noci = \"ghcr.io/a\"\ndefault = true\n\n\
          [[registries]]\noci = \"ghcr.io/b\"\ndefault = true\n";
 
+    /// Valid TOML that `validate_registries` rejects (two `default = true`)
+    /// which *also* declares the alias a user would log out of. The
+    /// distinction from [`INVALID_GLOBAL_CONFIG`] is the whole point of the
+    /// salvage: the alias map does not depend on the rule that was broken.
+    const INVALID_GLOBAL_CONFIG_WITH_ALIAS: &str = "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/acme\"\ndefault = true\n\n\
+         [[registries]]\noci = \"ghcr.io/b\"\ndefault = true\n";
+
     /// A hermetic context whose `$GRIM_HOME` holds the given global config.
     fn ctx_with_global_config(tmp: &tempfile::TempDir, body: &str) -> Context {
         std::fs::write(tmp.path().join("grimoire.toml"), body).unwrap();
@@ -994,6 +1033,83 @@ mod tests {
                 "a {shape} global config is a config error (78) for login: {err:#}"
             );
         }
+    }
+
+    /// The `logout` half of W-S4, narrowed. A global config that *parsed*
+    /// and only failed validation still carries a usable alias map — the
+    /// at-most-one-default rule it broke has nothing to do with which url an
+    /// alias names. Dropping the whole tier there made `grim logout acme`
+    /// resolve to a host literally named `acme`, erase nothing, and exit 0:
+    /// success reported for work not done, on a credential path.
+    ///
+    /// An *unparseable* config is the boundary and stays literal — there is
+    /// no alias map to salvage, only bytes that are not TOML.
+    ///
+    /// The disclosure flag stays `true` in both shapes: the validated tier
+    /// really was dropped (`default_registry` with it), and only alias
+    /// substitution is recovered.
+    #[test]
+    fn a_validation_failure_still_substitutes_an_alias_the_config_declares() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_global_config(&tmp, INVALID_GLOBAL_CONFIG_WITH_ALIAS);
+        let (registry, dropped) = resolve_login_registry_lenient(&ctx, Some("acme")).expect("logout is never blocked");
+        assert_eq!(
+            registry, "ghcr.io/acme",
+            "a config that parsed still names this alias; erasing the credential for a host \
+             literally called 'acme' is a silent no-op reported as success"
+        );
+        assert!(
+            dropped,
+            "the validated tier was still dropped — only the alias map is salvaged"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_global_config(&tmp, UNPARSEABLE_GLOBAL_CONFIG);
+        let (registry, dropped) = resolve_login_registry_lenient(&ctx, Some("acme")).expect("logout is never blocked");
+        assert_eq!(
+            registry, "acme",
+            "bytes that are not TOML carry no alias map; the argument stays literal"
+        );
+        assert!(dropped, "an unparseable global config still drops the tier");
+
+        // The line between salvage and trusting the file: *which* entry is
+        // primary is decided by the very rule that failed, so a bare
+        // `logout` recovers nothing and still errors.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_global_config(&tmp, INVALID_GLOBAL_CONFIG_WITH_ALIAS);
+        let err = resolve_login_registry_lenient(&ctx, None)
+            .expect_err("a salvaged alias map must not also elect a primary registry");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::ConfigError,
+            "unchanged from before the salvage: no registry resolves (78): {err:#}"
+        );
+    }
+
+    /// `login`/`logout` resolved their scope with `resolve(ctx, false, None)`
+    /// — `--global` and `--config` hardcoded away, while every other command
+    /// passes `ctx.global()` / `ctx.config()`. So `grim --config <path>
+    /// logout` silently resolved against a walk-up from the current
+    /// directory instead of the file the user named.
+    #[test]
+    fn bare_logout_honours_the_config_flag_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let config = project.join("grimoire.toml");
+        std::fs::write(
+            &config,
+            "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/acme\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(config));
+        assert_eq!(
+            resolve_login_registry(&ctx, None, GlobalConfigPolicy::Strict)
+                .expect("the named config declares a default registry"),
+            "ghcr.io/acme",
+            "`--config` must select the config `logout` resolves against, as it does for every \
+             other command"
+        );
     }
 
     #[test]

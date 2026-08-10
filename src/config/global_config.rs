@@ -41,6 +41,45 @@ impl GlobalConfig {
         })
     }
 
+    /// The `[[registries]]` of `$GRIM_HOME/grimoire.toml` exactly as
+    /// authored, skipping every check [`Self::load`] applies.
+    ///
+    /// Salvage for one caller: `logout`'s lenient degrade, where the
+    /// validating load has **already failed**. A config that parsed and only
+    /// failed validation still carries a usable alias map — the rules
+    /// `validate_registries` enforces (at most one default, unique aliases,
+    /// exactly one locator) say nothing about which url a given alias names —
+    /// and dropping it made `grim logout <alias>` erase a credential for a
+    /// host literally named `<alias>`, exit 0, and report success.
+    ///
+    /// Anything unreadable or unparseable yields an empty list: there is no
+    /// alias map to salvage, only bytes.
+    ///
+    /// **This is not the second global-config load `W-S2` forbids** (see
+    /// `command::tests::the_global_config_is_loaded_from_exactly_one_seam_ws2`).
+    /// That rule exists because a load compiles every browse-filter glob, so
+    /// a second one doubles attacker-controlled CPU. This runs only on the
+    /// path where the first load *errored*, and it validates nothing — so it
+    /// compiles no glob, and the doubling it guards against cannot occur.
+    /// Do not "unify" it with `load`; the whole point is that it skips the
+    /// step that failed.
+    pub fn registries_unvalidated(path: &Path) -> Vec<RegistryConfig> {
+        /// Only the array matters here; every other key is ignored rather
+        /// than rejected, so an unrelated bad table cannot suppress the
+        /// salvage.
+        #[derive(serde::Deserialize)]
+        struct RawRegistries {
+            #[serde(default)]
+            registries: Vec<RegistryConfig>,
+        }
+
+        config::read_capped(path)
+            .ok()
+            .and_then(|content| toml::from_str::<RawRegistries>(&content).ok())
+            .map(|raw| raw.registries)
+            .unwrap_or_default()
+    }
+
     /// Load `$GRIM_HOME/grimoire.toml`.
     ///
     /// An absent file yields an empty config (not an error). Any other
