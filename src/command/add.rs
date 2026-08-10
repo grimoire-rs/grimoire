@@ -141,15 +141,15 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // `[[registries]]` / `[options].default_registry` > global config > the
     // built-in fallback). The expanded identifier is always fully-qualified,
     // so the config and lock persist the registry host explicitly.
-    let registries = super::registries_for_scope(ctx, &scope);
-    // Index sources cannot expand short ids (their locator is not a
-    // registry host), so the documented short-id chain supplies the
-    // registry when the browse set has no OCI primary.
-    let short_id_default = super::resolve_default_registry(
-        ctx,
-        scope.options.default_registry.as_deref(),
-        super::global_config_default(ctx, scope.scope).as_deref(),
-    );
+    //
+    // Both come from ONE global-config load: reading the browse set and the
+    // short-id default separately re-loads it, and on this branch a load
+    // compiles every browse-filter glob (see
+    // `command::registries_and_short_id_default`). Index sources cannot expand
+    // short ids — their locator is not a registry host — which is why the
+    // second answer follows the documented short-id chain rather than the
+    // browse set's primary.
+    let (registries, short_id_default) = super::registries_and_short_id_default(ctx, &scope)?;
     let id = super::grim(crate::config::resolve_reference(
         &args.reference,
         &registries,
@@ -973,6 +973,15 @@ pub(crate) fn write_config(
         if let Some(index) = &rc.index {
             let _ = writeln!(out, "index = {}", toml::Value::String(index.clone()));
         }
+        // Browse filters (plan C-015), in struct order between the locator
+        // and `default`. Emitted only when non-empty so an unfiltered entry
+        // stays byte-identical to one written before filters existed.
+        for (key, patterns) in [("include", &rc.include), ("exclude", &rc.exclude)] {
+            if !patterns.is_empty() {
+                let list = toml::Value::Array(patterns.iter().cloned().map(toml::Value::String).collect());
+                let _ = writeln!(out, "{key} = {list}");
+            }
+        }
         if rc.default {
             let _ = writeln!(out, "default = true");
         }
@@ -1251,12 +1260,14 @@ mod tests {
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
                 default: true,
+                ..Default::default()
             },
             RegistryConfig {
                 alias: None,
                 oci: Some("registry.corp/team".to_string()),
                 index: None,
                 default: false,
+                ..Default::default()
             },
         ];
         write_config(&path, &ConfigOptions::default(), &registries, &set).unwrap();
@@ -1264,6 +1275,64 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
         assert_eq!(cfg.registries, registries, "registries must round-trip verbatim");
+    }
+
+    #[test]
+    fn write_config_round_trips_every_registry_field() {
+        // Plan C-015 tripwire. The emitter is hand-rolled, so a field added
+        // to `RegistryConfig` but not to it is silently DELETED by the next
+        // `grim add` / `grim remove` / `grim config set` / `grim config
+        // registry` verb — exit 0, reporting success. `include`/`exclude`
+        // shipped that way until this landed.
+        //
+        // Every field is written out explicitly with NO `..Default::default()`:
+        // that is the tripwire. A new field breaks this test at COMPILE time
+        // (missing field in initializer), before it can reach the silent
+        // data-loss path at runtime. Do not "fix" a future break by adding
+        // `..Default::default()` here — add the emitter arm.
+        use crate::config::declaration::RegistryConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let registries = vec![RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: None,
+            include: vec!["platform".to_string(), "tools/*".to_string()],
+            exclude: vec!["platform/legacy/**".to_string()],
+            default: true,
+        }];
+        write_config(&path, &ConfigOptions::default(), &registries, &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        assert_eq!(cfg.registries, registries, "every registry field must survive: {body}");
+    }
+
+    #[test]
+    fn write_config_omits_filters_when_unset() {
+        // The companion to the tripwire: an entry with no filter must not
+        // grow an `include = []` / `exclude = []` line, so an unfiltered
+        // config is byte-identical to one written before filters existed.
+        use crate::config::declaration::RegistryConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let registries = vec![RegistryConfig {
+            oci: Some("ghcr.io/acme".to_string()),
+            ..Default::default()
+        }];
+        write_config(&path, &ConfigOptions::default(), &registries, &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("include"),
+            "unfiltered entry must not emit include: {body}"
+        );
+        assert!(
+            !body.contains("exclude"),
+            "unfiltered entry must not emit exclude: {body}"
+        );
     }
 
     #[test]
@@ -1364,6 +1433,7 @@ mod tests {
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
             default: true,
+            ..Default::default()
         }];
         let opts = ConfigOptions {
             vendors: Default::default(),
@@ -1558,6 +1628,7 @@ tree_separators_typo = 1
             oci: Some("array.example".to_string()),
             index: None,
             default: true,
+            ..Default::default()
         }];
         write_config(&path, &opts, &registries, &set).unwrap();
 

@@ -79,7 +79,9 @@ pub struct LoginArgs {
 /// 69, explicit `--verify` while offline 81 — nothing stored in any of
 /// these), or a credential-store failure (auth/I/O tiers).
 pub async fn run(ctx: &Context, args: &LoginArgs) -> anyhow::Result<(LoginReport, ExitCode)> {
-    let registry = super::resolve_login_registry(ctx, args.host.as_deref())?;
+    // Strict: storing a credential against a registry set grim could not
+    // fully assemble risks writing the secret to the wrong host.
+    let registry = super::resolve_login_registry(ctx, args.host.as_deref(), super::GlobalConfigPolicy::Strict)?;
 
     // Credential input blocks on a TTY / stdin read, so it runs on the
     // blocking pool — never parking an async worker thread (quality-rust.md).
@@ -250,6 +252,32 @@ mod tests {
     #[test]
     fn registry_is_optional_at_parse() {
         parse(&[]).expect("registry optional (resolved at runtime)");
+    }
+
+    /// Wiring guard for the `login`/`logout` asymmetry: `login` must resolve
+    /// under [`super::super::GlobalConfigPolicy::Strict`], so a global config
+    /// that fails to load stops it at 78 **before** any credential is read or
+    /// stored. `logout` is deliberately lenient (see
+    /// `command::tests::logout_resolves_an_explicit_host_over_a_broken_global_config`);
+    /// swapping the two here would send a secret to a host resolved from a
+    /// registry set grim could not assemble.
+    #[tokio::test]
+    async fn run_refuses_a_broken_global_config_before_reading_a_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[[registries]]\noci = \"ghcr.io/a\"\ndefault = true\n\n[[registries]]\noci = \"ghcr.io/b\"\ndefault = true\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let err = run(&ctx, &parse(&["ghcr.io"]).expect("parses"))
+            .await
+            .expect_err("an invalid global config must stop login");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::ConfigError,
+            "login must fail at the config tier (78), not fall through to a credential prompt: {err:#}"
+        );
     }
 
     /// Regression: `LoginArgs::host` must not share a clap argument id with

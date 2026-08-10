@@ -57,21 +57,19 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     // home) — everything then reports `authenticated: false`. Never spawns a
     // credential helper.
     let cred_store = DockerCredentialStore::new(StoreOptions::default()).ok();
-    let registries = super::registries_for_scope(ctx, &scope)
+    let resolved = super::registries_for_scope(ctx, &scope)?;
+    // The default is read off the set already resolved above rather than
+    // through `primary_registry_for_scope`, which resolves a second time
+    // (S-8): that recompiled every entry's `GlobSet` again and printed each
+    // filter's diagnostics twice for one `grim context`.
+    let default_registry = default_registry_of(&resolved);
+    let registries = resolved
         .into_iter()
-        .map(|r| ContextRegistry {
-            authenticated: cred_store.as_ref().is_some_and(|s| s.has_credential(&r.url)),
-            alias: r.alias,
-            kind: if r.kind.is_index() {
-                ContextRegistryKind::Index
-            } else {
-                ContextRegistryKind::Registry
-            },
-            default: r.is_default,
-            url: r.url,
+        .map(|r| {
+            let authenticated = cred_store.as_ref().is_some_and(|s| s.has_credential(&r.url));
+            context_registry(r, authenticated)
         })
         .collect();
-    let default_registry = super::primary_registry_for_scope(ctx, &scope);
 
     // `Context::offline` folds flag and env; the ambient env var is
     // reported as the source whenever it is set (it applies regardless of
@@ -118,9 +116,105 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     Ok((report, ExitCode::Success))
 }
 
+/// The reported default registry for an already-resolved browse set.
+///
+/// The same composition [`super::primary_registry_for_scope`] applies —
+/// including the push-side substitution for an index-only set, where
+/// `primary_registry` has no registry-kind entry to return.
+fn default_registry_of(registries: &[crate::config::ResolvedRegistry]) -> String {
+    super::or_fallback_registry(crate::config::registry_resolve::primary_registry(registries))
+}
+
+/// Project one resolved browse source into its report row.
+///
+/// The browse filter's patterns are read straight off the resolved entry
+/// (plan C-020) rather than re-read from `grimoire.toml`: resolution is
+/// what decides whether a filter applies at all, so a second config read
+/// here would report configured patterns under `--registry`, where the
+/// forced browse set is genuinely unfiltered (plan C-009, S-014/S-019).
+fn context_registry(r: crate::config::ResolvedRegistry, authenticated: bool) -> ContextRegistry {
+    ContextRegistry {
+        authenticated,
+        include: r.filter.include_patterns().to_vec(),
+        exclude: r.filter.exclude_patterns().to_vec(),
+        alias: r.alias,
+        kind: if r.kind.is_index() {
+            ContextRegistryKind::Index
+        } else {
+            ContextRegistryKind::Registry
+        },
+        default: r.is_default,
+        url: r.url,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::declaration::RegistryConfig;
+    use crate::config::resolve_registries;
+
+    /// One project entry filtered on both sides.
+    fn filtered_entry() -> RegistryConfig {
+        RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: None,
+            include: vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()],
+            exclude: vec!["acme/platform/legacy/**".to_string()],
+            default: true,
+        }
+    }
+
+    #[test]
+    fn context_registry_reports_each_side_from_its_own_list() {
+        // Plan C-020 / S-019: the authored patterns, in declaration order,
+        // read back off the resolved entry's compiled filter. Swapping the
+        // two fields here inverts an allowlist into a denylist in the one
+        // report a JSON consumer trusts, and fails this assertion.
+        let resolved = resolve_registries(&[], &[filtered_entry()], None, &[], None, "fallback.example", None);
+        let row = context_registry(resolved.into_iter().next().expect("one entry"), false);
+        assert_eq!(
+            row.include,
+            vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()]
+        );
+        assert_eq!(row.exclude, vec!["acme/platform/legacy/**".to_string()]);
+    }
+
+    #[test]
+    fn context_registry_under_forced_registry_reports_empty_lists() {
+        // Plan C-020 / S-019: `--registry <ref>` collapses the browse set to
+        // entries the resolver builds with no filter at all (C-009), so both
+        // lists are `[]` even though the config declares patterns. Reporting
+        // the configured patterns there would misdescribe the run.
+        let resolved = resolve_registries(
+            &["ghcr.io/other".to_string()],
+            &[filtered_entry()],
+            None,
+            &[],
+            None,
+            "fallback.example",
+            None,
+        );
+        let row = context_registry(resolved.into_iter().next().expect("one forced entry"), false);
+        assert_eq!(row.url, "ghcr.io/other");
+        assert!(
+            row.include.is_empty() && row.exclude.is_empty(),
+            "the forced browse set is unfiltered; got: {row:?}"
+        );
+    }
+
+    #[test]
+    fn context_registry_unfiltered_entry_reports_empty_lists() {
+        let entry = RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_registries(&[], &[entry], None, &[], None, "fallback.example", None);
+        let row = context_registry(resolved.into_iter().next().expect("one entry"), false);
+        assert!(row.include.is_empty() && row.exclude.is_empty());
+    }
 
     #[tokio::test]
     async fn hermetic_global_scope_reports_paths_and_defaults() {
@@ -146,8 +240,30 @@ mod tests {
             !target.clients().is_empty(),
             "context reports the resolved set — the generic client at minimum, never []"
         );
-        let primary = crate::command::primary_registry_for_scope(&ctx, &scope);
+        let primary = crate::command::primary_registry_for_scope(&ctx, &scope).expect("no global config to fail on");
         assert!(!primary.is_empty(), "default registry always resolves");
+    }
+
+    #[tokio::test]
+    async fn default_registry_of_matches_the_resolver_seam() {
+        // S-8: `run` now reads the default off the browse set it already
+        // resolved instead of re-resolving through
+        // `primary_registry_for_scope`. An unconfigured scope is exactly
+        // where the two can diverge — the set is index-only, so
+        // `primary_registry` returns "" and only the push-side substitution
+        // keeps the report's `default_registry` non-empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let scope = scope_resolution::resolve(&ctx, true, None).expect("global scope resolves");
+        let resolved = crate::command::registries_for_scope(&ctx, &scope).expect("browse set resolves");
+        assert!(
+            resolved.iter().all(|r| r.kind.is_index()),
+            "the divergence case needs an index-only set: {resolved:?}"
+        );
+        assert_eq!(
+            default_registry_of(&resolved),
+            crate::command::primary_registry_for_scope(&ctx, &scope).expect("seam resolves"),
+        );
     }
 
     #[test]

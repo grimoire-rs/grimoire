@@ -257,6 +257,47 @@ pub struct RegistryConfig {
     /// holds `index/**/metadata.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
+    /// Narrows registry browsing to repositories matching at least one of
+    /// these glob patterns. Values are never comma-split — a comma is glob
+    /// alternation — so `grim config set` writes exactly one pattern and
+    /// replaces the whole list. Several patterns need repeated `--include`
+    /// flags on `grim config registry add`; to change them on an existing
+    /// entry, re-create it with `grim config registry rm <alias>`, then
+    /// `grim config registry add`. Combines with `exclude` on the same
+    /// entry — unlike Cargo's mutually exclusive `include`/`exclude`
+    /// fields. Unset (the default) shows every repository from this
+    /// registry. Affects browsing only — `grim search`, the TUI, and
+    /// `grim_search`; a direct reference to a hidden package still
+    /// resolves and installs.
+    ///
+    /// A pattern with none of `* ? [ ] { } \` auto-expands to also match
+    /// everything beneath it (`acme` behaves as `acme{,/**}`); every other
+    /// pattern is used verbatim. Patterns match against the row's path
+    /// relative to this entry's own `oci`/`index` locator, never the
+    /// fully-qualified `registry/repository` ref — normally the same
+    /// string the TUI tree shows beneath this source's root, though the
+    /// tree strips the longest locator across *all* configured entries, so
+    /// the two differ for a row one entry's locator nests inside another's.
+    /// A pattern always means the same thing wherever its own entry points.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Hides repositories matching any of these glob patterns from
+    /// registry browsing. Values are never comma-split — a comma is glob
+    /// alternation — so `grim config set` writes exactly one pattern and
+    /// replaces the whole list. Several patterns need repeated `--exclude`
+    /// flags on `grim config registry add`; to change them on an existing
+    /// entry, re-create it with `grim config registry rm <alias>`, then
+    /// `grim config registry add`. Combines with `include` on the same
+    /// entry — unlike Cargo's mutually exclusive `include`/`exclude`
+    /// fields, and wins when a repository matches both. Unset (the
+    /// default) hides nothing. Affects browsing only — `grim search`, the
+    /// TUI, and `grim_search`; a direct reference to a hidden package
+    /// still resolves and installs.
+    ///
+    /// Same auto-expansion and match-candidate rules as `include`; see its
+    /// doc comment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
     /// Controls whether this registry is the primary one short identifiers
     /// expand against. Only one entry may set this; the first entry wins
     /// when none do. Setting it on two or more entries is a parse error.
@@ -488,5 +529,56 @@ mod tests {
         // Fill a's cache but not b's — equality must still hold.
         let _ = a.declaration_hash_cached();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn registry_config_unset_include_exclude_omit_the_keys() {
+        // Plan C-001: an entry setting neither field must serialize with
+        // the keys entirely absent — byte-identical to a pre-this-feature
+        // config, matching the `skip_serializing_if = "Vec::is_empty"`
+        // contract.
+        let rc = RegistryConfig {
+            oci: Some("ghcr.io/acme".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&rc).expect("RegistryConfig must serialize");
+        assert!(json.get("include").is_none(), "unset include must be omitted: {json}");
+        assert!(json.get("exclude").is_none(), "unset exclude must be omitted: {json}");
+    }
+
+    #[test]
+    fn registry_config_empty_include_is_same_state_as_absent() {
+        // Plan C-001: `include = []` and an absent `include` collapse to
+        // one state — there is no third "explicitly empty" meaning.
+        let absent = RegistryConfig {
+            oci: Some("ghcr.io/acme".to_string()),
+            ..Default::default()
+        };
+        let explicit_empty = RegistryConfig {
+            oci: Some("ghcr.io/acme".to_string()),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(absent, explicit_empty);
+        assert_eq!(
+            serde_json::to_value(&absent).expect("serializes"),
+            serde_json::to_value(&explicit_empty).expect("serializes"),
+        );
+    }
+
+    #[test]
+    fn registry_config_populated_include_exclude_round_trips() {
+        // Plan C-001: a populated entry round-trips through serialize/parse.
+        let rc = RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            include: vec!["acme/platform".to_string()],
+            exclude: vec!["acme/platform/legacy".to_string()],
+            ..Default::default()
+        };
+        let round_tripped: RegistryConfig =
+            serde_json::from_value(serde_json::to_value(&rc).expect("serialize")).expect("deserialize");
+        assert_eq!(round_tripped, rc);
     }
 }

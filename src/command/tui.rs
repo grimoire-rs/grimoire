@@ -87,20 +87,24 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
 
     // Resolve the full ordered registry set for the active scope via the shared
     // multi-registry seam (mirrors `grim search` / `grim mcp`).
-    let registries = resolve_registries_for_tui(ctx, &scope);
+    let registries = resolve_registries_for_tui(ctx, &scope)?;
     let primary_registry = crate::config::primary_registry(&registries).to_string();
 
     // Resolve the *other* scope too so the TUI can toggle Global ⇄
     // Project at runtime. It is best-effort: if the alternate scope
     // cannot be resolved (e.g. no project config discoverable), the
-    // toggle is simply disabled rather than failing the whole TUI.
-    let alt = scope_resolution::resolve(ctx, !ctx.global(), ctx.config())
+    // toggle is simply disabled rather than failing the whole TUI. A
+    // malformed global config is NOT best-effort — it propagates here (as
+    // above, before raw mode) rather than silently dropping the user's
+    // global registries from the swapped scope.
+    let alt = match scope_resolution::resolve(ctx, !ctx.global(), ctx.config())
         .ok()
         .filter(|other| other.scope != scope.scope)
-        .map(|other| {
-            let alt_registries = resolve_registries_for_tui(ctx, &other);
+    {
+        Some(other) => {
+            let alt_registries = resolve_registries_for_tui(ctx, &other)?;
             let alt_primary = crate::config::primary_registry(&alt_registries).to_string();
-            ScopeSwap {
+            Some(ScopeSwap {
                 scope: other.scope,
                 workspace: other.workspace.clone(),
                 lock_path: other.lock_path.clone(),
@@ -114,8 +118,10 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
                 resolved_options: other.options.resolved(),
                 registries: alt_registries,
                 primary_registry: alt_primary,
-            }
-        });
+            })
+        }
+        None => None,
+    };
 
     let tui_ctx = TuiContext {
         primary_registry,
@@ -227,7 +233,7 @@ async fn prompt_init(ctx: &Context) -> anyhow::Result<InitPrompt> {
     // can never diverge. The browse default's shape pre-selects the type
     // (index for an unconfigured user); the other type falls back to its
     // built-in so switching always offers a working prefill.
-    let browse_default = resolve_browse_default(ctx);
+    let browse_default = resolve_browse_default(ctx)?;
     let (index_prefill, oci_prefill, kind) =
         if crate::config::registry_resolve::classify_index(&browse_default).is_some() {
             (
@@ -279,20 +285,28 @@ fn snapshot_choice(registry: Option<String>) -> Option<String> {
 /// normal case for this dialog), the global-`[[registries]]`-aware
 /// fallback set ([`crate::command::registries_global_fallback`]) is used so
 /// a `[[registries]]`-only global config is still honored.
-fn resolve_browse_default(ctx: &Context) -> String {
+///
+/// # Errors
+///
+/// A malformed or invalid global config (exit 78) — see
+/// [`crate::command::global_config_tiers`]. Surfaced before the dialog
+/// opens (like every other pre-session failure here), so raw mode is never
+/// entered and the terminal is never left mangled.
+fn resolve_browse_default(ctx: &Context) -> anyhow::Result<String> {
     if let Some(r) = ctx.registry_flags().first() {
-        return r.clone();
+        return Ok(r.clone());
     }
     let set = match scope_resolution::resolve(ctx, ctx.global(), ctx.config()) {
-        Ok(scope) => crate::command::registries_for_scope(ctx, &scope),
-        Err(_) => crate::command::registries_global_fallback(ctx),
+        Ok(scope) => crate::command::registries_for_scope(ctx, &scope)?,
+        Err(_) => crate::command::registries_global_fallback(ctx)?,
     };
-    set.iter()
+    Ok(set
+        .iter()
         .find(|r| r.is_default)
         .or_else(|| set.first())
         .map(|r| r.url.clone())
         // resolve_registries never returns an empty set; defensive only.
-        .unwrap_or_else(|| crate::command::FALLBACK_INDEX.to_string())
+        .unwrap_or_else(|| crate::command::FALLBACK_INDEX.to_string()))
 }
 
 /// Resolve the ordered registry set for a TUI session, mirroring the
@@ -308,7 +322,15 @@ fn resolve_browse_default(ctx: &Context) -> String {
 ///
 /// [`super::registries_for_scope`] already implements this precedence (the
 /// `--registry` flag is its highest tier), so it is the single seam here.
-fn resolve_registries_for_tui(ctx: &Context, scope: &scope_resolution::ResolvedScope) -> Vec<ResolvedRegistry> {
+///
+/// # Errors
+///
+/// A malformed or invalid global config (exit 78) — see
+/// [`super::global_config_tiers`].
+fn resolve_registries_for_tui(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+) -> anyhow::Result<Vec<ResolvedRegistry>> {
     super::registries_for_scope(ctx, scope)
 }
 
@@ -381,7 +403,7 @@ mod tests {
         let mut o = opts();
         o.registry = vec!["ghcr.io".to_string()];
         let ctx = Context::new(&o);
-        assert_eq!(resolve_browse_default(&ctx), "ghcr.io");
+        assert_eq!(resolve_browse_default(&ctx).expect("flag short-circuits"), "ghcr.io");
     }
 
     #[test]
@@ -395,7 +417,10 @@ mod tests {
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
         let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(cfg));
-        assert_eq!(resolve_browse_default(&ctx), crate::command::FALLBACK_INDEX);
+        assert_eq!(
+            resolve_browse_default(&ctx).expect("valid global config"),
+            crate::command::FALLBACK_INDEX
+        );
     }
 
     #[test]
@@ -404,8 +429,8 @@ mod tests {
         // (no [options].default_registry) running `grim tui` from a directory
         // without a project grimoire.toml must get their declared registry —
         // not the built-in fallback. The Err branch previously bypassed
-        // [[registries]] by calling only global_config_default +
-        // resolve_default_registry.
+        // [[registries]] entirely, resolving only the legacy scalar
+        // [options].default_registry chain.
         //
         // Point the hermetic ctx at a temp dir that has a global config with
         // [[registries]] but no project grimoire.toml. scope_resolution will
@@ -422,7 +447,96 @@ mod tests {
         // scope resolution to error (no file at that path ⇒ Err branch).
         let missing_cfg = tmp.path().join("no-such/grimoire.toml");
         let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing_cfg));
-        assert_eq!(resolve_browse_default(&ctx), "global-tui.example");
+        assert_eq!(
+            resolve_browse_default(&ctx).expect("valid global config"),
+            "global-tui.example"
+        );
+    }
+
+    /// A global config whose `[[registries]]` entry carries an uncompilable
+    /// `include` glob — one of `test_registries.py`'s `_BROKEN_GLOBAL_CONFIGS`
+    /// shapes, rejected by `validate_registries` (exit 78).
+    const MALFORMED_GLOBAL_CONFIG: &str =
+        "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/acme\"\ninclude = [\"acme{unclosed\"]\n";
+
+    /// A hermetic ctx whose `$GRIM_HOME` holds [`MALFORMED_GLOBAL_CONFIG`] and
+    /// whose `--config` points at a path that does not exist, so project scope
+    /// resolution fails and the global tier is the only one left to read.
+    fn ctx_with_a_broken_global_config(tmp: &tempfile::TempDir) -> Context {
+        std::fs::write(tmp.path().join("grimoire.toml"), MALFORMED_GLOBAL_CONFIG).unwrap();
+        let missing_cfg = tmp.path().join("no-such/grimoire.toml");
+        Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing_cfg))
+    }
+
+    #[test]
+    fn resolve_browse_default_propagates_a_broken_global_config_t4() {
+        // T-4: every pre-session seam in this file returns `Result` so a
+        // malformed global config exits 78 instead of silently dropping the
+        // user's global registries — and until now nothing asserted the `Err`
+        // side of any of them. The acceptance tier cannot: `run` returns
+        // `ExitCode::Success` the moment stdout is not a TTY, before a byte of
+        // config is read (`test_registries.py`'s test 9 records that).
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_a_broken_global_config(&tmp);
+        let err = resolve_browse_default(&ctx).expect_err("a malformed global config must surface, not vanish");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            ExitCode::ConfigError,
+            "the init dialog's prefill must fail closed at 78: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_registries_for_tui_propagates_a_broken_global_config_t4() {
+        // The session's own registry set, same contract. A valid project
+        // config resolves the scope, so the only thing that can fail here is
+        // the global tier `registries_for_scope` folds in.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_cfg = project.path().join("grimoire.toml");
+        std::fs::write(&project_cfg, "[options]\n").unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), MALFORMED_GLOBAL_CONFIG).unwrap();
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(project_cfg.clone()));
+
+        let scope = scope_resolution::resolve(&ctx, false, Some(&project_cfg)).expect("the project config is valid");
+        let err = resolve_registries_for_tui(&ctx, &scope).expect_err("the global tier must still surface");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            ExitCode::ConfigError,
+            "a malformed global config is a config error (78): {err:#}"
+        );
+    }
+
+    #[test]
+    fn tui_run_propagates_every_registry_resolution_t4() {
+        // The two tests above pin the seams; this pins their CALL SITES, which
+        // no unit test can reach — `run` short-circuits on a non-TTY stdout,
+        // which is exactly what a test binary has. Reverting either `?` to
+        // `.unwrap_or_default()` restores the silent-drop bug with the whole
+        // gate green, so the invariant is pinned the way H-4 pins its own
+        // (`tui::app`'s `include_str!` occurrence count): at the source level,
+        // deterministically.
+        let source = include_str!("tui.rs");
+        // Everything from the first `#[cfg(test)]` on is this module.
+        let production = source.split_once("#[cfg(test)]").map_or(source, |(before, _)| before);
+        assert_eq!(
+            production.matches("resolve_registries_for_tui(ctx, &").count(),
+            2,
+            "the session scope and the alternate scope are the only two call sites; a third \
+             must be reviewed for propagation rather than silently joining the count"
+        );
+        assert_eq!(
+            production.matches("resolve_registries_for_tui(ctx, &scope)?").count(),
+            1,
+            "the session's registry set must propagate — `.unwrap_or_default()` here drops \
+             the user's global registries and exits 0 on a config that must exit 78"
+        );
+        assert_eq!(
+            production.matches("resolve_registries_for_tui(ctx, &other)?").count(),
+            1,
+            "the alternate scope propagates too: the scope TOGGLE is best-effort (the `.ok()` \
+             above it), a malformed global config deliberately is not"
+        );
     }
 
     #[test]

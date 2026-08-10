@@ -36,7 +36,7 @@ pub struct DescribeArgs {
 /// Reference/resolution/transport failures (their own exit taxonomy: offline
 /// 81, auth 80, unreachable 69, …) or a missing tag / manifest.
 pub async fn run(ctx: &Context, args: &DescribeArgs) -> anyhow::Result<(DescribeCliReport, ExitCode)> {
-    let scope = crate::command::resolve_fetch_scope(ctx, ctx.global(), ctx.config(), None);
+    let scope = crate::command::resolve_fetch_scope(ctx, ctx.global(), ctx.config(), None)?;
     // Degraded-scope warnings ride stderr so stdout stays a pure report.
     for warning in &scope.warnings {
         tracing::warn!("{warning}");

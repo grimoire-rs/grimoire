@@ -212,6 +212,13 @@ pub struct RegistryHealth {
     pub offline: Vec<String>,
     /// Registry URLs whose browse window was truncated at the cap.
     pub truncated: Vec<String>,
+    /// Registry URLs showing nothing while a browse filter is configured —
+    /// the TUI's channel for the plan C-019 diagnostic, which the CLI emits
+    /// as a `tracing::warn!` the alt-screen session can never show (all
+    /// tracing output is redirected to `$GRIM_HOME/tui.log` for the whole
+    /// session). Populated by `app::aggregate_registry_health`, which
+    /// documents how far it can reproduce C-019's predicate.
+    pub filtered: Vec<String>,
 }
 
 /// The whole screen model.

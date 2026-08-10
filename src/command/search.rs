@@ -15,9 +15,13 @@
 //! otherwise the declared `[[registries]]` (or the single default) are all
 //! browsed and flattened into one table.
 //!
-//! State is data: `search` always exits 0, even with no results. Offline
-//! degrades — the catalog layer serves whatever is cached and never errors
-//! on a network-absent run.
+//! State is data: `search` always exits 0 on the *browse* — no results, a
+//! filter that admits nothing, and an unreachable registry are all exit 0.
+//! Offline degrades the same way: the catalog layer serves whatever is
+//! cached and never errors on a network-absent run. A config that exists
+//! and fails to parse is the one non-browse failure and is **not** data —
+//! it exits 78 at either scope, like every sibling command, rather than
+//! silently browsing a different registry set.
 
 use clap::Args;
 
@@ -43,7 +47,9 @@ pub struct SearchArgs {
     /// (case-insensitive) any of kind / repo / summary / description /
     /// keywords. A bare kind keyword (`skill`/`rule`/`bundle`, singular or
     /// plural) filters by kind instead of matching as text. Empty ⇒ list the
-    /// whole catalog.
+    /// whole catalog. Results are narrowed further by each source's
+    /// `include`/`exclude` browse filter — `grim context` shows the active
+    /// patterns.
     pub query: Option<String>,
 
     /// Force a catalog rebuild even if the cache is fresh.
@@ -58,7 +64,9 @@ pub struct SearchArgs {
     /// or `--registry a --registry b`) to browse several at once. Precedence
     /// (highest first): this flag (or the global `--registry`), then
     /// `GRIM_DEFAULT_REGISTRY`, then project config `default_registry`, then
-    /// global config.
+    /// global config. Collapses the browse set to exactly these registries
+    /// and browses them unfiltered — a configured `include`/`exclude` does
+    /// not apply.
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Append)]
     pub registry: Vec<String>,
 
@@ -82,9 +90,10 @@ pub struct SearchArgs {
 ///
 /// # Errors
 ///
-/// A catalog cache parse / version failure, or a genuine registry
-/// transport/auth failure during an online rebuild. Offline never errors.
-/// A registry always resolves (the built-in fallback is the last tier).
+/// A malformed project or global config (78), a catalog cache parse /
+/// version failure, or a genuine registry transport/auth failure during an
+/// online rebuild. Offline never errors on the *browse*. A registry always
+/// resolves (the built-in fallback is the last tier).
 pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchReport, ExitCode)> {
     let access = super::access_seam(ctx)?;
     // Parse the raw query once for the truncation hint (the service applies
@@ -95,7 +104,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // then browse every configured registry through the shared catalog
     // service (the single seam `search`/`tui`/`mcp` share). A registry given
     // via `--registry` collapses the set to exactly that registry.
-    let (registries, lock, state, roots, active, cfg_show_deprecated) = resolve_scope(ctx, args);
+    let (registries, lock, state, roots, active, cfg_show_deprecated) = resolve_scope(ctx, args)?;
     let badges = BadgeContext {
         lock: lock.as_ref(),
         state: &state,
@@ -111,6 +120,10 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             &badges,
             ctx.offline(),
             args.refresh,
+            // A user-facing browse: each source's `include`/`exclude` narrows
+            // what is listed (plan C-007). The MCP `grim_search` tool inherits
+            // this by delegating to `run`.
+            crate::catalog::CatalogScope::Browse,
         )
         .await,
     )?;
@@ -131,6 +144,12 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // installed row (badge ≠ NotInstalled — covers direct + bundle installs)
     // is always shown regardless.
     let show = args.show_deprecated || cfg_show_deprecated;
+
+    // Read before the groups are consumed below: whether any source returned
+    // rows at all *before* the read-time filters ran. It is the same gate
+    // C-019 uses, and it is what tells an empty table caused by a browse
+    // filter apart from one caused by a `_catalog`-gated registry.
+    let any_rows_before_filter = results.any_rows_before_filter();
 
     // Flatten the registry groups into the flat search table (sorted by
     // `registry/repository`).
@@ -157,10 +176,16 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // An online browse that comes back empty is most often a registry that
     // gates the `_catalog` endpoint (GitLab SaaS, GHCR, Docker Hub), not a
     // fault — point at the registry-compatibility docs so an empty list is not
-    // read as "nothing published". Offline (serves the cache), any hit, and an
-    // index-only browse set (no `_catalog` involved) stay quiet.
+    // read as "nothing published". Offline (serves the cache), any hit, an
+    // index-only browse set (no `_catalog` involved), and a result the
+    // read-time filters emptied all stay quiet.
     let any_registry_source = registries.iter().any(|r| !r.kind.is_index());
-    if warn_unsupported_browse(ctx.offline(), entries.is_empty(), any_registry_source) {
+    if warn_unsupported_browse(
+        ctx.offline(),
+        entries.is_empty(),
+        any_registry_source,
+        any_rows_before_filter,
+    ) {
         tracing::warn!(
             "no catalog entries; some registries ({CATALOG_GATED_REGISTRIES}) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS_URL}"
         );
@@ -172,13 +197,28 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
 ///
 /// Gate: online (an offline browse legitimately serves the local cache), the
-/// result is empty (any hit proves browse works), AND at least one browsed
+/// result is empty (any hit proves browse works), at least one browsed
 /// source is a plain OCI registry — an index-only set never touches
 /// `_catalog`, and a failed index fetch already gets its own per-source
-/// "package index fetch failed" warn, so this hint would misdiagnose it.
+/// "package index fetch failed" warn, so this hint would misdiagnose it —
+/// AND nothing was **considered** anywhere.
+///
+/// That last gate is what keeps the hint honest once a source carries a
+/// browse filter (`any_rows_before_filter`, from
+/// [`crate::catalog::CatalogResults::any_rows_before_filter`]): `result_empty` is
+/// the *post*-filter count, so a filter admitting nothing would otherwise
+/// print C-019 ("filter admitted 0 of N") and then this line, which blames
+/// the registry and carries the doc link the user will follow. A source that
+/// returned N rows before filtering has proved its `_catalog` browse works.
+///
 /// Extracted so the gate is unit-testable without a live registry.
-fn warn_unsupported_browse(offline: bool, result_empty: bool, any_registry_source: bool) -> bool {
-    !offline && result_empty && any_registry_source
+fn warn_unsupported_browse(
+    offline: bool,
+    result_empty: bool,
+    any_registry_source: bool,
+    any_rows_before_filter: bool,
+) -> bool {
+    !offline && result_empty && any_registry_source && !any_rows_before_filter
 }
 
 /// Whether a catalog row survives the deprecated-hiding filter.
@@ -192,6 +232,18 @@ fn deprecated_row_visible(show: bool, deprecated: bool, installed: bool) -> bool
     show || !deprecated || installed
 }
 
+/// What [`resolve_scope`] hands back: the ordered browse set, the badge
+/// inputs (lock, install state, anchor roots, active clients), and the
+/// scope's `show_deprecated` default.
+type SearchScope = (
+    Vec<crate::config::ResolvedRegistry>,
+    Option<GrimoireLock>,
+    InstallState,
+    AnchorRoots,
+    Vec<ClientTarget>,
+    bool,
+);
+
 /// Resolve the registry browse set and best-effort badge inputs for the
 /// search. The registry set spans every configured `[[registries]]` (or the
 /// single default), so `grim search` browses all of them at once; an
@@ -199,17 +251,15 @@ fn deprecated_row_visible(show: bool, deprecated: bool, installed: bool) -> bool
 /// exactly those registries. Badge
 /// derivation is best-effort — a missing project config just means "nothing
 /// installed" rather than a hard failure.
-fn resolve_scope(
-    ctx: &Context,
-    args: &SearchArgs,
-) -> (
-    Vec<crate::config::ResolvedRegistry>,
-    Option<GrimoireLock>,
-    InstallState,
-    AnchorRoots,
-    Vec<ClientTarget>,
-    bool,
-) {
+///
+/// # Errors
+///
+/// A malformed or invalid config at **either** scope (exit 78) — the global
+/// one via [`super::global_config_tiers`], the project one via the
+/// scope resolution below. The `--registry` path returns before the global
+/// config is ever read, so an explicit registry keeps working past a broken
+/// one.
+fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope> {
     // An explicit `--registry` on the command collapses the browse set to
     // exactly those registries (in order, deduped, first is primary),
     // independent of any `[[registries]]` declared in config. No config scope
@@ -222,36 +272,47 @@ fn resolve_scope(
         let registries =
             crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_INDEX, None);
         let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
-        return (registries, lock, state, roots, active, false);
+        return Ok((registries, lock, state, roots, active, false));
     }
 
-    let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
-    else {
-        // No scope resolves: browse the flag/env/global fallback chain via
-        // `registries_global_fallback` — the same seam the TUI and fetch
+    let scope = match scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
+    {
+        Ok(scope) => scope,
+        // No config to resolve — `NotDiscovered`, or an explicit `--config`
+        // path that is not there. Browse the flag/env/global fallback chain
+        // via `registries_global_fallback` — the same seam the TUI and fetch
         // use — so the global `[[registries]]`/default tiers are honored
         // and the final tier is the built-in package index (issue #41: a
         // hand-rolled chain here browsed the push-side GHCR fallback,
         // which gates `_catalog`). Badge inputs are empty; with no scope
         // to detect against, treat every client as active (no output is
         // filtered).
-        let registries = super::registries_global_fallback(ctx);
-        let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
-        return (
-            registries,
-            None,
-            InstallState::empty(std::path::Path::new("")),
-            roots,
-            ClientTarget::ALL.to_vec(),
-            false,
-        );
+        Err(e) if scope_resolution::config_not_found(&e) => {
+            let registries = super::registries_global_fallback(ctx)?;
+            let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
+            return Ok((
+                registries,
+                None,
+                InstallState::empty(std::path::Path::new("")),
+                roots,
+                ClientTarget::ALL.to_vec(),
+                false,
+            ));
+        }
+        // A config that EXISTS and failed to parse is a different condition,
+        // and it must not share the fallback: browsing a *different* registry
+        // set at exit 0 hides the very file the user has to fix, while
+        // `grim context` / `config get` / `add` all exit 78 on it naming the
+        // path. `config_not_found` is the same predicate `grim tui` uses to
+        // separate "offer to init" from "surface the parse failure".
+        Err(e) => return Err(anyhow::Error::from(crate::error::Error::from(e))),
     };
-    let registries = super::registries_for_scope(ctx, &scope);
+    let registries = super::registries_for_scope(ctx, &scope)?;
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let active = detect_clients_or_all(&scope.workspace, scope.scope);
     let show_deprecated = scope.options.show_deprecated;
-    (registries, lock, state, scope.roots, active, show_deprecated)
+    Ok((registries, lock, state, scope.roots, active, show_deprecated))
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge
@@ -293,22 +354,85 @@ mod tests {
         }
     }
 
+    /// The rendered `grim search` help text.
+    fn search_help() -> String {
+        use clap::CommandFactory as _;
+
+        /// Minimal parse harness so the arg tree renders in isolation.
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(subcommand)]
+            _cmd: Sub,
+        }
+
+        #[derive(clap::Subcommand)]
+        enum Sub {
+            Search(SearchArgs),
+        }
+
+        Harness::command()
+            .find_subcommand_mut("search")
+            .expect("`search` is a subcommand")
+            .render_long_help()
+            .to_string()
+    }
+
+    #[test]
+    fn search_help_states_that_a_browse_filter_can_hide_rows() {
+        // W-14 / U5: a user reading only `--help` could not learn that a
+        // `[[registries]]` browse filter narrows this command's output at
+        // all, nor that `--registry` silently discards it on the same
+        // registry. Collapsed first, because clap wraps to the terminal
+        // width; the trailing period is clap's to strip, so it is not
+        // asserted.
+        let collapsed = search_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains(
+                "Results are narrowed further by each source's `include`/`exclude` browse filter — `grim context` shows the active patterns"
+            ),
+            "the query arg must say a filter can hide rows; got:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains(
+                "Collapses the browse set to exactly these registries and browses them unfiltered — a configured `include`/`exclude` does not apply"
+            ),
+            "--registry must say it discards the filter; got:\n{collapsed}"
+        );
+    }
+
     #[test]
     fn warn_unsupported_browse_only_when_online_and_empty() {
-        // Online + empty + a registry-kind source → warn (likely a
-        // `_catalog`-gated registry). Mixed sets (index + registry) still
-        // warn — the registry half may be gated.
-        assert!(warn_unsupported_browse(false, true, true));
+        // Online + empty + a registry-kind source + nothing considered → warn
+        // (likely a `_catalog`-gated registry). Mixed sets (index + registry)
+        // still warn — the registry half may be gated.
+        assert!(warn_unsupported_browse(false, true, true, false));
         // Online + empty but index-only browse set → quiet: `_catalog` was
         // never involved, and a failed index fetch has its own warn.
-        assert!(!warn_unsupported_browse(false, true, false));
+        assert!(!warn_unsupported_browse(false, true, false, false));
         // Online + hits → quiet (browse works).
-        assert!(!warn_unsupported_browse(false, false, true));
-        assert!(!warn_unsupported_browse(false, false, false));
+        assert!(!warn_unsupported_browse(false, false, true, false));
+        assert!(!warn_unsupported_browse(false, false, false, false));
         // Offline → quiet regardless (the cache is the source of truth).
-        assert!(!warn_unsupported_browse(true, true, true));
-        assert!(!warn_unsupported_browse(true, true, false));
-        assert!(!warn_unsupported_browse(true, false, true));
+        assert!(!warn_unsupported_browse(true, true, true, false));
+        assert!(!warn_unsupported_browse(true, true, false, false));
+        assert!(!warn_unsupported_browse(true, false, true, false));
+    }
+
+    #[test]
+    fn warn_unsupported_browse_stays_quiet_when_the_filter_emptied_the_result_h4() {
+        // H4: `result_empty` is the POST-filter count, so an `include` list
+        // that admits nothing used to print C-019 ("filter admitted 0 of N")
+        // and then this hint — two contradictory explanations back to back,
+        // and the wrong one carries the doc link. A source that returned rows
+        // before the filter ran has already proved its `_catalog` browse
+        // works; reproduced against a source listing 500 repositories.
+        // The same inputs cover the worse exclude-only case: C-019 stays
+        // deliberately silent for a filter that empties a source by exclusion,
+        // so this hint would be the ONLY message on screen there.
+        assert!(!warn_unsupported_browse(false, true, true, true));
+        // Nothing considered anywhere — every source came back empty before
+        // any filter ran — is the condition the hint was written for.
+        assert!(warn_unsupported_browse(false, true, true, false));
     }
 
     #[test]
@@ -334,7 +458,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.registry = vec!["ghcr.io".to_string()];
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, "ghcr.io");
     }
@@ -350,7 +474,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.registry = vec![String::new()];
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
         assert!(registries[0].kind.is_index());
@@ -368,7 +492,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(cfg);
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
         assert!(registries[0].kind.is_index());
@@ -386,7 +510,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(tmp.path().join("no-such/grimoire.toml"));
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
         assert!(registries[0].kind.is_index());
@@ -407,9 +531,103 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(tmp.path().join("no-such/grimoire.toml"));
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         let urls: Vec<&str> = registries.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(urls, vec!["global-search.example"]);
+    }
+
+    #[test]
+    fn explicit_registry_browse_set_carries_no_filter_s014() {
+        // Plan S-014 / C-009: `--registry` overrides the browse set rather
+        // than selecting within it, so the config's `include`/`exclude` are
+        // dropped along with the alias. Reporting the config's patterns here
+        // would misdescribe what the run browses (S-019).
+        //
+        // This also pins the deliberate asymmetry recorded in the plan: the
+        // `--registry` branch returns before any global-config read, so it
+        // still resolves (exit 0) on a machine with a broken global config.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("grimoire.toml");
+        std::fs::write(
+            &cfg,
+            "[[registries]]\nalias = \"acme\"\nurl = \"ghcr.io/acme\"\ninclude = [\"platform/**\"]\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(cfg);
+        a.registry = vec!["ghcr.io/other".to_string()];
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("the --registry branch always resolves");
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].url, "ghcr.io/other");
+        assert_eq!(
+            registries[0].filter,
+            crate::config::registry_filter::RegistryFilter::default(),
+            "a forced browse set is genuinely unfiltered"
+        );
+    }
+
+    #[test]
+    fn declared_filter_reaches_the_search_browse_set_s001() {
+        // Plan S-001 at the command layer: the patterns authored on a
+        // `[[registries]]` entry are compiled onto the source `grim search`
+        // browses, so `load_catalog`'s `Browse` scope has something to apply.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("grimoire.toml");
+        std::fs::write(
+            &cfg,
+            "[[registries]]\nalias = \"acme\"\nurl = \"ghcr.io/acme\"\ninclude = [\"platform/**\"]\nexclude = [\"platform/legacy/**\"]\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(cfg);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].filter.include_patterns(), ["platform/**"]);
+        assert_eq!(registries[0].filter.exclude_patterns(), ["platform/legacy/**"]);
+        assert!(registries[0].filter.matches("platform/foo"));
+        assert!(!registries[0].filter.matches("platform/legacy/foo"));
+        assert!(!registries[0].filter.matches("tools/foo"));
+    }
+
+    #[test]
+    fn malformed_project_config_propagates_instead_of_browsing_another_set_b1() {
+        // B1: a project `grimoire.toml` that EXISTS and fails to parse must
+        // reach the user, not degrade to the global/built-in browse fallback.
+        // `grim context`, `grim config get` and `grim add` all exit 78 on this
+        // exact file; a silent exit 0 listing a *different* registry set is the
+        // worst of the four answers, and the browse filter this branch shipped
+        // is authored by hand into precisely this file.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cfg = project.join("grimoire.toml");
+        std::fs::write(
+            &cfg,
+            "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/acme\"\ninclude = [\"acme/[\"]\n",
+        )
+        .unwrap();
+        // `$GRIM_HOME` is the tempdir root, whose `grimoire.toml` is absent —
+        // so only the PROJECT arm can produce this error (the global arm was
+        // already made loud by `be18386`).
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(cfg);
+        // `let Err(…) else` rather than `expect_err`: `SearchScope` carries
+        // `AnchorRoots`, which is not `Debug`.
+        let Err(err) = resolve_scope(&ctx, &a) else {
+            panic!("a malformed project config must not fall back silently");
+        };
+        assert_eq!(
+            crate::error::classify_error(&err),
+            ExitCode::ConfigError,
+            "parity with `grim context` / `config get` / `add` on the same file: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("include pattern"),
+            "the message must name the offending pattern: {err:#}"
+        );
     }
 
     #[test]
@@ -425,7 +643,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(cfg);
-        let (registries, ..) = resolve_scope(&ctx, &a);
+        let (registries, ..) = resolve_scope(&ctx, &a).expect("scope resolves");
         let urls: Vec<&str> = registries.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(urls, vec!["ghcr.io/acme", "registry.corp/team"]);
     }

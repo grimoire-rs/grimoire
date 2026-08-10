@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 7 fixed `options.*` keys, the 3
+//! Single source of truth for the 7 fixed `options.*` keys, the 5
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -177,17 +177,36 @@ impl ConfigKey {
     }
 }
 
-/// The 3 per-registry field names addressable as `registry.<alias>.<field>`.
+/// The 5 per-registry field names addressable as `registry.<alias>.<field>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryField {
     Oci,
     Index,
+    Include,
+    Exclude,
     Default,
 }
 
 impl RegistryField {
-    /// Every registry field, in `oci, index, default` order.
-    pub const ALL: [RegistryField; 3] = [RegistryField::Oci, RegistryField::Index, RegistryField::Default];
+    /// Every registry field, in `oci, index, default, include, exclude`
+    /// order.
+    ///
+    /// **Append here, never insert.** This array is the item order of
+    /// `grim config registry fields --format json`, and consumers index it
+    /// positionally — the VS Code extension reads this report, and a test
+    /// in `api::config_report` addressed the `default` row as `items[2]`
+    /// until `include`/`exclude` were added. Inserting the two filter
+    /// fields before `default` (the shape first written) silently moved a
+    /// shipped index; appending leaves every existing position untouched,
+    /// matching the append-only discipline `VENDOR_ROOTS` rows and enum
+    /// literals already follow.
+    pub const ALL: [RegistryField; 5] = [
+        RegistryField::Oci,
+        RegistryField::Index,
+        RegistryField::Default,
+        RegistryField::Include,
+        RegistryField::Exclude,
+    ];
 
     /// This field's short name — the last segment of its pattern key
     /// (`registry.<alias>.oci` → `"oci"`). Used by `grim config registry
@@ -197,6 +216,8 @@ impl RegistryField {
         match self {
             Self::Oci => "oci",
             Self::Index => "index",
+            Self::Include => "include",
+            Self::Exclude => "exclude",
             Self::Default => "default",
         }
     }
@@ -222,6 +243,40 @@ impl RegistryField {
                            `oci` on the same registry entry.",
             constraints: None,
         };
+        const INCLUDE: KeySpec = KeySpec {
+            key: "registry.<alias>.include",
+            value_type: ValueType::StringList { default: None },
+            title: "Include patterns",
+            description: "Narrows registry browsing to repositories matching at least one of these \
+                           glob patterns. Values are never comma-split — a comma is glob alternation \
+                           — so `grim config set` writes exactly one pattern and replaces the whole \
+                           list. Several patterns need repeated `--include` flags on `grim config \
+                           registry add`; to change them on an existing entry, re-create it with \
+                           `grim config registry rm <alias>`, then `grim config registry add`. \
+                           Combines with `exclude` on the same entry — unlike Cargo's mutually \
+                           exclusive `include`/`exclude` fields. Unset (the default) shows every \
+                           repository from this registry. Affects browsing only — `grim search`, the \
+                           TUI, and `grim_search`; a direct reference to a hidden package still \
+                           resolves and installs.",
+            constraints: None,
+        };
+        const EXCLUDE: KeySpec = KeySpec {
+            key: "registry.<alias>.exclude",
+            value_type: ValueType::StringList { default: None },
+            title: "Exclude patterns",
+            description: "Hides repositories matching any of these glob patterns from registry \
+                           browsing. Values are never comma-split — a comma is glob alternation — so \
+                           `grim config set` writes exactly one pattern and replaces the whole list. \
+                           Several patterns need repeated `--exclude` flags on `grim config registry \
+                           add`; to change them on an existing entry, re-create it with `grim config \
+                           registry rm <alias>`, then `grim config registry add`. Combines with \
+                           `include` on the same entry — unlike Cargo's mutually exclusive \
+                           `include`/`exclude` fields, and wins when a repository matches both. Unset \
+                           (the default) hides nothing. Affects browsing only — `grim search`, the \
+                           TUI, and `grim_search`; a direct reference to a hidden package still \
+                           resolves and installs.",
+            constraints: None,
+        };
         // Not an `[options]`/`[options.tui]` key, so there is no matching
         // `config::defaults` const — this literal instead mirrors
         // `RegistryConfig`'s own serde-derived `bool` default (`false`).
@@ -236,6 +291,8 @@ impl RegistryField {
         match self {
             Self::Oci => &OCI,
             Self::Index => &INDEX,
+            Self::Include => &INCLUDE,
+            Self::Exclude => &EXCLUDE,
             Self::Default => &DEFAULT,
         }
     }
@@ -334,6 +391,66 @@ mod tests {
                 "spec().key {:?} must end with field_name() {:?}",
                 f.spec().key,
                 f.field_name()
+            );
+        }
+    }
+
+    /// Plan C-010 / S-011: `RegistryField::ALL` grows 3 → 5 with `Include`/
+    /// `Exclude`; both are `ValueType::StringList { default: None }` with
+    /// no `ValueConstraints` (a glob has no width rule — widening
+    /// `ValueConstraints` to make `item_width` optional is refused under
+    /// Principle 9, since it is published in `grim config list --format
+    /// json`). Already implemented in this stub phase (the drift test
+    /// `registry_field_completeness_matches_registry_config` below could
+    /// not otherwise compile); this test passes today and pins the fact
+    /// explicitly rather than only via the generic schema-matching test.
+    #[test]
+    fn registry_field_all_keeps_the_shipped_prefix_in_order() {
+        // `ALL` is append-only, and the ORDER of its first three entries is a
+        // frozen on-the-wire contract: `grim config registry fields
+        // --format json` maps over `ALL`, and the shipped VS Code extension
+        // addresses the `default` row positionally as `items[2]`. Inserting a
+        // variant anywhere before index 3 moves that row and breaks the
+        // extension (Principle 9). The length assertion below and the
+        // key-vector assertion in `api::config_report` both survive an
+        // accidental insert — only this one fails.
+        assert_eq!(
+            &RegistryField::ALL[..3],
+            &[RegistryField::Oci, RegistryField::Index, RegistryField::Default],
+            "append to RegistryField::ALL, never insert — items[2] must stay `default`"
+        );
+    }
+
+    #[test]
+    fn registry_field_all_has_five_fields_including_include_and_exclude() {
+        assert_eq!(RegistryField::ALL.len(), 5);
+        for field in [RegistryField::Include, RegistryField::Exclude] {
+            assert!(
+                matches!(field.spec().value_type, ValueType::StringList { default: None }),
+                "{}: expected ValueType::StringList {{ default: None }}",
+                field.field_name()
+            );
+            assert!(
+                field.spec().constraints.is_none(),
+                "{}: expected no ValueConstraints",
+                field.field_name()
+            );
+        }
+    }
+
+    /// The lowercase literal is the machine-readable marker a positional
+    /// consumer substring-matches to learn these two lists are not
+    /// comma-separated (W-15). Case matters: sentence-start would capitalize
+    /// it, so the phrase is kept mid-sentence. Asserted on the token alone —
+    /// pinning the sentence would fight every future style pass.
+    #[test]
+    fn filter_field_descriptions_carry_the_never_comma_split_marker() {
+        for field in [RegistryField::Include, RegistryField::Exclude] {
+            let description = field.spec().description;
+            assert!(
+                description.contains("never comma-split"),
+                "{}: description must carry the literal `never comma-split`; got {description:?}",
+                field.field_name()
             );
         }
     }
@@ -471,6 +588,8 @@ mod tests {
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             index: Some("https://index.example".to_string()),
+            include: vec!["acme/platform".to_string()],
+            exclude: vec!["acme/platform/legacy".to_string()],
             default: true,
         };
         let value = serde_json::to_value(&config).expect("RegistryConfig must serialize");
@@ -627,6 +746,8 @@ mod tests {
             let node = match field {
                 RegistryField::Oci => &registry_config["properties"]["oci"],
                 RegistryField::Index => &registry_config["properties"]["index"],
+                RegistryField::Include => &registry_config["properties"]["include"],
+                RegistryField::Exclude => &registry_config["properties"]["exclude"],
                 RegistryField::Default => &registry_config["properties"]["default"],
             };
             assert_description_prefix(node, spec.description, spec.key);

@@ -811,35 +811,39 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // marked-set action keys (contextual). The always-on key summary lives
     // in `hint` so a transient message can never hide `? help`.
     // C6 / D-DEGRADE: compose registry health degradation message when any
-    // registry is offline or truncated (shown when no higher-priority
-    // transient message overrides — takes precedence over marked count).
-    // P2: short-circuit to avoid any allocation when both lists are empty.
+    // registry is offline, truncated, or emptied by its own browse filter
+    // (shown when no higher-priority transient message overrides — takes
+    // precedence over marked count).
+    // H5: the `filtered` clause is the only place a TUI session can learn why
+    // a 0/0 root is 0/0 — the CLI's C-019 warning is a `tracing::warn!`, and
+    // the whole alt-screen session's tracing output goes to `$GRIM_HOME/tui.log`.
+    // P2: short-circuit to avoid any allocation when every list is empty.
     // SEC1: map each URL through `sanitize_member_label` before joining so
     // registry URLs from the catalog cannot inject terminal escape sequences.
     let registry_health_status = {
         let h = &state.registry_health;
-        if h.offline.is_empty() && h.truncated.is_empty() {
+        if h.offline.is_empty() && h.truncated.is_empty() && h.filtered.is_empty() {
             String::new()
         } else {
             // B: show the alias-based label (SEC1: sanitize against escape injection).
-            let mut parts: Vec<String> = Vec::new();
-            if !h.offline.is_empty() {
-                let names: Vec<String> = h
-                    .offline
-                    .iter()
-                    .map(|url| sanitize_member_label(&state.registry_label(url)))
-                    .collect();
-                parts.push(format!("offline: {}", names.join(", ")));
-            }
-            if !h.truncated.is_empty() {
-                let names: Vec<String> = h
-                    .truncated
-                    .iter()
-                    .map(|url| sanitize_member_label(&state.registry_label(url)))
-                    .collect();
-                parts.push(format!("truncated: {}", names.join(", ")));
-            }
-            parts.join(" · ")
+            let clause = |label: &str, urls: &[String]| {
+                (!urls.is_empty()).then(|| {
+                    let names: Vec<String> = urls
+                        .iter()
+                        .map(|url| sanitize_member_label(&state.registry_label(url)))
+                        .collect();
+                    format!("{label}: {}", names.join(", "))
+                })
+            };
+            [
+                clause("offline", &h.offline),
+                clause("truncated", &h.truncated),
+                clause("filtered", &h.filtered),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<String>>()
+            .join(" · ")
         }
     };
 
@@ -3107,6 +3111,7 @@ mod spec_multi_registry_render_tests {
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string()],
             truncated: vec![],
+            filtered: vec![],
         };
         let m = frame(&s);
         assert!(
@@ -3125,6 +3130,7 @@ mod spec_multi_registry_render_tests {
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string(), "ghcr.io/other".to_string()],
             truncated: vec![],
+            filtered: vec![],
         };
         let m = frame(&s);
         // When all registries are offline, the status must signal it
@@ -3144,12 +3150,60 @@ mod spec_multi_registry_render_tests {
         s.registry_health = RegistryHealth {
             offline: vec![],
             truncated: vec!["ghcr.io/other".to_string()],
+            filtered: vec![],
         };
         let m = frame(&s);
         assert!(
             m.status.contains("ghcr.io/other"),
             "status line must name the truncated registry; got: {:?}",
             m.status
+        );
+    }
+
+    // H5: registry_health.filtered non-empty → status line names the source and
+    // says why it is showing nothing. This is the whole point of the field: the
+    // CLI emits that reason as a `tracing::warn!`, which in an alt-screen
+    // session goes to `$GRIM_HOME/tui.log` and is never seen. Without this
+    // clause a TUI user with a mis-aimed filter has a 0/0 root and no reason.
+    #[test]
+    fn spec_frame_filtered_registry_appears_in_status_line() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec![],
+            truncated: vec![],
+            filtered: vec!["ghcr.io/acme".to_string()],
+        };
+        let m = frame(&s);
+        assert!(
+            m.status.contains("ghcr.io/acme"),
+            "status line must name the filtered registry; got: {:?}",
+            m.status
+        );
+        assert!(
+            m.status.contains("filtered"),
+            "status line must say the rows are missing because of a filter; got: {:?}",
+            m.status
+        );
+    }
+
+    // H5: the third clause composes with the other two in the established
+    // `a · b` style, and never displaces them.
+    #[test]
+    fn spec_frame_all_three_health_clauses_compose() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![]);
+        s.registry_health = RegistryHealth {
+            offline: vec!["ghcr.io/down".to_string()],
+            truncated: vec!["ghcr.io/big".to_string()],
+            filtered: vec!["ghcr.io/acme".to_string()],
+        };
+        let m = frame(&s);
+        assert_eq!(
+            m.status, "offline: ghcr.io/down · truncated: ghcr.io/big · filtered: ghcr.io/acme",
+            "all three clauses compose in declaration order"
         );
     }
 
@@ -3410,6 +3464,7 @@ mod spec_multi_registry_render_tests {
         s.registry_health = RegistryHealth {
             offline: vec!["ghcr.io/acme".to_string()],
             truncated: vec![],
+            filtered: vec![],
         };
         // Map ghcr.io/acme → "acme (ghcr.io/acme)" alias label.
         let mut labels = BTreeMap::new();

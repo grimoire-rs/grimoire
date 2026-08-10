@@ -373,14 +373,28 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     }
     if checked {
         let access = super::access_seam(ctx)?;
-        let registries = super::registries_for_scope(ctx, &scope);
+        let registries = super::registries_for_scope(ctx, &scope)?;
         let badges = BadgeContext {
             lock: lock.as_ref(),
             state: &state,
             roots: &scope.roots,
             active: &active,
         };
-        match crate::catalog::load_catalog(&ctx.paths(), &registries, "", &access, &badges, ctx.offline(), false).await
+        // `Complete`, never `Browse` (plan C-007, ADR D5): this load exists
+        // solely to populate `deprecated` / `replaced_by` on **declared**
+        // artifacts, so a per-registry browse filter hiding one of them would
+        // be a silent correctness bug, not a display change (S-005).
+        match crate::catalog::load_catalog(
+            &ctx.paths(),
+            &registries,
+            "",
+            &access,
+            &badges,
+            ctx.offline(),
+            false,
+            crate::catalog::CatalogScope::Complete,
+        )
+        .await
         {
             Ok(results) => apply_catalog_check(&mut entries, &results.into_flat_rows()),
             Err(e) => {

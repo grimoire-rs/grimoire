@@ -58,7 +58,7 @@ impl GrimMcpServer {
     /// query and annotated with each repository's install status. Returns the
     /// same JSON payload as `grim search --format json`.
     #[tool(
-        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status."
+        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
@@ -221,6 +221,26 @@ mod tests {
         assert!(
             build_router(true).has_route("grim_render"),
             "routed with --allow-writes"
+        );
+    }
+
+    /// W14: an MCP-driving agent has no channel but the tool schema itself to
+    /// learn that a registry browse filter narrows `grim_search` results — the
+    /// zero-match warning (C-019) goes to `tracing`/stderr, never the
+    /// JSON-RPC channel. The description must carry that warning inline, and
+    /// this test is the only thing that fails if a later edit drops it.
+    #[test]
+    fn grim_search_description_discloses_browse_filter() {
+        let router = build_router(false);
+        let description = router
+            .get("grim_search")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("grim_search must be routed with a description");
+        assert!(
+            description.contains("browse filter") && description.contains("direct reference"),
+            "grim_search description must warn that results may be narrowed by a registry \
+             browse filter and that an excluded package still resolves by direct reference: \
+             {description:?}"
         );
     }
 }

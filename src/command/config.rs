@@ -101,6 +101,25 @@ pub enum RegistryCommand {
         /// registry refs.
         #[arg(long, conflicts_with = "oci")]
         index: Option<String>,
+        /// Browse-filter glob narrowing what this registry shows in `grim
+        /// search`, the TUI, and `grim_search`. Affects browsing only — a
+        /// direct reference to a hidden package still resolves and installs.
+        /// Repeatable, never comma-separated — a comma is glob alternation
+        /// syntax, so `--include '{platform,tools}/**'` is one pattern.
+        /// Matched against the repository path with this entry's own --oci
+        /// prefix stripped: under `--oci ghcr.io/acme`, write
+        /// 'platform/**', not 'acme/platform/**'. An --index entry has no
+        /// registry root to strip, so its patterns match the whole
+        /// 'registry/repository' ref instead.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Browse-filter glob hiding matching repositories from this
+        /// registry. Affects browsing only — a direct reference to a hidden
+        /// package still resolves and installs. Repeatable, never
+        /// comma-separated, and anchored the same way (see `--include`);
+        /// wins over `--include` where both match.
+        #[arg(long)]
+        exclude: Vec<String>,
         /// Mark this registry as the default (clears any prior default).
         #[arg(long)]
         default: bool,
@@ -148,8 +167,10 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 alias,
                 oci,
                 index,
+                include,
+                exclude,
                 default,
-            } => run_registry_add(ctx, alias, oci.as_deref(), index.as_deref(), *default),
+            } => run_registry_add(ctx, alias, oci.as_deref(), index.as_deref(), *default, include, exclude),
             RegistryCommand::Rm { alias } => run_registry_rm(ctx, alias),
             RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
             RegistryCommand::Show { alias } => run_registry_show(ctx, alias),
@@ -211,21 +232,32 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     if let Some(rest) = key.strip_prefix("registry.") {
         // FIX 2: split at the RIGHTMOST dot so aliases containing dots
         // (e.g. `a.b`) are addressable: `registry.a.b.oci` → alias=`a.b`,
-        // field=`oci`.  The field must be exactly `oci`, `index`, or `default`
-        // (`url` accepted as the pre-0.7.0 alias for `oci`).
+        // field=`oci`.  The field must be one of `RegistryField::ALL`'s own
+        // names (`url` accepted as the pre-0.7.0 alias for `oci`).
         if let Some(dot_pos) = rest.rfind('.') {
             let alias = &rest[..dot_pos];
             let field_str = &rest[dot_pos + 1..];
             if !alias.is_empty() && !field_str.is_empty() {
+                // Matched against `RegistryField::ALL` rather than a
+                // hand-written arm list, for the reason C-021 gives for
+                // `collect_entries`: a field added to that array must become
+                // addressable without a second edit here. `include` and
+                // `exclude` (plan C-011) arrive for free through it.
                 let field = match field_str {
-                    "oci" | "url" => RegistryField::Oci,
-                    "index" => RegistryField::Index,
-                    "default" => RegistryField::Default,
-                    other => {
-                        return Err(super::config_usage(format!(
-                            "unknown registry field '{other}'; valid fields: oci, index, default"
-                        )));
-                    }
+                    "url" => RegistryField::Oci,
+                    other => RegistryField::ALL
+                        .into_iter()
+                        .find(|f| f.field_name() == other)
+                        .ok_or_else(|| {
+                            // Escaped like every other message quoting a
+                            // user-supplied key segment: a raw ESC echoed to
+                            // stderr is a control-sequence-injection vector.
+                            super::config_usage(format!(
+                                "unknown registry field '{}'; valid fields: {}",
+                                other.escape_debug(),
+                                RegistryField::ALL.map(RegistryField::field_name).join(", ")
+                            ))
+                        })?,
                 };
                 // FIX 1: validate alias format at CLI boundary (exit 64) so
                 // a bad alias never reaches validate_registries (exit 78).
@@ -327,20 +359,192 @@ fn get_value(
         ParsedKey::VendorField { vendor } => vendor_value(vendor, options),
         ParsedKey::RegistryAlias { alias } => {
             return Err(super::config_usage(format!(
-                "no registry field specified for '{alias}'; use registry.<alias>.oci or registry.<alias>.default"
+                "no registry field specified for '{alias}'; use registry.{alias}.<field>, one of: {}",
+                RegistryField::ALL.map(RegistryField::field_name).join(", ")
             )));
         }
         ParsedKey::RegistryAliasField { alias, field } => {
             let rc = find_registry(registries, alias).ok_or_else(|| {
                 super::config_usage(format!("no registry '{alias}'; add it with `grim config registry add`"))
             })?;
-            match field {
-                RegistryField::Oci => rc.oci.clone(),
-                RegistryField::Index => rc.index.clone(),
-                RegistryField::Default => Some(rc.default.to_string()),
-            }
+            registry_field_value(rc, *field)
         }
     })
+}
+
+/// The effective value of one registry field on one entry, or `None` when
+/// unset.
+///
+/// The single accessor behind both `config get` ([`get_value`]) and
+/// `config list` ([`collect_entries`]), so the two can never disagree
+/// about a registry field (plan C-021).
+fn registry_field_value(rc: &RegistryConfig, field: RegistryField) -> Option<String> {
+    match field {
+        RegistryField::Oci => rc.oci.clone(),
+        RegistryField::Index => rc.index.clone(),
+        RegistryField::Include => pattern_list_value(&rc.include),
+        RegistryField::Exclude => pattern_list_value(&rc.exclude),
+        // `default` always has an effective value — it has no unset state.
+        RegistryField::Default => Some(rc.default.to_string()),
+    }
+}
+
+/// An authored `include`/`exclude` list as a display value: `None` when
+/// empty, so it reads as unset everywhere (`get` exits 1, `list` omits the
+/// row) exactly like the other empty-list keys (plan C-012).
+///
+/// The comma join is **display only and not round-trippable**: `set` takes
+/// exactly one pattern and never splits (a comma is glob alternation
+/// syntax), so feeding a multi-element rendering back would store it as one
+/// literal pattern. `--format json` carries the true array.
+fn pattern_list_value(patterns: &[String]) -> Option<String> {
+    (!patterns.is_empty()).then(|| patterns.join(","))
+}
+
+/// Which verb is writing the pattern. The two paths accept exactly the same
+/// set — they differ only in which remedy is reachable from where the user
+/// is standing (plan C-012/C-013).
+#[derive(Clone, Copy)]
+enum WriteSite {
+    /// `grim config set registry.<alias>.<field>`, reachable only once the
+    /// entry exists.
+    Set,
+    /// `grim config registry add --include`/`--exclude`, reachable only
+    /// while it does not.
+    Add,
+}
+
+/// Quote an authored filter pattern for a CLI error message: `escape_debug`d
+/// and **capped**, the set-time twin of `project_config::quote_pattern`
+/// (private to its module, hence the second copy).
+///
+/// The cap is not cosmetic — [`crate::config::project_config::validate_filter_pattern`]
+/// rejects a pattern for being over 1024 bytes, so this message is exactly
+/// where an arbitrarily long pattern arrives, and quoting one whole turns a
+/// 12 000-byte pattern into a 12 000-byte error line. The cut happens on the
+/// **raw** pattern, before escaping: escaping first and truncating after
+/// could split a `\u{…}` sequence in half.
+fn quote_pattern(pattern: &str) -> String {
+    /// Chars of the authored pattern shown before truncation. Escaping can
+    /// expand each one, so the rendered quote is longer — bounded, which is
+    /// the point, not exact.
+    const MAX_SHOWN_CHARS: usize = 80;
+    match pattern.char_indices().nth(MAX_SHOWN_CHARS) {
+        None => format!("'{}'", pattern.escape_debug()),
+        Some((cut, _)) => format!("'{}…' ({} bytes total)", pattern[..cut].escape_debug(), pattern.len()),
+    }
+}
+
+/// Validate one authored browse-filter pattern at the CLI write boundary
+/// (exit 65, plan C-012/C-013/S-016).
+///
+/// Delegates to [`crate::config::project_config::validate_filter_pattern`],
+/// the same predicate load-time validation uses (exit 78), so the accepted
+/// set cannot drift between a hand-edited config and the CLI. `site` selects
+/// only the remedy named in the bare-comma warning, never what is accepted.
+fn check_filter_pattern(value: &str, key: &str, site: WriteSite) -> anyhow::Result<()> {
+    crate::config::project_config::validate_filter_pattern(value).map_err(|reason| {
+        // Quoted through `quote_pattern` for the same two reasons the load
+        // path is: a pattern is user-authored text on its way to stderr and
+        // `char::is_control` does not cover the bidi/zero-width format
+        // characters that reach the glob compiler intact, and the
+        // over-length rejection arrives here carrying the over-long value.
+        // The KEY is escaped too, not just the value: it interpolates the
+        // authored alias (`registry.<alias>.include`), and `parse_key`'s
+        // control-char screen is false for U+202E. Same call
+        // `warn_on_discarded_patterns` already makes on the same alias.
+        super::config_value(format!(
+            "invalid value for {}: {} {reason}",
+            key.escape_debug(),
+            quote_pattern(value)
+        ))
+    })?;
+    if has_bare_comma(value) {
+        // One pattern is stored verbatim (C-012), so a top-level comma is
+        // almost always a list the user expected to be split — most often
+        // the comma-joined output of `config get` fed straight back in.
+        // That compiles to a valid glob matching nothing, which browses
+        // empty with no other symptom, so it must not pass silently. A
+        // warning, never an error: `a,b` is a legal repository name.
+        let reachable = match site {
+            // `registry add --include` is deliberately absent here: `config
+            // set` is reachable only once the alias exists, and `registry
+            // add` on an existing alias is exit 64, so naming it would close
+            // a loop with no exit.
+            WriteSite::Set => "",
+            // On `add` the flag is still open, and repeating it is the only
+            // remedy that writes a real multi-pattern list — so it leads.
+            WriteSite::Add => " Repeat the flag instead — `--include a --include b` accumulates.",
+        };
+        tracing::warn!(
+            "{key}: {} is stored as ONE pattern — a comma is glob alternation, never a separator.{reachable} \
+             If these were meant as separate patterns, brace them into one glob (`{{a,b}}`) or \
+             write the list by hand in `grimoire.toml`.",
+            quote_pattern(value)
+        );
+    }
+    Ok(())
+}
+
+/// [`check_filter_pattern`] for the `config set` path, where an empty value
+/// has a next command that the `registry add` path does not.
+///
+/// The shared validator's emptiness reason stays generic because load-time
+/// validation (exit 78) reports it for a hand-edited file, where no `grim
+/// config` verb applies — so the remedy is attached here, at the one
+/// boundary that knows `unset` is what the user meant.
+fn check_set_filter_pattern(value: &str, key: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        // Escaped twice over, and the second one is the one that matters: this
+        // message hands the user a command to copy and run, so an unescaped
+        // U+202E in the alias reorders how `grim config unset …` renders.
+        let key = key.escape_debug();
+        return Err(super::config_value(format!(
+            "invalid value for {key}: must not be empty or whitespace-only; \
+             clear the filter with `grim config unset {key}`"
+        )));
+    }
+    check_filter_pattern(value, key, WriteSite::Set)
+}
+
+/// Warn when a one-pattern `set` discards a multi-pattern browse filter.
+///
+/// `set` writes exactly one pattern and replaces the whole list (C-012), so
+/// on an entry that already carries several it destroys committed config at
+/// exit 0 under a report that reads as an addition — and because the
+/// surviving pattern leaves the filter *partially* correct, the
+/// `filter admitted M of N` diagnostic stays silent too. Naming the count is
+/// the point: "one of them worked" is exactly why the loss goes unnoticed.
+fn warn_on_discarded_patterns(alias: &str, field: RegistryField, previous: &[String]) {
+    if previous.len() > 1 {
+        // Escaped like every other message quoting the alias — `parse_key`
+        // screens control characters, but not U+202E.
+        let shown = alias.escape_debug();
+        tracing::warn!(
+            "registry.{shown}.{}: `grim config set` writes ONE pattern and replaces the whole list — \
+             the {} patterns already stored are discarded, not appended to. To keep them, re-create \
+             the entry: `grim config registry rm {shown}`, then `grim config registry add` with \
+             repeated --include/--exclude flags; or edit `grimoire.toml` by hand.",
+            field.field_name(),
+            previous.len()
+        );
+    }
+}
+
+/// Whether `pattern` carries a comma outside every `{…}` group — the shape
+/// of a list somebody expected to be split, rather than legitimate glob
+/// alternation (`acme/{platform,tools}/**`, which must stay silent).
+fn has_bare_comma(pattern: &str) -> bool {
+    let mut depth = 0usize;
+    for ch in pattern.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 // ── Value setters ─────────────────────────────────────────────────────────────
@@ -424,7 +628,8 @@ fn apply_set(
         }
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
             "cannot set registry '{alias}' without a field; \
-             use registry.<alias>.oci or registry.<alias>.default"
+             use registry.{alias}.<field>, one of: {}",
+            RegistryField::ALL.map(RegistryField::field_name).join(", ")
         ))),
         ParsedKey::RegistryAliasField { alias, field } => {
             if find_registry(registries, alias).is_none() {
@@ -436,6 +641,10 @@ fn apply_set(
                 RegistryField::Oci => {
                     reject_control_chars(value_str, &format!("registry.{alias}.oci"))?;
                     if find_registry(registries, alias).is_some_and(|rc| rc.index.is_some()) {
+                        // Both interpolations escaped — the second is a command
+                        // to copy and run. Pre-existing (`main` carries the
+                        // same line), fixed here because it is the same edit.
+                        let alias = alias.escape_debug();
                         return Err(super::config_value(format!(
                             "registry '{alias}' is an index entry; oci and index are mutually \
                              exclusive — unset registry.{alias}.index first"
@@ -447,6 +656,7 @@ fn apply_set(
                 RegistryField::Index => {
                     reject_control_chars(value_str, &format!("registry.{alias}.index"))?;
                     if find_registry(registries, alias).is_some_and(|rc| rc.oci.is_some()) {
+                        let alias = alias.escape_debug();
                         return Err(super::config_value(format!(
                             "registry '{alias}' is a registry entry; oci and index are mutually \
                              exclusive — unset registry.{alias}.oci first"
@@ -465,6 +675,34 @@ fn apply_set(
                     set_registry_field(registries, alias, |rc| rc.index = Some(value_str.to_string()));
                     Ok(value_str.to_string())
                 }
+                // Exactly ONE pattern, replacing the whole list (plan
+                // C-012). Deliberately no comma split — the house
+                // `StringList` style (`options.clients`,
+                // `options.tui.tree_separators`) cannot apply here because a
+                // comma is glob alternation syntax, and splitting would make
+                // `acme/{platform,tools}/**` unwritable. Several patterns are
+                // written with repeated `registry add --include` (C-013) or
+                // by editing `grimoire.toml`.
+                RegistryField::Include => {
+                    check_set_filter_pattern(value_str, &format!("registry.{alias}.include"))?;
+                    // After validation, so a rejected pattern never warns
+                    // about a list it was never going to replace.
+                    if let Some(rc) = find_registry(registries, alias) {
+                        warn_on_discarded_patterns(alias, *field, &rc.include);
+                    }
+                    let replacement = vec![value_str.to_string()];
+                    set_registry_field(registries, alias, |rc| rc.include = replacement);
+                    Ok(value_str.to_string())
+                }
+                RegistryField::Exclude => {
+                    check_set_filter_pattern(value_str, &format!("registry.{alias}.exclude"))?;
+                    if let Some(rc) = find_registry(registries, alias) {
+                        warn_on_discarded_patterns(alias, *field, &rc.exclude);
+                    }
+                    let replacement = vec![value_str.to_string()];
+                    set_registry_field(registries, alias, |rc| rc.exclude = replacement);
+                    Ok(value_str.to_string())
+                }
                 RegistryField::Default => {
                     let b = parse_bool(value_str, &format!("registry.{alias}.default"))?;
                     if b {
@@ -476,6 +714,19 @@ fn apply_set(
             }
         }
     }
+}
+
+/// The shared "no such registry" usage error for `unset`'s field arms.
+///
+/// One function rather than four copies of one string, and the alias is
+/// escaped for the reason `validate_alias_format` gives: `char::is_control`
+/// never matches U+202E, so a bidi override reaches every message that
+/// quotes an alias intact.
+fn no_such_registry_for_unset(alias: &str) -> anyhow::Error {
+    super::config_usage(format!(
+        "no registry '{}'; cannot unset a field on a registry that does not exist",
+        alias.escape_debug()
+    ))
 }
 
 fn apply_unset(
@@ -505,8 +756,14 @@ fn apply_unset(
         }
         ParsedKey::RegistryAlias { alias } => {
             if !registries.iter().any(|r| r.alias.as_deref() == Some(alias.as_str())) {
+                // The bare `registry.<alias>` form is the ONE key shape
+                // `parse_key` does not run `validate_alias_format` over, so
+                // this message is reached with control characters intact —
+                // a raw ESC on stderr is a control-sequence-injection
+                // vector, the same one every other quoted segment escapes.
                 return Err(super::config_usage(format!(
-                    "no registry '{alias}'; cannot remove a registry that does not exist"
+                    "no registry '{}'; cannot remove a registry that does not exist",
+                    alias.escape_debug()
                 )));
             }
             registries.retain(|r| r.alias.as_deref() != Some(alias.as_str()));
@@ -515,9 +772,7 @@ fn apply_unset(
         ParsedKey::RegistryAliasField { alias, field } => match field {
             RegistryField::Oci => {
                 let Some(rc) = find_registry(registries, alias) else {
-                    return Err(super::config_usage(format!(
-                        "no registry '{alias}'; cannot unset a field on a registry that does not exist"
-                    )));
+                    return Err(no_such_registry_for_unset(alias));
                 };
                 if rc.index.is_none() {
                     return Err(super::config_usage(format!(
@@ -530,9 +785,7 @@ fn apply_unset(
             }
             RegistryField::Index => {
                 let Some(rc) = find_registry(registries, alias) else {
-                    return Err(super::config_usage(format!(
-                        "no registry '{alias}'; cannot unset a field on a registry that does not exist"
-                    )));
+                    return Err(no_such_registry_for_unset(alias));
                 };
                 if rc.oci.is_none() {
                     return Err(super::config_usage(format!(
@@ -543,10 +796,28 @@ fn apply_unset(
                 set_registry_field(registries, alias, |rc| rc.index = None);
                 Ok(())
             }
+            // `unset` clears to empty (plan C-012) — the entry survives with
+            // no filter, unlike `oci`/`index` where clearing the last
+            // locator would leave the entry sourceless.
+            RegistryField::Include => {
+                if find_registry(registries, alias).is_none() {
+                    return Err(no_such_registry_for_unset(alias));
+                }
+                set_registry_field(registries, alias, |rc| rc.include.clear());
+                Ok(())
+            }
+            RegistryField::Exclude => {
+                if find_registry(registries, alias).is_none() {
+                    return Err(no_such_registry_for_unset(alias));
+                }
+                set_registry_field(registries, alias, |rc| rc.exclude.clear());
+                Ok(())
+            }
             RegistryField::Default => {
                 if find_registry(registries, alias).is_none() {
                     return Err(super::config_usage(format!(
-                        "no registry '{alias}'; cannot unset default on a registry that does not exist"
+                        "no registry '{}'; cannot unset default on a registry that does not exist",
+                        alias.escape_debug()
                     )));
                 }
                 set_registry_default(registries, alias, false);
@@ -586,20 +857,24 @@ fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryCon
     }
     for rc in registries {
         if let Some(alias) = &rc.alias {
-            let oci_spec = RegistryField::Oci.spec();
-            if rc.oci.is_some() || all {
-                entries.push(entry(format!("registry.{alias}.oci"), rc.oci.clone(), oci_spec));
+            // Iterate `RegistryField::ALL` rather than naming the fields one
+            // at a time (plan C-021): `list [--all]` documents itself as
+            // listing every supported key, so a field added to that array
+            // has to appear here for free — hand-written branches silently
+            // made that promise false. The value comes from the same
+            // accessor `get` uses, so the two surfaces cannot disagree.
+            // Row order follows `ALL`, whose first three entries are the
+            // shipped `oci, index, default` sequence.
+            for field in RegistryField::ALL {
+                let value = registry_field_value(rc, field);
+                if value.is_some() || all {
+                    entries.push(entry(
+                        format!("registry.{alias}.{}", field.field_name()),
+                        value,
+                        field.spec(),
+                    ));
+                }
             }
-            let index_spec = RegistryField::Index.spec();
-            if rc.index.is_some() || all {
-                entries.push(entry(format!("registry.{alias}.index"), rc.index.clone(), index_spec));
-            }
-            // `default` always has an effective value — no unset state.
-            entries.push(entry(
-                format!("registry.{alias}.default"),
-                Some(rc.default.to_string()),
-                RegistryField::Default.spec(),
-            ));
         }
     }
     // Per-vendor rows exist only for a client the config actually names —
@@ -938,6 +1213,8 @@ fn run_registry_add(
     oci: Option<&str>,
     index: Option<&str>,
     make_default: bool,
+    include: &[String],
+    exclude: &[String],
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
     // FIX 1: pre-validate alias at the CLI boundary (exit 64) so a bad alias
     // exits UsageError rather than ConfigError after write → validate_registries.
@@ -965,24 +1242,58 @@ fn run_registry_add(
             locator.escape_debug()
         )));
     }
-
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
-    let _guard = acquire_config_lock(&scope)?;
-
-    let mut registries = scope.registries.clone();
-
-    if registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
+    // Before the pattern loop, so C-013's "duplicate alias → 64" holds
+    // unconditionally: `registry add <existing> --include '<malformed>'` is a
+    // usage error about the alias, not a value error about a pattern that
+    // could never have been written anyway.
+    if scope.registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
         // Set-time twin of the load-time `duplicate alias '{shown}'` message.
         // `validate_alias_format` above does not stop U+202E — nothing rejects
         // a format character in an alias — so it reaches this message intact.
         let shown = alias.escape_debug();
+        // The filter clause is not decoration: this message is where a user
+        // adding a second `--include` to an existing entry lands, and
+        // without it they read "use `config set` instead" — which replaces
+        // the whole list rather than appending to it (B-2). Re-creating the
+        // entry is the only sequence that writes a multi-pattern filter.
         return Err(super::config_usage(format!(
             "registry '{shown}' already exists; use `grim config set registry.{shown}.oci <ref>` \
-             to update or `grim config registry rm {shown}` to remove"
+             to update or `grim config registry rm {shown}` to remove — and to change its browse \
+             filter, re-create it with `grim config registry rm {shown}` then `grim config \
+             registry add` with repeated --include/--exclude flags, since `grim config set \
+             registry.{shown}.include` writes ONE pattern and replaces the whole list"
         )));
     }
+
+    // Browse filters (plan C-013), validated before the lock so a bad pattern
+    // is exit 65 with nothing written (S-016). Each flag is repeatable and
+    // accumulates; values are never split on a comma, which is glob
+    // alternation syntax — this is the only CLI path that writes a
+    // multi-pattern list.
+    for (field, patterns) in [("include", include), ("exclude", exclude)] {
+        let key = format!("registry.{alias}.{field}");
+        for pattern in patterns {
+            check_filter_pattern(pattern, &key, WriteSite::Add)?;
+        }
+        // C-006's fourth check — the whole-list budget, which the per-pattern
+        // loop structurally cannot see: no single pattern is over any
+        // per-pattern cap. Without it the aggregate rejection reached the user
+        // only from `commit_config` → `validate_registries`, as exit **78**
+        // naming the `grimoire.toml` path for a value that arrived through
+        // `--include`/`--exclude` flags on a file nobody edited. `compile_set`
+        // is the same seam load-time validation uses, so what the two accept
+        // cannot drift; `commit_config`'s check stays the backstop for a
+        // hand-edited file.
+        crate::config::registry_filter::compile_set(patterns)
+            .map_err(|reason| super::config_value(format!("invalid value for {key}: {reason}")))?;
+    }
+
+    let _guard = acquire_config_lock(&scope)?;
+
+    let mut registries = scope.registries.clone();
 
     if make_default {
         clear_all_defaults(&mut registries);
@@ -991,6 +1302,10 @@ fn run_registry_add(
         alias: Some(alias.to_string()),
         oci: (!is_index).then(|| locator.to_string()),
         index: is_index.then(|| locator.to_string()),
+        // `registry add` with neither flag declares an unfiltered entry
+        // (plan C-013).
+        include: include.to_vec(),
+        exclude: exclude.to_vec(),
         default: make_default,
     });
 
@@ -1074,6 +1389,8 @@ fn run_registry_show(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport
             alias: alias.to_string(),
             oci: rc.oci.clone(),
             index: rc.index.clone(),
+            include: rc.include.clone(),
+            exclude: rc.exclude.clone(),
             default: rc.default,
         }),
         ExitCode::Success,
@@ -1089,6 +1406,8 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
             alias: rc.alias.clone(),
             oci: rc.oci.clone(),
             index: rc.index.clone(),
+            include: rc.include.clone(),
+            exclude: rc.exclude.clone(),
             default: rc.default,
         })
         .collect();
@@ -1098,8 +1417,9 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
     ))
 }
 
-/// `grim config registry fields` — static metadata for the 3 addressable
-/// per-registry fields (`oci`, `index`, `default`). Unlike every other
+/// `grim config registry fields` — static metadata for the 5 addressable
+/// per-registry fields (`oci`, `index`, `default`, and the browse filters
+/// `include` / `exclude`). Unlike every other
 /// `config` subcommand this takes no [`Context`], resolves no scope, and
 /// acquires no lock: the field set and its type/title/description are
 /// fixed at compile time (see [`RegistryField::spec`]), so the command
@@ -1146,6 +1466,34 @@ mod tests {
         Harness::try_parse_from(argv).map(|h| match h.cmd {
             Sub::Config(a) => a,
         })
+    }
+
+    /// P5: the pattern *value* was already escaped through `quote_pattern`;
+    /// the *key* was not, and it interpolates the authored alias. Both
+    /// messages below hand the user a `grim config unset …` command to copy
+    /// and run, so an unescaped bidi override reorders how that command
+    /// renders — and `parse_key`'s control screen is false for U+202E.
+    #[test]
+    fn filter_pattern_errors_escape_the_key_p5() {
+        const BIDI_OVERRIDE: char = '\u{202e}';
+        let key = format!("registry.ac{BIDI_OVERRIDE}me.include");
+
+        for message in [
+            // The empty-value arm, which carries the copy-pasteable command.
+            check_set_filter_pattern("   ", &key).expect_err("whitespace-only is rejected"),
+            // The glob-compile arm, which carries the key once.
+            check_filter_pattern("acme{unclosed", &key, WriteSite::Set).expect_err("an unclosed group is rejected"),
+        ] {
+            let text = format!("{message:#}");
+            assert!(
+                !text.contains(BIDI_OVERRIDE),
+                "no raw bidi override may reach stderr; got: {text:?}"
+            );
+            assert!(
+                text.contains("registry.ac\\u{202e}me.include"),
+                "the key must still be readable, escaped; got: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -1208,6 +1556,7 @@ mod tests {
                     oci,
                     index,
                     default,
+                    ..
                 } => {
                     assert_eq!(alias, "acme");
                     assert_eq!(oci.as_deref(), Some("ghcr.io/acme"));
@@ -1515,6 +1864,7 @@ mod tests {
             oci: None,
             index: Some("https://index.example".to_string()),
             default: false,
+            ..Default::default()
         }];
 
         let without_all = collect_entries(false, &options, &registries);
@@ -1567,12 +1917,14 @@ mod tests {
                 oci: Some("u1".to_string()),
                 index: None,
                 default: true,
+                ..Default::default()
             },
             RegistryConfig {
                 alias: Some("b".to_string()),
                 oci: Some("u2".to_string()),
                 index: None,
                 default: false,
+                ..Default::default()
             },
         ];
         // Simulate `registry use b`.
@@ -2093,6 +2445,897 @@ mod tests {
         assert_eq!(row.title, VENDOR_SHARED_SKILLS.title);
     }
 
+    // ── C-011…C-014, C-021: per-registry browse filters ──────────────────────
+
+    /// One aliased registry carrying an authored filter on both sides.
+    fn filtered_registries() -> Vec<RegistryConfig> {
+        vec![RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: None,
+            include: vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()],
+            exclude: vec!["acme/platform/legacy/**".to_string()],
+            default: false,
+        }]
+    }
+
+    /// The same entry with no filter authored on either side.
+    fn unfiltered_registries() -> Vec<RegistryConfig> {
+        vec![RegistryConfig {
+            alias: Some("acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn parse_key_recognizes_include_and_exclude() {
+        // Plan C-011: the two filter fields become addressable as
+        // `registry.<alias>.<field>`, closing WP-A's interim state where
+        // `config registry fields` advertised keys `parse_key` rejected.
+        assert!(matches!(
+            parse_key("registry.acme.include"),
+            Ok(ParsedKey::RegistryAliasField { alias, field: RegistryField::Include })
+            if alias == "acme"
+        ));
+        assert!(matches!(
+            parse_key("registry.acme.exclude"),
+            Ok(ParsedKey::RegistryAliasField { alias, field: RegistryField::Exclude })
+            if alias == "acme"
+        ));
+        // A dotted alias stays addressable (the rightmost-dot split).
+        assert!(matches!(
+            parse_key("registry.a.b.include"),
+            Ok(ParsedKey::RegistryAliasField { alias, field: RegistryField::Include })
+            if alias == "a.b"
+        ));
+    }
+
+    #[test]
+    fn parse_key_registry_field_set_is_exactly_registry_field_all() {
+        // Every declared field parses, and nothing else does — the match is
+        // driven by `RegistryField::ALL`, so a future field is addressable
+        // without editing `parse_key` and this test needs no edit either.
+        for f in RegistryField::ALL {
+            let key = format!("registry.acme.{}", f.field_name());
+            assert!(
+                matches!(parse_key(&key), Ok(ParsedKey::RegistryAliasField { field, .. }) if field == f),
+                "every registry field must parse: {key}"
+            );
+        }
+        let msg = parse_key("registry.acme.bogus")
+            .expect_err("an unknown registry field must be rejected")
+            .to_string();
+        for f in RegistryField::ALL {
+            assert!(
+                msg.contains(f.field_name()),
+                "the unknown-field error must name '{}'; got: {msg}",
+                f.field_name()
+            );
+        }
+    }
+
+    #[test]
+    fn filter_get_is_unset_when_the_list_is_empty() {
+        // Plan C-012 / S-009: an empty list is unset — `get` exits 1 with
+        // no output, exactly like the other empty-list keys.
+        let options = fresh_options();
+        let registries = unfiltered_registries();
+        for field in ["include", "exclude"] {
+            let key = parse_key(&format!("registry.acme.{field}")).unwrap();
+            assert_eq!(
+                get_value(&key, &options, &registries).unwrap(),
+                None,
+                "an empty {field} list must read as unset, not as an empty string"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_get_reads_each_side_from_its_own_field() {
+        // Plan C-012: display-only comma join, and — the mutation that
+        // matters — each key reads its OWN list. Swapping the two arms
+        // inverts an allowlist into a denylist and fails right here.
+        let options = fresh_options();
+        let registries = filtered_registries();
+        assert_eq!(
+            get_value(&parse_key("registry.acme.include").unwrap(), &options, &registries).unwrap(),
+            Some("acme/platform/**,acme/tools/**".to_string())
+        );
+        assert_eq!(
+            get_value(&parse_key("registry.acme.exclude").unwrap(), &options, &registries).unwrap(),
+            Some("acme/platform/legacy/**".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_set_replaces_the_whole_list_with_exactly_one_pattern() {
+        // Plan C-012: `set` takes exactly one pattern and replaces the whole
+        // list. Writing several is `registry add --include` repeated (C-013)
+        // or a hand edit — a deliberate, documented limitation.
+        let mut options = fresh_options();
+        let mut registries = filtered_registries();
+        let stored = apply_set(
+            &parse_key("registry.acme.include").unwrap(),
+            "acme/next/**",
+            &mut options,
+            &mut registries,
+        )
+        .expect("a valid pattern must be accepted");
+        assert_eq!(stored, "acme/next/**");
+        assert_eq!(registries[0].include, vec!["acme/next/**".to_string()]);
+        assert_eq!(
+            registries[0].exclude,
+            vec!["acme/platform/legacy/**".to_string()],
+            "setting one side must not disturb the other"
+        );
+    }
+
+    #[test]
+    fn filter_set_never_splits_on_a_comma() {
+        // Plan C-012/C-013: a comma is glob alternation syntax. Splitting on
+        // it would make `acme/{platform,tools}/**` unwritable, so this path
+        // deliberately diverges from the `StringList` house comma-split that
+        // `options.clients` and `options.tui.tree_separators` use.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        apply_set(
+            &parse_key("registry.acme.include").unwrap(),
+            "acme/{platform,tools}/**",
+            &mut options,
+            &mut registries,
+        )
+        .expect("brace alternation must survive intact");
+        assert_eq!(
+            registries[0].include,
+            vec!["acme/{platform,tools}/**".to_string()],
+            "the value must be stored as ONE pattern, never split into two"
+        );
+    }
+
+    #[test]
+    fn filter_set_rejects_an_invalid_pattern_as_a_data_error() {
+        // Plan S-016 / the error taxonomy: a malformed pattern through
+        // `config set` is exit 65 with nothing written — not the exit 78 a
+        // hand-edited config gets at load. The shared predicate is
+        // `project_config::validate_filter_pattern`, so the accepted set
+        // cannot drift between the two paths.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        // `"   "` is the silent one: it compiles to a valid glob matching
+        // nothing, so accepting it would empty the browse set with no
+        // diagnostic at all.
+        for value in ["acme{unclosed", "", "   ", "a\tb"] {
+            let err = apply_set(
+                &parse_key("registry.acme.include").unwrap(),
+                value,
+                &mut options,
+                &mut registries,
+            )
+            .expect_err("an invalid pattern must be rejected");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                ExitCode::DataError,
+                "a bad pattern must exit 65, not 78; value: {value:?}"
+            );
+        }
+        assert!(
+            registries[0].include.is_empty(),
+            "a rejected pattern must leave the list untouched"
+        );
+    }
+
+    #[test]
+    fn filter_set_message_never_echoes_a_raw_hostile_byte() {
+        // Same discipline as every other message in this file: a pattern is
+        // user-supplied and reaches stderr, so ESC must be escaped — and
+        // U+202E is not `char::is_control`, so it sails past the control
+        // check into the glob compiler's own error.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        for (value, raw) in [("a\u{1b}[2Jb", '\u{1b}'), ("acme{\u{202e}", '\u{202e}')] {
+            let msg = apply_set(
+                &parse_key("registry.acme.exclude").unwrap(),
+                value,
+                &mut options,
+                &mut registries,
+            )
+            .expect_err("a hostile pattern must be rejected")
+            .to_string();
+            assert!(
+                !msg.contains(raw),
+                "message for {value:?} must not embed the raw {raw:?} byte: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_comma_flags_a_list_but_not_brace_alternation() {
+        // The `get` → `set` round trip stores a comma-joined list as ONE
+        // literal glob that matches nothing, so `set` warns on it. Legal
+        // alternation must stay silent, or the warning trains users to
+        // ignore it.
+        for suspicious in ["a/**,b/**", "a,b", "{a,b},c", "acme/**,"] {
+            assert!(has_bare_comma(suspicious), "must flag {suspicious:?}");
+        }
+        for legitimate in [
+            "acme/{platform,tools}/**",
+            "acme/**",
+            "a/{b,c}",
+            "a/{b,{c,d}}/**",
+            "acme",
+        ] {
+            assert!(!has_bare_comma(legitimate), "must stay silent on {legitimate:?}");
+        }
+    }
+
+    #[test]
+    fn filter_set_warns_but_still_stores_a_comma_joined_value() {
+        // Warning only, never an error: `a,b` is a legal repository name,
+        // and C-012's one-pattern `set` is the design. What must not happen
+        // is silence.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        let stored = apply_set(
+            &parse_key("registry.acme.include").unwrap(),
+            "a/**,b/**",
+            &mut options,
+            &mut registries,
+        )
+        .expect("a comma is legal in a pattern — warn, do not reject");
+        assert_eq!(stored, "a/**,b/**");
+        assert_eq!(registries[0].include, vec!["a/**,b/**".to_string()]);
+    }
+
+    /// A `std::io::Write` sink over a shared buffer, so a `tracing` event can
+    /// be asserted as text. Same shape as `catalog_service`'s capture helper.
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer is never poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `f` with `tracing` captured thread-locally, returning what it wrote.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        crate::log_switch::tracing_capture::arm();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = std::sync::Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(std::sync::Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        f();
+        drop(guard);
+        String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone()).expect("tracing writes UTF-8")
+    }
+
+    #[test]
+    fn filter_set_comma_warning_names_only_remedies_that_work() {
+        // H2/H3: `config set registry.<alias>.include` is reachable only when
+        // the alias already exists, and `registry add` on an existing alias is
+        // exit 64 by design — so the warning must not route the user there.
+        // Both remedies it names work from either call site that fires it.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        let logs = capture_logs(|| {
+            apply_set(
+                &parse_key("registry.acme.include").unwrap(),
+                "acme/platform/**,acme/tools/**",
+                &mut options,
+                &mut registries,
+            )
+            .expect("a comma is legal in a pattern — warn, do not reject");
+        });
+        assert!(
+            logs.contains("a comma is glob alternation, never a separator"),
+            "the warning must keep its point: {logs}"
+        );
+        assert!(logs.contains("{a,b}"), "brace alternation must be offered: {logs}");
+        assert!(
+            logs.contains("grimoire.toml"),
+            "writing the list by hand must be offered: {logs}"
+        );
+        assert!(
+            !logs.contains("registry add"),
+            "`registry add` is exit 64 on an existing alias — never a remedy here: {logs}"
+        );
+    }
+
+    #[test]
+    fn filter_set_warns_when_it_discards_an_existing_multi_pattern_list() {
+        // B-2: `set` replaces the whole list (C-012), so on an entry that
+        // already carries several patterns it destroys committed config at
+        // exit 0 with a report that reads as an addition — and the filter
+        // stays PARTIALLY correct, so no downstream diagnostic fires either.
+        // The count is named because "one of them survived" is the whole
+        // reason this is silent.
+        let mut options = fresh_options();
+        let mut registries = filtered_registries();
+        let logs = capture_logs(|| {
+            apply_set(
+                &parse_key("registry.acme.include").unwrap(),
+                "acme/tools/**",
+                &mut options,
+                &mut registries,
+            )
+            .expect("a valid pattern must be accepted");
+        });
+        assert!(
+            logs.contains("registry.acme.include"),
+            "the warning must name the key it overwrote: {logs}"
+        );
+        assert!(logs.contains('2'), "the discarded count must be named: {logs}");
+        assert!(
+            logs.contains("grim config registry rm acme"),
+            "the only sequence that rebuilds a multi-pattern list must be named: {logs}"
+        );
+        assert_eq!(
+            registries[0].include,
+            vec!["acme/tools/**".to_string()],
+            "the warning does not change what `set` writes"
+        );
+    }
+
+    #[test]
+    fn filter_set_stays_silent_when_it_replaces_at_most_one_pattern() {
+        // The warning must fire on data loss, not on every `set` — a first
+        // write and a one-for-one overwrite discard nothing worth naming.
+        for mut registries in [unfiltered_registries(), {
+            let mut one = unfiltered_registries();
+            one[0].include = vec!["acme/platform/**".to_string()];
+            one
+        }] {
+            let mut options = fresh_options();
+            let logs = capture_logs(|| {
+                apply_set(
+                    &parse_key("registry.acme.include").unwrap(),
+                    "acme/tools/**",
+                    &mut options,
+                    &mut registries,
+                )
+                .expect("a valid pattern must be accepted");
+            });
+            assert!(
+                !logs.contains("discard"),
+                "replacing 0 or 1 patterns is not data loss: {logs}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_path_comma_warning_names_repeating_the_flag() {
+        // W-6: the warning is shared by both write paths, but the remedies
+        // are not. On `registry add` the flag is still open, so repeating it
+        // is the one remedy that writes a real multi-pattern list — and it
+        // was the one clause missing, because the text was worded for the
+        // `config set` path (where `registry add` is exit 64).
+        let (_tmp, _config_path, ctx) = project_scope();
+        let logs = capture_logs(|| {
+            run_registry_add(
+                &ctx,
+                "acme",
+                Some("ghcr.io/acme"),
+                None,
+                false,
+                &["platform/**,tools/**".to_string()],
+                &[],
+            )
+            .map(|_| ())
+            .expect("a comma is legal in a pattern — warn, do not reject");
+        });
+        assert!(
+            logs.contains("a comma is glob alternation, never a separator"),
+            "the warning must keep its point: {logs}"
+        );
+        assert!(
+            logs.contains("--include"),
+            "the add path must name repeating the flag: {logs}"
+        );
+    }
+
+    #[test]
+    fn filter_set_message_caps_a_huge_pattern() {
+        // S-4: `validate_filter_pattern` rejects a pattern for being too
+        // long, so this message is exactly where an arbitrarily long pattern
+        // arrives. The load path already caps it (`quote_pattern`); the CLI
+        // path interpolated it whole, turning a 2 000-byte pattern into a
+        // 2 000-byte error line.
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        let huge = "a".repeat(2000);
+        let msg = apply_set(
+            &parse_key("registry.acme.include").unwrap(),
+            &huge,
+            &mut options,
+            &mut registries,
+        )
+        .expect_err("an over-long pattern must be rejected")
+        .to_string();
+        assert!(
+            !msg.contains(&huge),
+            "the whole pattern must not reach stderr; message was {} bytes",
+            msg.len()
+        );
+        assert!(
+            msg.contains("2000 bytes total"),
+            "the true byte count must survive the cut: {msg}"
+        );
+    }
+
+    #[test]
+    fn unset_messages_never_echo_a_raw_hostile_alias() {
+        // S-9: `parse_key` screens control characters through
+        // `validate_alias_format`, but `char::is_control` never matches
+        // U+202E, so a bidi override reaches these messages intact. Every
+        // arm of `apply_unset` quotes the alias, so every arm escapes it —
+        // fixing four and leaving the fifth is the shape that rots.
+        let hostile = "ac\u{202e}me";
+        for field in RegistryField::ALL {
+            let key = format!("registry.{hostile}.{}", field.field_name());
+            let parsed = parse_key(&key).expect("a bidi override is a legal alias character");
+            let mut options = fresh_options();
+            let mut registries: Vec<RegistryConfig> = vec![];
+            let msg = apply_unset(&parsed, &mut options, &mut registries)
+                .expect_err("no such registry")
+                .to_string();
+            assert!(
+                !msg.contains('\u{202e}'),
+                "the {} arm must not embed the raw override: {msg:?}",
+                field.field_name()
+            );
+        }
+        // The bare-alias form is the one `parse_key` does NOT validate, so a
+        // raw ESC reaches its message too.
+        let parsed = parse_key("registry.a\u{1b}[2Jb").expect("a bare alias is parsed unvalidated");
+        let msg = apply_unset(&parsed, &mut fresh_options(), &mut vec![])
+            .expect_err("no such registry")
+            .to_string();
+        assert!(
+            !msg.contains('\u{1b}'),
+            "the bare-alias arm must not embed a raw ESC: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn filter_set_on_an_empty_value_names_unset() {
+        // W16: the plan's taxonomy — an empty value is exit 65 and `unset` is
+        // the clear path. The shared validator's reason stays generic because
+        // it also serves load-time validation, where no `grim config` verb
+        // applies.
+        for value in ["", "   "] {
+            let mut options = fresh_options();
+            let mut registries = unfiltered_registries();
+            let err = apply_set(
+                &parse_key("registry.acme.include").unwrap(),
+                value,
+                &mut options,
+                &mut registries,
+            )
+            .expect_err("an empty pattern must be rejected");
+            assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("grim config unset registry.acme.include"),
+                "an empty value must name the command that clears the filter: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_registry_alias_hint_lists_every_field() {
+        // S5: both the `get` and the `set` hint named 2 of the 5 fields.
+        // Written against `RegistryField::ALL` for the same reason the
+        // unknown-field message is — a sixth field cannot be silently omitted.
+        let key = parse_key("registry.acme").unwrap();
+        let get_msg = get_value(&key, &fresh_options(), &unfiltered_registries())
+            .expect_err("a bare alias is not a readable key")
+            .to_string();
+        let mut options = fresh_options();
+        let mut registries = unfiltered_registries();
+        let set_msg = apply_set(&key, "x", &mut options, &mut registries)
+            .expect_err("a bare alias is not a writable key")
+            .to_string();
+        for field in RegistryField::ALL {
+            let name = field.field_name();
+            assert!(get_msg.contains(name), "the `get` hint must list {name}: {get_msg}");
+            assert!(set_msg.contains(name), "the `set` hint must list {name}: {set_msg}");
+        }
+    }
+
+    #[test]
+    fn filter_set_and_unset_on_a_missing_alias_are_usage_errors() {
+        // Mirrors the `oci` / `index` arms: the alias is part of the key, so
+        // a missing one is exit 64, never a silent no-op.
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+        let key = parse_key("registry.ghost.include").unwrap();
+        let err = apply_set(&key, "acme/**", &mut options, &mut registries).expect_err("no such registry");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
+        let err = apply_unset(&key, &mut options, &mut registries).expect_err("no such registry");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn filter_unset_clears_only_its_own_side() {
+        // Plan C-012: `unset` clears to empty, and the other side survives.
+        let mut options = fresh_options();
+        let mut registries = filtered_registries();
+        apply_unset(
+            &parse_key("registry.acme.include").unwrap(),
+            &mut options,
+            &mut registries,
+        )
+        .expect("unset must succeed");
+        assert!(registries[0].include.is_empty(), "unset must clear the list");
+        assert_eq!(
+            registries[0].exclude,
+            vec!["acme/platform/legacy/**".to_string()],
+            "unsetting one side must not disturb the other"
+        );
+        assert_eq!(
+            get_value(&parse_key("registry.acme.include").unwrap(), &options, &registries).unwrap(),
+            None,
+            "a cleared list reads back as unset"
+        );
+    }
+
+    #[test]
+    fn collect_entries_all_covers_every_registry_field() {
+        // Plan C-021: `list --all` builds its registry rows by iterating
+        // `RegistryField::ALL` rather than naming fields one at a time, so a
+        // field added to that array cannot be silently omitted. This test is
+        // written against `ALL` for the same reason.
+        let options = fresh_options();
+        let registries = unfiltered_registries();
+        let keys: Vec<String> = collect_entries(true, &options, &registries)
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        for f in RegistryField::ALL {
+            let expected = format!("registry.acme.{}", f.field_name());
+            assert!(
+                keys.contains(&expected),
+                "--all must list every registry field; missing {expected}; got: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_entries_filter_rows_match_get_value_exactly() {
+        // Plan C-021 / S-020: `list` and `get` can never disagree about one
+        // registry field — both render through the same accessor.
+        let options = fresh_options();
+        let registries = filtered_registries();
+        let rows = collect_entries(true, &options, &registries);
+        for f in RegistryField::ALL {
+            let key = format!("registry.acme.{}", f.field_name());
+            let row = rows
+                .iter()
+                .find(|e| e.key == key)
+                .unwrap_or_else(|| panic!("--all must emit {key}"));
+            let got = get_value(&parse_key(&key).unwrap(), &options, &registries).unwrap();
+            assert_eq!(row.value, got, "list and get must agree on {key}");
+        }
+        // And the filter rows really carry the patterns (not just agree on
+        // `None`), including without `--all`.
+        let plain_rows = collect_entries(false, &options, &registries);
+        let include_row = plain_rows
+            .iter()
+            .find(|e| e.key == "registry.acme.include")
+            .expect("a set include list must be listed without --all");
+        assert_eq!(include_row.value.as_deref(), Some("acme/platform/**,acme/tools/**"));
+        assert!(include_row.set);
+    }
+
+    #[test]
+    fn collect_entries_omits_unset_filter_rows_without_all() {
+        // An empty list is unset, so it renders exactly like every other
+        // unset key: absent without `--all`, null-valued with it.
+        let options = fresh_options();
+        let registries = unfiltered_registries();
+        assert!(
+            !collect_entries(false, &options, &registries)
+                .iter()
+                .any(|e| e.key.ends_with(".include") || e.key.ends_with(".exclude")),
+            "an unfiltered registry emits no filter rows without --all"
+        );
+        let row = collect_entries(true, &options, &registries)
+            .into_iter()
+            .find(|e| e.key == "registry.acme.exclude")
+            .expect("--all must surface the unset row");
+        assert_eq!(row.value, None);
+        assert!(!row.set);
+    }
+
+    #[test]
+    fn registry_add_filter_flags_are_repeatable_and_never_comma_split() {
+        // Plan C-013 / S-008: repeatable flags that accumulate; a comma in a
+        // value is glob alternation and must survive verbatim — this is the
+        // one CLI path that writes a multi-pattern list.
+        let a = parse(&[
+            "registry",
+            "add",
+            "acme",
+            "--index",
+            "https://index.acme.internal",
+            "--include",
+            "acme/platform/**",
+            "--include",
+            "acme/{tools,labs}/**",
+            "--exclude",
+            "acme/platform/legacy/**",
+        ])
+        .expect("repeated filter flags must parse");
+        match a.command {
+            ConfigCommand::Registry(r) => match r.command {
+                RegistryCommand::Add { include, exclude, .. } => {
+                    assert_eq!(
+                        include,
+                        vec!["acme/platform/**".to_string(), "acme/{tools,labs}/**".to_string()],
+                        "repeated --include must accumulate, and the comma must not split"
+                    );
+                    assert_eq!(exclude, vec!["acme/platform/legacy/**".to_string()]);
+                }
+                _ => panic!("expected Add"),
+            },
+            _ => panic!("expected Registry"),
+        }
+    }
+
+    #[test]
+    fn registry_add_without_filter_flags_declares_an_unfiltered_entry() {
+        let a = parse(&["registry", "add", "acme", "--oci", "ghcr.io/acme"]).expect("parses");
+        match a.command {
+            ConfigCommand::Registry(r) => match r.command {
+                RegistryCommand::Add { include, exclude, .. } => {
+                    assert!(include.is_empty() && exclude.is_empty());
+                }
+                _ => panic!("expected Add"),
+            },
+            _ => panic!("expected Registry"),
+        }
+    }
+
+    /// A project scope on disk: an empty `grimoire.toml` plus a hermetic
+    /// `$GRIM_HOME`, addressed through `--config` so no walk-up escapes the
+    /// temp dir.
+    fn project_scope() -> (tempfile::TempDir, std::path::PathBuf, Context) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("grimoire.toml");
+        std::fs::write(&config_path, "[skills]\n\n[rules]\n").expect("write config");
+        let grim_home = tmp.path().join("grim-home");
+        std::fs::create_dir_all(&grim_home).expect("grim home");
+        let ctx = Context::hermetic_scoped(grim_home, false, Some(config_path.clone()));
+        (tmp, config_path, ctx)
+    }
+
+    #[test]
+    fn registry_add_writes_both_pattern_lists_to_disk() {
+        // Plan C-013 / S-008 end to end: the flags reach the entry, the
+        // emitter writes them, and the config parses back with each list on
+        // its own side — a swap of the two arguments fails here.
+        let (_tmp, config_path, ctx) = project_scope();
+        let include = vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()];
+        let exclude = vec!["acme/platform/legacy/**".to_string()];
+        run_registry_add(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.acme.internal"),
+            false,
+            &include,
+            &exclude,
+        )
+        .expect("registry add with filters must succeed");
+
+        let written = std::fs::read_to_string(&config_path).expect("config written");
+        assert!(
+            written.contains(r#"include = ["acme/platform/**", "acme/tools/**"]"#),
+            "both include patterns must reach the file; got:\n{written}"
+        );
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        let rc = find_registry(&scope.registries, "acme").expect("entry declared");
+        assert_eq!(rc.include, include);
+        assert_eq!(rc.exclude, exclude);
+    }
+
+    #[test]
+    fn registry_add_rejects_an_invalid_pattern_before_writing() {
+        // Plan C-013 / S-016: the same exit-65 gate as `config set`, and the
+        // config file must be untouched — validation runs before the lock.
+        let (_tmp, config_path, ctx) = project_scope();
+        let before = std::fs::read_to_string(&config_path).expect("config readable");
+        let err = run_registry_add(
+            &ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            false,
+            &["acme{unclosed".to_string()],
+            &[],
+        )
+        // `ConfigReport` is not `Debug`; drop the Ok payload so `expect_err`
+        // has a printable `T`.
+        .map(|_| ())
+        .expect_err("an invalid pattern must be rejected");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            before,
+            "nothing may be written when a pattern is rejected"
+        );
+    }
+
+    #[test]
+    fn registry_add_on_an_existing_alias_is_a_usage_error_whatever_the_pattern() {
+        // S9: C-013 promises 64 for a duplicate alias unconditionally, so the
+        // alias check must run before the pattern loop. Both directions are
+        // pinned — a well-formed pattern and a malformed one — because only
+        // the malformed one exposed the ordering.
+        for pattern in ["acme/platform/**", "acme{unclosed"] {
+            let (_tmp, config_path, ctx) = project_scope();
+            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+                .map(|_| ())
+                .expect("the first add must succeed");
+            let before = std::fs::read_to_string(&config_path).expect("config readable");
+            let err = run_registry_add(
+                &ctx,
+                "acme",
+                Some("ghcr.io/acme"),
+                None,
+                false,
+                &[pattern.to_string()],
+                &[],
+            )
+            .map(|_| ())
+            .expect_err("a duplicate alias must be refused");
+            assert_eq!(
+                crate::error::classify_error(&err),
+                ExitCode::UsageError,
+                "the duplicate alias must win over the pattern check for {pattern:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config_path).expect("config readable"),
+                before,
+                "a refused add must write nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_alias_message_names_the_browse_filter_path() {
+        // B-2: the message named only `oci` and `rm`, so a user adding a
+        // second `--include` to an existing entry read it as "use `config
+        // set` instead" — and that path replaces the whole list. The one
+        // sequence that rebuilds a multi-pattern filter has to be here,
+        // because this is where the user lands.
+        let (_tmp, _config_path, ctx) = project_scope();
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            .map(|_| ())
+            .expect("the first add must succeed");
+        let msg = run_registry_add(
+            &ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            false,
+            &["tools/**".to_string()],
+            &[],
+        )
+        .map(|_| ())
+        .expect_err("a duplicate alias must be refused")
+        .to_string();
+        assert!(
+            msg.contains("filter"),
+            "the message must name the browse-filter path: {msg}"
+        );
+        assert!(
+            msg.contains("--include"),
+            "re-creating with repeated flags is the only working sequence: {msg}"
+        );
+    }
+
+    /// The rendered `grim config registry add` help text.
+    fn registry_add_help() -> String {
+        use clap::CommandFactory as _;
+        let mut root = Harness::command();
+        root.find_subcommand_mut("config")
+            .and_then(|c| c.find_subcommand_mut("registry"))
+            .and_then(|c| c.find_subcommand_mut("add"))
+            .expect("`config registry add` is a subcommand")
+            .render_help()
+            .to_string()
+    }
+
+    #[test]
+    fn registry_add_help_states_the_browse_only_boundary() {
+        // W13: the platform lead the ADR worries about meets this feature
+        // through `--help`, where "narrows what this registry shows" reads
+        // just as well as "restricts". Both flags state the boundary.
+        // Collapsed first, because clap wraps to the terminal width.
+        let help = registry_add_help();
+        let collapsed = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clause = "Affects browsing only — a direct reference to a hidden package still resolves and installs.";
+        assert_eq!(
+            collapsed.matches(clause).count(),
+            2,
+            "both --include and --exclude must carry the boundary clause; got:\n{help}"
+        );
+    }
+
+    #[test]
+    fn registry_add_help_states_how_a_pattern_is_anchored() {
+        // W-16 / H-2: locator-relativity is the rule users get wrong most —
+        // the project's own docs taught `acme/platform/**` against an entry
+        // whose own locator is `ghcr.io/acme`, which matches nothing. The
+        // help must say what a pattern is matched against, for BOTH source
+        // kinds: `--oci` strips its own prefix, `--index` has no registry
+        // root to strip so its candidate stays fully qualified
+        // (`registry_filter::browse_candidate`).
+        let collapsed = registry_add_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains("'platform/**', not 'acme/platform/**'"),
+            "the --oci example must show the stripped form beside the wrong one:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("--index"),
+            "the index exception must be stated, or the rule is half true:\n{collapsed}"
+        );
+    }
+
+    #[test]
+    fn registry_add_help_carries_no_markdown_emphasis() {
+        // W15: `--help` is plain text, not markdown. The only `**` left in it
+        // is glob syntax, which is never followed by a word character.
+        let help = registry_add_help();
+        for (i, _) in help.match_indices("**") {
+            assert!(
+                !help[i + 2..].chars().next().is_some_and(char::is_alphanumeric),
+                "`**` at byte {i} reads as markdown emphasis, not glob syntax:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_show_and_list_report_each_side_from_its_own_field() {
+        // Plan C-014 / S-010: the reports carry the authored patterns, per
+        // side. A swap at either producer fails here.
+        let (_tmp, _config_path, ctx) = project_scope();
+        let include = vec!["acme/platform/**".to_string()];
+        let exclude = vec!["acme/legacy/**".to_string()];
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &include, &exclude)
+            .expect("registry add must succeed");
+
+        let (report, _) = run_registry_show(&ctx, "acme").expect("show must succeed");
+        match report {
+            ConfigReport::RegistryShow(r) => {
+                assert_eq!(r.include, include);
+                assert_eq!(r.exclude, exclude);
+            }
+            _ => panic!("expected RegistryShow"),
+        }
+        let (report, _) = run_registry_list(&ctx).expect("list must succeed");
+        match report {
+            ConfigReport::RegistryList(r) => {
+                assert_eq!(r.items[0].include, include);
+                assert_eq!(r.items[0].exclude, exclude);
+            }
+            _ => panic!("expected RegistryList"),
+        }
+    }
+
     #[test]
     fn set_registry_alias_default_true_at_most_one() {
         use crate::config::declaration::RegistryConfig;
@@ -2102,12 +3345,14 @@ mod tests {
                 oci: Some("u1".to_string()),
                 index: None,
                 default: true,
+                ..Default::default()
             },
             RegistryConfig {
                 alias: Some("y".to_string()),
                 oci: Some("u2".to_string()),
                 index: None,
                 default: false,
+                ..Default::default()
             },
         ];
         // Simulate `set registry.y.default true`.

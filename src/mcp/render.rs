@@ -76,7 +76,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         args.scope.global(),
         args.scope.config.as_deref(),
         args.scope.workspace.as_deref(),
-    );
+    )?;
     let access = crate::command::access_seam(ctx)?;
     let fetched = fetch_artifact(&scope, &access, &args.reference, Some(INSTALL_LAYER_SIZE_LIMIT)).await?;
     // A description companion never materializes files; render only ever
