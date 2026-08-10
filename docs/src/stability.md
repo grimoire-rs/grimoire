@@ -259,6 +259,16 @@ a data error (65) at install or fetch, never a silent drop. A descriptor
 that does not author the new fields serializes byte-identically across
 the boundary.
 
+`grimoire.toml` holds the same line too: both the top-level shape and each
+`[[registries]]` entry (`RegistryConfig`) parse with `deny_unknown_fields`,
+so an older `grim` reading a newer config hard-rejects it (exit 78) rather
+than silently dropping a field it does not recognize. This branch is the
+first minor release to add a key under `RegistryConfig` — [`include` and
+`exclude`](./configuration.md#browse-filters) — so it is the first case
+where that matters in practice: a project that adopts a browse filter is
+unreadable by any `grim` build that predates it, the same trade the lock
+and install-state already make.
+
 A lock's **size** cuts the same way, for one release boundary. Builds up
 to and including 0.12.0 read `grimoire.toml`, `grimoire.lock`, and
 `publish.toml` under a 64 KiB cap; later builds read them under 8 MiB. A

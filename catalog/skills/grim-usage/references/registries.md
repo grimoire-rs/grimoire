@@ -6,6 +6,7 @@ lands in, how offline mode behaves, or how to search a catalog.
 
 Contents: [Registry Resolution](#registry-resolution) ·
 [Multiple Registries](#multiple-registries) ·
+[Browse Filters](#browse-filters) ·
 [Managing Config](#managing-config) ·
 [Qualified References](#qualified-references) ·
 [Scopes](#scopes) · [Client Targets](#client-targets) ·
@@ -81,6 +82,8 @@ parse-time alias for `oci`):
 | `index` | one of `oci`/`index` | Package index locator (see [Index Sources](#index-sources)) |
 | `alias` | no | Short name for qualified `alias/repo` references |
 | `default` | no | Marks the primary registry for short-id expansion; first entry is primary when none set it |
+| `include` | no | Glob patterns narrowing what this source **shows** when browsed; unset or `[]` shows everything — see [Browse Filters](#browse-filters) |
+| `exclude` | no | Glob patterns hiding matching repositories from this source's browse; combines with `include` and wins where both match |
 
 ```toml
 [[registries]]
@@ -171,6 +174,175 @@ alike. `grim publish --announce` is the write side: it publishes
 pointers into an index repository rather than reading them — see
 [references/publish.md](publish.md#announce).
 
+## Browse Filters {#browse-filters}
+
+A `[[registries]]` entry may carry two glob lists, `include` and `exclude`,
+that narrow what that source shows in `grim search`, the TUI, and the MCP
+`grim_search` tool. They let one shared index serve several teams without
+splitting it into several indices.
+
+```toml
+[[registries]]
+alias = "acme"
+index = "https://index.acme.internal"
+include = ["ghcr.io/acme/platform/**", "ghcr.io/acme/tools/**"]
+exclude = ["ghcr.io/acme/platform/legacy/**"]
+```
+
+The patterns are qualified with the registry (`ghcr.io`) the index points
+into, not written bare as `acme/platform/**` — an index entry has no
+locator to strip from the candidate string, see [Pattern rules](#pattern-rules).
+
+A repository is shown when the `include` list is empty **or** an `include`
+pattern matches it, **and** no `exclude` pattern matches. The two lists
+combine on one entry (unlike Cargo's mutually exclusive pair) and `exclude`
+wins where both match. An entry setting neither is unfiltered.
+
+### Not access control {#not-access-control}
+
+**A browse filter is not access control. Never present it to a user as
+one.** `include`/`exclude` govern browse and search *rendering* — nothing
+else:
+
+- A direct reference to an excluded package still **resolves, locks, and
+  installs**. `grim add ghcr.io/acme/internal/thing` succeeds against an
+  entry excluding `acme/internal/**`, and so do `grim lock`, `grim
+  install`, `grim fetch`, and `grim release`. If you are asked to keep
+  someone from *installing* a package, a filter does not do it.
+- `grim status --check` ignores every filter, so a deprecation notice on an
+  artifact the project already declares can never be hidden by one.
+- **The filtered source controls the string its own filter is matched
+  against.** Patterns are tested against the candidate derived from the row
+  the source served — for an index entry, the `ref` the index itself
+  published. The same artifact re-published under a differently-spelled
+  pointer yields a row the pattern no longer matches, and nothing checks
+  that a source's string describes what it points at. This is the sharpest
+  reason a filter can never be a privacy boundary: it is the reader's own
+  view setting, not a control over what a source may show.
+- A filter that reaches the browse path uncompilable **fails open**: grim
+  warns and drops **that entry's whole filter — `include` and `exclude`
+  both** — browsing the source unfiltered, at exit `0`. It does not skip
+  one list and keep the other. An `exclude` you wrote therefore stops
+  hiding anything; `grim context` then shows that entry with no filter,
+  which is the signal to look for. A filter never empties a catalog by
+  failing — but never rely on it to keep something hidden either.
+- The only mechanism that restricts what a user can actually pull is the
+  **registry's own pull authorization**. Say so when a filter is proposed
+  as a privacy or permission boundary.
+- **An invalid pattern is a config error like any other, not a browse-only
+  failure.** A malformed pattern is rejected at write time (`grim config
+  set` / `registry add`, exit `65`, nothing written) or at load time (a
+  hand-edited `grimoire.toml`, exit `78`) — before any command runs, browse
+  or otherwise. "Nothing else" above describes a *compiled* filter's reach
+  at runtime, never a bad pattern's blast radius, which blocks the whole
+  invocation.
+
+### Pattern rules {#pattern-rules}
+
+- `*` and `?` stop at a `/`; only `**` crosses one (the gitignore dialect).
+  `acme/*` matches `acme/foo`, not `acme/foo/bar`. Matching is
+  case-sensitive. A backslash escapes the next metacharacter (`acme\*x`
+  matches the literal `acme*x`), and does so identically on every platform
+  including Windows — a committed `grimoire.toml` means one thing on every
+  checkout.
+- A pattern containing none of `* ? [ ] { } \` auto-expands to also match
+  everything beneath it: `acme/platform` behaves as `acme/platform{,/**}`.
+  Every other pattern is used verbatim. Brace alternation is one pattern:
+  `acme/{platform,tools}/**`.
+- Patterns match the row's `registry/repository` with **this entry's own**
+  `oci`/`index` url stripped from the front — not the fully-qualified ref.
+  With `oci = "ghcr.io/acme"`, the row `ghcr.io/acme/platform/foo` is
+  matched as `platform/foo`. An index source has no registry root to strip,
+  so its candidate is the whole reference.
+- That is usually what the TUI tree shows beneath the source's root, but
+  the tree strips the *longest* locator across **all** entries while a
+  pattern strips only its own. With both `ghcr.io` and `ghcr.io/acme`
+  declared, `ghcr.io/acme/tools/foo` displays as `tools/foo` yet the
+  `ghcr.io` entry must match it as `acme/tools/**`. The locality is
+  deliberate: adding an unrelated entry never re-aims an existing filter.
+- Editing an entry's **own** locator does re-aim its patterns. A case
+  difference silently makes every pattern in that entry match nothing — it
+  passes validation untouched. (A trailing slash, `oci = "ghcr.io/acme/"`,
+  does **not**: it is trimmed before the prefix strip.) The one signal is a
+  stderr warning; the exit code stays `0` and the source's tree root still
+  renders at a `0/0` rollup:
+
+  ```text
+  registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+  ```
+
+  Emitted once per affected source per browse, for one shape only: a
+  non-empty `include` list that admitted **nothing** from a group that had
+  rows. The count is the rows the filter was asked about — under `grim
+  search <query>`, what the query already matched, so the warning is silent
+  under a non-empty query (a search for a deliberately-hidden term looks
+  identical to a mis-aimed filter, and a warning that fires on the ordinary
+  path stops being read on the rare one). A non-empty `exclude` that removes
+  **nothing** has no warning at all — a correct `exclude` waiting for a
+  repository that does not exist yet (`exclude = ["archive/**"]` before
+  anything under `archive/` is published) looks identical to one copied off
+  a displayed row, and the counts alone cannot tell them apart, so that
+  trigger would cry wolf on every correct config forever. An
+  **exclude-only** filter that empties a source stays silent too: that is
+  intent, not a mistake.
+- **The filter narrows the view, never the listing.** Each source's browse
+  window is built and capped at **500 repositories** first; the patterns run
+  afterwards. A narrow filter can never widen what grim looked at — on a
+  registry big enough to hit the cap, narrow the `oci` locator instead
+  (`ghcr.io/acme/platform`, not `ghcr.io`). Never tell a user a filter will
+  surface packages a plain browse missed.
+
+### Writing filters {#writing-filters}
+
+```sh
+grim config registry add acme --oci ghcr.io/acme \
+  --include 'acme/platform/**' --include 'acme/tools/**' \
+  --exclude 'acme/platform/legacy/**'
+
+grim config set registry.acme.include 'acme/{platform,tools}/**'
+grim config get registry.acme.include --format json
+```
+
+`--include`/`--exclude` are repeatable and accumulate; **neither is ever
+comma-split**, because a comma is glob alternation syntax. This is the only
+CLI path that writes a multi-pattern list — `grim config set
+registry.<alias>.include` replaces the whole list with **exactly one**
+pattern, and warns naming the discarded count when the entry carried more
+than one. Confirm the current flags with `grim config registry add --help`.
+
+Growing a filter is a re-create, not a second `add`: `grim config registry
+add acme …` on an alias that already exists is a data error (`64`) — the
+error names both `config set` (single pattern) and the re-create sequence
+(`registry rm acme`, then `registry add` again with the full set of
+`--include`/`--exclude` flags) as the two ways forward.
+
+`grim config get` comma-joins a multi-pattern list for display and is
+**not round-trippable**: feeding that string back to `set` stores it as one
+literal glob. It does **not** fail — a comma outside `{…}` is a valid glob,
+so the value validates, is written, and the command exits `0` with a warning
+that it was stored as one pattern. Never treat that round trip as safe
+because it "would error"; it does not. Use `--format json` for the true
+array (`get` on an empty list exits `1`).
+
+A pattern that is empty, whitespace-only, carries a control character,
+exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile
+is rejected: exit `78` when read from a config file — project or global, at
+either scope — and `65` through `grim config set` / `registry add`, which
+then write nothing. A sixth cap bounds the **list** rather than one
+pattern — an entry's `include`/`exclude` list, summed as compiled, must not
+exceed 64 KiB — invisible to the five caps above since no single pattern
+can trip it alone. It is exit `78` from a config file too, but at the CLI
+write boundary it is reachable only through `registry add`'s accumulated
+flags (also exit `65`): `grim config set` writes exactly one pattern per
+call, capped well under the list budget, and can never trip it by itself.
+Every cap accepts exactly the same set on both paths, because both compile
+the pattern the way the browse filter itself is built. Exact validation
+messages live in the [command reference][config-cmd]; never quote them from
+memory.
+
+Full reference, including the `grim context` reporting: [Browse
+filters][browse-filters].
+
 ## Managing Config {#managing-config}
 
 `grim config` reads and writes `grimoire.toml`, modeled on `git
@@ -207,7 +379,7 @@ lock on every change.
   grim config registry use acme                       # set default, clearing all others atomically
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
-  grim config registry fields                         # oci/index/default field metadata — works with no config at all
+  grim config registry fields                         # per-field metadata (oci/index/default/include/exclude) — works with no config at all
   ```
 
   `registry use` is the correct way to change the default registry.
@@ -337,6 +509,17 @@ grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 ```
 
+A registry declaring a [browse filter](#browse-filters) contributes only the
+repositories its patterns admit — to `grim search`, the TUI, and
+`grim_search` alike. A filtered source that contributes nothing logs
+`registry '<name>': filter admitted 0 of <N> repositories` on stderr and
+still exits `0`; in the TUI its root stays visible at a `0/0` rollup.
+`--registry` browses **unfiltered**: a forced browse set is exactly what the
+flag names. `grim status --check` is never filtered either. If a search
+comes back thinner than expected, check the entry's `include`/`exclude`
+before blaming the registry — `grim context --format json` reports the
+resolved patterns per source.
+
 A package the publisher has marked deprecated is **hidden by default** from
 both `grim search` and the TUI — unless it is installed in the active scope
 (directly or via a bundle), so a deprecated dependency you already rely on
@@ -430,6 +613,7 @@ Confirm current flags with `grim mcp --help`.
 [online]: https://grimoire.rs/concepts.html#online-by-default-offline-on-demand
 [envvars]: https://grimoire.rs/configuration.html#environment-variables
 [registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
+[browse-filters]: https://grimoire.rs/configuration.html#browse-filters
 [package-index]: https://grimoire.rs/package-index.html
 [hosting]: https://grimoire.rs/hosting-an-index.html
 [index-repo]: https://github.com/grimoire-rs/index
