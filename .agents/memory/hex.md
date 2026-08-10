@@ -95,4 +95,166 @@ research-axes:
 
 ## Memory
 
-_(empty at bootstrap — the orchestrators maintain this section.)_
+- **Active plan:** `.agents/plans/plan_registry_browse_filters.md`
+  (per-registry browse `include`/`exclude` glob filters + derived TUI
+  tree-root label). Planned 2026-08-09 at tier medium,
+  `architect=on research=1 adversary=on`. Design record
+  `.agents/adr/adr_registry_browse_filters.md` (D1–D13); evidence
+  `.agents/research/research_registry_browse_filters.md`. **Executed
+  2026-08-09** on `feat/registry-browse-filters` — all seven work packages
+  merged. **Reviewed 2026-08-09 at tier high: Request Changes** — 1 Block, 5
+  High, 19 Warn, 8 unconverged IDs; wave 5 (WP-R1…WP-R6) appended to the
+  plan's Parallelization table. `Step: /hex-execute … "apply high-tier review
+  findings"`. Cross-model leg (`codex:rescue`) ran on the third attempt and
+  contradicted nothing — it tried to falsify the Block and two Highs and
+  could not, and added one in-scope Warn (X1, silent dedup).
+  **Converged 2026-08-09:** ten fix WPs merged across waves 5–6; the Block,
+  all 5 High and all 19 Warn addressed. `Step: awaiting /hex-review`.
+
+### Execution learnings, 2026-08-09 (for the next `/hex-execute`)
+
+- **The file-drop contract works — make it universal.** Every worker this
+  run was given a scratchpad path to `Write` before replying, and every one
+  delivered, including the reviewers that returned only idle notifications
+  in-band. Several reviews arrived *solely* as the file. One casualty
+  proves the other half: the wave-3 doc review's own file was never written
+  (or was lost with its session), and when WP-E went looking it was gone —
+  the builder had to reconstruct the sweep from source. **Verify the file
+  exists before you rely on it later in the run.**
+- **Never trust a gate a worker reports.** Three separate times a worker
+  reported green and the tree was red: a stale `cargo fmt`, a failing test
+  it had not re-run, and `task verify` reporting exit 0 purely from the
+  Taskfile cache. **`task --force verify` is the only trustworthy full
+  gate** — plain `task verify` prints "up to date" and exits 0 without
+  running a single test. Re-run every gate yourself in the worktree before
+  merging.
+- **The commit hook wants a marker in the *worktree*, not the lead.** Its
+  own error message names the path — `<worktree>/.claude/hooks/.state/
+  commit-verified` — and `.state/` may not exist yet, so `mkdir -p` first.
+- **Each worktree needs `git submodule update --init --recursive`** after
+  `git worktree add`, or the build cannot resolve `external/*`.
+- **A mutation check per contract caught two real defects** that full green
+  suites had hidden: a swapped `RegistryFilter::new(include, exclude)` pair
+  (would invert an allowlist into a denylist) and swapped count arguments
+  that made a diagnostic never fire at all. Require it in every builder
+  brief: *"what single-token mutation would make this wrong, and does a
+  test fail on it?"* — the answer is a deliverable, not a formality.
+- **Ask the builder the open design question rather than pre-deciding it.**
+  WP-B was handed "`Option<RegistryFilter>` or a plain field?" with the
+  constraints, not an answer, and returned a better-reasoned choice than
+  the brief would have imposed.
+- **Deferred follow-up (from that ADR, D5):** `load_catalog` reaches 8
+  parameters and should collapse into a params struct. Deliberately not
+  done inside the feature diff (Two Hats Rule).
+- **Cross-repo handover pending:** WP-H writes
+  `../grimoire-vscode/.claude/artifacts/handover_registry_filters.md`.
+  Owner chose the extension repo over this repo's `.agents/handover_*.md`
+  precedent so the VS Code design can be driven there interactively.
+### Convergence-round learnings, 2026-08-09 (10 WPs, `/hex-execute` on review findings)
+
+- **Group review-fix WPs by FILE OWNERSHIP, never by theme.** The first
+  decomposition grouped the findings thematically (exit paths, diagnostics,
+  escaping, records) and five of six rows collided on the same files — it
+  could not have run in parallel worktrees at all. Regrouped by owning file,
+  wave 5 ran four packages concurrently with zero merge conflicts across ten
+  merges. Findings arrive grouped by *symptom*; work has to be grouped by
+  *file*.
+- **Give every builder the outgoing WP's report, not a summary of it.** Three
+  hand-offs this round were consumed verbatim — R1→R2 (a `pub(crate)` helper
+  still carrying `#[allow(dead_code)]`), R5→R3 (a gate-by-gate table of where
+  a predicate was weaker than its contract), R3→R10 (a literal diff). Each
+  landed correctly because the receiving WP read the source document.
+- **A verbatim hand-off diff still needs someone reading the fixtures.** R10
+  applied R3's diff exactly and then found the *positive* test's fixture set
+  `rows_before_filter: 0`, so the new gate would have killed the case that
+  test exists to prove. The diff was right; the surrounding code was not.
+- **Name the dead-code attribute as a hard gate in the receiving brief.** R1
+  shipped a guard against a real process abort with `#[allow(dead_code)]`
+  because its caller lived in another WP. Had R2 landed without wiring it,
+  clippy would have stayed green and the crash stayed live — the exact
+  "unit pinned, call site not" class the review round existed to close.
+- **Builders that check the WP table before editing out of set are the system
+  working.** Two did (R5 needing `state.rs` for a struct field, R3 needing two
+  `#[cfg(test)]` literals); both cross-checked the table, announced, and
+  waited. Cost: two messages. Alternative: two conflicting merges.
+- **Ask for the mutation empirically and they will run it.** Every WP this
+  round applied its mutations to real source, ran them, and reverted — R2
+  reported two that *abort the test binary* rather than fail, and labelled
+  them so a crashed run is not read as flaky. Reasoned mutation checks did
+  not appear once.
+- **Brief errors get caught when the brief says "flag it rather than
+  reinterpret".** R8 found two of mine: `grim status` does *not* exit 0 on a
+  broken **project** config (it must read it), and C-018's headline was not
+  wholly untested. It also found that `ruff` is named in the project's own
+  quality rule but wired into no task — so "the project lints the Python
+  suite" was false.
+- **The docs WP must be told to write from the source, not from the plan** —
+  and its brief must say "including this brief". Docs written from a drifted
+  plan is how two shipped documents, one a published catalog artifact, came
+  to assert a safety property the code did not have.
+- **`git -C` applies to merges and gates, not just commits.** Twice I `cd`'d
+  into a worktree, then removed it, leaving the shell in a deleted directory:
+  once a merge silently ran inside the worktree ("Already up to date"), once
+  `task` failed with "No Taskfile found". Run every merge and every gate from
+  the main checkout with an explicit path.
+
+### Review learnings, 2026-08-09 (for the next `/hex-review`)
+
+- **The file-drop contract now proven at review scale.** All 8 panel workers
+  (tier high) wrote their report before replying, and all 8 files survived —
+  including three workers that returned nothing but an idle notification
+  in-band. Read the file on the idle notification rather than treating a
+  silent worker as failed. Make the file drop mandatory in every reviewer
+  brief; it is the difference between a lost perspective and a full panel.
+- **The `codex:rescue` adversary spawn silently dropped its task text.** The
+  agent came back within seconds with "What should Codex investigate or fix?
+  No task text was included in your request" — the whole prompt vanished.
+  **Workaround that worked:** `Write` the brief to a scratchpad file, then
+  `SendMessage` the agent a short pointer to that path. The same failure hit
+  a second time one level down: invoking `Skill({skill: "codex:rescue"})`
+  with **no `args`** produces a fresh fork that inherits none of the
+  conversation, asks "What should Codex investigate or fix?", and — launched
+  in the background with nobody to answer — stops there having run nothing.
+  It looks identical to a long-running pass. **Always pass the task in
+  `args`, and verify the leg produced output before reporting it as run.**
+- **Hand every reviewer the panel's already-found list.** Each Stage 2 brief
+  carried Stage 1's findings with instructions not to re-derive them. Result:
+  near-zero duplicate findings across six perspectives, and the researcher
+  and security reviewers spent their budget *extending* two Stage 1 findings
+  into materially stronger ones (the `backslash_escape` platform default went
+  from a deferred nit to actionable once the researcher found that the very
+  crate the module cites as precedent pins it unconditionally).
+- **Tell reviewers which decisions are frozen.** Naming the owner-decided
+  items ("do not relitigate the pinned warning wording, the no-comma-split
+  flags, read-time-only filtering") kept six reviewers from spending their
+  pass re-arguing settled design, and they still reported divergences from
+  those decisions as information — which is exactly the wanted behaviour.
+- **Brief the adversary with properties to attack, not areas to probe.** The
+  "where to dig instead" list named adjacent *subsystems* (the cache, the
+  TOML round-trip, `update`/`status`/bundles) and duly got back findings in
+  adjacent code — pre-existing, out of diff scope, and disproportionately
+  loud in the report. Name **properties of the diff to falsify** instead
+  ("prove the filter cannot reach resolution", "find an input where a
+  configured filter is silently discarded"): the same run's best cross-model
+  finding came from exactly that framing. ~10% of findings landed out of
+  scope and every one traces to an area-shaped prompt.
+- **An agent's interim task-notification is not its report.** The Codex leg's
+  completion notification carried two findings its own final file had already
+  withdrawn — reporting the notification cost a correction to the owner.
+  Read the dropped file; treat the notification as "it stopped", nothing more.
+- **Encourage running the binary.** The UX and security reviewers built the
+  release binary and drove it against scratch configs; five of the six
+  highest-severity findings this run came with pasted terminal output. A
+  finding with a repro is one the next agent cannot mis-scope.
+
+- **Note for the next `/hex-init` run — worker reply channel.** In the
+  2026-08-09 planning run, 4 of 7 spawned workers returned only idle
+  notifications with no text: `architect`, `reviewer:spec`, the `architect`
+  review perspective, and the `codex:rescue` adversary. The 3 that
+  delivered (`architecture-explorer`, 2×`explorer`, `researcher`,
+  `doc-reviewer`) were all sonnet. Workers that wrote a file first (ADR,
+  research artifact, scratchpad probe) left usable output; workers asked to
+  return long structured markdown in-band left nothing, and a terse-retry
+  via SendMessage did not help. **Consider making a file drop the contract
+  for every reviewer persona**, not just the artifact-producing ones — an
+  in-band-only reply is a single point of failure for a whole perspective.
