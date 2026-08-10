@@ -762,8 +762,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
                     // shorten Repo to the path relative to it. Using `r.registry`
                     // directly would show the bare host and an un-shortened repo.
                     let configured: Vec<&str> = state
-                        .registry_order
+                        .registry_locators
                         .iter()
+                        .chain(state.registry_order.iter())
                         .map(String::as_str)
                         .chain(state.default_registry.as_deref())
                         .collect();

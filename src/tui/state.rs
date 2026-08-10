@@ -302,12 +302,21 @@ pub struct TuiState {
     /// Drives [`Self::apply_default_collapse`] on catalog load and the `z`
     /// fold toggle ([`Self::toggle_collapse_all`]).
     pub expand_levels: usize,
-    /// The resolved registries in precedence order (F13). Threaded into
-    /// [`super::tree::TreeBuildOptions`] so the tree's registry roots follow
-    /// resolution precedence (not alphabetical order) and every resolved
-    /// registry yields a root even with zero matching rows. Empty in
+    /// The resolved sources' **root keys** in precedence order (F13).
+    /// Threaded into [`super::tree::TreeBuildOptions`] so the tree's registry
+    /// roots follow resolution precedence (not alphabetical order) and every
+    /// resolved source yields a root even with zero matching rows. Empty in
     /// single-registry / elided sessions.
+    ///
+    /// A key is the entry's alias, or its locator when it declared none — an
+    /// *entry* identity, not a locator, because one file may declare a
+    /// locator twice to split it into two filtered views and those are two
+    /// roots. [`Self::registry_locators`] carries the locators.
     pub registry_order: Vec<String>,
+    /// The resolved sources' locators, for attributing a bare-host row to the
+    /// configured registry it came from. Parallel to [`Self::registry_order`]
+    /// and separate from it because two entries may share one locator.
+    pub registry_locators: Vec<String>,
     /// Ephemeral per-scope cache for bundle member nodes.
     ///
     /// Keyed by `(scope_label, bundle_repo)` so entries from one scope are
@@ -389,6 +398,7 @@ impl Default for TuiState {
             bundle_members: HashMap::new(),
             expanded_bundles: BTreeSet::new(),
             registry_health: RegistryHealth::default(),
+            registry_locators: Vec::new(),
             registry_labels: BTreeMap::new(),
         }
     }
@@ -893,10 +903,18 @@ impl TuiState {
         self.default_registry = registry;
     }
 
-    /// Set the resolved registries in precedence order (F13). Drives the
-    /// tree's registry-root ordering and the empty-registry roots (D-EMPTY).
+    /// Set the resolved sources' root keys in precedence order (F13). Drives
+    /// the tree's registry-root ordering and the empty-registry roots
+    /// (D-EMPTY).
     pub fn set_registry_order(&mut self, order: Vec<String>) {
         self.registry_order = order;
+    }
+
+    /// Set the resolved sources' locators — what a bare-host row is
+    /// attributed against. Separate from [`Self::set_registry_order`] because
+    /// two entries may declare one locator.
+    pub fn set_registry_locators(&mut self, locators: Vec<String>) {
+        self.registry_locators = locators;
     }
 
     /// Set the per-registry health summary (C6). Replaces the previous value
@@ -991,6 +1009,7 @@ impl TuiState {
             group_by_type: self.group_by_type,
             separators: self.tree_separators.clone(),
             registry_order: self.registry_order.clone(),
+            registry_locators: self.registry_locators.clone(),
         };
         let tree = super::tree::build(&self.rows, &self.filtered, &opts);
         self.collapsed = super::tree::default_collapsed(&tree, self.expand_levels);
@@ -1170,6 +1189,7 @@ impl TuiState {
             group_by_type: self.group_by_type,
             separators: self.tree_separators.clone(),
             registry_order: self.registry_order.clone(),
+            registry_locators: self.registry_locators.clone(),
         };
         let tree = super::tree::build(&self.rows, &self.filtered, &opts);
         // While a query is active, ignore the collapsed set: the tree prunes
@@ -3195,6 +3215,7 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             registry_order: Vec::new(),
+            registry_locators: Vec::new(),
         };
         let tree = build(&[], &[], &opts);
         let collapsed: BTreeSet<String> = BTreeSet::new();

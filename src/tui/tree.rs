@@ -28,13 +28,27 @@ pub struct TreeBuildOptions {
     /// into nested groups. `/` is always honored structurally even if
     /// absent; an empty list defaults to `["/"]`.
     pub separators: Vec<String>,
-    /// The resolved registries in precedence order (F13). In a
+    /// The resolved sources' **root keys** in precedence order (F13). In a
     /// multi-registry session (`default_registry == None`) the registry-root
     /// nodes are emitted in this order rather than the `BTreeMap`'s
     /// alphabetical order, and every entry yields a root even with zero
     /// matching rows (D-EMPTY). Empty in single-registry / elided sessions —
     /// the tree is then byte-identical to the pre-multi-registry behavior.
+    ///
+    /// A key is the entry's alias, or its locator when it declared none. It
+    /// is an *entry* identity because one file may declare a locator twice to
+    /// split it into two filtered views, and those are two roots.
     pub registry_order: Vec<String>,
+    /// The configured locators a bare-host row is attributed against — the
+    /// registry side of the `(root, path)` split. Separate from
+    /// `registry_order` because two entries may share one locator.
+    ///
+    /// `registry_order` is folded into the attribution set as well: a root
+    /// key IS its locator whenever the entry declared no alias (the shape
+    /// every pre-alias caller passes), and an alias in the set is inert —
+    /// attribution matches only at a reference's leading host boundary, which
+    /// an alias cannot occupy.
+    pub registry_locators: Vec<String>,
 }
 
 /// Aggregate install-state counts over a group's descendant leaves, so a
@@ -469,8 +483,9 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
     // so it must NOT change. `attribute_registry` re-splits each row at the
     // configured registry boundary purely for grouping/display.
     let configured: Vec<&str> = opts
-        .registry_order
+        .registry_locators
         .iter()
+        .chain(opts.registry_order.iter())
         .map(String::as_str)
         .chain(opts.default_registry.as_deref())
         .collect();
@@ -579,19 +594,28 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
 /// is returned unchanged, so non-namespaced registries and the synthetic
 /// full-url test rows are a no-op.
 ///
-/// The display-oriented `(root, path)` split for one row: an index-sourced
-/// row roots at its **source locator** (`row.source`) with the full OCI ref
-/// as the path — an index locator is not an OCI prefix, so
-/// [`attribute_registry`] could never match it and would fabricate a
-/// bare-host registry root, splitting a namespaced ref like
-/// `ghcr.io/grimoire-rs` into two stacked nodes. Any other row re-attributes
-/// to the longest configured registry prefix as before.
+/// The display-oriented `(root, path)` split for one row.
+///
+/// A row that names its source (`row.source`) roots at that **entry's key** —
+/// the identity that lets two views of one locator be two roots, and the
+/// synthetic `"Local"` group be its own. The path below it is whatever the
+/// entry's own locator does not cover: attribution against `configured` when
+/// one matches (an OCI source, whose namespace belongs to the root, not the
+/// path), the full reference when none does. An index locator is not an OCI
+/// prefix, so attribution declines for index rows — which is right, because
+/// fabricating a bare-host root would split a namespaced ref like
+/// `ghcr.io/grimoire-rs` into two stacked nodes. A row with no source
+/// re-attributes to the longest configured prefix, root and all.
 ///
 /// Shared with the flat-list renderer (`render.rs`) so the Registry column
 /// and the shortened Repo cell attribute identically to the tree.
 pub(super) fn display_split(row: &TuiRow, configured: &[&str]) -> (String, String) {
     match &row.source {
-        Some(source) => (source.clone(), format!("{}/{}", row.registry, row.repository)),
+        Some(source) => (
+            source.clone(),
+            attributed(&row.registry, &row.repository, configured)
+                .map_or_else(|| format!("{}/{}", row.registry, row.repository), |(_, path)| path),
+        ),
         None => attribute_registry(&row.registry, &row.repository, configured),
     }
 }
@@ -599,16 +623,21 @@ pub(super) fn display_split(row: &TuiRow, configured: &[&str]) -> (String, Strin
 /// Shared with the flat-list renderer (`render.rs`) so the Registry column and
 /// the shortened Repo cell attribute identically to the tree.
 pub(super) fn attribute_registry(registry: &str, repository: &str, configured: &[&str]) -> (String, String) {
+    attributed(registry, repository, configured).unwrap_or_else(|| (registry.to_string(), repository.to_string()))
+}
+
+/// The `(configured registry, relative path)` split, or `None` when no
+/// configured locator is a prefix of the row's full reference at a `/`
+/// boundary. The `None` case is the caller's decision to make: the bare-host
+/// split for an un-sourced row, the full reference for a source-rooted one.
+fn attributed(registry: &str, repository: &str, configured: &[&str]) -> Option<(String, String)> {
     let full = format!("{registry}/{repository}");
     let best = configured
         .iter()
         .filter(|c| full.strip_prefix(**c).is_some_and(|rest| rest.starts_with('/')))
-        .max_by_key(|c| c.len());
-    match best {
-        // `c.len() + 1` skips the boundary '/'; the prefix guarantees it exists.
-        Some(c) => (c.to_string(), full[c.len() + 1..].to_string()),
-        None => (registry.to_string(), repository.to_string()),
-    }
+        .max_by_key(|c| c.len())?;
+    // `best.len() + 1` skips the boundary '/'; the prefix guarantees it exists.
+    Some((best.to_string(), full[best.len() + 1..].to_string()))
 }
 
 /// Path-compress single-child group chains (issue #19, "longest empty
@@ -1017,6 +1046,7 @@ mod tests {
             default_registry: default_registry.map(|s| s.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
     }
@@ -1077,6 +1107,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec!["https://index.example".to_string()],
         };
         let t = build(&rows, &[0], &opts);
@@ -1145,6 +1176,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec!["https://index.example".to_string(), "ghcr.io/acme".to_string()],
         };
         let t = build(&rows, &[0, 1], &opts);
@@ -1219,6 +1251,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), ".".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![skill_row("reg/acme/code.review", ArtifactState::Installed)];
@@ -1240,6 +1273,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), "-".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![skill_row("reg/acme/code-review", ArtifactState::Installed)];
@@ -1372,6 +1406,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec![],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let opts_slash = opts_default(Some("reg"));
@@ -1486,6 +1521,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec!["ghcr.io/acme".to_string()],
         };
         let t = build(&rows, &[0, 1], &opts);
@@ -1528,6 +1564,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec!["localhost:5050/grimoire".to_string()],
         };
         let t = build(&rows, &[0], &opts);
@@ -1559,6 +1596,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec![
                 "localhost:5050/grimoire".to_string(),
                 "localhost:5051/tools".to_string(),
@@ -1579,6 +1617,39 @@ mod tests {
         );
     }
 
+    // Two views of ONE locator: two entries, two aliases, two roots. Keying
+    // roots by locator merged them into a single root that then wore
+    // whichever alias the label map happened to keep — the same rows under
+    // one name, with no way to see which filter admitted what.
+    #[test]
+    fn two_views_of_one_locator_are_two_named_roots() {
+        let mut wide = row2("ghcr.io", "acme/skills/a", "skill", ArtifactState::NotInstalled);
+        wide.source = Some("wide".to_string());
+        let mut mine = row2("ghcr.io", "mine/skills/b", "skill", ArtifactState::NotInstalled);
+        mine.source = Some("mine".to_string());
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            // One locator, declared twice — the roots are the entry keys.
+            registry_locators: vec!["ghcr.io".to_string(), "ghcr.io".to_string()],
+            registry_order: vec!["wide".to_string(), "mine".to_string()],
+        };
+        let t = build(&[wide, mine], &[0, 1], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("wide".to_string(), 0, true),
+                ("acme/skills".to_string(), 1, true),
+                ("a".to_string(), 2, false),
+                ("mine".to_string(), 0, true),
+                ("mine/skills".to_string(), 1, true),
+                ("b".to_string(), 2, false),
+            ],
+            "each entry must root on its own key, in declaration order"
+        );
+    }
+
     // Single namespaced registry: the configured `default_registry` (host +
     // namespace) elides even though the row's registry is the bare host.
     #[test]
@@ -1593,6 +1664,7 @@ mod tests {
             default_registry: Some("localhost:5050/grimoire".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let t = build(&rows, &[0], &opts);
@@ -1611,6 +1683,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![
@@ -1684,6 +1757,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
         };
         let t = build(&rows, &[0, 1], &opts);
@@ -1771,6 +1845,7 @@ mod tests {
             separators: vec!["/".to_string()],
             // Both sources resolved; the second one's filter admitted nothing,
             // so `load_catalog` returned it as an empty group.
+            registry_locators: Vec::new(),
             registry_order: vec!["ghcr.io/acme".to_string(), "registry.corp/team".to_string()],
         };
         let tree = build(&rows, &[0], &opts);
@@ -1809,6 +1884,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![
@@ -1868,6 +1944,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string(), "-".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![row("reg/acme/code-review", "skill", ArtifactState::Installed)];
@@ -2016,6 +2093,7 @@ mod tests {
             default_registry: Some("ghcr.io/acme".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         // registry = "ghcr.io/acme", repository = "skills/code-review"
@@ -2067,6 +2145,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let rows = vec![row("ghcr.io/acme/tool", "skill", ArtifactState::Installed)];
@@ -2488,6 +2567,7 @@ mod p2_member_node_tests {
             default_registry: Some(default_registry.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
     }
@@ -2941,6 +3021,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: Some(default_registry.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
     }
@@ -2950,6 +3031,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
     }
@@ -3094,6 +3176,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: true,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
         let filtered = vec![0];
@@ -3145,6 +3228,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            registry_locators: Vec::new(),
             registry_order: order.iter().map(|s| s.to_string()).collect(),
         }
     }

@@ -1050,9 +1050,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 rows,
                 aggregate_registry_health(&results.groups, &ctx.registries),
                 results.any_truncated(),
-                elision_registry(ctx),
-                registry_order(ctx),
-                registry_labels(&ctx.registries),
+                RegistryDisplay::of(ctx),
             );
         }
         Err(e) => {
@@ -1174,17 +1172,18 @@ fn apply_catalog_results(
     rows: Vec<TuiRow>,
     health: super::state::RegistryHealth,
     truncated: bool,
-    elision: Option<String>,
-    order: Vec<String>,
-    labels: BTreeMap<String, String>,
+    display: RegistryDisplay,
 ) {
     state.set_rows(rows);
     // Elide the registry prefix from tree labels only when exactly one registry
     // is in scope — with multiple registries each tree root already names its
     // registry, so elision would be misleading (D-ELIDE).
-    state.set_default_registry(elision);
+    state.set_default_registry(display.elision);
     // Keep the tree-root precedence order in sync with the resolved set (F13).
-    state.set_registry_order(order);
+    state.set_registry_order(display.order);
+    // …and the locators the roots were keyed from, which the (root, path)
+    // attribution needs and the keys no longer carry.
+    state.set_registry_locators(display.locators);
     // Fold the freshly-loaded tree to the configured `expand_levels` depth.
     // Load path only (not background refresh) — see the invariant note above.
     state.apply_default_collapse();
@@ -1192,7 +1191,7 @@ fn apply_catalog_results(
     state.set_truncated(truncated);
     // Store URL → alias labels so the flat list's Registry column and tree
     // registry-root labels can show human-friendly names (A, B display labels).
-    state.set_registry_labels(labels);
+    state.set_registry_labels(display.labels);
     // Clear the transient message so the render status falls through to the
     // registry-health line (D-DEGRADE) or marked-count; `set_rows` already
     // cleared the loading flag. Empty/gated registries surface as 0/0 tree
@@ -1213,12 +1212,12 @@ fn kind_or_dash(kind: &Option<String>) -> String {
 /// consumes a `CatalogGroup` (from the multi-registry seam) instead of a
 /// single-registry [`Catalog`].
 fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext) -> Vec<TuiRow> {
-    // Index-sourced rows carry their source locator so the tree / flat list
-    // group them under the source root: an index locator classifies (git /
-    // http forms), an OCI registry url does not.
-    let source = crate::config::registry_resolve::classify_index(&group.registry)
-        .is_some()
-        .then(|| group.registry.clone());
+    // Every row carries the key of the entry that produced it, so the tree /
+    // flat list group them under that entry's root. It has to be the entry
+    // and not the locator: one file may declare a locator twice to split it
+    // into two filtered views, and re-deriving the root from the row's own
+    // reference cannot tell those two apart — both views' rows look alike.
+    let source = source_key(group.alias.as_deref(), &group.registry);
     group
         .rows
         .iter()
@@ -1246,7 +1245,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
                 pinned_version: None,
                 state: row_state,
-                source: source.clone(),
+                source: Some(source.clone()),
             }
         })
         .collect()
@@ -2948,16 +2947,72 @@ fn split_repo(repo: &str) -> Option<(String, String)> {
     repo.split_once('/').map(|(r, p)| (r.to_string(), p.to_string()))
 }
 
-/// The resolved registry urls in precedence order — the input the tree's
+/// How the resolved browse set names and orders its roots — everything the
+/// tree and the flat list need from it, resolved once per catalog load.
+///
+/// The four values travel together because they are one projection of one
+/// set and are only ever consistent with each other: a root key, the locator
+/// it was derived from, the label it renders as, and which key (if any) is
+/// elided. Threading them as four parallels is how they would drift.
+struct RegistryDisplay {
+    /// The single source's root key, when exactly one is in scope (D-ELIDE).
+    elision: Option<String>,
+    /// Root keys in precedence order (F13).
+    order: Vec<String>,
+    /// The locators those keys were derived from, for row attribution.
+    locators: Vec<String>,
+    /// Root key → display label.
+    labels: BTreeMap<String, String>,
+}
+
+impl RegistryDisplay {
+    fn of(ctx: &TuiContext) -> Self {
+        Self {
+            elision: elision_registry(ctx),
+            order: registry_order(ctx),
+            locators: registry_locators(ctx),
+            labels: registry_labels(&ctx.registries),
+        }
+    }
+}
+
+/// The tree-root key for one resolved source: its alias, or its locator when
+/// it declared none.
+///
+/// The key is an **entry** identity, not a locator, because one config file
+/// may declare a locator twice to split it into two filtered views — a wide
+/// entry beside a narrow one. Keying roots by locator merged those two views
+/// into one root that then took whichever alias the label map happened to
+/// keep, which is the whole reason this is a named function and not
+/// `r.url.clone()` at three call sites.
+fn source_key(alias: Option<&str>, url: &str) -> String {
+    alias.map_or_else(|| url.to_string(), str::to_string)
+}
+
+/// The resolved sources' root keys in precedence order — the input the tree's
 /// multi-registry root ordering (F13) and empty-registry roots (D-EMPTY)
 /// consume via [`TuiState::set_registry_order`].
 fn registry_order(ctx: &TuiContext) -> Vec<String> {
+    ctx.registries
+        .iter()
+        .map(|r| source_key(r.alias.as_deref(), &r.url))
+        .collect()
+}
+
+/// The resolved sources' locators — what [`crate::tui::tree::display_split`]
+/// attributes a bare-host row against. Kept beside [`registry_order`] rather
+/// than derived from it: two entries may share one locator, so the keys no
+/// longer carry it.
+fn registry_locators(ctx: &TuiContext) -> Vec<String> {
     ctx.registries.iter().map(|r| r.url.clone()).collect()
 }
 
-/// URL → display-label map for the resolved registry set. When an alias is
-/// configured the label is `"{alias} ({url})"`; with no alias the url is both
-/// key and label (matching [`TuiState::registry_label`]'s fallback).
+/// Root key → display-label map for the resolved registry set. When an alias
+/// is configured the label is `"{alias} ({url})"`; with no alias the url is
+/// both key and label (matching [`TuiState::registry_label`]'s fallback).
+///
+/// Keyed by [`source_key`], not by url: two entries over one locator are two
+/// roots with two labels, and a url key can only hold one of them.
 ///
 /// Plan S-018: a configured `include`/`exclude` **never** reaches this — the
 /// browse filter narrows rows, it does not rename or re-prefix a tree root
@@ -2972,7 +3027,7 @@ fn registry_labels(registries: &[ResolvedRegistry]) -> BTreeMap<String, String> 
                 Some(alias) => format!("{alias} ({url})", url = r.url),
                 None => r.url.clone(),
             };
-            (r.url.clone(), label)
+            (source_key(r.alias.as_deref(), &r.url), label)
         })
         .collect()
 }
@@ -2982,13 +3037,15 @@ fn registry_labels(registries: &[ResolvedRegistry]) -> BTreeMap<String, String> 
 /// each root names its own registry and namespaced roots stay
 /// distinguishable.
 ///
-/// The elided value is the source's own locator (`registries[0].url`), not
+/// The elided value is the source's own **root key** ([`source_key`]), not
 /// `ctx.primary_registry`: for an index-only set the primary is `""` (index
 /// locators cannot expand short ids), which would never match the rows'
 /// source root and the single-source session would keep a redundant root.
+/// It is the key rather than the locator for the same reason the roots are —
+/// elision compares against what the row roots at.
 fn elision_registry(ctx: &TuiContext) -> Option<String> {
     match ctx.registries.as_slice() {
-        [only] => Some(only.url.clone()),
+        [only] => Some(source_key(only.alias.as_deref(), &only.url)),
         _ => None,
     }
 }
@@ -3577,9 +3634,12 @@ mod tests {
             rows,
             health,
             false,
-            None, // no single-registry elision
-            vec!["ghcr.io/acme".to_string(), "ghcr.io/offline".to_string()],
-            BTreeMap::new(), // no aliases in this fixture
+            RegistryDisplay {
+                elision: None, // no single-registry elision
+                order: vec!["ghcr.io/acme".to_string(), "ghcr.io/offline".to_string()],
+                locators: vec!["ghcr.io/acme".to_string(), "ghcr.io/offline".to_string()],
+                labels: BTreeMap::new(), // no aliases in this fixture
+            },
         );
 
         // B1 regression guard: status must be cleared so D-DEGRADE can surface.
@@ -3625,9 +3685,12 @@ mod tests {
                 filtered: vec![],
             },
             false,
-            None,
-            vec!["ghcr.io/acme".into()],
-            labels,
+            RegistryDisplay {
+                elision: None,
+                order: vec!["acme".into()],
+                locators: vec!["ghcr.io/acme".into()],
+                labels,
+            },
         );
         assert_eq!(
             s.registry_label("ghcr.io/acme"),
@@ -4102,7 +4165,8 @@ mod tests {
         };
         let labels = registry_labels(&[filtered("ghcr.io/acme", Some("acme")), filtered("registry.corp", None)]);
         assert_eq!(
-            labels.get("ghcr.io/acme").map(String::as_str),
+            // Keyed by root key — the alias here, since one is declared.
+            labels.get("acme").map(String::as_str),
             Some("acme (ghcr.io/acme)"),
             "an aliased root keeps the alias + url label, with no filter prefix"
         );
@@ -4454,7 +4518,10 @@ mod tests {
         );
         assert_eq!(
             registry_order(&ctx),
-            vec!["ghcr.io/acme".to_string(), "registry.corp.example/team".to_string()],
+            // Root KEYS: the alias when one is declared, the locator when
+            // none is — two entries may share a locator, so the locator
+            // cannot be the identity.
+            vec!["ghcr.io/acme".to_string(), "internal".to_string()],
         );
     }
 

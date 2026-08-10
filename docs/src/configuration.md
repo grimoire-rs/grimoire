@@ -224,10 +224,11 @@ alias = "internal"
 oci = "registry.corp.example/team"
 ```
 
-**One file may declare the same locator more than once.** Two entries over one
+**The same locator may be declared more than once.** Two entries over one
 registry, each with its own alias and its own
 [browse filter](#browse-filters), are two *views* of that source, and both are
-browsed — one group per entry:
+browsed — one group per entry, and one `grim tui` root per entry, named by its
+alias:
 
 ```toml
 [[registries]]
@@ -246,22 +247,25 @@ grim loads each *locator* once and hands the result to every entry that names
 it, so a second view costs no extra network round trip. Only the entries'
 filters differ in what they show.
 
-The same `[[registries]]` array can appear in the global config
-(`$GRIM_HOME/grimoire.toml`). Project entries take precedence: a global entry
-whose locator a project entry already declares is **shadowed** — dropped
-whole, so its alias and its browse filter go with it. This is layering, not a
-second view, and it keeps a project snapshot of an index the global config
-already declares from showing up as two identical groups. grim warns when the
-shadowed entry declared either:
+An entry is identified by its locator **and its alias**, so this holds across
+files too: the same `[[registries]]` array can appear in the global config
+(`$GRIM_HOME/grimoire.toml`), and a project entry naming a globally-declared
+locator under a different alias is a second view rather than a replacement.
+
+What does collapse is a genuine repeat — the same alias at the same locator in
+both files, which is the shape `grim init` writes when it snapshots an index
+the global config already declares. Project entries take precedence, so the
+project one wins and the global one is dropped, taking its browse filter with
+it. grim warns when the dropped entry declared one:
 
 ```text
-registry 'acme-global': shadowed by the project entry for 'ghcr.io/acme'; ignoring it, along with its alias and its include/exclude filter
+registry 'acme': repeats an earlier entry for 'ghcr.io/acme'; ignoring its include/exclude filter
 ```
 
-A shadowed entry that declared neither is deliberately silent: layering a
-project entry over an identical global one is a legitimate setup, and warning
-on it would fire on every browse for no recoverable reason. Two locators can
-match without looking alike — a trailing slash or a difference in host case is
+A repeat that declares no filter is deliberately silent: layering a project
+entry over an identical global one is a legitimate setup, and warning on it
+would fire on every browse for no recoverable reason. Two locators can match
+without looking alike — a trailing slash or a difference in host case is
 normalized away before the comparison.
 
 A global config that is **unreadable or invalid** fails the command at
