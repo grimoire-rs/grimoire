@@ -209,6 +209,8 @@ plus two optional fields:
 | `index` | one of `oci`/`index` | A [package index](./package-index.md) locator: an `http(s)://` static base or a git repository (`git+…`, `ssh://`, `git@…`, or ending in `.git`). Replaces the `_catalog` listing; index entries carry their own registry refs. Mutually exclusive with `oci` — setting both is a parse error (exit 78). |
 | `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. The TUI uses the alias as the display label in the flat list's Registry column and as the tree registry-root row label; entries without an alias fall back to the raw locator. |
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
+| `include` | no | Array of glob patterns narrowing what this source **shows** when browsed. Unset (or `[]`) shows every repository. See [Browse filters](#browse-filters). |
+| `exclude` | no | Array of glob patterns hiding matching repositories from this source's browse. Combines with `include` and wins wherever both match. Unset (or `[]`) hides nothing. See [Browse filters](#browse-filters). |
 
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
@@ -225,6 +227,49 @@ oci = "registry.corp.example/team"
 The same `[[registries]]` array can appear in the global config
 (`$GRIM_HOME/grimoire.toml`). Project entries take precedence over global
 entries; duplicate locators are deduped, first occurrence wins.
+
+Dedup drops the losing entry **whole**, so a project entry shadowing a global
+one also discards that global entry's alias and its
+[browse filter](#browse-filters). grim warns when the dropped entry declared
+either — the two ways to lose something you can feel:
+
+```text
+registry 'acme-global': duplicate of an earlier entry for 'ghcr.io/acme'; ignoring it, along with its alias and its include/exclude filter
+```
+
+A duplicate that declared neither is deliberately silent: layering a project
+entry over an identical global one is a legitimate setup, and warning on it
+would fire on every browse for no recoverable reason. Two entries can be
+duplicates without looking alike — a trailing slash or a difference in host
+case is normalized away before the comparison.
+
+A global config that is **unreadable or invalid** fails the command at
+project scope too — exit 78 (`EX_CONFIG`), the same code a global-scope
+run gives — rather than quietly dropping every globally-declared registry
+and browsing on. "Invalid" reaches further than a parse error: a config
+that is well-formed TOML but fails registry validation (two entries
+declaring `default = true`, for instance) is exactly as fatal, because
+every load re-validates every `[[registries]]` entry — a file that survives
+every editor, formatter, and TOML linter can still trip this.
+
+This reaches every command that resolves a registry: [`grim
+context`](./commands.md#context), [`grim add`](./commands.md#add), [`grim
+login`](./commands.md#login), [`grim fetch`](./commands.md#fetch), [`grim
+describe`](./commands.md#describe), [`grim search`](./commands.md#search)
+(without `--registry`), and [`grim status
+--check`](./commands.md#status-check) — plus the MCP `grim_fetch`,
+`grim_describe`, and `grim_render` tools ([`grim mcp`](./commands.md#mcp)),
+which share `fetch`/`describe`'s scope resolution. Three commands never
+reach that read and still exit `0` on the same broken file: [`grim search
+--registry <ref>`](./commands.md#search), which collapses the browse set
+from the flag and returns before any config is consulted; [`grim
+status`](./commands.md#status) without `--check`, which resolves no
+registries at all; and [`grim logout`](./commands.md#logout) — the one
+command here that erases a credential rather than writing one, so an
+unreadable global config degrades to a warning instead of refusing (`grim
+login` keeps the hard failure — storing a credential against a registry set
+grim could not fully assemble is the more dangerous direction). An
+**absent** global config is not an error anywhere.
 
 **Backward compatibility**: a config that omits `[[registries]]` entirely
 behaves exactly as before — `[options].default_registry`, the environment
@@ -249,6 +294,249 @@ registry you never named. See [`grim login`][grim-login].
 **At-most-one `default = true`**: declaring two `[[registries]]` entries with
 `default = true` is a parse error (exit 78). When none set it, the first entry
 is the primary.
+
+### Browse filters {#browse-filters}
+
+Two optional glob lists on a `[[registries]]` entry — `include` and
+`exclude` — narrow what that source shows when it is browsed.
+
+One shared index is the whole point of an index: every team in the company
+points at the same locator. But a platform team that only ever installs from
+`acme/platform` still pages past marketing's and data's packages in
+[`grim search`][grim-search] and the [TUI][grim-tui], and the usual fix is to
+split the index in two — doubling the infrastructure to shorten one team's
+list.
+
+A filter narrows the view instead of the deployment. The index stays one
+index; each consumer declares what it wants to see:
+
+```toml
+[[registries]]
+alias = "acme"
+index = "https://index.acme.internal"
+include = ["ghcr.io/acme/platform/**", "ghcr.io/acme/tools/**"]
+exclude = ["ghcr.io/acme/platform/legacy/**"]
+```
+
+The patterns above are fully qualified with the registry the index points
+into (`ghcr.io`) rather than written as bare `acme/platform/**` — an index
+entry's own locator never appears in the string a pattern is matched
+against, for reasons "Patterns are relative to their own entry's locator"
+further down explains in full.
+
+A repository is shown when the `include` list is empty **or** at least one
+`include` pattern matches it, **and** no `exclude` pattern matches. The two
+lists combine on the same entry — unlike [Cargo's `include`/`exclude`
+fields][cargo-include], which are mutually exclusive — and `exclude` wins
+wherever both match. An entry setting neither field is unfiltered and
+behaves exactly as it did before the fields existed. The filter applies to
+[`grim search`](./commands.md#search), the [TUI](./commands.md#tui), and the
+MCP [`grim_search`](./commands.md#mcp) tool, and to nothing else — for a
+filter that validates. An invalid pattern is a config error like any
+other: it is rejected at exit `78` reading `grimoire.toml`, or exit `65`
+writing it through `grim config`, which blocks the whole command, not just
+browsing. "Nothing else" describes a compiled filter's runtime reach, never
+a bad pattern's blast radius.
+
+**A browse filter is not access control.** `include` and `exclude` govern
+browse and search *rendering* — they are a view over a catalog listing, not
+a boundary. A direct reference to an excluded package still resolves, locks,
+and installs: `grim add ghcr.io/acme/internal/thing` succeeds against an
+entry excluding `acme/internal/**`, and so do `grim lock`, `grim install`,
+`grim fetch`, and `grim release`. [`grim status --check`](./commands.md#status-check)
+likewise ignores every filter, so a deprecation notice on something you
+already depend on can never be hidden by one. The only mechanism that
+restricts what a user can actually pull is the registry's own pull
+authorization.
+
+The sharpest reason is structural, not a matter of coverage: **the source
+being filtered controls the very string its own filter is matched against.**
+A pattern is tested against the candidate derived from the row the source
+served — for an [index](./package-index.md) entry, the `ref` the index
+itself published. Re-publishing the same artifact under a pointer that spells
+the repository differently produces a row the pattern no longer matches, and
+the filter is not consulted about anything else. Nothing verifies that the
+string a source hands over describes what it points at. Treat the filter as
+what it is — the reader's own view setting — and never as a control over what
+a source may show you.
+
+**A filter that cannot be compiled is dropped whole.** A pattern is normally
+rejected long before this — see "Writing the patterns" below — but if a
+filter does reach the browse path uncompilable — a pattern *list*
+that only fails once its patterns are compiled together — grim fails **open**:
+it warns, discards **that entry's entire filter, `include` and `exclude`
+both**, and browses the source unfiltered.
+
+```text
+registry 'acme': invalid include/exclude pattern (does not compile as part of a glob set: error building NFA); browsing without a filter
+```
+
+The exit code stays `0`, and [`grim context`](./commands.md#context) then
+reports that entry with no filter at all — which is the signal to look for.
+Note what this costs: an `exclude` you wrote stops hiding anything. A display
+filter must never be the reason a catalog silently empties, and hiding is not
+a guarantee the filter ever made (paragraph above), so degrading to *shows
+more* is the correct direction — but if a row disappearing matters to you,
+that is the point at which a filter was the wrong tool.
+
+**Glob dialect.** `*` and `?` match within a single path segment and stop at
+a `/`; only `**` crosses one — the same rule [gitignore][gitignore] and
+[ripgrep][ripgrep] follow — so `acme/*` matches `acme/foo` but not
+`acme/foo/bar`, while `acme/**` matches both. **Unlike gitignore's own
+negation model**, though: `include` and `exclude` are two
+independently-evaluated pattern sets, never one ordered list where a later
+`!pattern` re-admits what an earlier line excluded. Declaration order never
+matters, and `exclude` always wins over `include` regardless of which was
+written first. Matching is case-sensitive. Brace alternation works:
+`acme/{platform,tools}/**` is one pattern. A
+pattern containing none of `* ? [ ] { } \` is **wildcard-free** and
+auto-expands to also match everything beneath it, so `acme/platform` behaves
+as `acme/platform{,/**}` — the common case needs no wildcards at all. Every
+other pattern is used verbatim.
+
+A backslash escapes the metacharacter after it — `acme\*x` matches the
+literal `acme*x` — and it does so **identically on every platform**,
+including Windows. `grimoire.toml` is a file teams commit and share, so one
+pattern has to mean one thing on every checkout; grim pins that rather than
+inheriting the platform-dependent default its glob engine would otherwise
+apply.
+
+**Patterns are relative to their own entry's locator.** A pattern is matched
+against the row's `registry/repository` with *this* entry's own `oci` /
+`index` url stripped from the front — never against the fully-qualified
+reference:
+
+| This entry's locator | Catalog row | Pattern matches against |
+|---|---|---|
+| `ghcr.io` | `ghcr.io/acme/platform/foo` | `acme/platform/foo` |
+| `ghcr.io/acme` | `ghcr.io/acme/platform/foo` | `platform/foo` |
+| `https://index.grimoire.rs` | `ghcr.io/acme/foo` | `ghcr.io/acme/foo` |
+
+An index source has no single registry root to be relative to, so its
+candidate is the whole reference — which is also what its tree root already
+shows.
+
+That is usually the same string the [TUI][grim-tui] tree prints beneath the
+source's root, but the two are not the same rule and they diverge when one
+configured locator nests inside another. The tree strips the **longest**
+locator across every configured entry; a pattern strips only its **own**.
+With both `ghcr.io` and `ghcr.io/acme` declared, the row
+`ghcr.io/acme/tools/foo` *displays* under the `ghcr.io/acme` root as
+`tools/foo`, while the `ghcr.io` entry's filter sees `acme/tools/foo` — so a
+pattern on the `ghcr.io` entry must be written `acme/tools/**`, not
+`tools/**`. The locality is deliberate: a pattern means the same thing
+wherever its own entry points, so adding or removing an unrelated
+`[[registries]]` entry can never silently re-aim a filter you already wrote.
+
+Editing an entry's **own** locator does re-aim every pattern in it. Moving
+`oci = "ghcr.io/acme"` to `oci = "ghcr.io"` turns the candidate
+`platform/foo` into `acme/platform/foo`, and `include = ["platform/**"]`
+then matches nothing. A difference in **case** has the same effect — it
+passes validation untouched, and the prefix strip simply never fires.
+(A trailing slash, `oci = "ghcr.io/acme/"`, is *not* one of these: it is
+trimmed before the strip, so the entry filters exactly as it would without
+one.) Copying a pattern between two entries whose locators differ in depth
+fails the same way as a depth change. The one signal is a warning naming the
+source and the counts:
+
+```text
+registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+```
+
+grim emits it once per affected source per browse, for **one shape only**: a
+non-empty `include` list that admitted **nothing** from a group that had
+rows. The count is the rows the filter was actually asked about — **only on
+the unqueried browse** (`grim search` with no query, every TUI load): under
+`grim search <query>` the count is what the query already matched, a
+query-shaped subset indistinguishable from a deliberate search for a hidden
+term, so the warning stays silent there and is decidable only on the full
+listing.
+
+A non-empty `exclude` that removes **nothing** does **not** warn. An earlier
+revision briefly added that trigger — aimed at an `exclude` copied off a
+visible row (`acme/internal/**` against an `oci = "ghcr.io/acme"` source is
+a no-op) — and dropped it: `admitted N of N` is also the permanent, correct
+state of an `exclude` with nothing to match yet
+(`exclude = ["archive/**"]` before anything under `archive/` is published),
+and the counts alone cannot tell the two apart, so the trigger warned on
+every correct config forever. An **exclude-only** filter that empties a
+source stays silent too: that is explicit intent, not a mis-aimed pattern.
+Either way the exit code stays `0` — a filter matching nothing is legal —
+and the source's tree root still renders, at a `0/0` rollup rather than
+disappearing.
+
+**A filter narrows the view, never the listing.** Each source's browse
+window is built first and capped at **500 repositories**, and only then are
+the patterns consulted, so a narrow filter cannot widen what grim looked at
+— it can only show less of the same 500. This matters because it is the
+opposite of the intuition a server-side filter creates: `include =
+["acme/platform/**"]` does not make grim walk deeper into a large registry
+looking for `acme/platform` matches, it discards non-matches from the window
+it already had. On a registry big enough to hit the cap, the honest fix is a
+narrower `oci` locator (`ghcr.io/acme/platform` rather than `ghcr.io`),
+which moves the cut-line itself. `grim search <query>` also reports the cap
+when a query's results may be incomplete:
+
+```text
+catalog listing capped at 500 repositories; results may be incomplete — narrow the query or use a more specific term
+```
+
+**Writing the patterns.** Hand-editing `grimoire.toml` is one way;
+[`grim config`](./commands.md#config) is the other. `grim config registry
+add <alias> --oci … --include <glob> --exclude <glob>` takes both flags
+repeatably and is the only CLI path that writes a multi-pattern list.
+`grim config set registry.<alias>.include <glob>` replaces the whole list
+with **exactly one** pattern — a comma is glob alternation syntax, never a
+separator, so nothing is ever split on one.
+
+Calling `set` on an entry that already carries more than one pattern
+**discards the rest**: exit `0`, with a warning naming how many were
+dropped, because the surviving pattern makes the result read as an edit
+rather than a partial wipe.
+
+```text
+registry.acme.include: `grim config set` writes ONE pattern and replaces the whole list — the 2 patterns already stored are discarded, not appended to. To keep them, re-create the entry: `grim config registry rm acme`, then `grim config registry add` with repeated --include/--exclude flags; or edit `grimoire.toml` by hand.
+```
+
+That is the same reason the `filter admitted M of N` diagnostic goes quiet
+here too: one surviving pattern leaves a partially-correct filter, and
+otherwise the loss traces to nothing.
+
+That last rule has a consequence worth stating, because the round trip looks
+safe and is not. `grim config get` comma-joins a multi-pattern list for
+display; feeding that string straight back to `set` stores it as **one**
+literal pattern. It does not fail — a comma outside a `{…}` group is a valid
+glob, so the value validates, is written, and the command exits `0` with a
+warning:
+
+```text
+registry.acme.include: 'acme/platform/**,acme/tools/**' is stored as ONE pattern — a comma is glob alternation, never a separator. If these were meant as separate patterns, brace them into one glob (`{a,b}`) or write the list by hand in `grimoire.toml`.
+```
+
+Read the true array from `grim config get … --format json` instead, and write
+a multi-pattern list with repeated `registry add --include` flags or by hand.
+
+A pattern that is empty, whitespace-only, carries a control character,
+exceeds **1024 bytes**, nests `{` more than **32** levels deep, or fails to
+compile is rejected outright. A sixth cap bounds the **list**, not one
+pattern: an entry's `include` (or `exclude`) list, summed as *compiled*
+rather than as authored — a wildcard-free pattern's auto-expansion (the
+`{,/**}` suffix above) counts too — must not exceed **64 KiB**, invisible
+to the five per-pattern checks above since no single pattern can trip it
+alone.
+
+Every one of the six is exit **78** (`EX_CONFIG`) when grim reads it from a
+config file — project or global, at either scope. At the CLI write
+boundary the split matters: the five per-pattern caps reject at exit **65**
+(`EX_DATAERR`) from either `grim config set` or `grim config registry add`,
+which write nothing in that case; the list-byte budget is reachable only
+through `grim config registry add`'s repeated `--include`/`--exclude` flags
+(also exit **65**) — a single `grim config set` call writes exactly one
+pattern, capped well under the list budget, so it can never trip the sixth
+cap by itself. Every cap accepts the same set on both paths, because both
+run the pattern through the same compilation the browse filter itself is
+built by. An over-long pattern is echoed back truncated, with its true byte
+count, rather than reprinting the whole thing at you.
 
 ### Qualified references {#qualified-references}
 
@@ -564,3 +852,6 @@ state file is kept out of version control without touching your root
 [distroless]: https://github.com/GoogleContainerTools/distroless
 [webpki-root-certs]: https://crates.io/crates/webpki-root-certs
 [dockerhub]: https://hub.docker.com/
+[cargo-include]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-exclude-and-include-fields
+[gitignore]: https://git-scm.com/docs/gitignore#_pattern_format
+[ripgrep]: https://github.com/BurntSushi/ripgrep

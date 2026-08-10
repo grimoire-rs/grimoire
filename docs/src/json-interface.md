@@ -90,8 +90,8 @@ One row object per item inside `{"items": [...]}`:
 | `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated | `action`: `updated`, `unchanged`, `removed`, `kept-modified` |
 | `search` | `{kind, repo, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, …) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
-| `config registry list` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
-| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
+| `config registry list` | `{alias, oci, index, include, exclude, default}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered | — |
+| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
 | `publish` | `{ref, kind, digest, tags, status, pushed_to}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
 `kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
@@ -99,6 +99,16 @@ enveloped report except `search`: the other reports resolve a locked or
 otherwise real artifact, so their `kind` is always one of those five
 values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
+
+`search`'s `items` carries no signal for *why* it might be short or empty.
+A registry that gates its `_catalog` endpoint and a registry whose own
+[browse filter][browse-filters] admits nothing both render as fewer or zero
+rows, and no report field distinguishes them — the diagnostic that does
+(`registry '<alias>': filter admitted <M> of <N> repositories`) is a
+`tracing::warn!` on stderr only, invisible to a consumer that reads just
+the JSON document. Cross-reference [`grim context`][commands-context]'s
+`registries[].include`/`.exclude` to tell a gated registry from a filtered
+one; no field is planned on `search` itself for this.
 
 `install`'s `target` is `null` when every selected client declines the
 artifact's kind — e.g. a rule installed with only [Codex][codex-subagents-docs]
@@ -176,11 +186,28 @@ own validation is the source of truth, `constraints` is a client-side
 pre-check hint to fail fast before round-tripping to the CLI.
 
 `config registry fields` describes the field *pattern*
-(`registry.<alias>.oci`, `.index`, `.default`), not any resolved alias's
-values, so its rows are a slimmer shape than `config list`'s
-`ConfigEntry`: just `key`/`type`/`title`/`description`, always exactly 3
-items in `oci, index, default` order. It resolves no scope and reads no
-file, so it succeeds identically inside or outside a project.
+(`registry.<alias>.oci`, `.index`, `.default`, `.include`, `.exclude`), not
+any resolved alias's values, so its rows are a slimmer shape than `config
+list`'s `ConfigEntry`: just `key`/`type`/`title`/`description`. It resolves
+no scope and reads no file, so it succeeds identically inside or outside a
+project.
+
+The row set is **append-only**: `oci, index, default, include, exclude`
+today, and a future field is added at the end. Positional access to the
+existing rows therefore stays valid across releases — `items[2]` is the
+`default` row before and after the two filter fields landed — but read the
+count from `items.length` rather than assuming it, and prefer matching on
+`key` where you can.
+
+The two browse-filter rows carry `"type": "string-list"`, matching the JSON
+shape `config registry list` / `show` report. The CLI **write** path is
+narrower than that type suggests: `grim config set
+registry.<alias>.include` stores exactly one pattern and never splits on a
+comma (a comma is glob alternation syntax), so a multi-pattern list is
+written with repeated `grim config registry add --include` flags or by
+editing `grimoire.toml`. `grim config get` on such a list comma-joins for
+display and is **not** round-trippable — feed that string back to `set` and
+it is stored as one literal glob. Read the true array from `--format json`.
 
 ### Single-object reports {#shapes-single}
 
@@ -196,8 +223,8 @@ file, so it succeeds identically inside or outside a project.
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
 | `config set` / `unset` / `registry add` / `rm` / `use` | `{action, key, value, scope, dry_run}` — `dry_run` is `true` only for `config set --dry-run`, `false` for every other write verb (`unset` has no `--dry-run` flag) | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default` |
-| `config registry show` | `{alias, oci, index, default}` — both locator keys present, exactly one non-null | — |
-| `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated}` — see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
+| `config registry show` | `{alias, oci, index, include, exclude, default}` — both locator keys present, exactly one non-null; `include`/`exclude` always-present arrays, `[]` when unfiltered | — |
+| `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
 
@@ -410,6 +437,13 @@ apply serializes as an explicit `null`, never as an absent key (the
 can therefore distinguish "not applicable" (`null`) from "older grim
 that predates the field" (key missing) without version sniffing.
 
+A **list-valued** field follows the same rule with `[]` in place of
+`null`: `[]` means "this applies and is empty", a missing key means
+"older grim". `config registry list`/`show`'s and `context`'s
+`include`/`exclude` are the current examples — an unfiltered registry
+reports `{"include": [], "exclude": []}`, never an absent pair — alongside
+`update`'s `retained` and `status`'s `clients_missing`.
+
 New fields may appear in any minor release; existing fields never change
 type or meaning and are never removed. Readers must ignore unknown
 fields. The full policy, including the install-state schema it also
@@ -520,6 +554,7 @@ can ship in a minor release.
 [stability-frozen]: ./stability.md#frozen
 [stability-additive]: ./stability.md#frozen-additive-fields
 [stability-unstable]: ./stability.md#unstable
+[browse-filters]: ./configuration.md#browse-filters
 
 <!-- external -->
 [clap]: https://docs.rs/clap/latest/clap/

@@ -141,6 +141,36 @@ shipped in 0.10.0.
 the file. No exit code was added or repurposed; this narrows one path back to
 the documented behaviour.
 
+## A broken global config now fails more commands the same way {#global-config-strict}
+
+An unreadable or invalid `$GRIM_HOME/grimoire.toml` used to fail cleanly
+only for a global-scope run or a project run that explicitly resolved
+`[[registries]]`. Every command that resolves a registry now does the same
+check, including several that previously degraded silently instead.
+
+**What you will see.** `grim context`, `grim add`, `grim login`, `grim
+fetch`, `grim describe`, and a default `grim search` now exit **78**
+(`EX_CONFIG`) when the global config is unreadable or fails registry
+validation — a parse error, or something as easy to miss as two
+`[[registries]]` entries both setting `default = true`, which is invalid
+even though it is well-formed TOML. Some of these previously exited `0` and
+quietly dropped the global registry tier instead. `grim status --check` and
+the MCP `grim_fetch`, `grim_describe`, and `grim_render` tools resolve the
+same way and are affected identically.
+
+**What stays exit `0`.** `grim search --registry <ref>` collapses the browse
+set from the flag before any config is consulted; `grim status` without
+`--check` resolves no registries at all; and `grim logout` degrades to a
+warning and carries on, because erasing a credential is the direction
+where refusing to act is the worse failure mode — `grim login` keeps the
+hard failure, since storing one is the direction that can send a secret to
+the wrong host.
+
+**What to do.** Fix or remove the offending entry in
+`$GRIM_HOME/grimoire.toml` — the error names both the file and the rule it
+violates. See [Multiple registries][multi-registry] for the full
+affected-command list and the reasoning.
+
 ## Nothing detected no longer installs into every client {#autodetect-fallback}
 
 With no `--client`, no `[options].clients`, and no client marker present,
@@ -190,3 +220,4 @@ explicitly; nothing else recovers it, and that is deliberate.
 [install]: ./commands.md#install
 [vendor-metadata]: ./vendor-metadata.md#projection-semantics
 [no-clobber]: ./json-interface.md#error-reason
+[multi-registry]: ./configuration.md#multiple-registries

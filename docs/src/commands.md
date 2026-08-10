@@ -131,6 +131,8 @@ The supported dotted keys are:
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
+| `registry.<alias>.include` | one glob pattern | A [browse filter](./configuration.md#browse-filters) narrowing what this registry shows in `grim search`, the TUI, and `grim_search`. `set` stores **exactly one** pattern, replacing the whole list — a comma is glob alternation syntax, never a separator, so nothing is split on one; a pattern carrying a comma outside a `{…}` group is stored verbatim and warned about. `set` on an entry that already carries more than one pattern **discards the rest** — exit `0`, with a warning naming the count. Write several patterns with repeated `grim config registry add --include` flags, or by hand. A pattern that is empty, whitespace-only, carries a control character, exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile exits `65` — the same set a config-file read rejects with `78`, since both compile the pattern the way the browse filter itself is built. A sixth cap bounds the whole list rather than one pattern — 64 KiB summed as compiled — reachable only through `registry add`'s accumulated flags (exit `65`) or a hand-edited file (exit `78`); a single `set` call writes one pattern and can never trip it alone. `unset` clears the list; `get` on an empty list exits `1`. |
+| `registry.<alias>.exclude` | one glob pattern | Same shape and rules as `include`, hiding matching repositories instead. Combines with `include` on the same entry and wins wherever both match. |
 
 Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
 
@@ -142,6 +144,9 @@ Registry dotted keys require the entry to already exist — only `grim config re
 grim config registry add  acme --oci ghcr.io/acme
 grim config registry add  acme --oci ghcr.io/acme --default
 grim config registry add  hub  --index https://index.grimoire.rs
+grim config registry add  acme --oci ghcr.io/acme \
+  --include 'acme/platform/**' --include 'acme/tools/**' \
+  --exclude 'acme/platform/legacy/**'
 grim config registry use  acme     # mark as default; clears the prior default
 grim config registry show acme     # print one registry's fields
 grim config registry rm   acme
@@ -156,11 +161,20 @@ entry lists via the OCI `_catalog` endpoint, an index entry lists from a
 exits `64` — update the locator with `grim config set
 registry.<alias>.oci <new-ref>`, or remove and re-add.
 
+`--include` / `--exclude` seed the entry's
+[browse filter](./configuration.md#browse-filters). Both are repeatable and
+accumulate; neither is ever comma-split, because a comma is glob alternation
+syntax — `--include 'acme/{platform,tools}/**'` is one pattern, not two.
+This is the only CLI path that writes a multi-pattern list: `grim config set
+registry.<alias>.include` replaces the list with exactly one pattern. Both
+flags are inert on an alias that already exists, since `add` rejects a
+duplicate with exit `64`.
+
 `registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
 
 `registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (locator-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
 
-`registry fields` lists the 3 addressable per-registry field names (`oci`, `index`, `default`) with their type, title, and description — the same static metadata the `registry.<alias>.<field>` dotted-key table above documents, in machine-readable form. It reads no config and resolves no scope: unlike every other `config` subcommand it works in a directory with no `grimoire.toml`, and with no `--global`/`--config` flag needed.
+`registry fields` lists the 5 addressable per-registry field names (`oci`, `index`, `default`, `include`, `exclude`) with their type, title, and description — the same static metadata the `registry.<alias>.<field>` dotted-key table above documents, in machine-readable form. It reads no config and resolves no scope: unlike every other `config` subcommand it works in a directory with no `grimoire.toml`, and with no `--global`/`--config` flag needed. New fields are **appended** to that list, never inserted, so a consumer indexing the rows positionally keeps working.
 
 ### JSON output {#config-json}
 
@@ -174,14 +188,20 @@ shapes are:
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…","dry_run":bool}` — `dry_run` is `true` only for `set --dry-run`; every other write verb always reports `false` |
 | `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null,"constraints":{"item_pattern":"…","item_width":integer} or null}` |
-| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"default":bool}` |
-| `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"default":bool}` |
-| `registry fields` | `{"items": [...]}` of `{"key":"…","type":"…","title":"…","description":"…"}` — `key` is the short field name (`oci`, `index`, `default`), not a dotted key; no `value`/`set`/`default` (meaningless for a field pattern) |
+| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
+| `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
+| `registry fields` | `{"items": [...]}` of `{"key":"…","type":"…","title":"…","description":"…"}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`), not a dotted key; no `value`/`set`/`default` (meaningless for a field pattern) |
 
 `list` rows carry all nine fields whether or not `--all` was passed — the flag only widens the row set, never the row shape. `value` is `null` only for an unset row (surfaced only under `--all`); `set` is `value != null`. `type` is one of `string`, `boolean`, `integer`, `enum`, `string-list`, `string-set`; `values` is non-null for `enum` and `string-set` keys (the allowed value set), `null` otherwise. `title` and `description` are fixed per-key metadata, not derived from the current value; `default` is the runtime default in CLI string form, or `null` when the key has no fixed default. `constraints` is non-null only for a list key whose items carry a shape rule beyond closed-set membership — today just `options.tui.tree_separators` — and is advisory: `item_pattern` is necessary but not sufficient (it cannot express the paired `item_width` rule), so `grim`'s own validation stays authoritative even when a value matches the pattern; see [the JSON interface](./json-interface.md#shapes-items) for the full honesty contract.
 
 Registry rows always carry both locator keys — exactly one of `oci` /
-`index` is non-null for a valid entry.
+`index` is non-null for a valid entry — and both
+[browse-filter](./configuration.md#browse-filters) keys: `include` and
+`exclude` are always present arrays, `[]` on an unfiltered entry, never an
+absent key. The plain `registry list` / `registry show` tables report the
+filter as a `Filters` cell carrying **counts** (`2 include, 1 exclude`, or
+`—` when unfiltered); the patterns themselves are read from `--format json`,
+which has no width to lose.
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
 
@@ -524,6 +544,12 @@ bundle-member artifact; a declared bundle, a dev-install, or a
 matched). It costs one network round-trip regardless of how many artifacts
 are declared.
 
+That lookup is deliberately **never** narrowed by a registry
+[browse filter](./configuration.md#browse-filters). `--check` reports on
+artifacts you already declared, so a filter hiding one of them from
+`grim search` must not also hide its deprecation notice here — a filter is a
+view over browsing, not over what you depend on.
+
 `checked` (top-level, alongside `items`) reports whether the check actually
 ran: `true` only when `--check` was passed and the invocation is online.
 Combined with `--offline` (or `$GRIM_OFFLINE`), the check is skipped
@@ -577,8 +603,21 @@ grim_home, offline, offline_source, clients, registries, default_registry}`.
 fine or is simply absent — `lock_exists` alone answers "is it there", not
 "can grim use it". The exit code stays `0` either way; `context` reports
 the state, it does not fail on it.
-`registries` entries are `{alias, url, kind, default, authenticated}` with
-`kind` either `registry` or `index`. `authenticated` is a boolean: `true`
+`registries` entries are `{alias, url, kind, default, authenticated, include,
+exclude}` with `kind` either `registry` or `index`. `include` and `exclude`
+are the source's authored
+[browse-filter](./configuration.md#browse-filters) patterns in declaration
+order — always-present arrays, `[]` on an unfiltered entry, and `[]` for
+every entry under `--registry`, whose forced browse set genuinely carries no
+filter. This is the seam that saves a consumer parsing `grimoire.toml`
+itself. Because these are the patterns as **resolved** rather than as
+authored, they are also how you catch a filter that failed to compile and was
+[dropped whole](./configuration.md#browse-filters): the entry reports `[]`
+for both lists while `grimoire.toml` still shows the patterns. The plain
+table appends the same information to the registry row as
+**counts** — `acme ghcr.io/acme (registry, default, 2 include, 1 exclude)` —
+and omits both clauses entirely when the entry is unfiltered, so an
+unfiltered row reads exactly as it always has. `authenticated` is a boolean: `true`
 when a credential for this registry's **host** is present in the
 docker-compatible credential store (`~/.docker/config.json`, or
 `$DOCKER_CONFIG/config.json`) — an `auths` or `credHelpers` entry for the
@@ -671,6 +710,39 @@ browse to exactly the registries it names — repeatable and comma-separated
 `GRIM_DEFAULT_REGISTRY` is only the
 short-id resolution default — it does not restrict the browse set when
 `[[registries]]` is configured.
+
+A `[[registries]]` entry carrying an `include` / `exclude`
+[browse filter](./configuration.md#browse-filters) contributes only the
+repositories its patterns admit. The filter is applied at read time, after
+the query — so `grim search` and the TUI narrow identically, and the shared
+catalog cache stays whole. A mis-aimed-pattern warning fires on stderr,
+naming the source and the counts, but **only on the unqueried browse** —
+`grim search` with no query, or a TUI load:
+
+```text
+registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+```
+
+That line fires when a non-empty `include` list contributed **nothing** from
+a source that had rows. Under `grim search <query>` the count is a
+query-shaped subset — indistinguishable from a deliberate search for a
+hidden term — so the warning stays silent there; it is decidable only on
+the full, unqueried listing. A non-empty `exclude` that removes nothing does
+**not** warn (tried and dropped: it is also the permanent, correct state of
+an `exclude` with nothing yet to match). An **exclude-only** filter that
+empties a source also stays silent, since that is what it was asked to do.
+The exit code stays `0`. `--registry <ref>` browses **unfiltered** — a
+forced browse set is exactly what the flag names, with no config filter
+applied to it.
+
+The filter runs **after** the per-source browse window is built and capped at
+500 repositories, so it can only show less of that window, never reach past
+it. A separate warning reports the cap when a query's results may be
+incomplete:
+
+```text
+catalog listing capped at 500 repositories; results may be incomplete — narrow the query or use a more specific term
+```
 
 The plain table shows each entry's short summary (`com.grimoire.summary`),
 falling back to the description when no summary is set. On an interactive
@@ -858,6 +930,39 @@ for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
 browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
 `space` to mark rows.
+
+Like [`grim search`](#search), a registry declaring an `include` / `exclude`
+[browse filter](./configuration.md#browse-filters) shows only the
+repositories its patterns admit — and a source whose filter admits nothing
+keeps its tree root, rolled up as `0/0`, rather than vanishing from the
+tree. The root label is unaffected: it stays the configured alias (or the raw
+locator), exactly as without a filter. `--registry` collapses the browse and
+applies no filter at all. Like the registry set itself, a filter is read
+once at startup — editing `include`/`exclude` in `grimoire.toml` while the
+TUI is open has no effect until you quit and reopen it.
+
+The `filter admitted 0 of N repositories` warning is written to
+`$GRIM_HOME/tui.log`, not to the screen — the alt-screen session redirects
+all log output for its whole lifetime so nothing can scribble the frame. The
+TUI's own channel for it is the status line, which names each affected source
+in a `filtered:` clause alongside the existing `offline:` and `truncated:`
+ones:
+
+```text
+offline: ghcr.io/down · truncated: ghcr.io/big · filtered: acme
+```
+
+That clause is what explains a `0/0` root without leaving the TUI. It names
+a source only when its own filter can be shown to have caused the empty
+result — the source had rows before the filter ran, and none after, the
+same proof the CLI's `admitted 0 of N` diagnostic requires. A source that
+was already empty with nothing for a filter to remove is never blamed here
+either, exactly as `grim search` stays quiet about it. A mis-aimed `exclude`
+that removes nothing has no signal on either surface — the CLI itself
+dropped that trigger (an `exclude` with nothing yet to match is
+indistinguishable from a correct one waiting on a not-yet-published
+repository), so a mis-aimed `exclude` renders a full tree with no warning
+anywhere.
 
 Like [`grim search`](#search), deprecated artifacts that are not installed are
 **hidden on open** (installed-but-deprecated rows stay visible, still marked).
@@ -1216,7 +1321,7 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
