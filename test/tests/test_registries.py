@@ -1526,3 +1526,49 @@ def test_malformed_filter_pattern_in_project_config_exits_78(
     assert "acme{unclosed" in result.stderr, (
         f"the diagnostic must quote the offending pattern; got: {result.stderr!r}"
     )
+
+
+def test_one_file_may_declare_a_locator_twice_as_two_views(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """Two entries over ONE locator are two filtered views, and both browse.
+
+    The dedup that used to collapse them predates per-entry browse filters:
+    it dropped the second entry whole — alias, filter and all — so the rows
+    only its `include` admitted were unreachable, and the loss was reported
+    to stderr alone. Splitting a source into a wide view and a narrow one is
+    exactly what the filters are for, so a repetition inside one file is
+    honoured; only a global entry a project entry repeats is shadowed.
+    """
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_filter_tree(ns)
+
+    (project_dir / "grimoire.toml").write_text(
+        "[[registries]]\n"
+        'alias = "platform"\n'
+        f'oci = "{REGISTRY_HOST}/{ns}"\n'
+        f'include = {_toml_list(_ns_rel(ns, "platform"))}\n'
+        "default = true\n"
+        "\n"
+        "[[registries]]\n"
+        'alias = "internal"\n'
+        f'oci = "{REGISTRY_HOST}/{ns}"\n'
+        f'include = {_toml_list(_ns_rel(ns, "internal"))}\n'
+        "\n[skills]\n\n[rules]\n"
+    )
+    runner = grim_at(project_dir)
+
+    context = runner.json("context")
+    aliases = [r["alias"] for r in context["registries"]]
+    assert aliases == ["platform", "internal"], (
+        f"both entries must resolve, in declaration order; got {aliases}"
+    )
+
+    # The union of the two views: neither entry alone admits all four rows,
+    # so this fails if either view was dropped or handed the other's filter.
+    assert _visible_candidates(runner, ns) == {
+        "platform/foo",
+        "platform/foo/deep",
+        "platform/bar",
+        "internal/thing",
+    }, "each view must contribute the rows its own include admits"

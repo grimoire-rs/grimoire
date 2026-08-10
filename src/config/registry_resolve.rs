@@ -149,8 +149,10 @@ pub struct ResolvedRegistry {
 ///    the flag collapses; `$GRIM_DEFAULT_REGISTRY` (`env_default`) is a
 ///    default for tier 3, not a collapse trigger.
 /// 2. Otherwise the declared `[[registries]]` are authoritative — project
-///    entries then global entries, deduped by normalized locator (trailing
-///    slashes and host case ignored; first occurrence wins).
+///    entries then global entries. A global entry whose normalized locator a
+///    project entry already declares is shadowed (trailing slashes and host
+///    case ignored); two entries at one locator **within one file** are two
+///    views of that source and both browse.
 ///    Exactly one is marked primary: the first `default = true`, else the
 ///    first entry. When `[[registries]]` is non-empty the `env_default` is
 ///    NOT added to the browse set (it stays the short-id default only).
@@ -192,10 +194,35 @@ pub fn resolve_registries(
     // validation enforces exactly-one-of; an unclassifiable programmatic
     // index locator degrades to the HTTP transport rather than panicking.
     let mut out: Vec<ResolvedRegistry> = Vec::new();
-    // Normalized locator → that locator's winning entry's alias, so a
-    // dropped duplicate can be compared against what actually survived.
+    // Dedup happens **between the two files, never inside one**, and the two
+    // cases are not the same thing wearing different hats:
+    //
+    // - Two entries at one locator in ONE file are what the author wrote:
+    //   two named views of a source, which is the whole point of per-entry
+    //   browse filters (`grim` minus a namespace beside `mine` holding only
+    //   it). Both browse. The test is the locator alone — not the filters —
+    //   so a field added to `RegistryConfig` later cannot quietly change what
+    //   counts as a duplicate.
+    // - A global entry repeating a project one is layering, not a second
+    //   view. It collapses, first (project) occurrence winning, so a project
+    //   snapshot of an index the global config already declares does not show
+    //   up as two identical catalog groups (issue #28).
+    //
+    // Normalized locator → that locator's winning PROJECT entry's alias, so a
+    // shadowed global entry can be compared against what actually survived.
+    // Project entries are the only writers; a second global entry at the same
+    // locator is inside one file and stays.
+    //
+    // `load_catalog` fans its refresh out per distinct *locator*, not per
+    // entry, so sibling views share one cache read and never race each other
+    // for the advisory lock (which on a cold cache would serve one of them an
+    // empty catalog).
     let mut seen: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
-    for rc in project.iter().chain(global.iter()) {
+    for (rc, is_project) in project
+        .iter()
+        .map(|rc| (rc, true))
+        .chain(global.iter().map(|rc| (rc, false)))
+    {
         let (locator, kind) = match (&rc.oci, &rc.index) {
             (Some(oci), _) if !oci.trim().is_empty() => (oci.clone(), SourceKind::Registry),
             // Classified on the *trimmed* locator, the same string the stored
@@ -212,12 +239,14 @@ pub fn resolve_registries(
             _ => continue,
         };
         let key = normalize_locator(&locator);
-        // Looked up before the insert, and cloned: the winner's alias must
-        // survive the lookup, and `BTreeMap::insert` would overwrite it with
-        // the loser's.
-        let winner_alias = seen.get(&key).cloned();
-        if winner_alias.is_none() {
+        // Cloned before the insert: the winner's alias must survive the
+        // lookup, and `BTreeMap::insert` would overwrite it with a later
+        // project entry's.
+        let winner_alias = if is_project { None } else { seen.get(&key).cloned() };
+        if is_project {
             seen.insert(key, rc.alias.clone());
+        }
+        if winner_alias.is_none() {
             // Compiled *here*, at resolve time, so `globset` stays inside
             // `src/config/` and every consumer (search, TUI, MCP,
             // `grim context`) receives an already-compiled filter.
@@ -258,12 +287,10 @@ pub fn resolve_registries(
             || !rc.exclude.is_empty()
             || winner_alias.flatten().as_deref() != rc.alias.as_deref()
         {
-            // Dedup drops the whole entry, and the two ways to get here look
-            // nothing alike to the user: two entries in one file differing
-            // only by host case or a trailing slash, and a project entry
-            // shadowing a global one — where the *global* filter is what
-            // silently stops applying. Same voice as the sibling arm above,
-            // escaped for the same reason.
+            // Layering dropped this global entry **whole**, and what the user
+            // loses is its alias and its browse filter — the filter being the
+            // one that silently stops applying. Same voice as the sibling arm
+            // above, escaped for the same reason.
             //
             // Gated on what the user can observe losing: a browse filter, or
             // an alias that will not resolve. A redundant declaration
@@ -272,7 +299,7 @@ pub fn resolve_registries(
             // project-over-global layering of the same registry is a
             // legitimate setup that would otherwise warn on every browse.
             tracing::warn!(
-                "registry '{}': duplicate of an earlier entry for '{}'; ignoring it, along with its alias and its include/exclude filter",
+                "registry '{}': shadowed by the project entry for '{}'; ignoring it, along with its alias and its include/exclude filter",
                 rc.alias.as_deref().unwrap_or(&locator).escape_debug(),
                 locator.escape_debug()
             );
@@ -583,6 +610,58 @@ mod tests {
         );
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].alias.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn one_file_may_declare_the_same_locator_twice() {
+        // Two views of one source: a wide entry beside a narrow one over the
+        // same index. Dedup would drop the second whole — alias, filter and
+        // all — and the rows only it admits would be unreachable, which is
+        // what per-entry browse filters exist to make reachable. Both entries
+        // are in ONE file, so the repetition is authored, not layering.
+        let set = resolve_registries(
+            &[],
+            &[
+                rc_filtered("everything-else", "https://index.grimoire.rs", &[], &["mine"]),
+                rc_filtered("mine", "https://index.grimoire.rs", &["mine"], &[]),
+            ],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 2, "both views must survive: {set:?}");
+        assert_eq!(set[0].alias.as_deref(), Some("everything-else"));
+        assert_eq!(set[1].alias.as_deref(), Some("mine"));
+        assert_eq!(
+            set[1].filter.include_patterns(),
+            ["mine"],
+            "its own filter, not the winner's"
+        );
+        assert!(set[0].is_default, "the first entry is still the only primary");
+        assert!(!set[1].is_default);
+    }
+
+    #[test]
+    fn a_global_file_may_declare_the_same_locator_twice() {
+        // Same rule on the other side of the boundary: `seen` is written by
+        // project entries only, so a second global entry at one locator is
+        // inside one file and stays — the user's own global config is where
+        // two views are most likely to be written.
+        let set = resolve_registries(
+            &[],
+            &[],
+            None,
+            &[
+                rc(Some("a"), "https://index.grimoire.rs", false),
+                rc(Some("b"), "https://index.grimoire.rs/", false),
+            ],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 2, "both views must survive: {set:?}");
     }
 
     #[test]
@@ -1069,7 +1148,7 @@ mod tests {
         assert_eq!(set.len(), 1, "the dedup itself is unchanged: {set:?}");
         assert!(set[0].filter.include_patterns().is_empty(), "the project entry won");
         assert!(
-            logs.contains("registry 'acme': duplicate of an earlier entry for 'GHCR.io/acme/'"),
+            logs.contains("registry 'acme': shadowed by the project entry for 'GHCR.io/acme/'"),
             "the dropped entry must be named; captured:\n{logs}"
         );
         assert!(
@@ -1090,7 +1169,7 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].alias.as_deref(), Some("proj"), "first occurrence still wins");
         assert!(
-            logs.contains("registry 'glob': duplicate of an earlier entry"),
+            logs.contains("registry 'glob': shadowed by the project entry"),
             "a dropped alias must be named; captured:\n{logs}"
         );
     }

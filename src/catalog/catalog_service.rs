@@ -38,6 +38,7 @@ use crate::catalog::registry_catalog::{Catalog, OciMeta};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
 use crate::config::registry_filter::browse_candidate;
+use crate::config::registry_resolve::SourceKind;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
@@ -249,15 +250,36 @@ pub async fn load_catalog(
 ) -> Result<CatalogResults, crate::catalog::catalog_error::CatalogError> {
     let parsed = SearchQuery::parse(query);
 
-    // Fan out one coordinated, per-registry refresh on a JoinSet. Each task
-    // owns its inputs ('static); the borrowed `badges` stays on this task and
-    // is applied after the joins (badge derivation is synchronous).
+    // Fan out one coordinated refresh per distinct **locator** — not per
+    // entry. `resolve_registries` admits two differently-aliased entries at
+    // one locator (two filtered views of one source), and both would key the
+    // same cache file: spawning both, one wins the advisory lock and rebuilds
+    // while the other reads `Locked` and serves stale — which on a cold cache
+    // is *empty*, so a view would show nothing until the next browse. Sharing
+    // the load removes the race and the redundant walk with it; a lone entry
+    // takes exactly the path it took before.
+    //
+    // Each task owns its inputs ('static); the borrowed `badges` stays on this
+    // task and is applied after the joins (badge derivation is synchronous).
+    // Distinct locators in first-occurrence order, each with the kind its
+    // first entry resolved to — sibling views share a locator, and the kind is
+    // read off the locator (`classify_index`), so they cannot disagree.
+    let mut loads: Vec<(&str, SourceKind)> = Vec::new();
+    // Registry index → the index in `loads` whose catalog it reads.
+    let load_of: Vec<usize> = registries
+        .iter()
+        .map(|reg| {
+            loads.iter().position(|(u, _)| *u == reg.url).unwrap_or_else(|| {
+                loads.push((&reg.url, reg.kind));
+                loads.len() - 1
+            })
+        })
+        .collect();
     let mut set: tokio::task::JoinSet<(usize, Option<Catalog>)> = tokio::task::JoinSet::new();
-    for (idx, reg) in registries.iter().enumerate() {
-        let path = paths.catalog_file_for(&reg.url);
-        let registry = reg.url.clone();
-        let kind = reg.kind;
-        let git_dir = paths.index_git_dir_for(&reg.url);
+    for (idx, (url, kind)) in loads.iter().copied().enumerate() {
+        let path = paths.catalog_file_for(url);
+        let registry = url.to_string();
+        let git_dir = paths.index_git_dir_for(url);
         let access = Arc::clone(access);
         set.spawn(async move {
             // Browse scope (empty query) — the in-memory filter below applies
@@ -279,15 +301,15 @@ pub async fn load_catalog(
         });
     }
 
-    // Collect into a BTreeMap keyed by input index: deterministic group order
+    // Collect into a BTreeMap keyed by load index: deterministic group order
     // regardless of completion order (quality-rust JoinSet rule) with no
     // separate sort. A task that panicked is logged and its registry degrades
     // to an absent (empty) group below rather than vanishing silently.
-    let mut by_index: std::collections::BTreeMap<usize, Option<Catalog>> = std::collections::BTreeMap::new();
+    let mut by_load: std::collections::BTreeMap<usize, Option<Catalog>> = std::collections::BTreeMap::new();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((idx, catalog)) => {
-                by_index.insert(idx, catalog);
+                by_load.insert(idx, catalog);
             }
             Err(e) => tracing::error!("catalog refresh task failed to join: {e}"),
         }
@@ -295,7 +317,9 @@ pub async fn load_catalog(
 
     let mut groups = Vec::with_capacity(registries.len());
     for (idx, reg) in registries.iter().enumerate() {
-        let catalog = by_index.remove(&idx).flatten();
+        // Cloned, not removed: sibling views of one locator read the same
+        // load, and each narrows it through its own filter below.
+        let catalog = load_of.get(idx).and_then(|l| by_load.get(l)).cloned().flatten();
         let group = match catalog {
             Some(catalog) => {
                 // The rows the browse filter is asked about: everything the
@@ -837,6 +861,47 @@ mod tests {
                 group_repos(&results, group),
                 expected,
                 "group {group} must admit the same rows from the same pattern"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn two_views_of_one_locator_each_get_the_whole_catalog() {
+        // A config may declare one locator twice to split it into two named
+        // views (`resolve_registries` stops deduping those). Both entries key
+        // the SAME cache file, so the fan-out loads per locator and hands the
+        // result to every entry sharing it: each group must see all five rows
+        // before its own filter runs. Loading per *entry* instead puts two
+        // tasks on one advisory lock — the loser reads `Locked` and serves
+        // stale, which on a cold cache is empty, so one view silently shows
+        // nothing until the next browse.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[
+                source("ghcr.io", Some("everything-else"), &[], &["acme/internal"]),
+                source("ghcr.io", Some("internal"), &["acme/internal"], &[]),
+            ],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            group_repos(&results, 1),
+            vec!["ghcr.io/acme/internal/secret".to_string()],
+            "the second view reads the same load, narrowed by its OWN filter"
+        );
+        assert!(
+            !group_repos(&results, 0).contains(&"ghcr.io/acme/internal/secret".to_string()),
+            "and the first view still excludes what it excluded"
+        );
+        for group in [0, 1] {
+            assert_eq!(
+                results.groups[group].rows_before_filter,
+                FIXTURE_REPOS.len(),
+                "group {group} must be offered the whole catalog"
             );
         }
     }
