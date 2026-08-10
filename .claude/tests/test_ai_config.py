@@ -885,7 +885,11 @@ class TestAiConfigOverhaulPhase2:
     _EXPECTED_DISABLE_MODEL_INVOCATION = {
         # Action skills with side effects — must disable auto-invocation
         "commit": True,
-        "finalize": True,
+        # Owner-flipped 2026-08-10 so an autonomous run can reach /finalize
+        # without a human in the loop. Still an action skill with side
+        # effects — re-flip both this entry and the frontmatter together if
+        # the manual-only policy is restored.
+        "finalize": False,
             "meta-maintain-config": True,
                         # Pure analysis / advisory — auto-invocation safe
             "bugfix": False,
@@ -1535,3 +1539,208 @@ class TestPlanStatusBlock:
                 assert field in block, (
                     f"{tmpl.relative_to(ROOT)} Status block missing field {field}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# ADR Index: every ADR indexed, no ADR referenced by a finalized plan stays
+# `Status: Proposed`
+# ---------------------------------------------------------------------------
+
+
+class TestAdrIndex:
+    """`arch-principles.md`'s "ADR Index" table is the map this repo tells
+    every agent to consult before deciding in a domain (see AGENTS.md
+    "Architecture" and the rule's own header). Two invariants keep the table
+    itself, and the ADRs it indexes, from drifting silently out of sync with
+    what actually shipped.
+
+    Both tests scan every ADR / plan in the repo, not just one pair — a gap
+    found here is real drift to report, never something to paper over by
+    editing an unrelated ADR or narrowing the assertion (see
+    `.claude/rules/meta-ai-config.md` "Principle: test the contract, not the
+    content").
+    """
+
+    _ARCH_PRINCIPLES = CLAUDE_DIR / "rules" / "arch-principles.md"
+    _ADR_DIR = ROOT / ".agents" / "adr"
+    _PLANS_DIR = ROOT / ".agents" / "plans"
+
+    # Frozen allowlist of pre-existing drift, recorded 2026-08-10 (round-2
+    # review-fix wave, S-17). Every name below already lacked an ADR Index
+    # row before these two tests existed — they are debt, not new failures,
+    # and this list is the only thing keeping the debt from blocking every
+    # future branch. It may only SHRINK, as each entry gets a real index row
+    # backfilled; it must never grow. A file that is not already named here
+    # is a real, new gap — fix the source, never add it to this list.
+    _MISSING_INDEX_ROW_ALLOWLIST = frozenset(
+        {
+            "adr_anchor_escape_recovery.md",
+            "adr_client_compat_matrix.md",
+            "adr_description_companion.md",
+            "adr_grim_publish.md",
+            "adr_hooks_support.md",
+            "adr_local_path_sources.md",
+            "adr_managed_context_block.md",
+            "adr_projection_over_index.md",
+            "adr_registry_default_dedup.md",
+            "adr_render_layout_stability.md",
+            "adr_structured_vendor_metadata.md",
+            "adr_vendor_wave_expansion.md",
+        }
+    )
+
+    # Frozen allowlist of (plan, adr) pairs where a finalized plan already
+    # references a still-`Proposed` ADR, recorded 2026-08-10 — same freeze
+    # rule as above: shrink-only, one named pair per known case, never a
+    # count or a glob.
+    #
+    # The second pair was surfaced the same day by widening `_referenced_adrs`
+    # to the backticked-bare-filename citation shape (round-3 review, T-1): it
+    # cites the SAME already-recorded ADR from a second finalized plan, so it
+    # is the same debt seen through a wider lens, not a new regression. Both
+    # clear together when `adr_projection_over_index.md` gets a real status.
+    #
+    # The third pair is the same ADR again, seen from a third finalized plan
+    # that only *mentions* it — `plan_registry_browse_filters` cites it as
+    # background for withdrawing its own D7, and ships no part of that
+    # decision. This is the "genuine exception" `_referenced_adrs` documents:
+    # the widened regex cannot tell a citation from a mention, and the safe
+    # direction is to over-match and record the exception here. All three
+    # clear together.
+    _STALE_PROPOSED_ALLOWLIST = frozenset(
+        {
+            ("plan_tui_tree_view_phase2.md", "adr_projection_over_index.md"),
+            ("plan_tui_member_nodes.md", "adr_projection_over_index.md"),
+            ("plan_registry_browse_filters.md", "adr_projection_over_index.md"),
+        }
+    )
+
+    @staticmethod
+    def _indexed_adrs(arch_principles_text: str) -> set[str]:
+        """ADR filenames that have a row in the "## ADR Index" table.
+
+        Every such row starts its line with `| [adr_<name>.md](...)` — no
+        other table in this file leads a row with an `adr_*.md` link, so a
+        whole-file scan is equivalent to (and simpler than) extracting the
+        section first.
+        """
+        return set(re.findall(r"^\| \[(adr_[^\]]+\.md)\]", arch_principles_text, re.MULTILINE))
+
+    @staticmethod
+    def _adr_status(adr_text: str) -> str | None:
+        """The value of an ADR's `**Status:**` metadata field, or None."""
+        m = re.search(r"\*\*Status:\*\*\s*(.+)", adr_text)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _plan_step(plan_text: str) -> str | None:
+        """The value of a plan's `**Step:**` Status-block field, or None."""
+        m = re.search(r"\*\*Step:\*\*\s*(.+)", plan_text)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _referenced_adrs(plan_text: str) -> set[str]:
+        """Every ADR filename a plan names, in any shape.
+
+        Deliberately the bare filename and not the `(../adr/adr_*.md)` link
+        it started as: that narrower regex described one citation style the
+        repo does not consistently use. Measured over the 12 finalized plans,
+        it saw 5 (plan, adr) pairs while three more plans cite an ADR as a
+        backticked bare filename (`adr_projection_over_index.md`) or a
+        backticked `.agents/adr/…` path — 8 pairs once widened. One of the
+        three was real drift nobody had recorded.
+
+        The filename is unambiguous enough to match on its own (`adr_*.md`,
+        underscores only, one flat directory), and it subsumes the link shape
+        rather than being OR-ed with it. The trade is that a plan merely
+        *mentioning* an ADR is read as citing it; that is the safe direction
+        here — an ADR named by a plan that shipped should have a decided
+        status either way, and a genuine exception belongs in
+        `_STALE_PROPOSED_ALLOWLIST` where it is visible.
+        """
+        return set(re.findall(r"(adr_[A-Za-z0-9_]+\.md)", plan_text))
+
+    def _plan_files(self) -> list[Path]:
+        if not self._PLANS_DIR.exists():
+            return []
+        return [
+            p
+            for p in sorted(self._PLANS_DIR.glob("plan_*.md"))
+            if not p.name.startswith("meta-plan_")
+        ]
+
+    def test_every_adr_has_an_index_row(self) -> None:
+        """Every `.agents/adr/adr_*.md` file must have a row in
+        `arch-principles.md`'s ADR Index table.
+
+        A missing row is real drift: do not add rows for unrelated ADRs to
+        make this pass, and do not narrow the assertion with a skip-list —
+        report the gap instead. `_MISSING_INDEX_ROW_ALLOWLIST` is the one
+        exception: a frozen, shrink-only record of pre-existing debt (see
+        its docstring) — a NEW file missing a row still fails here.
+        """
+        adr_files = sorted(p.name for p in self._ADR_DIR.glob("adr_*.md"))
+        if not adr_files:
+            pytest.skip("No ADR files in .agents/adr/ (fresh checkout)")
+        indexed = self._indexed_adrs(self._ARCH_PRINCIPLES.read_text())
+        missing = [
+            a
+            for a in adr_files
+            if a not in indexed and a not in self._MISSING_INDEX_ROW_ALLOWLIST
+        ]
+        assert not missing, (
+            f"ADRs with no row in arch-principles.md's ADR Index: {missing}. "
+            f"Add one row per ADR, in the table's existing format: "
+            f"`| [adr_x.md](../../.agents/adr/adr_x.md) | <one-line decision> |`."
+        )
+
+    def test_no_adr_referenced_by_a_finalized_plan_stays_proposed(self) -> None:
+        """A plan whose Status block reads `Step: finalized` has landed on
+        main — the ADR it names documents a decision that shipped, so it
+        cannot still read `Status: Proposed`.
+
+        Scans every finalized plan, not just one feature's own — a stale
+        status on an unrelated ADR is real drift to report, not something
+        to quietly fix as a side effect of this test. `_STALE_PROPOSED_ALLOWLIST`
+        is the one exception: a frozen, shrink-only record of pre-existing
+        debt (see its docstring) — a NEW (plan, adr) pair still fails here.
+
+        **This is a `/finalize`-time gate, by construction, not a branch
+        gate.** `Step: finalized` is written by `/finalize` as the last act
+        of landing a plan (see `meta-ai-config.md` "Plan Status Protocol"),
+        so an in-flight branch's own plan reads something else and its ADR is
+        never inspected here — measured on the branch that introduced this
+        test: reverting its ADR to `Status: Proposed` left the suite green.
+        That is the intended shape (an ADR is legitimately `Proposed` while
+        its plan is in flight), but it means a stale status is caught on the
+        way out, not on the way in. A per-branch check is a different test
+        with a different condition — the plan named by
+        `.claude/state/current_plan.md`, which is gitignored and per-worktree,
+        so it can only ever be advisory.
+        """
+        plans = self._plan_files()
+        if not plans:
+            pytest.skip("No plan files in .agents/plans/ (fresh checkout)")
+        stale: list[tuple[str, str]] = []
+        for plan in plans:
+            text = plan.read_text()
+            step = self._plan_step(text)
+            if not step or not step.startswith("finalized"):
+                continue
+            for adr_name in self._referenced_adrs(text):
+                adr_path = self._ADR_DIR / adr_name
+                if not adr_path.exists():
+                    continue
+                status = self._adr_status(adr_path.read_text())
+                if (
+                    status
+                    and status.startswith("Proposed")
+                    and (plan.name, adr_name) not in self._STALE_PROPOSED_ALLOWLIST
+                ):
+                    stale.append((plan.name, adr_name))
+        assert not stale, (
+            f"ADRs referenced by a finalized plan but still Status: Proposed "
+            f"(plan, adr): {stale}. A plan that shipped documents a decision "
+            f"that shipped — flip the ADR's Status (Accepted / Superseded / "
+            f"Rejected, as appropriate)."
+        )
