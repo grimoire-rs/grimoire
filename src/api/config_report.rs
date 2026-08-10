@@ -12,8 +12,10 @@
 //!   `false`.
 //! - `List`: one table per invocation (`Key | Value`); unset rows (shown
 //!   only with `--all`) render an empty `Value` cell.
-//! - `RegistryList`: one table (`Alias | Type | Source | Default`).
-//! - `RegistryShow`: one-row table (`Alias | Type | Source | Default`).
+//! - `RegistryList`: one table (`Alias | Type | Source | Default |
+//!   Filters`); `Filters` is browse-filter counts (`N include, M exclude`,
+//!   `—` when unfiltered), never the patterns.
+//! - `RegistryShow`: one-row table, same columns.
 //! - `RegistryFields`: one table (`Key | Type | Title | Description`) —
 //!   static per-registry-field metadata, no scope/file read involved.
 //!
@@ -29,8 +31,9 @@
 //!   the row shape. `constraints` is non-null only for keys whose list
 //!   items carry a shape rule beyond closed-set membership (today:
 //!   `options.tui.tree_separators`) — see [`ValueConstraints`].
-//! - `RegistryList`: `{"items": [...]}` of `{"alias","oci","index","default"}`
-//!   objects.
+//! - `RegistryList`: `{"items": [...]}` of `{"alias","oci","index",
+//!   "include","exclude","default"}` objects — the pattern lists are
+//!   always present, `[]` when unfiltered.
 //! - `RegistryShow`: single object matching struct fields.
 //! - `RegistryFields`: `{"items": [...]}` of `{"key","type","title",
 //!   "description"}` objects — `key` is the short field name (`"oci"`),
@@ -225,10 +228,24 @@ pub struct ConfigListReport {
 impl Printable for ConfigListReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
+        // Both cells are `escape_debug`d because both carry config-file text.
+        // The value is authored (a browse-filter glob, a locator), and the key
+        // interpolates the entry's alias, so `registry.<alias>.include` puts
+        // two attacker-controlled strings on one line. `char::is_control` — the
+        // screen browse patterns and aliases pass — is **false** for the bidi
+        // and zero-width format characters (U+202E, U+200B), so those reach
+        // stdout intact, and a `grimoire.toml` is found by silent walk-up from
+        // cwd: this is `git clone && grim config list`. Same call the sibling
+        // diagnostics make (`catalog_service.rs`, `registry_resolve.rs`).
         let rows: Vec<Vec<String>> = self
             .items
             .iter()
-            .map(|e| vec![e.key.clone(), e.value.as_deref().unwrap_or("").to_string()])
+            .map(|e| {
+                vec![
+                    e.key.escape_debug().to_string(),
+                    e.value.as_deref().unwrap_or("").escape_debug().to_string(),
+                ]
+            })
             .collect();
         print_table(w, &["Key", "Value"], &rows)
     }
@@ -443,11 +460,13 @@ impl fmt::Display for Origin {
 
 /// Result of `grim config registry list`.
 ///
-/// Plain format: one table — `Alias | URL | Default`.
+/// Plain format: one table — `Alias | Type | Source | Default | Filters`.
+/// `Filters` carries browse-filter counts, never the patterns.
 ///
 /// JSON format: `{"items": [...]}` of
-/// `{"alias":"…"|null,"oci":"…"|null,"index":"…"|null,"default":bool}`
-/// objects — uniform `items` envelope per `subsystem-cli-api.md`.
+/// `{"alias":"…"|null,"oci":"…"|null,"index":"…"|null,"include":[…],
+/// "exclude":[…],"default":bool}` objects — uniform `items` envelope per
+/// `subsystem-cli-api.md`.
 #[derive(Debug, Serialize)]
 pub struct RegistryListReport {
     /// All registries declared in the scope's `[[registries]]`.
@@ -463,14 +482,17 @@ impl Printable for RegistryListReport {
             .map(|r| {
                 let (ty, source) = type_and_source(r.oci.as_deref(), r.index.as_deref());
                 vec![
-                    r.alias.as_deref().unwrap_or("").to_string(),
+                    // Escaped for the same reason the locator is: the alias
+                    // clears `char::is_control`, which does not cover U+202E.
+                    r.alias.as_deref().unwrap_or("").escape_debug().to_string(),
                     ty.to_string(),
-                    source.to_string(),
+                    source,
                     r.default.to_string(),
+                    filter_cell(&r.include, &r.exclude),
                 ]
             })
             .collect();
-        print_table(w, &["Alias", "Type", "Source", "Default"], &rows)
+        print_table(w, &["Alias", "Type", "Source", "Default", "Filters"], &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -478,14 +500,34 @@ impl Printable for RegistryListReport {
     }
 }
 
+/// The `Filters` cell for a registry row: browse-filter **counts**, in the
+/// same spelling `grim context`'s plain row uses, or `—` when the entry is
+/// unfiltered. Counts, never the patterns — a glob list has no width bound
+/// and `--format json` is where the patterns are read.
+fn filter_cell(include: &[String], exclude: &[String]) -> String {
+    if include.is_empty() && exclude.is_empty() {
+        "—".to_string()
+    } else {
+        format!("{} include, {} exclude", include.len(), exclude.len())
+    }
+}
+
 /// The `Type | Source` cell pair for a registry/index entry: which kind of
-/// browse source it is and its locator. Empty pair only for an invalid
-/// entry that validation would reject.
-fn type_and_source<'a>(oci: Option<&'a str>, index: Option<&'a str>) -> (&'static str, &'a str) {
+/// browse source it is and its locator, **`escape_debug`d**. Empty pair only
+/// for an invalid entry that validation would reject.
+///
+/// The locator is the one `[[registries]]` field that is never
+/// control-screened — `validate_registries` screens the *alias* for
+/// `char::is_control` and never the `oci`/`index` value — so a TOML
+/// `` escape puts a real ESC byte in it and arbitrary ANSI on stdout
+/// from a `grimoire.toml` found by silent walk-up. Escaping here rather than
+/// at the two call sites is deliberate: `registry list` and `registry show`
+/// both route through this, so neither can be fixed and the other forgotten.
+fn type_and_source(oci: Option<&str>, index: Option<&str>) -> (&'static str, String) {
     match (oci, index) {
-        (Some(oci), _) => ("registry", oci),
-        (None, Some(index)) => ("index", index),
-        (None, None) => ("", ""),
+        (Some(oci), _) => ("registry", oci.escape_debug().to_string()),
+        (None, Some(index)) => ("index", index.escape_debug().to_string()),
+        (None, None) => ("", String::new()),
     }
 }
 
@@ -502,17 +544,27 @@ pub struct RegistryRow {
     pub oci: Option<String>,
     /// The package-index locator (`null` for registry entries).
     pub index: Option<String>,
+    /// The authored browse-`include` glob patterns; `[]` when unfiltered.
+    pub include: Vec<String>,
+    /// The authored browse-`exclude` glob patterns; `[]` when unfiltered.
+    pub exclude: Vec<String>,
     /// Whether this is the default registry.
     pub default: bool,
 }
 
 /// Result of `grim config registry show <alias>`.
 ///
-/// Plain format: one-row table — `Alias | Type | Source | Default`.
+/// Plain format: one-row table — `Alias | Type | Source | Default |
+/// Filters`. The `Filters` cell carries **counts** in `grim context`'s
+/// spelling (`N include, M exclude`, `—` when unfiltered); the patterns
+/// themselves stay in `--format json`, since a glob list has no width
+/// bound (plan C-014/C-020).
 ///
 /// JSON format: `{"alias": "…", "oci": "…"|null, "index": "…"|null,
-/// "default": bool}` — both locator keys always present, exactly one
-/// non-null (always-present-null policy, `subsystem-cli-api.md`).
+/// "include": […], "exclude": […], "default": bool}` — both locator keys
+/// always present, exactly one non-null; both pattern lists always
+/// present, `[]` when unfiltered (always-present policy,
+/// `subsystem-cli-api.md`).
 #[derive(Debug, Serialize)]
 pub struct RegistryShowReport {
     /// The registry alias.
@@ -521,6 +573,10 @@ pub struct RegistryShowReport {
     pub oci: Option<String>,
     /// The package-index locator (`null` for registry entries).
     pub index: Option<String>,
+    /// The authored browse-`include` glob patterns; `[]` when unfiltered.
+    pub include: Vec<String>,
+    /// The authored browse-`exclude` glob patterns; `[]` when unfiltered.
+    pub exclude: Vec<String>,
     /// Whether this is the default registry.
     pub default: bool,
 }
@@ -531,12 +587,13 @@ impl Printable for RegistryShowReport {
         let (ty, source) = type_and_source(self.oci.as_deref(), self.index.as_deref());
         print_table(
             w,
-            &["Alias", "Type", "Source", "Default"],
+            &["Alias", "Type", "Source", "Default", "Filters"],
             &[vec![
-                self.alias.clone(),
+                self.alias.escape_debug().to_string(),
                 ty.to_string(),
-                source.to_string(),
+                source,
                 self.default.to_string(),
+                filter_cell(&self.include, &self.exclude),
             ]],
         )
     }
@@ -548,8 +605,9 @@ impl Printable for RegistryShowReport {
 
 /// Result of `grim config registry fields`.
 ///
-/// Static metadata — the 3 addressable per-registry field names
-/// (`oci`, `index`, `default`) and their type/title/description. No
+/// Static metadata — the 5 addressable per-registry field names
+/// (`oci`, `index`, `default`, `include`, `exclude`) and their
+/// type/title/description. No
 /// scope, no file read: this describes the field *pattern*
 /// (`registry.<alias>.<field>`), not any resolved alias's values, so it
 /// works identically inside or outside a project.
@@ -560,7 +618,8 @@ impl Printable for RegistryShowReport {
 /// uniform `items` envelope per `subsystem-cli-api.md`.
 #[derive(Debug, Serialize)]
 pub struct RegistryFieldsReport {
-    /// The 3 registry fields, in `oci, index, default` order.
+    /// The 5 registry fields, in `RegistryField::ALL` order (`oci, index,
+    /// default, include, exclude` — append-only, see that constant).
     pub items: Vec<RegistryFieldEntry>,
 }
 
@@ -599,7 +658,10 @@ impl Printable for RegistryFieldsReport {
 /// All four fields are always present (no optional columns to widen).
 #[derive(Debug, Serialize)]
 pub struct RegistryFieldEntry {
-    /// The short field name: `"oci"`, `"index"`, or `"default"`.
+    /// The short field name — one of [`RegistryField::field_name`]'s
+    /// values (`"oci"`, `"index"`, `"default"`, `"include"`, `"exclude"`).
+    ///
+    /// [`RegistryField::field_name`]: crate::command::config_keys::RegistryField::field_name
     pub key: &'static str,
     /// The field's declared value type.
     #[serde(rename = "type")]
@@ -807,6 +869,119 @@ mod tests {
         );
     }
 
+    /// The bidi override `char::is_control` does **not** catch, so it passes
+    /// the browse-pattern and alias screens and reaches a terminal intact.
+    const BIDI_OVERRIDE: char = '\u{202e}';
+    /// A real ESC byte — what a TOML `` escape puts in an unscreened
+    /// `oci` locator, and the start of every ANSI sequence.
+    const ESC: char = '\u{1b}';
+
+    #[test]
+    fn config_list_plain_escapes_both_cells_ws3() {
+        // W-S3: `list` grew `registry.<alias>.include`/`.exclude` rows, and
+        // BOTH cells are config-file text — the value is authored, and the key
+        // interpolates the alias. `char::is_control` is false for U+202E, so
+        // the pattern screen passes it through; a `grimoire.toml` is found by
+        // silent walk-up, making this `git clone && grim config list`.
+        let r = ConfigListReport {
+            items: vec![ConfigEntry::new(
+                format!("registry.zz{BIDI_OVERRIDE}acme.include"),
+                Some(format!("zz{BIDI_OVERRIDE}nothing/**")),
+                ValueType::String { default: None },
+                "Include",
+                "Browse-filter include patterns.",
+                None,
+            )],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            !text.contains(BIDI_OVERRIDE),
+            "no raw bidi override may reach stdout; got: {text:?}"
+        );
+        assert_eq!(
+            text.matches("\\u{202e}").count(),
+            2,
+            "the key AND the value must both be escaped — the key carries the alias; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn registry_list_plain_escapes_the_locator_and_alias_ws3() {
+        // W-S3's other half. The locator is the one `[[registries]]` field
+        // validation never control-screens — it screens the ALIAS for
+        // `char::is_control` and never the `oci`/`index` value — so a TOML
+        // `` escape puts a real ESC here and arbitrary ANSI on stdout.
+        // The alias needs the same call for the U+202E reason above.
+        let r = RegistryListReport {
+            items: vec![RegistryRow {
+                alias: Some(format!("zz{BIDI_OVERRIDE}acme")),
+                oci: Some(format!("ghcr.io/{ESC}[2J{ESC}[Hwiped")),
+                index: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+                default: true,
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(!text.contains(ESC), "no raw ESC byte may reach stdout; got: {text:?}");
+        assert!(
+            !text.contains(BIDI_OVERRIDE),
+            "no raw bidi override may reach stdout; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn registry_show_plain_escapes_the_locator_through_the_shared_seam_ws3() {
+        // `show` and `list` share `type_and_source`, which is why the escape
+        // lives there — but "shared today" is not "shared tomorrow", and this
+        // is the surface a user reaches for one hostile alias by name.
+        let r = RegistryShowReport {
+            alias: format!("zz{BIDI_OVERRIDE}acme"),
+            oci: None,
+            index: Some(format!("https://{ESC}[2Jindex.example")),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            default: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(!text.contains(ESC), "no raw ESC byte may reach stdout; got: {text:?}");
+        assert!(
+            !text.contains(BIDI_OVERRIDE),
+            "no raw bidi override may reach stdout; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn config_list_plain_leaves_an_ordinary_row_untouched_ws3() {
+        // The boundary: `escape_debug` must not mangle what a real config
+        // holds. A wildcard-free glob, a brace alternation and a locator all
+        // render verbatim — otherwise the fix above would be a regression on
+        // every non-hostile config.
+        let r = ConfigListReport {
+            items: vec![ConfigEntry::new(
+                "registry.acme.include".to_string(),
+                Some("acme/{platform,tools}/**".to_string()),
+                ValueType::String { default: None },
+                "Include",
+                "Browse-filter include patterns.",
+                None,
+            )],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("registry.acme.include") && text.contains("acme/{platform,tools}/**"),
+            "an ordinary key and value must render byte-identically; got: {text:?}"
+        );
+    }
+
     #[test]
     fn config_list_report_json_is_items_envelope() {
         let r = ConfigListReport {
@@ -997,6 +1172,8 @@ mod tests {
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
                 default: true,
             }],
         };
@@ -1014,6 +1191,8 @@ mod tests {
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
+                include: vec!["acme/platform/**".to_string()],
+                exclude: Vec::new(),
                 default: false,
             }],
         };
@@ -1035,6 +1214,8 @@ mod tests {
             alias: "pub".to_string(),
             oci: None,
             index: Some("https://index.example".to_string()),
+            include: Vec::new(),
+            exclude: Vec::new(),
             default: false,
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -1043,6 +1224,141 @@ mod tests {
         assert_eq!(v["index"], "https://index.example");
         let oci = v.get("oci").expect("oci key must always be present");
         assert!(oci.is_null(), "oci must be explicit null for an index row");
+    }
+
+    #[test]
+    fn registry_list_report_json_keeps_empty_pattern_lists_as_arrays() {
+        // `src/api/` bans `skip_serializing_if` (subsystem-cli-api.md), and
+        // `RegistryRow` is the one shape whose serialization no other test
+        // touches: `registry_list_report_json_is_items_envelope` never reads
+        // the two keys, and the command-side test asserts on struct fields.
+        // `get` + `== []` is the assertion pair that tells an empty array
+        // apart from an absent key.
+        let r = RegistryListReport {
+            items: vec![RegistryRow {
+                alias: Some("acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
+                index: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+                default: false,
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        for side in ["include", "exclude"] {
+            let list = v["items"][0].get(side).expect("key must always be present");
+            assert_eq!(list, &serde_json::json!([]), "{side} must serialize as []");
+        }
+    }
+
+    #[test]
+    fn registry_show_report_json_carries_both_pattern_lists() {
+        // Plan C-014 / S-010: `include`/`exclude` are always present and
+        // carry the authored patterns on their own side. Swapping the two
+        // fields at the producer fails this assertion.
+        let r = RegistryShowReport {
+            alias: "acme".to_string(),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: None,
+            include: vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()],
+            exclude: vec!["acme/platform/legacy/**".to_string()],
+            default: false,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["include"], serde_json::json!(["acme/platform/**", "acme/tools/**"]));
+        assert_eq!(v["exclude"], serde_json::json!(["acme/platform/legacy/**"]));
+    }
+
+    #[test]
+    fn registry_show_report_json_keeps_empty_pattern_lists_as_arrays() {
+        // Plan C-014 / S-010: `[]`, never an absent key — `src/api/` bans
+        // `skip_serializing_if` (subsystem-cli-api.md).
+        let r = RegistryShowReport {
+            alias: "acme".to_string(),
+            oci: Some("ghcr.io/acme".to_string()),
+            index: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            default: false,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        for side in ["include", "exclude"] {
+            let list = v.get(side).expect("key must always be present");
+            assert_eq!(list, &serde_json::json!([]), "{side} must serialize as []");
+        }
+    }
+
+    #[test]
+    fn registry_list_plain_shows_filter_counts_never_the_patterns() {
+        // Owner decision: a filtered registry must be visible in the very
+        // command that lists registries — as COUNTS, in `grim context`'s
+        // spelling. The patterns themselves must never reach the table (a
+        // glob list has no width bound), and an unfiltered row reads `—`.
+        let filtered = RegistryListReport {
+            items: vec![RegistryRow {
+                alias: Some("acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
+                index: None,
+                include: vec!["acme/platform/**".to_string()],
+                exclude: vec!["acme/legacy/**".to_string()],
+                default: true,
+            }],
+        };
+        let unfiltered = RegistryListReport {
+            items: vec![RegistryRow {
+                alias: Some("acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
+                index: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+                default: true,
+            }],
+        };
+        let render = |r: &RegistryListReport| {
+            let mut buf: Vec<u8> = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let filtered_out = render(&filtered);
+        assert!(
+            filtered_out.contains("Filters") && filtered_out.contains("1 include, 1 exclude"),
+            "a filtered row must report its counts; got:\n{filtered_out}"
+        );
+        assert!(
+            !filtered_out.contains("acme/platform/**") && !filtered_out.contains("acme/legacy/**"),
+            "the patterns themselves must never reach the plain table; got:\n{filtered_out}"
+        );
+        assert!(
+            render(&unfiltered).contains('—'),
+            "an unfiltered row must render the empty-cell marker; got:\n{}",
+            render(&unfiltered)
+        );
+        // Still exactly one table in both states (subsystem-cli-api.md).
+        assert_eq!(filtered_out.lines().count(), 2);
+        assert_eq!(render(&unfiltered).lines().count(), 2);
+    }
+
+    #[test]
+    fn registry_show_plain_carries_the_same_filter_cell() {
+        // One spelling across both renderers — `show` and `list` must not
+        // disagree about how a filter looks.
+        let render = |include: Vec<String>, exclude: Vec<String>| {
+            let r = RegistryShowReport {
+                alias: "acme".to_string(),
+                oci: Some("ghcr.io/acme".to_string()),
+                index: None,
+                include,
+                exclude,
+                default: false,
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let filtered = render(vec!["a/**".to_string(), "b/**".to_string()], vec!["c/**".to_string()]);
+        assert!(filtered.contains("2 include, 1 exclude"), "got:\n{filtered}");
+        assert!(!filtered.contains("a/**"), "patterns must stay out; got:\n{filtered}");
+        assert!(render(Vec::new(), Vec::new()).contains('—'));
     }
 
     #[test]
@@ -1072,19 +1388,29 @@ mod tests {
             "registry fields JSON must be an items envelope; got: {v}"
         );
         let items = v["items"].as_array().expect("items must be an array");
+        // The whole key vector, not a count: `items` is built from
+        // `RegistryField::ALL` right above, so `items.len() == ALL.len()`
+        // is a tautology that cannot fail. This pins membership, order and
+        // count in one line, and a field added to `ALL` fails it honestly.
+        let field_keys: Vec<&str> = items.iter().filter_map(|i| i["key"].as_str()).collect();
         assert_eq!(
-            items.len(),
-            3,
-            "must list exactly the 3 registry fields; got: {items:?}"
+            field_keys,
+            ["oci", "index", "default", "include", "exclude"],
+            "must list every registry field in declared order; got: {items:?}"
         );
         assert_eq!(items[0]["key"], "oci", "first field must be 'oci'; got: {items:?}");
         assert_eq!(
             items[0]["type"], "string",
             "oci field type must be 'string'; got: {items:?}"
         );
-        assert_eq!(items[2]["key"], "default");
+        // Located by key, not by index — field order is a separate contract
+        // (pinned for `oci` above) and adding a field must not break this.
+        let default_row = items
+            .iter()
+            .find(|i| i["key"] == "default")
+            .unwrap_or_else(|| panic!("'default' field must be listed; got: {items:?}"));
         assert_eq!(
-            items[2]["type"], "boolean",
+            default_row["type"], "boolean",
             "default field type must be 'boolean'; got: {items:?}"
         );
         // Deliberately NOT a ConfigEntry shape: no value/set/default fields.
@@ -1119,6 +1445,8 @@ mod tests {
             alias: "acme".to_string(),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
             default: false,
         };
         let mut buf: Vec<u8> = Vec::new();

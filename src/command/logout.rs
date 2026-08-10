@@ -40,9 +40,13 @@ pub struct LogoutArgs {
 ///
 /// A missing registry (config error 78) or a genuine credential-store
 /// failure during erase (auth/I/O tiers). An absent credential is not an
-/// error.
+/// error, and neither is a broken global config — see
+/// [`super::GlobalConfigPolicy`].
 pub async fn run(ctx: &Context, args: &LogoutArgs) -> anyhow::Result<(LogoutReport, ExitCode)> {
-    let registry = super::resolve_login_registry(ctx, args.host.as_deref())?;
+    // Lenient: erasing a leaked credential must not be blocked by an
+    // unrelated unparseable file grim itself cannot repair. The flag rides
+    // out on the report because the degrade is invisible in the exit code.
+    let (registry, global_config_dropped) = super::resolve_login_registry_lenient(ctx, args.host.as_deref())?;
 
     // When no store location can be resolved (no $HOME, no $DOCKER_CONFIG)
     // there is nothing to log out from — a true no-op, exit 0.
@@ -51,7 +55,7 @@ pub async fn run(ctx: &Context, args: &LogoutArgs) -> anyhow::Result<(LogoutRepo
         Err(err) => tracing::debug!(%err, "logout: no credential store to act on; treating as no-op"),
     }
 
-    Ok((LogoutReport::new(registry), ExitCode::Success))
+    Ok((LogoutReport::new(registry, global_config_dropped), ExitCode::Success))
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ pub async fn describe(ctx: &Context, args: &DescribeToolArgs) -> anyhow::Result<
         args.scope.global(),
         args.scope.config.as_deref(),
         args.scope.workspace.as_deref(),
-    );
+    )?;
     let access = crate::command::access_seam(ctx)?;
     crate::fetch::describe_artifact(&scope, &access, &args.reference).await
 }

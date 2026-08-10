@@ -981,6 +981,17 @@ async fn load_into(ctx: &TuiContext, state: &mut TuiState) {
     reload_into(ctx, state, ctx.force_refresh).await;
 }
 
+/// The catalog scope every TUI browse runs under (plan C-007): each source's
+/// `include`/`exclude` narrows what the tree and the flat list show.
+///
+/// Hoisted out of [`reload_into`]'s call site so `Browse` is spelled exactly
+/// once in this module. Flipping this single token to `Complete` would make
+/// the browse filter inert on the TUI — one of the feature's three declared
+/// front-ends — while every test stayed green, because `reload_into` needs a
+/// registry, a cache and a `$GRIM_HOME` and so has no unit test to notice.
+/// `tui_browses_under_catalog_scope_browse_w9` asserts the value instead.
+const TUI_CATALOG_SCOPE: catalog_service::CatalogScope = catalog_service::CatalogScope::Browse;
+
 /// Load or rebuild the catalog into `state` via `catalog_service::load_catalog`,
 /// fanning out over all `ctx.registries` in parallel and projecting each
 /// [`crate::catalog::catalog_service::CatalogGroup`] through [`project_group_rows`].
@@ -1008,6 +1019,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
         &catalog_badges,
         ctx.offline,
         force,
+        TUI_CATALOG_SCOPE,
     )
     .await
     {
@@ -1033,43 +1045,14 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
             // extra registry I/O); each row carries `source = Some("Local")`
             // so `tree::display_split` roots it under the Local group.
             rows.extend(local_rows(&config, lock.as_ref(), &install_state));
-            // Aggregate health from group metadata.
-            let mut offline_regs: Vec<String> = Vec::new();
-            let mut truncated_regs: Vec<String> = Vec::new();
-            for g in &results.groups {
-                if g.served_offline {
-                    offline_regs.push(g.registry.clone());
-                }
-                if g.truncated {
-                    truncated_regs.push(g.registry.clone());
-                }
-            }
-            // Build URL → display-label map from the resolved registry set.
-            // When an alias is configured, the label is "alias (url)"; when
-            // no alias was declared, the URL is used directly as both key and
-            // label (fallback matches [`TuiState::registry_label`] semantics).
-            let registry_labels: BTreeMap<String, String> = ctx
-                .registries
-                .iter()
-                .map(|r| {
-                    let label = match &r.alias {
-                        Some(alias) => format!("{alias} ({url})", url = r.url),
-                        None => r.url.clone(),
-                    };
-                    (r.url.clone(), label)
-                })
-                .collect();
             apply_catalog_results(
                 state,
                 rows,
-                super::state::RegistryHealth {
-                    offline: offline_regs,
-                    truncated: truncated_regs,
-                },
+                aggregate_registry_health(&results.groups, &ctx.registries),
                 results.any_truncated(),
                 elision_registry(ctx),
                 registry_order(ctx),
-                registry_labels,
+                registry_labels(&ctx.registries),
             );
         }
         Err(e) => {
@@ -1082,6 +1065,88 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     // cannot wipe it: a catalog that loaded fine still renders every row
     // `not-installed` when the lock behind the badges was unreadable.
     note_unreadable_lock(ctx, lock.as_ref(), state);
+}
+
+/// Aggregate the per-registry health verdict a finished catalog load implies.
+///
+/// `offline` and `truncated` are read straight off each group's metadata.
+///
+/// `filtered` is this front-end's channel for the plan C-019 diagnostic — see
+/// [`c019_filter_emptied`], the single place that decides it.
+fn aggregate_registry_health(
+    groups: &[catalog_service::CatalogGroup],
+    registries: &[ResolvedRegistry],
+) -> super::state::RegistryHealth {
+    let mut health = super::state::RegistryHealth::default();
+    for g in groups {
+        if g.served_offline {
+            health.offline.push(g.registry.clone());
+        }
+        if g.truncated {
+            health.truncated.push(g.registry.clone());
+        }
+        if c019_filter_emptied(g, registries) {
+            health.filtered.push(g.registry.clone());
+        }
+    }
+    health
+}
+
+/// Plan C-019's **emptied-the-source** signal, as the TUI sees it. One
+/// function on purpose: this is the only place the TUI decides "this source is
+/// empty because of its own browse filter", so a future change to what counts
+/// as filter-emptied lands in exactly this body and nothing else.
+///
+/// Why the TUI needs its own answer at all: the CLI emits C-019 as a
+/// `tracing::warn!`, and `SwitchableWriter` redirects all tracing output to
+/// `$GRIM_HOME/tui.log` for the whole alt-screen session, precisely so
+/// warnings cannot scribble the frame. Without this the user of a mis-aimed
+/// filter gets a 0/0 root (C-017) and no reason for it, forever.
+///
+/// The three gates:
+///
+/// 1. the source authored a filter (either list — the TUI cannot see which
+///    list did the emptying, and does not guess);
+/// 2. the group came back with no rows;
+/// 3. the source HAD rows before its filter ran
+///    (`CatalogGroup::rows_before_filter`) — otherwise the group is empty for
+///    a reason no filter caused (a failed or offline-degraded load considers
+///    nothing), and `catalog_service::zero_match_warning` stays silent too.
+///
+/// `served_offline` is deliberately **not** a gate (W-2). It is the offline
+/// *flag*, not a degradation signal — `catalog_service` sets it from the
+/// caller's `offline` argument — so gating on it emptied this clause by
+/// construction in every offline session and left `offline: <source>` naming
+/// a source whose cache was served fine and whose rows a pattern removed. A
+/// source can be both; `render::frame` joins the clauses with ` · `.
+///
+/// **This gate is deliberately wider than the CLI's.** `zero_match_warning`
+/// has exactly one shape — a non-empty `include` that admitted nothing
+/// (`admitted 0 of N`) — so an **exclude-only** filter that empties a source
+/// is silent there and `filtered: <source>` here. The divergence is the point:
+/// the CLI pays a one-shot line on stderr next to output the user can re-read,
+/// while the TUI is looking at a 0/0 root (C-017) whose cause is otherwise
+/// unrecoverable, and gate 1 does not guess which list did the emptying.
+///
+/// The reverse direction cannot arise. `admitted N of N` — a non-empty
+/// `exclude` that removed *nothing* — was a second `zero_match_warning` shape
+/// until it was dropped for crying wolf (it fires on correct configs whose
+/// exclude simply matches nothing yet, `exclude = ["**/internal/**"]` against a
+/// registry with no internal repos). It never had a channel here, and now has
+/// none to want: a source it would fire on has rows, so gate 2 already
+/// declines it. Should it ever return upstream, note that `RegistryHealth.
+/// filtered` renders as the bare word `filtered: <source>`, which beside a
+/// *full* tree reads as "rows were removed" — the opposite of what happened —
+/// so it would need its own clause and wording in `render::frame`, never this
+/// one.
+fn c019_filter_emptied(group: &catalog_service::CatalogGroup, registries: &[ResolvedRegistry]) -> bool {
+    if !group.rows.is_empty() || group.rows_before_filter == 0 {
+        return false;
+    }
+    registries
+        .iter()
+        .find(|r| r.url == group.registry)
+        .is_some_and(|r| !r.filter.include_patterns().is_empty() || !r.filter.exclude_patterns().is_empty())
 }
 
 /// Apply the success-arm state mutations of a catalog load to `state`.
@@ -2890,6 +2955,28 @@ fn registry_order(ctx: &TuiContext) -> Vec<String> {
     ctx.registries.iter().map(|r| r.url.clone()).collect()
 }
 
+/// URL → display-label map for the resolved registry set. When an alias is
+/// configured the label is `"{alias} ({url})"`; with no alias the url is both
+/// key and label (matching [`TuiState::registry_label`]'s fallback).
+///
+/// Plan S-018: a configured `include`/`exclude` **never** reaches this — the
+/// browse filter narrows rows, it does not rename or re-prefix a tree root
+/// (C-016 withdrawn, ADR D7 withdrawn). Extracted from `reload_into` so that
+/// invariant is directly assertable, matching the sibling helpers
+/// [`registry_order`] and [`elision_registry`].
+fn registry_labels(registries: &[ResolvedRegistry]) -> BTreeMap<String, String> {
+    registries
+        .iter()
+        .map(|r| {
+            let label = match &r.alias {
+                Some(alias) => format!("{alias} ({url})", url = r.url),
+                None => r.url.clone(),
+            };
+            (r.url.clone(), label)
+        })
+        .collect()
+}
+
 /// The registry whose root prefix is elided from tree labels — `Some` only
 /// when exactly one browse source is in scope (D-ELIDE); `None` otherwise so
 /// each root names its own registry and namespaced roots stay
@@ -3279,12 +3366,14 @@ mod tests {
                 alias: None,
                 is_default: false,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             },
             ResolvedRegistry {
                 url: "ghcr.io/acme".to_string(),
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             },
         ];
         let parent = member_parent_registry_from_registries(&registries, "ghcr.io/acme/bundles/starter-pack");
@@ -3314,6 +3403,7 @@ mod tests {
             truncated: false,
             built_at: String::new(),
             served_offline: false,
+            rows_before_filter: 1,
             rows: vec![CatalogRow {
                 kind: Some("skill".to_string()),
                 registry: "ghcr.io/acme".to_string(),
@@ -3480,6 +3570,7 @@ mod tests {
         let health = crate::tui::state::RegistryHealth {
             offline: vec!["ghcr.io/offline".to_string()],
             truncated: vec![],
+            filtered: vec![],
         };
         apply_catalog_results(
             &mut s,
@@ -3531,6 +3622,7 @@ mod tests {
             crate::tui::state::RegistryHealth {
                 offline: vec![],
                 truncated: vec![],
+                filtered: vec![],
             },
             false,
             None,
@@ -3992,6 +4084,311 @@ mod tests {
     }
 
     #[test]
+    fn registry_labels_are_unchanged_by_a_configured_filter_s018() {
+        // Plan S-018: a configured `include`/`exclude` narrows rows and
+        // nothing else. The tree-root label stays `"{alias} ({url})"` (or the
+        // bare url with no alias) — C-016 / ADR D7 (a derived root label) are
+        // withdrawn, so a filter must never reach this map.
+        let filtered = |url: &str, alias: Option<&str>| ResolvedRegistry {
+            url: url.to_string(),
+            alias: alias.map(str::to_string),
+            is_default: false,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::new(
+                &["platform/**".to_string()],
+                &["platform/legacy/**".to_string()],
+            )
+            .expect("fixture patterns compile"),
+        };
+        let labels = registry_labels(&[filtered("ghcr.io/acme", Some("acme")), filtered("registry.corp", None)]);
+        assert_eq!(
+            labels.get("ghcr.io/acme").map(String::as_str),
+            Some("acme (ghcr.io/acme)"),
+            "an aliased root keeps the alias + url label, with no filter prefix"
+        );
+        assert_eq!(
+            labels.get("registry.corp").map(String::as_str),
+            Some("registry.corp"),
+            "an unaliased root stays the bare url"
+        );
+        // Byte-identical to the same registries with no filter at all.
+        let unfiltered = |url: &str, alias: Option<&str>| ResolvedRegistry {
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+            ..filtered(url, alias)
+        };
+        assert_eq!(
+            labels,
+            registry_labels(&[
+                unfiltered("ghcr.io/acme", Some("acme")),
+                unfiltered("registry.corp", None)
+            ])
+        );
+    }
+
+    /// W9: the TUI's browse scope is spelled exactly once, in
+    /// [`TUI_CATALOG_SCOPE`], and `reload_into` reads that name. Flipping the
+    /// single token there to `Complete` makes every source's `include`/
+    /// `exclude` inert in the TUI — the feature dies on one of its three
+    /// declared front-ends — and nothing else in the suite notices, because
+    /// `reload_into` needs a registry, a cache and a `$GRIM_HOME`.
+    #[test]
+    fn tui_browses_under_catalog_scope_browse_w9() {
+        assert_eq!(
+            TUI_CATALOG_SCOPE,
+            catalog_service::CatalogScope::Browse,
+            "the TUI is a browse front-end (plan C-007): under `Complete` the browse filter is inert here"
+        );
+    }
+
+    /// H-4: the test above pins the constant's *value*; nothing pinned that
+    /// `reload_into` still passes it. Measured: mutating that one call site to
+    /// `Complete` while leaving the constant alone kept all 2496 unit tests
+    /// green, and pytest cannot reach it either — `src/command/tui.rs` returns
+    /// `ExitCode::Success` the moment stdout is not a TTY. So one token made
+    /// every `include`/`exclude` inert on one of the feature's three declared
+    /// front-ends with the whole gate green.
+    ///
+    /// This asserts the invariant [`TUI_CATALOG_SCOPE`]'s own doc claims: a
+    /// catalog scope is spelled exactly once in this module's production half.
+    /// The alternative — threading a `scope` parameter through `reload_into` —
+    /// was rejected: it relocates the untested call site into `load_into`,
+    /// which needs a registry, a cache and a `$GRIM_HOME` just the same, so it
+    /// buys a signature rather than a seam a unit test can reach.
+    #[test]
+    fn tui_spells_a_catalog_scope_exactly_once_outside_the_tests_h4() {
+        let source = include_str!("app.rs");
+        // Everything from the first `#[cfg(test)]` on is test code, including
+        // this file's two test modules.
+        let production = source.split_once("#[cfg(test)]").map_or(source, |(before, _)| before);
+        assert_eq!(
+            production.matches("CatalogScope::").count(),
+            1,
+            "a catalog scope must be spelled exactly once in production code here — in \
+             `TUI_CATALOG_SCOPE`. A second spelling means some call site picked its own \
+             scope, which is how the browse filter goes inert on the TUI unnoticed"
+        );
+    }
+
+    /// A browse source at `url` carrying the given authored filter patterns.
+    fn source(url: &str, include: &[&str], exclude: &[&str]) -> ResolvedRegistry {
+        let own = |p: &[&str]| p.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        ResolvedRegistry {
+            url: url.to_string(),
+            alias: None,
+            is_default: false,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::new(&own(include), &own(exclude))
+                .expect("fixture patterns compile"),
+        }
+    }
+
+    /// A freshly-loaded, untruncated group for `url` holding `rows` rows.
+    /// Offline / truncated variants are `..group(url, n)` at the call site.
+    fn group(url: &str, rows: usize) -> catalog_service::CatalogGroup {
+        use crate::catalog::catalog_service::CatalogRow;
+        use crate::install::status_badge::StatusBadge;
+        catalog_service::CatalogGroup {
+            registry: url.to_string(),
+            alias: None,
+            truncated: false,
+            built_at: String::new(),
+            served_offline: false,
+            // Unfiltered fixture: every considered row survived, so
+            // `c019_filter_emptied`'s fourth gate never suppresses this
+            // group. A filtered-and-emptied fixture sets this field above
+            // `rows.len()` at the call site — see the `..group(url, 0)`
+            // overrides below.
+            rows_before_filter: rows,
+            rows: (0..rows)
+                .map(|i| CatalogRow {
+                    kind: Some("skill".to_string()),
+                    registry: url.to_string(),
+                    repository: format!("platform/skill-{i}"),
+                    summary: None,
+                    description: None,
+                    keywords: Vec::new(),
+                    repository_url: None,
+                    revision: None,
+                    created: None,
+                    deprecated: None,
+                    replaced_by: None,
+                    oci: crate::catalog::OciMeta::default(),
+                    latest_tag: None,
+                    version: None,
+                    badge: StatusBadge::NotInstalled,
+                })
+                .collect(),
+        }
+    }
+
+    /// H5: all three health clauses are aggregated from one load — the
+    /// offline / truncated pair off the group metadata (characterization: this
+    /// loop moved out of `reload_into`, which has no test), and `filtered` for
+    /// an online source a configured browse filter left showing nothing.
+    #[test]
+    fn aggregate_registry_health_names_offline_truncated_and_filtered_sources_h5() {
+        let groups = vec![
+            catalog_service::CatalogGroup {
+                served_offline: true,
+                ..group("ghcr.io/down", 0)
+            },
+            catalog_service::CatalogGroup {
+                truncated: true,
+                ..group("ghcr.io/big", 2)
+            },
+            // Filtered-and-emptied fixture: 3 rows existed before the filter
+            // ran (gate 4), none survived it (gate 2) — the genuine C-019 case.
+            catalog_service::CatalogGroup {
+                rows_before_filter: 3,
+                ..group("ghcr.io/acme", 0)
+            },
+        ];
+        let registries = vec![
+            source("ghcr.io/down", &[], &[]),
+            source("ghcr.io/big", &[], &[]),
+            source("ghcr.io/acme", &["platform/**"], &[]),
+        ];
+
+        let health = aggregate_registry_health(&groups, &registries);
+
+        assert_eq!(
+            health.offline,
+            vec!["ghcr.io/down"],
+            "a degraded group is named offline"
+        );
+        assert_eq!(
+            health.truncated,
+            vec!["ghcr.io/big"],
+            "a capped group is named truncated"
+        );
+        assert_eq!(
+            health.filtered,
+            vec!["ghcr.io/acme"],
+            "an online source a filter left empty must be named, or its 0/0 root has no reason on screen"
+        );
+    }
+
+    /// H-A: an **exclude-only** filter that emptied its source is named here
+    /// even though `catalog_service::zero_match_warning` stays silent on it
+    /// (its one shape requires a non-empty `include`). That widening is the
+    /// documented divergence in `c019_filter_emptied`'s own doc comment, and
+    /// nothing asserted it — every other fixture in this module authors an
+    /// `include`, so narrowing gate 1 back to `include` alone left the whole
+    /// module green while a TUI user with a mis-aimed `exclude` lost the only
+    /// explanation their 0/0 root has.
+    #[test]
+    fn aggregate_registry_health_names_a_source_an_exclude_only_filter_emptied_ha() {
+        let health = aggregate_registry_health(
+            &[catalog_service::CatalogGroup {
+                rows_before_filter: 3,
+                ..group("ghcr.io/acme", 0)
+            }],
+            &[source("ghcr.io/acme", &[], &["**"])],
+        );
+        assert_eq!(
+            health.filtered,
+            vec!["ghcr.io/acme"],
+            "gate 1 reads EITHER list — the TUI cannot see which one emptied the source, and \
+             the CLI's one-shot stderr line is not available behind the alt screen"
+        );
+    }
+
+    /// H5's first three negatives — each one is a way the clause could blame
+    /// a filter for an emptiness it did not cause. The fourth negative the
+    /// `rows_before_filter` field bought — a source that was never anything
+    /// but empty — lives beside this one, in
+    /// `aggregate_registry_health_never_blames_a_filter_over_a_source_that_was_always_empty_h5`.
+    #[test]
+    fn aggregate_registry_health_never_blames_a_filter_it_cannot_prove_h5() {
+        let filtered = |url: &str| source(url, &["platform/**"], &[]);
+
+        let empty_unfiltered =
+            aggregate_registry_health(&[group("ghcr.io/acme", 0)], &[source("ghcr.io/acme", &[], &[])]);
+        assert!(
+            empty_unfiltered.filtered.is_empty(),
+            "a source with no authored patterns is never named: nothing filtered it"
+        );
+
+        let admitted = aggregate_registry_health(&[group("ghcr.io/acme", 1)], &[filtered("ghcr.io/acme")]);
+        assert!(
+            admitted.filtered.is_empty(),
+            "any surviving row proves the patterns point somewhere real (C-019's third gate)"
+        );
+
+        // The failed-load shape: `catalog_service` degrades a source whose
+        // catalog would not build to `served_offline: true` with
+        // `rows_before_filter: 0`, so gate 3 covers it — not a `served_offline`
+        // gate, which W-2 removed for suppressing the genuine offline case
+        // (`…_names_a_filter_emptied_source_served_from_cache_w2`).
+        let failed = aggregate_registry_health(
+            &[catalog_service::CatalogGroup {
+                served_offline: true,
+                ..group("ghcr.io/acme", 0)
+            }],
+            &[filtered("ghcr.io/acme")],
+        );
+        assert!(
+            failed.filtered.is_empty(),
+            "a source whose load failed considered nothing, so no filter emptied it"
+        );
+        assert_eq!(
+            failed.offline,
+            vec!["ghcr.io/acme"],
+            "and the offline clause is what names it"
+        );
+    }
+
+    /// W-2: `CatalogGroup::served_offline` is the offline **flag**, not a
+    /// degradation signal (`catalog_service`: `served_offline: offline`), so
+    /// gating on it left `health.filtered` empty by construction in every
+    /// offline session while `health.offline` named every source. Same config
+    /// and same cache, `grim search --offline` reported
+    /// `filter admitted 0 of N` and the TUI reported `offline: acme` — an
+    /// answer that is not merely missing but wrong, pointing at the network
+    /// when the cache was served fine and a pattern is the cause. Both
+    /// clauses are true here, and `render::frame` joins them with ` · `.
+    #[test]
+    fn aggregate_registry_health_names_a_filter_emptied_source_served_from_cache_w2() {
+        let health = aggregate_registry_health(
+            &[catalog_service::CatalogGroup {
+                served_offline: true,
+                rows_before_filter: 3,
+                ..group("ghcr.io/acme", 0)
+            }],
+            &[source("ghcr.io/acme", &["platform/**"], &[])],
+        );
+        assert_eq!(
+            health.filtered,
+            vec!["ghcr.io/acme"],
+            "a cache served offline that the filter then emptied is a filter problem, not a network one"
+        );
+        assert_eq!(
+            health.offline,
+            vec!["ghcr.io/acme"],
+            "and the offline clause still names it — both are true of this source"
+        );
+    }
+
+    /// H5's fourth negative, bought by `CatalogGroup::rows_before_filter`
+    /// (WP-R3): a source that never had any rows to begin with — online,
+    /// authored a filter, but the filter admitted nothing because there was
+    /// nothing to admit — must not be named. This is exactly the over-fire
+    /// WP-R5 documented as the approximation's one known gap, and the field
+    /// closes it: gate 4 of `c019_filter_emptied` reads `rows_before_filter`
+    /// straight off the group instead of guessing from `rows` alone.
+    #[test]
+    fn aggregate_registry_health_never_blames_a_filter_over_a_source_that_was_always_empty_h5() {
+        let health = aggregate_registry_health(
+            &[group("ghcr.io/acme", 0)],
+            &[source("ghcr.io/acme", &["platform/**"], &[])],
+        );
+        assert!(
+            health.filtered.is_empty(),
+            "a source with zero rows before its filter ran was never emptied BY the filter — C-019 stays silent too"
+        );
+    }
+
+    #[test]
     fn elision_registry_returns_some_for_single_registry() {
         // D-ELIDE: exactly one registry → elide its prefix from tree labels.
         let ctx = ctx_with_registries(
@@ -4000,6 +4397,7 @@ mod tests {
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             }],
             "ghcr.io/acme",
         );
@@ -4016,12 +4414,14 @@ mod tests {
                     alias: None,
                     is_default: true,
                     kind: crate::config::registry_resolve::SourceKind::Registry,
+                    filter: crate::config::registry_filter::RegistryFilter::default(),
                 },
                 ResolvedRegistry {
                     url: "ghcr.io/other".to_string(),
                     alias: None,
                     is_default: false,
                     kind: crate::config::registry_resolve::SourceKind::Registry,
+                    filter: crate::config::registry_filter::RegistryFilter::default(),
                 },
             ],
             "ghcr.io/acme",
@@ -4040,12 +4440,14 @@ mod tests {
                     alias: None,
                     is_default: true,
                     kind: crate::config::registry_resolve::SourceKind::Registry,
+                    filter: crate::config::registry_filter::RegistryFilter::default(),
                 },
                 ResolvedRegistry {
                     url: "registry.corp.example/team".to_string(),
                     alias: Some("internal".to_string()),
                     is_default: false,
                     kind: crate::config::registry_resolve::SourceKind::Registry,
+                    filter: crate::config::registry_filter::RegistryFilter::default(),
                 },
             ],
             "ghcr.io/acme",
@@ -4064,6 +4466,7 @@ mod tests {
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             }],
             "ghcr.io/acme",
         );
@@ -4221,6 +4624,7 @@ mod tests {
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             }],
             primary_registry: "localhost:5050".to_string(),
             access,
@@ -5351,6 +5755,7 @@ mod tests {
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             }],
             primary_registry: "localhost:5050".to_string(),
             access: Arc::new(MemoryRegistry::new()),
@@ -5873,6 +6278,7 @@ mod p2_app_member_node_tests {
                 alias: None,
                 is_default: true,
                 kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
             }],
             primary_registry: "localhost:5050".to_string(),
             access,

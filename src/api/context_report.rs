@@ -16,9 +16,14 @@
 //! or `null` (when online); `clients` is the effective client-target
 //! name list (names only — vendor on-disk layout is unstable, and
 //! `grim status --format json` `outputs` is the path channel);
-//! `registries` is `[{alias, url, kind, default, authenticated}]`
-//! (`authenticated`: a credential for the registry's host is present in the
-//! docker-compatible store).
+//! `registries` is `[{alias, url, kind, default, authenticated, include,
+//! exclude}]` (`authenticated`: a credential for the registry's host is
+//! present in the docker-compatible store; `include`/`exclude`: the
+//! authored browse-filter globs for that source, `[]` when unfiltered —
+//! and always `[]` under `--registry`, whose forced browse set carries no
+//! filter). The plain table reports the filters as `, N include, M
+//! exclude` counts appended to the registry row, omitted entirely when
+//! both lists are empty.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -63,6 +68,14 @@ pub struct ContextRegistry {
     /// with no per-host entry does not count). See
     /// [`crate::auth::store::DockerCredentialStore::has_credential`].
     pub authenticated: bool,
+    /// The authored browse-`include` glob patterns for this source, in
+    /// declaration order; `[]` when the source is unfiltered — including
+    /// under `--registry`, whose forced browse set carries no filter at
+    /// all (plan C-009/C-020).
+    pub include: Vec<String>,
+    /// The authored browse-`exclude` glob patterns for this source, in
+    /// declaration order; `[]` when the source is unfiltered.
+    pub exclude: Vec<String>,
 }
 
 /// Where the effective offline mode came from.
@@ -168,12 +181,41 @@ impl Printable for ContextReport {
             let alias = r.alias.as_deref().unwrap_or("-");
             let default = if r.default { ", default" } else { "" };
             let auth = if r.authenticated { ", authenticated" } else { "" };
+            // Browse-filter COUNTS, not the patterns (plan C-020): a glob
+            // list has no width bound and this cell is already the widest in
+            // the table, so the patterns stay in `--format json` (and in
+            // `grim config registry show --format json`). Both clauses are
+            // omitted when both lists are empty, keeping an unfiltered row
+            // byte-identical to what shipped before filters existed.
+            let filters = if r.include.is_empty() && r.exclude.is_empty() {
+                String::new()
+            } else {
+                format!(", {} include, {} exclude", r.include.len(), r.exclude.len())
+            };
+            // `escape_debug` on both authored strings. The locator is the one
+            // `[[registries]]` field `validate_registries` never screens — it
+            // checks the *alias* for `char::is_control` and never the
+            // `oci`/`index` value — so a TOML `` escape puts a real ESC
+            // byte here and arbitrary ANSI on stdout. The alias is screened,
+            // but `char::is_control` is false for U+202E/U+200B, so it needs
+            // the same call. `grimoire.toml` is found by silent walk-up from
+            // cwd: this is `git clone && grim context`.
             rows.push(vec![
                 "registry".into(),
-                format!("{alias} {} ({}{default}{auth})", r.url, r.kind),
+                format!(
+                    "{} {} ({}{default}{auth}{filters})",
+                    alias.escape_debug(),
+                    r.url.escape_debug(),
+                    r.kind
+                ),
             ]);
         }
-        rows.push(vec!["default_registry".into(), self.default_registry.clone()]);
+        // Same locator, same channel — it is `oci`/`index` read back out of
+        // the very same config, or `$GRIM_DEFAULT_REGISTRY`.
+        rows.push(vec![
+            "default_registry".into(),
+            self.default_registry.escape_debug().to_string(),
+        ]);
         print_table(w, &["Key", "Value"], &rows)
     }
 
@@ -207,6 +249,8 @@ mod tests {
                 kind: ContextRegistryKind::Registry,
                 default: true,
                 authenticated: true,
+                include: vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()],
+                exclude: vec!["acme/platform/legacy/**".to_string()],
             }],
             default_registry: "ghcr.io/acme".to_string(),
         }
@@ -225,6 +269,149 @@ mod tests {
         assert!(out.contains(", authenticated"));
         assert!(out.contains("(exists)"));
         assert!(out.contains("(absent)"));
+    }
+
+    #[test]
+    fn plain_escapes_the_locator_and_alias_ws3() {
+        // W-S3: the `oci`/`index` locator is the one `[[registries]]` field
+        // validation never control-screens — `validate_registries` screens the
+        // ALIAS for `char::is_control` and never the value — so a TOML
+        // `` escape puts a real ESC byte in it and arbitrary ANSI on
+        // stdout from `git clone && grim context`. The alias needs the same
+        // call for a different reason: `char::is_control` is FALSE for the
+        // bidi and zero-width format characters, so U+202E clears its screen.
+        //
+        // The locator reaches TWO rows here — the registry row and
+        // `default_registry` — and both are the same authored string.
+        const ESC: char = '\u{1b}';
+        const BIDI_OVERRIDE: char = '\u{202e}';
+        let hostile = format!("ghcr.io/{ESC}[2J{ESC}[Hwiped");
+        let mut r = report();
+        r.registries[0].alias = Some(format!("zz{BIDI_OVERRIDE}acme"));
+        r.registries[0].url = hostile.clone();
+        r.default_registry = hostile;
+
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains(ESC), "no raw ESC byte may reach stdout; got: {out:?}");
+        assert!(
+            !out.contains(BIDI_OVERRIDE),
+            "no raw bidi override may reach stdout; got: {out:?}"
+        );
+        assert_eq!(
+            out.matches("\\u{1b}").count(),
+            4,
+            "both ESCs must be escaped on BOTH rows — the registry row and default_registry \
+             carry the same authored locator; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn plain_leaves_an_ordinary_registry_row_untouched_ws3() {
+        // The boundary of the escape above: a real locator and alias must
+        // render byte-identically, or the fix is a regression on every
+        // non-hostile config. `plain_is_single_key_value_table` asserts the
+        // same for the fixture; this names the reason.
+        let mut buf = Vec::new();
+        report().print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("acme ghcr.io/acme (registry, default, authenticated"),
+            "an ordinary registry row must be unchanged by escaping; got: {out:?}"
+        );
+    }
+
+    /// The registry cell of the plain table, for the single fixture entry.
+    fn registry_cell(r: &ContextReport) -> String {
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        String::from_utf8(buf)
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("registry"))
+            .expect("a registry row must render")
+            .to_string()
+    }
+
+    #[test]
+    fn plain_registry_row_appends_filter_counts_not_patterns() {
+        // Plan C-020 / S-019: the row carries `, N include, M exclude`
+        // inside the existing parenthesis group. Counts, not patterns — a
+        // glob list has no width bound and this cell is already the widest
+        // in the table; `--format json` is where the patterns are read.
+        let row = registry_cell(&report());
+        assert!(
+            row.contains("(registry, default, authenticated, 2 include, 1 exclude)"),
+            "the counts must append inside the existing parenthesis group; got: {row:?}"
+        );
+        assert!(
+            !row.contains("acme/platform/**"),
+            "the patterns themselves must never reach the plain table; got: {row:?}"
+        );
+    }
+
+    #[test]
+    fn plain_unfiltered_registry_row_is_byte_identical_to_pre_filter_output() {
+        // Plan C-020: both clauses are omitted entirely when both lists are
+        // empty, so an unfiltered registry's row is exactly what it was
+        // before browse filters existed.
+        let mut r = report();
+        r.registries[0].include.clear();
+        r.registries[0].exclude.clear();
+        let row = registry_cell(&r);
+        assert!(
+            row.contains("acme ghcr.io/acme (registry, default, authenticated)"),
+            "an unfiltered row must not grow a clause; got: {row:?}"
+        );
+        assert!(
+            !row.contains("include") && !row.contains("exclude"),
+            "an unfiltered row must name neither list; got: {row:?}"
+        );
+    }
+
+    #[test]
+    fn plain_one_sided_filter_still_reports_both_counts() {
+        // The pair is omitted only when BOTH lists are empty (plan C-020);
+        // otherwise both counts render, so a zero is legible as "nothing
+        // excluded" rather than as a missing feature.
+        let mut r = report();
+        r.registries[0].exclude.clear();
+        let row = registry_cell(&r);
+        assert!(
+            row.contains("(registry, default, authenticated, 2 include, 0 exclude)"),
+            "a one-sided filter must still report both counts; got: {row:?}"
+        );
+    }
+
+    #[test]
+    fn json_registry_carries_the_authored_patterns_per_side() {
+        // Plan C-020 / S-019: the authored patterns, in declaration order,
+        // on their own side. A swap of the two populated fields fails here.
+        let v = serde_json::to_value(report()).unwrap();
+        assert_eq!(
+            v["registries"][0]["include"],
+            serde_json::json!(["acme/platform/**", "acme/tools/**"])
+        );
+        assert_eq!(
+            v["registries"][0]["exclude"],
+            serde_json::json!(["acme/platform/legacy/**"])
+        );
+    }
+
+    #[test]
+    fn json_unfiltered_registry_serializes_empty_arrays_never_absent_keys() {
+        // `src/api/` bans `skip_serializing_if` (subsystem-cli-api.md): an
+        // unfiltered entry is `[]`, never a missing key — a consumer must
+        // be able to tell "no filter" from "older grim".
+        let mut r = report();
+        r.registries[0].include.clear();
+        r.registries[0].exclude.clear();
+        let v = serde_json::to_value(&r).unwrap();
+        for side in ["include", "exclude"] {
+            let list = v["registries"][0].get(side).expect("key must always be present");
+            assert_eq!(list, &serde_json::json!([]), "{side} must serialize as []");
+        }
     }
 
     #[test]

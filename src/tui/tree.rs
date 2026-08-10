@@ -1702,6 +1702,172 @@ mod tests {
         );
     }
 
+    // ── C-005: the browse candidate vs. the displayed path ───────────────────
+
+    // Plan C-005 / ADR D3 (amended 2026-08-09). The two derivations agree
+    // **only when no configured source url is a prefix of another**, and this
+    // is the scoped half of that claim: for a non-overlapping browse set, the
+    // string a filter pattern is matched against is byte-identical to the path
+    // the TUI renders beneath that source's root — so a pattern reads exactly
+    // like what the user sees. The sibling test below pins the divergence.
+    #[test]
+    fn display_split_equals_browse_candidate_for_non_overlapping_sources_c005() {
+        use crate::config::declaration::RegistryConfig;
+        use crate::config::registry_filter::browse_candidate;
+        use crate::config::resolve_registries;
+
+        // The trailing-slash source's url comes out of `resolve_registries`
+        // rather than a literal, because that is the whole claim (W-10):
+        // `oci = "ghcr.io/trailing/"` passes validation, and only because the
+        // resolver normalizes it once does what the TUI is handed match what
+        // the filter strips. `browse_candidate` re-trims locally, so a literal
+        // here would test a string production can no longer produce.
+        let trailing = resolve_registries(
+            &[],
+            &[RegistryConfig {
+                oci: Some("ghcr.io/trailing/".to_string()),
+                ..Default::default()
+            }],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        )
+        .swap_remove(0)
+        .url;
+        // No url here is a prefix of another: two distinct hosts, one
+        // namespaced source, an index locator (never an OCI prefix), and the
+        // trailing-slash entry.
+        let configured = [
+            "ghcr.io/acme",
+            "registry.corp/team",
+            "https://index.example",
+            trailing.as_str(),
+        ];
+        let cases = [
+            // (declaring source url, row)
+            (
+                "ghcr.io/acme",
+                row2("ghcr.io", "acme/platform/foo", "skill", ArtifactState::Installed),
+            ),
+            (
+                "registry.corp/team",
+                row2("registry.corp", "team/tools/bar", "rule", ArtifactState::NotInstalled),
+            ),
+            // An index-sourced row: `display_split` roots it at its locator
+            // with the full OCI ref as the path, and `browse_candidate`'s
+            // `strip_prefix` falls through to the same full ref.
+            (
+                "https://index.example",
+                index_row("https://index.example", "ghcr.io", "acme/foo", "skill"),
+            ),
+            (
+                trailing.as_str(),
+                row2("ghcr.io", "trailing/platform/foo", "skill", ArtifactState::Installed),
+            ),
+        ];
+        for (source_url, row) in cases {
+            let (_root, displayed) = display_split(&row, &configured);
+            assert_eq!(
+                displayed,
+                browse_candidate(source_url, &row.registry, &row.repository),
+                "for non-overlapping sources the displayed path and the filter \
+                 candidate must not drift (source {source_url})"
+            );
+        }
+    }
+
+    // The other half of C-005, deliberate and pinned so it cannot become a
+    // latent surprise: `display_split` → `attribute_registry` strips the
+    // LONGEST configured prefix across the whole browse set, while
+    // `browse_candidate` strips the DECLARING entry's own url. With both
+    // `ghcr.io` and `ghcr.io/acme` configured — the case
+    // `overlapping_same_host_registries_attribute_to_most_specific` above
+    // already renders — the row displays under `ghcr.io/acme` as `tools/foo`
+    // while the `ghcr.io` entry matches it as `acme/tools/foo`. A pattern on
+    // the `ghcr.io` entry must therefore be written `acme/tools/**`.
+    //
+    // The rejected alternative (deriving the candidate from the whole
+    // configured set) was refused for non-locality: adding an unrelated source
+    // would silently re-point every existing filter.
+    #[test]
+    fn display_split_diverges_from_browse_candidate_under_overlapping_sources_c005() {
+        use crate::config::registry_filter::browse_candidate;
+
+        let configured = ["ghcr.io", "ghcr.io/acme"];
+        let row = row2("ghcr.io", "acme/tools/foo", "skill", ArtifactState::Installed);
+
+        let (root, displayed) = display_split(&row, &configured);
+        assert_eq!(
+            root, "ghcr.io/acme",
+            "display attributes to the longest configured prefix"
+        );
+        assert_eq!(displayed, "tools/foo");
+
+        let broad = browse_candidate("ghcr.io", &row.registry, &row.repository);
+        assert_eq!(broad, "acme/tools/foo", "the broad entry strips only its own url");
+        assert_ne!(
+            broad, displayed,
+            "the divergence under overlapping sources is deliberate (C-005); if these \
+             ever agree, the candidate rule was silently re-pointed at the whole set"
+        );
+
+        // The deeper entry, which owns the display root, does agree — the
+        // divergence is scoped to the entry whose url is the shorter prefix.
+        assert_eq!(
+            browse_candidate("ghcr.io/acme", &row.registry, &row.repository),
+            displayed,
+            "the declaring entry that also wins the display root stays in step"
+        );
+    }
+
+    // ── C-017 / S-004: a source whose filter admits nothing keeps its root ───
+
+    // Plan C-017: the D-EMPTY seeding above already gives every resolved
+    // registry a root; the deliverable is a test that a registry whose browse
+    // filter admits zero rows renders a 0/0 root rather than disappearing.
+    // `load_catalog` keeps the (empty) group — `source_matching_nothing_keeps_
+    // its_group_s004` in `catalog_service` — and the tree turns that into this.
+    #[test]
+    fn registry_whose_filter_admits_no_row_still_renders_a_zero_root_c017() {
+        let rows = vec![row2("ghcr.io", "acme/platform/foo", "skill", ArtifactState::Installed)];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            // Both sources resolved; the second one's filter admitted nothing,
+            // so `load_catalog` returned it as an empty group.
+            registry_order: vec!["ghcr.io/acme".to_string(), "registry.corp/team".to_string()],
+        };
+        let tree = build(&rows, &[0], &opts);
+        let flat = flatten(&tree, &BTreeSet::new(), &BTreeSet::new(), &rows);
+        let root = flat
+            .iter()
+            .find(|d| matches!(d, DisplayRow::Group { key, .. } if key == "registry.corp/team"))
+            .unwrap_or_else(|| panic!("a fully-filtered registry must still render its root: {flat:?}"));
+        match root {
+            DisplayRow::Group {
+                depth,
+                rollup,
+                rows: leaves,
+                ..
+            } => {
+                assert_eq!(*depth, 0, "the seeded root stays a top-level registry root");
+                assert_eq!(rollup.total, 0, "rollup reads 0/0, not a missing node");
+                assert_eq!(rollup.installed, 0);
+                assert!(leaves.is_empty(), "no leaves hang under a fully-filtered root");
+            }
+            other => panic!("expected a group, got {other:?}"),
+        }
+        // The unfiltered sibling is unaffected.
+        assert!(
+            flat.iter()
+                .any(|d| matches!(d, DisplayRow::Leaf { label, .. } if label == "foo")),
+            "the other source's rows still render: {flat:?}"
+        );
+    }
+
     // `group_by_type = true` inserts a type-group level between registry
     // root and path segments.
     #[test]

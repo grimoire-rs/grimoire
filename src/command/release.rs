@@ -177,7 +177,7 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // Parse the release reference, expanding a short identifier against the
     // effective default registry (config `[options].default_registry` first,
     // then `--registry` / `GRIM_DEFAULT_REGISTRY`).
-    let default_registry = release_default_registry(ctx);
+    let default_registry = release_default_registry(ctx)?;
     let id = super::grim(parse_reference(&args.reference, Some(&default_registry)))?;
     // The published tag is the reference tag; a reference with no tag is
     // rejected (a release must carry a tag). A non-version tag publishes
@@ -537,7 +537,13 @@ fn parse_reference(
 /// [`crate::command::primary_registry_global_fallback`] is used instead of
 /// the legacy `[options].default_registry` chain so a `[[registries]]`-only
 /// global config is still honored.
-pub(crate) fn release_default_registry(ctx: &Context) -> String {
+///
+/// # Errors
+///
+/// A malformed or invalid global config (exit 78) — see
+/// [`crate::command::global_config_tiers`]. A *project*-scope resolution
+/// failure stays non-fatal (it degrades to the global fallback), as before.
+pub(crate) fn release_default_registry(ctx: &Context) -> anyhow::Result<String> {
     use super::scope_resolution;
     // Best-effort: discover the project scope. On miss (no config in tree),
     // fall back through the global-[[registries]]-aware helper so a user with
@@ -659,13 +665,16 @@ mod tests {
         // composed `release_default_registry` chain — the refactor that
         // wired the global-config fallback in must not disturb it.
         let ctx = Context::new(&opts(Some("flag.example")));
-        assert_eq!(release_default_registry(&ctx), "flag.example");
+        assert_eq!(
+            release_default_registry(&ctx).expect("no global config to fail on"),
+            "flag.example"
+        );
     }
 
     #[test]
     fn release_default_registry_consults_global_tier_then_builtin() {
         // Regression for the skipped global-config tier: the publish path now
-        // routes through the centralized `global_config_default` (project
+        // routes through the centralized `primary_registry_for_scope` (project
         // scope, so the global config is a live fallback) instead of passing
         // a hard-coded `None`. With no flag / env / project-or-global config
         // present in the test environment the built-in fallback applies, but
@@ -680,7 +689,10 @@ mod tests {
         // no `default_registry` — keep it that way.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
-        assert_eq!(release_default_registry(&ctx), crate::command::FALLBACK_REGISTRY);
+        assert_eq!(
+            release_default_registry(&ctx).expect("no global config to fail on"),
+            crate::command::FALLBACK_REGISTRY
+        );
     }
 
     #[test]
@@ -689,7 +701,8 @@ mod tests {
         // (no [options].default_registry, no project grimoire.toml) must get
         // their declared registry — not the built-in fallback. The Err branch
         // of `release_default_registry` previously bypassed [[registries]] by
-        // calling only global_config_default + resolve_default_registry.
+        // resolving the default registry from the global `[options]` table
+        // alone; it now routes through `primary_registry_global_fallback`.
         let tmp = tempfile::tempdir().unwrap();
         // Write a global config with [[registries]] only (no default_registry).
         std::fs::write(
@@ -698,7 +711,10 @@ mod tests {
         )
         .unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
-        assert_eq!(release_default_registry(&ctx), "global-release.example");
+        assert_eq!(
+            release_default_registry(&ctx).expect("valid global config"),
+            "global-release.example"
+        );
     }
 
     #[test]

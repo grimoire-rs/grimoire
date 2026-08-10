@@ -318,6 +318,42 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 ));
             }
         }
+        // Plan C-006: every include/exclude pattern must be non-empty,
+        // free of control characters, and a valid glob — reject at load
+        // time (exit 78) the same way `grim config registry add --include`/
+        // `--exclude` reject at set time (exit 65, C-013).
+        for (field, patterns) in [("include", &rc.include), ("exclude", &rc.exclude)] {
+            for pattern in patterns {
+                if let Err(reason) = validate_filter_pattern(pattern) {
+                    return Err(ConfigError::new(
+                        path.to_path_buf(),
+                        ConfigErrorKind::RegistryInvalid {
+                            reason: format!("{field} pattern {} {reason}", quote_pattern(pattern)),
+                        },
+                    ));
+                }
+            }
+            // Per pattern is not the whole promise: the loop above compiles
+            // each pattern as a ONE-element set, while the browse filter
+            // builds one set out of the whole list, and that build has
+            // failure modes no single pattern can reach — the aggregate
+            // `MAX_PATTERN_LIST_BYTES` budget, which is the one a real
+            // hostile config trips, and globset's combined-NFA build behind
+            // it. Asking the same question the browse path asks is what
+            // makes "what load accepts is exactly what the browse path can
+            // build" true for the list as well — otherwise the config loads
+            // at exit 0 and the filter falls open at resolve time
+            // (C-008/D11) behind a `warn` the TUI redirects into `tui.log`.
+            // No pattern is quoted: the failure belongs to the list.
+            if let Err(reason) = crate::config::registry_filter::compile_set(patterns) {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("{field} pattern list {reason}"),
+                    },
+                ));
+            }
+        }
     }
     // At-most-one-default check: two `default = true` entries are ambiguous
     // and are rejected at parse time. `normalize_primary` is a defensive
@@ -332,6 +368,80 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
         ));
     }
     Ok(())
+}
+
+/// Quote an authored filter pattern for an error message: `escape_debug`d
+/// like every other quoted value in [`validate_registries`], and **capped**.
+/// The cap is not cosmetic — [`validate_filter_pattern`] rejects a pattern
+/// for being too long, so the rejection message is exactly where an
+/// arbitrarily long pattern arrives, and quoting one whole turns a
+/// 12 000-byte pattern into a 12 000-byte error line.
+///
+/// Over the cap, the pattern is cut and its true byte count reported. The
+/// cut happens on the **raw** pattern, before escaping: escaping first and
+/// truncating after could split a `\u{…}` sequence in half.
+fn quote_pattern(pattern: &str) -> String {
+    /// Chars of the authored pattern shown before truncation. Escaping can
+    /// expand each one, so the rendered quote is longer — bounded, which is
+    /// the point, not exact.
+    const MAX_SHOWN_CHARS: usize = 80;
+    match pattern.char_indices().nth(MAX_SHOWN_CHARS) {
+        None => format!("'{}'", pattern.escape_debug()),
+        Some((cut, _)) => format!("'{}…' ({} bytes total)", pattern[..cut].escape_debug(), pattern.len()),
+    }
+}
+
+/// Validate one `include`/`exclude` glob pattern from a `[[registries]]`
+/// entry (plan C-006): rejects an empty pattern, a pattern containing
+/// control characters, and anything
+/// [`compile_set`](crate::config::registry_filter::compile_set) refuses —
+/// over the size/nesting limits, or not compilable into a glob set. The
+/// single source of truth shared by load-time validation
+/// ([`validate_registries`], exit 78) and **both** CLI write paths at exit 65
+/// (plan C-013): `grim config registry add --include`/`--exclude`, and
+/// `grim config set registry.<alias>.include`/`.exclude` via
+/// `check_set_filter_pattern`. Per-pattern validation is the whole of what
+/// `set` can trip — the aggregate list budget is out of its reach by
+/// construction, for the arithmetic reason given on
+/// [`compile_set`](crate::config::registry_filter::compile_set).
+///
+/// **It validates by building what the browse path builds**, not by
+/// re-deriving the steps: `Glob::build` succeeding proves less than it
+/// looks, because the browse filter goes on to compile a *glob set* and
+/// that step has its own failure modes. Validating only the parse promised
+/// exit 78 for a pattern that then failed at browse time and fell open with
+/// a warning at exit 0. Calling `compile_set` — the browse filter's own
+/// constructor — is what makes the promise true and keeps it true.
+///
+/// # Errors
+///
+/// A plain failure description (e.g. `"must not be empty"`, or the
+/// underlying [`globset::Error`]'s message) that does **not** quote the
+/// pattern itself — the caller interpolates the escaped pattern
+/// separately, matching every other message in [`validate_registries`].
+pub(crate) fn validate_filter_pattern(pattern: &str) -> Result<(), String> {
+    // Whitespace-only counts as empty: `"   "` compiles to a valid glob that
+    // matches nothing, so it silently empties the browse set. Both sibling
+    // list keys reject blank segments the same way (`check_clients`,
+    // `is_valid_tree_separator`).
+    if pattern.trim().is_empty() {
+        return Err("must not be empty or whitespace-only".to_string());
+    }
+    if pattern.chars().any(char::is_control) {
+        return Err("must not contain control characters".to_string());
+    }
+    // One-element list so this is literally `RegistryFilter::new`'s code
+    // path, limits included. `compile_set` reports through `kind()`, not the
+    // `globset::Error` itself: its `Display` embeds the offending glob,
+    // which would put a second — unescaped, and auto-expanded — copy of the
+    // pattern in a message the caller already quotes via `escape_debug`.
+    // `kind()` suppresses that copy for every arm but
+    // `ErrorKind::Regex(String)`, whose message echoes the translated
+    // pattern; what makes even that arm safe is the `is_control` check
+    // ABOVE, which runs first, so no raw control byte can reach the glob
+    // compiler at all.
+    let one = [pattern.to_string()];
+    crate::config::registry_filter::compile_set(&one).map(|_| ())
 }
 
 /// Whether `entry` is a valid tree separator: exactly one Unicode scalar
@@ -1040,6 +1150,290 @@ surprise = "x"
         )
         .expect_err("unknown registry field must reject");
         assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
+    }
+
+    // ── C-006: `validate_registries` include/exclude validation ──────
+
+    #[test]
+    fn registries_include_empty_pattern_rejected() {
+        // Plan C-006 / S-015: an empty include pattern is rejected at
+        // config load with the existing ConfigErrorKind::RegistryInvalid —
+        // exit 78 (mapped elsewhere), no new error kind. Whitespace-only
+        // counts as empty: it compiles to a valid glob matching nothing, so
+        // accepting it would silently empty the browse set.
+        for pattern in ["", "   ", "\u{a0}"] {
+            let err = ProjectConfig::from_toml_str(&format!(
+                "[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"{pattern}\"]\n"
+            ))
+            .expect_err("a blank include pattern must reject");
+            assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        }
+    }
+
+    #[test]
+    fn registries_exclude_empty_pattern_rejected() {
+        for pattern in ["", "   ", "\u{a0}"] {
+            let err = ProjectConfig::from_toml_str(&format!(
+                "[[registries]]\noci = \"ghcr.io/acme\"\nexclude = [\"{pattern}\"]\n"
+            ))
+            .expect_err("a blank exclude pattern must reject");
+            assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        }
+    }
+
+    #[test]
+    fn registries_include_control_char_pattern_rejected() {
+        let err = ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"a\\tb\"]\n")
+            .expect_err("include pattern with a control character must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_exclude_control_char_pattern_rejected() {
+        let err = ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\nexclude = [\"a\\tb\"]\n")
+            .expect_err("exclude pattern with a control character must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_include_uncompilable_glob_rejected() {
+        let err =
+            ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"acme{unclosed\"]\n")
+                .expect_err("an uncompilable glob must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_exclude_uncompilable_glob_rejected() {
+        let err =
+            ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\nexclude = [\"acme{unclosed\"]\n")
+                .expect_err("an uncompilable glob must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_pattern_list_that_fails_only_as_a_whole_is_rejected() {
+        // W-5: per-pattern validation compiles each pattern as a ONE-element
+        // set, and no per-pattern cap can see a *list*. Every pattern below
+        // clears validation alone; the list does not. Without the whole-list
+        // check the documented exit-78 promise held per pattern only — the
+        // config loaded at exit 0 and the filter then fell open at resolve
+        // time (C-008/D11) behind a `warn` the TUI redirects into
+        // `$GRIM_HOME/tui.log`, so an operator's `exclude` list stopped
+        // applying with no signal at all.
+        //
+        // This is the **load-time** half: `compile_set`'s own budget test
+        // lives in `registry_filter.rs`, what is pinned here is that
+        // `validate_registries` runs that whole-list check per field, on top
+        // of its per-pattern loop, and names the field's *list* in the
+        // message rather than one pattern.
+        //
+        // The ceiling reached is `MAX_PATTERN_LIST_BYTES` (64 KiB, wave 1),
+        // not globset's combined-NFA build. That ordering is a property of
+        // the budget, NOT of this fixture: `compile_set` charges each
+        // pattern its **expanded** length — the bytes `expand_pattern`
+        // actually hands globset — against a running total checked before
+        // the pattern is added, so no list fitting under the budget can
+        // reach an oversized NFA build. Budget the *authored* length
+        // instead and that stops being true at once: `expand_pattern`
+        // appends `{,/**}` to any wildcard-free pattern, a 7x inflation at
+        // one byte, so ~65_500 one-byte patterns clear a 64 KiB authored
+        // budget and then fail the build ("error building NFA", ~277 MB
+        // peak). The guard for that shape belongs beside the budget in
+        // `registry_filter.rs`, not here — do not read this comment as
+        // license to drop the expanded-length accounting.
+        //
+        // An earlier version of this test aimed at the NFA cliff directly
+        // with 200 wildcard-dense ~1 KiB patterns; 201 KiB is 3x over the
+        // budget, so the cliff was never reached and the fixture paid ~600
+        // dense compiles (1.4 s, ~90% of the whole unit suite) for a
+        // rejection the byte count already produced. Hence literal patterns
+        // here — the fixture's only job is to be individually legal and
+        // collectively over budget, and wildcards would only buy back the
+        // runtime.
+        let wide: Vec<String> = (0..70).map(|i| format!("ns{i}/{}", "a".repeat(1000))).collect();
+        for pattern in &wide {
+            validate_filter_pattern(pattern).expect("each pattern must be valid on its own, or this proves nothing");
+        }
+        for field in ["include", "exclude"] {
+            let mut rc = RegistryConfig {
+                oci: Some("ghcr.io/acme".to_string()),
+                ..Default::default()
+            };
+            match field {
+                "include" => rc.include = wide.clone(),
+                _ => rc.exclude = wide.clone(),
+            }
+            let err = validate_registries(&[rc], Path::new("grimoire.toml"))
+                .expect_err("a pattern list that fails as a whole must reject at load");
+            let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+                panic!("expected RegistryInvalid, got {:?}", err.kind);
+            };
+            assert!(
+                reason.contains(&format!("{field} pattern list")),
+                "the message must name the list rather than one pattern: {reason}"
+            );
+            assert!(
+                reason.contains("exceed"),
+                "and name the aggregate budget — the ceiling this fixture is built to trip \
+                 (a different whole-list rejection here means the comment above is stale): {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn registries_include_pattern_message_quotes_offending_pattern() {
+        // Plan C-006: the message quotes the offending pattern via
+        // `escape_debug`, matching every other message in this function —
+        // and never echoes the raw control byte (same terminal-injection
+        // guard as `registries_messages_never_echo_raw_authored_bytes`).
+        let err = ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"a\\tb\"]\n")
+            .expect_err("include pattern with a control character must reject");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            reason.contains("include pattern 'a\\tb'"),
+            "reason must name the field and quote the escaped pattern: {reason}"
+        );
+        assert!(
+            !reason.contains('\t'),
+            "reason must not embed the raw control byte: {reason}"
+        );
+    }
+
+    #[test]
+    fn registries_exclude_pattern_message_quotes_offending_pattern() {
+        let err = ProjectConfig::from_toml_str("[[registries]]\noci = \"ghcr.io/acme\"\nexclude = [\"a\\tb\"]\n")
+            .expect_err("exclude pattern with a control character must reject");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            reason.contains("exclude pattern 'a\\tb'"),
+            "reason must name the field and quote the escaped pattern: {reason}"
+        );
+        assert!(
+            !reason.contains('\t'),
+            "reason must not embed the raw control byte: {reason}"
+        );
+    }
+
+    #[test]
+    fn registries_valid_include_exclude_patterns_accepted() {
+        // Plan C-006: syntactically valid glob patterns in both lists load
+        // cleanly — validate_filter_pattern only rejects empty, control
+        // characters, or an uncompilable glob.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+oci = "ghcr.io/acme"
+include = ["acme/platform/**", "acme/tools"]
+exclude = ["acme/platform/legacy/**"]
+"#,
+        )
+        .expect("valid include/exclude patterns must be accepted");
+        assert_eq!(
+            cfg.registries[0].include,
+            vec!["acme/platform/**".to_string(), "acme/tools".to_string()]
+        );
+        assert_eq!(cfg.registries[0].exclude, vec!["acme/platform/legacy/**".to_string()]);
+    }
+
+    #[test]
+    fn registries_stack_overflowing_pattern_rejected_at_load() {
+        // The crash path, end to end. Before the limits were wired in here,
+        // this input did not produce an error at all — globset's regex
+        // emitter recurses per `{…}` level and the process died inside
+        // `Glob::build` (`fatal runtime error: stack overflow`, SIGABRT,
+        // exit 134), so a hostile-or-clumsy `grimoire.toml` took `grim` down
+        // instead of exiting 78. If this test ever regresses it does not
+        // fail, it aborts the test binary.
+        let pattern = format!("{}a{}", "{".repeat(12_000), "}".repeat(12_000));
+        let err = ProjectConfig::from_toml_str(&format!(
+            "[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"{pattern}\"]\n"
+        ))
+        .expect_err("a stack-overflowing pattern must be rejected, not compiled");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_over_long_pattern_is_quoted_truncated_not_whole() {
+        // The byte cap rejects a pattern of any size, so the rejection
+        // message is where an arbitrarily long pattern lands — quoting one
+        // whole made a 24 001-byte pattern a 24 001-byte error line.
+        let pattern = format!("{}a{}", "{".repeat(12_000), "}".repeat(12_000));
+        let err = ProjectConfig::from_toml_str(&format!(
+            "[[registries]]\noci = \"ghcr.io/acme\"\ninclude = [\"{pattern}\"]\n"
+        ))
+        .expect_err("rejected");
+        let ConfigErrorKind::RegistryInvalid { reason } = &err.kind else {
+            panic!("expected RegistryInvalid, got {:?}", err.kind);
+        };
+        assert!(
+            reason.len() < 300,
+            "the message must stay readable, got {} bytes: {reason:.120}…",
+            reason.len()
+        );
+        assert!(
+            reason.contains("(24001 bytes total)"),
+            "the true size must still be reported: {reason}"
+        );
+        assert!(
+            reason.contains("include pattern '{{{{"),
+            "the start of the pattern must still be shown: {reason}"
+        );
+    }
+
+    #[test]
+    fn filter_pattern_validation_covers_the_whole_browse_build() {
+        // W1: `validate_filter_pattern` promised exit 78 for a rejected
+        // pattern while proving only that `Glob::build` parses. Each case
+        // below is a pattern that parse alone accepts — the first two were
+        // accepted at load and then failed at *browse* time, warning and
+        // falling open at exit 0, which is the promise this closes.
+        let cases = [
+            // Over the nesting cap but well inside the byte budget (67
+            // bytes). Only `pattern_within_limits` sees this one: the glob
+            // parses AND the glob set builds at this depth, so it is what
+            // proves the limit check is wired in, not just reachable.
+            (format!("{}a{}", "{".repeat(33), "}".repeat(33)), "nest"),
+            // Over the byte cap, nesting nothing.
+            ("a".repeat(1025), "exceed"),
+            // The measured W1 reproduction: deep enough that `Glob::build`
+            // still succeeds but the glob set fails to compile (`regex`
+            // caps nesting at 250), and small enough — 501 bytes — that the
+            // byte cap never sees it.
+            (format!("{}a{}", "{".repeat(251), "}".repeat(251)), "nest"),
+        ];
+        for (pattern, needle) in cases {
+            let reason = validate_filter_pattern(&pattern).expect_err("must be rejected at validation");
+            assert!(reason.contains(needle), "reason must name why ({needle}): {reason}");
+        }
+    }
+
+    #[test]
+    fn filter_pattern_validation_agrees_with_the_browse_filter() {
+        // The invariant behind the two tests above, stated directly: what
+        // config load accepts is exactly what the browse path can build.
+        // Both sides call `registry_filter::compile_set`, so this holds by
+        // construction rather than by mirroring — a second implementation of
+        // the same steps is what let the two answers drift apart before.
+        for pattern in [
+            "acme",
+            "acme/platform/**",
+            "acme/{platform,tools}/**",
+            "acme{unclosed",
+            &format!("{}a{}", "{".repeat(251), "}".repeat(251)),
+            &"a".repeat(1025),
+        ] {
+            assert_eq!(
+                validate_filter_pattern(pattern).is_ok(),
+                crate::config::registry_filter::RegistryFilter::new(&[pattern.to_string()], &[]).is_ok(),
+                "load-time validation and the browse filter must agree on {:.40?}",
+                pattern
+            );
+        }
     }
 
     #[test]
@@ -2027,7 +2421,7 @@ oci = "registry.corp/team"
         // each case proves it reached the arm its comment names — `shown` is
         // one binding shared by all five alias arms, so a `contains` check
         // would stay green if a case fell through to a different arm.
-        let cases: [(&str, char, &str); 5] = [
+        let cases: [(&str, char, &str); 7] = [
             // Locator, both-sources arm: ESC + `[2J` clears the caller's screen.
             (
                 "[[registries]]\noci = \"\\u001b[2Jghcr.io/x\"\nindex = \"https://y\"\n",
@@ -2065,6 +2459,30 @@ oci = "registry.corp/team"
                  [[registries]]\nalias = \"a\\u202Eb\"\noci = \"ghcr.io/y\"\n",
                 '\u{202e}',
                 r"duplicate alias 'a\u{202e}b'",
+            ),
+            // Filter pattern, control-char arm (C-006). The `include`/
+            // `exclude` messages quote authored bytes through the same
+            // `escape_debug` as the alias arms above, so they are the same
+            // exit-78 injection vector and need the same proof.
+            (
+                "[[registries]]\noci = \"ghcr.io/x\"\ninclude = [\"\\u001b[2Jacme\"]\n",
+                '\u{1b}',
+                r"include pattern '\u{1b}[2Jacme' must not contain control characters",
+            ),
+            // Filter pattern, uncompilable arm, reached by a bidi override.
+            // U+202E is NOT `char::is_control`, so it sails past the control
+            // check — the only reason this arm fires at all is the unclosed
+            // `[`. Without the bracket the pattern is *accepted and stored*
+            // verbatim, which is the residual gap this case documents rather
+            // than closes: validation's job is to reject malformed globs, not
+            // to police every confusable an operator may author.
+            (
+                "[[registries]]\noci = \"ghcr.io/x\"\nexclude = [\"a\\u202Eb[\"]\n",
+                '\u{202e}',
+                concat!(
+                    r"exclude pattern 'a\u{202e}b[' is not a valid glob: ",
+                    "unclosed character class; missing ']'"
+                ),
             ),
         ];
         for (toml, raw, expected) in cases {

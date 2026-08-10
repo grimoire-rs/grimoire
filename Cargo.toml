@@ -68,6 +68,12 @@ secrecy = "0.10"
 rpassword = "7"
 rmcp = { version = "3.0.0", features = ["schemars", "transport-io"] }
 unicode-width = "0.2"
+# Per-registry browse `include`/`exclude` glob filters (registry_filter.rs).
+# The de-facto standard glob engine in the Rust ecosystem (ripgrep, fd,
+# Cargo's own gitignore-style matching); costs exactly one net-new crate,
+# `bstr` — everything else it needs is already in Cargo.lock via `regex`.
+# See adr_registry_browse_filters.md and research_registry_browse_filters.md.
+globset = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

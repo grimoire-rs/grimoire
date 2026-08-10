@@ -22,6 +22,7 @@
 //! interpreted as a qualified reference — it collides with `repo:tag`.
 
 use crate::config::declaration::RegistryConfig;
+use crate::config::registry_filter::RegistryFilter;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierError;
 
@@ -89,6 +90,21 @@ fn normalize_locator(locator: &str) -> String {
     out
 }
 
+/// Trim trailing slashes off a declared locator on its way into
+/// [`ResolvedRegistry::url`]. `oci = "ghcr.io/acme/"` passes validation, and
+/// the stored url is what every consumer string-compares or concatenates
+/// against — the browse candidate, `tui::tree`'s configured-prefix split,
+/// the credential lookup, alias substitution. Normalizing once, here, is
+/// what keeps those answers consistent; each consumer re-normalizing on its
+/// own is how the filter and the tree came to disagree about the same row.
+///
+/// Only the trailing slashes: [`normalize_locator`] also case-folds the
+/// host, and that stays a dedup-key concern — the stored url is identity
+/// the user reads back out of `grim context`.
+fn trim_locator(locator: &str) -> &str {
+    locator.trim_end_matches('/')
+}
+
 /// One browse source in the resolved set, in precedence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRegistry {
@@ -102,6 +118,26 @@ pub struct ResolvedRegistry {
     pub is_default: bool,
     /// How this source lists its packages (`_catalog` vs package index).
     pub kind: SourceKind,
+    /// This entry's compiled browse filter (plan C-004/C-009).
+    ///
+    /// **Browse/display only — never consulted by reference resolution,
+    /// lock, or install.** It rides into the resolution path as inert data
+    /// (`ResolvedRegistry` is a field of [`crate::fetch::FetchScope`], which
+    /// `resolve_reference` consumes), so the prohibition belongs on the
+    /// field, not only on `registry_filter`'s module doc.
+    ///
+    /// Never `Option`: an entry with no authored `include`/`exclude` compiles to
+    /// a filter whose `matches` is unconditionally `true` (plan C-004,
+    /// `registry_filter_both_empty_matches_everything`), so "unfiltered" is
+    /// already representable by the value — wrapping it in `Option` would
+    /// let the same state exist two ways (`None` vs `Some(empty)`), which
+    /// is exactly what `PartialEq`/`Eq` (derived here, compared throughout
+    /// `src/tui/app.rs`'s tests) would then have to treat as unequal. The
+    /// `--registry`-forced branch below carries the same empty filter as
+    /// its existing `alias: None`, and every consumer (`grim context`
+    /// reading the patterns back, `load_catalog`'s per-row filter) can call
+    /// straight through with no `Option`-unwrapping at the call site.
+    pub filter: RegistryFilter,
 }
 
 /// Build the ordered, deduped registry browse set.
@@ -139,10 +175,11 @@ pub fn resolve_registries(
     for url in forced.iter().filter(|s| !s.is_empty()) {
         if forced_seen.insert(normalize_locator(url)) {
             forced_set.push(ResolvedRegistry {
-                url: url.clone(),
+                url: trim_locator(url).to_string(),
                 alias: None,
                 is_default: forced_set.is_empty(),
                 kind: SourceKind::Registry,
+                filter: RegistryFilter::default(),
             });
         }
     }
@@ -155,24 +192,90 @@ pub fn resolve_registries(
     // validation enforces exactly-one-of; an unclassifiable programmatic
     // index locator degrades to the HTTP transport rather than panicking.
     let mut out: Vec<ResolvedRegistry> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    // Normalized locator → that locator's winning entry's alias, so a
+    // dropped duplicate can be compared against what actually survived.
+    let mut seen: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
     for rc in project.iter().chain(global.iter()) {
         let (locator, kind) = match (&rc.oci, &rc.index) {
             (Some(oci), _) if !oci.trim().is_empty() => (oci.clone(), SourceKind::Registry),
-            (_, Some(index)) if !index.trim().is_empty() => {
-                (index.clone(), classify_index(index).unwrap_or(SourceKind::IndexHttp))
-            }
+            // Classified on the *trimmed* locator, the same string the stored
+            // `url` is built from below: `index.git/` must not store as a git
+            // locator while being served over the static-file transport.
+            // `locator` itself stays authored — the two warnings below name
+            // the entry the user has to find in their own file.
+            (_, Some(index)) if !index.trim().is_empty() => (
+                index.clone(),
+                classify_index(trim_locator(index)).unwrap_or(SourceKind::IndexHttp),
+            ),
             // Invalid entry (validation rejects it on parsed configs) —
             // skip rather than fabricate an empty source.
             _ => continue,
         };
-        if seen.insert(normalize_locator(&locator)) {
+        let key = normalize_locator(&locator);
+        // Looked up before the insert, and cloned: the winner's alias must
+        // survive the lookup, and `BTreeMap::insert` would overwrite it with
+        // the loser's.
+        let winner_alias = seen.get(&key).cloned();
+        if winner_alias.is_none() {
+            seen.insert(key, rc.alias.clone());
+            // Compiled *here*, at resolve time, so `globset` stays inside
+            // `src/config/` and every consumer (search, TUI, MCP,
+            // `grim context`) receives an already-compiled filter.
+            //
+            // The failure arm exists because this function returns `Vec`,
+            // not `Result` — the error has nowhere to propagate, so the only
+            // choice is which way to fail. It fails *open*, per C-008/D11:
+            // both lists are dropped and the entry is browsed unfiltered,
+            // rather than dropping the registry, which would read to the
+            // user as a broken source.
+            //
+            // A parsed config cannot reach it: `validate_registries` (plan
+            // C-006) exits 78 first, and it validates by calling the same
+            // `compile_set` this constructor uses — per pattern *and* once
+            // over each whole list, so neither a single bad pattern nor a
+            // list that only fails as a set can answer differently here.
+            // What is still reachable is a programmatically-built
+            // `RegistryConfig`, which never passed through validation.
+            let filter = RegistryFilter::new(&rc.include, &rc.exclude).unwrap_or_else(|reason| {
+                tracing::warn!(
+                    // Escaped: an alias is authored TOML content on its way
+                    // to a terminal, and `validate_registries` rejects only
+                    // `char::is_control` — U+202E and the rest of the
+                    // Unicode format characters reach this line intact.
+                    "registry '{}': invalid include/exclude pattern ({reason}); browsing without a filter",
+                    rc.alias.as_deref().unwrap_or(&locator).escape_debug()
+                );
+                RegistryFilter::default()
+            });
             out.push(ResolvedRegistry {
-                url: locator,
+                url: trim_locator(&locator).to_string(),
                 alias: rc.alias.clone(),
                 is_default: rc.default,
                 kind,
+                filter,
             });
+        } else if !rc.include.is_empty()
+            || !rc.exclude.is_empty()
+            || winner_alias.flatten().as_deref() != rc.alias.as_deref()
+        {
+            // Dedup drops the whole entry, and the two ways to get here look
+            // nothing alike to the user: two entries in one file differing
+            // only by host case or a trailing slash, and a project entry
+            // shadowing a global one — where the *global* filter is what
+            // silently stops applying. Same voice as the sibling arm above,
+            // escaped for the same reason.
+            //
+            // Gated on what the user can observe losing: a browse filter, or
+            // an alias that will not resolve. A redundant declaration
+            // identical to the winner is **deliberately unwarned** — nothing
+            // it declared was ignored in any way the user can feel, and
+            // project-over-global layering of the same registry is a
+            // legitimate setup that would otherwise warn on every browse.
+            tracing::warn!(
+                "registry '{}': duplicate of an earlier entry for '{}'; ignoring it, along with its alias and its include/exclude filter",
+                rc.alias.as_deref().unwrap_or(&locator).escape_debug(),
+                locator.escape_debug()
+            );
         }
     }
     if !out.is_empty() {
@@ -192,17 +295,19 @@ pub fn resolve_registries(
         .filter(|s| !s.is_empty())
     {
         return vec![ResolvedRegistry {
-            url: url.to_string(),
+            url: trim_locator(url).to_string(),
             alias: None,
             is_default: true,
             kind: SourceKind::Registry,
+            filter: RegistryFilter::default(),
         }];
     }
     vec![ResolvedRegistry {
-        url: fallback.to_string(),
+        url: trim_locator(fallback).to_string(),
         alias: None,
         is_default: true,
-        kind: classify_index(fallback).unwrap_or(SourceKind::Registry),
+        kind: classify_index(trim_locator(fallback)).unwrap_or(SourceKind::Registry),
+        filter: RegistryFilter::default(),
     }]
 }
 
@@ -279,6 +384,7 @@ mod tests {
             oci: Some(oci.to_string()),
             index: None,
             default,
+            ..Default::default()
         }
     }
 
@@ -288,6 +394,7 @@ mod tests {
             oci: None,
             index: Some(index.to_string()),
             default,
+            ..Default::default()
         }
     }
 
@@ -536,6 +643,66 @@ mod tests {
     }
 
     #[test]
+    fn every_construction_site_stores_the_locator_without_trailing_slashes() {
+        // W-10. `oci = "ghcr.io/acme/"` passes validation, and `url` is the
+        // string every consumer compares against: the browse candidate, the
+        // TUI's configured-prefix split (`tree::attribute_registry`), the
+        // credential lookup, alias substitution, the catalog cache key.
+        // Storing the authored form made those answers disagree — the filter
+        // re-normalized locally and the tree did not, so a row matched
+        // `platform/foo` while rendering under a root that was not its
+        // configured source. Normalizing once here is what keeps them in
+        // step, so all four sites that build a `ResolvedRegistry` are pinned.
+        let declared = resolve_registries(
+            &[],
+            &[rc(Some("acme"), "ghcr.io/acme/", true)],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(declared[0].url, "ghcr.io/acme", "declared [[registries]] entry");
+        // Alias substitution concatenates on the stored url, so an untrimmed
+        // one produced a double-slash reference rather than a wrong-but-valid
+        // one — the same defect, in the resolution path instead of display.
+        let id = resolve_reference("acme/x:1", &declared, "unused.example").expect("qualified alias resolves");
+        assert_eq!(id.to_string(), "ghcr.io/acme/x:1");
+
+        let forced = resolve_registries(
+            &["ghcr.io/flag/".to_string()],
+            &[],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(forced[0].url, "ghcr.io/flag", "--registry flag");
+
+        let legacy = resolve_registries(&[], &[], Some("proj.example/"), &[], None, "registry.example", None);
+        assert_eq!(legacy[0].url, "proj.example", "legacy scalar default_registry");
+
+        let fallback = resolve_registries(&[], &[], None, &[], None, "registry.example/", None);
+        assert_eq!(fallback[0].url, "registry.example", "built-in fallback");
+
+        // `kind` is classified from the same trimmed string the url is built
+        // from, or an entry would store a `.git` locator while being served
+        // over the static-file transport.
+        let git_index = resolve_registries(
+            &[],
+            &[rc_index(Some("hub"), "https://github.com/acme/index.git/", true)],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(git_index[0].url, "https://github.com/acme/index.git");
+        assert_eq!(git_index[0].kind, SourceKind::IndexGit);
+    }
+
+    #[test]
     fn no_registries_folds_legacy_default() {
         let set = resolve_registries(
             &[],
@@ -743,5 +910,241 @@ mod tests {
             set[0].url, "env.example",
             "env_default must beat project and global in tier 3"
         );
+    }
+
+    // ── Browse-filter threading (C-009) ─────────────────────────────────────
+
+    fn rc_filtered(alias: &str, oci: &str, include: &[&str], exclude: &[&str]) -> RegistryConfig {
+        RegistryConfig {
+            include: include.iter().map(|p| (*p).to_string()).collect(),
+            exclude: exclude.iter().map(|p| (*p).to_string()).collect(),
+            ..rc(Some(alias), oci, false)
+        }
+    }
+
+    #[test]
+    fn declared_entry_compiles_its_authored_filter_without_swapping_the_lists() {
+        // The one thing C-009 owns: `include` reaches the include list and
+        // `exclude` reaches the exclude list. Swapping the two arguments at
+        // the call site compiles and inverts an allowlist into a denylist,
+        // so this asserts each side by its own patterns, never by shape.
+        let set = resolve_registries(
+            &[],
+            &[rc_filtered("acme", "registry.acme", &["acme/*"], &["acme/internal"])],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].filter.include_patterns(), ["acme/*"]);
+        assert_eq!(set[0].filter.exclude_patterns(), ["acme/internal"]);
+        assert!(set[0].filter.matches("acme/tools"));
+        assert!(!set[0].filter.matches("acme/internal"), "exclude must win over include");
+    }
+
+    #[test]
+    fn forced_registries_carry_no_filter() {
+        // C-009: the `--registry` branch drops config-derived metadata, the
+        // same rule its existing `alias: None` follows. S-019 reads the empty
+        // pattern lists back out of exactly this.
+        let set = resolve_registries(
+            &["registry.flag".to_string()],
+            &[rc_filtered("acme", "registry.acme", &["acme/*"], &[])],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].url, "registry.flag");
+        assert_eq!(set[0].filter, RegistryFilter::default());
+        assert!(set[0].filter.include_patterns().is_empty());
+    }
+
+    #[test]
+    fn uncompilable_pattern_fails_open_instead_of_dropping_the_entry() {
+        // Unreachable in production (C-006 exits 78 at config load), but
+        // `resolve_registries` returns `Vec`, not `Result` — so the failure
+        // has to go somewhere. C-008's stance: browse unfiltered, never lose
+        // the registry.
+        let set = resolve_registries(
+            &[],
+            &[rc_filtered("acme", "registry.acme", &["acme{unclosed"], &[])],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1, "a bad pattern must not drop the registry");
+        assert_eq!(set[0].url, "registry.acme");
+        assert_eq!(set[0].filter, RegistryFilter::default());
+        assert!(set[0].filter.matches("anything/at-all"));
+    }
+
+    #[test]
+    fn stack_overflowing_pattern_fails_open_here_instead_of_aborting() {
+        // The other half of the crash path. Load-time validation exits 78
+        // before resolution runs, but this call site builds the filter from
+        // whatever `RegistryConfig` it is handed — and it reached globset's
+        // recursive emitter with no bound at all, so a pattern that got here
+        // by any route other than a parsed config killed the process
+        // (SIGABRT, exit 134). It is now the fail-open arm's business like
+        // any other bad pattern. A regression does not fail this test, it
+        // aborts the test binary.
+        let pattern = format!("{}a{}", "{".repeat(12_000), "}".repeat(12_000));
+        let set = resolve_registries(
+            &[],
+            &[RegistryConfig {
+                include: vec![pattern],
+                ..rc(Some("acme"), "registry.acme", false)
+            }],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 1, "the entry survives, unfiltered");
+        assert_eq!(set[0].filter, RegistryFilter::default());
+    }
+
+    // ── The two diagnostics `resolve_registries` emits ──────────────────────
+
+    /// A `MakeWriter` sink over a shared buffer — same idiom
+    /// `catalog_service`'s tests use to prove a warning reaches tracing.
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer is never poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Resolve while capturing everything the call logs.
+    fn resolve_capturing(project: &[RegistryConfig], global: &[RegistryConfig]) -> (Vec<ResolvedRegistry>, String) {
+        crate::log_switch::tracing_capture::arm();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = std::sync::Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(std::sync::Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let set = resolve_registries(&[], project, None, global, None, "registry.example", None);
+        drop(guard);
+        let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
+            .expect("tracing writes UTF-8");
+        (set, captured)
+    }
+
+    #[test]
+    fn duplicate_locator_warns_when_the_dropped_entry_carries_a_filter() {
+        // X1: the drop itself is correct (issue #28 — one browse entry per
+        // locator), the silence was not. A project entry shadowing a global
+        // one takes the global entry's include/exclude with it, and the user
+        // saw exit 0, an empty stderr, and a filter that had simply stopped
+        // applying. The sibling arm three lines up already warns; this one
+        // did not exist at all.
+        //
+        // Both entries carry the SAME alias — legal across scopes, each file
+        // is validated on its own — so the filter is the only thing lost and
+        // the only thing that can trigger the warning.
+        let (set, logs) = resolve_capturing(
+            &[rc(Some("acme"), "ghcr.io/acme", true)],
+            &[rc_filtered("acme", "GHCR.io/acme/", &["acme/platform/**"], &[])],
+        );
+        assert_eq!(set.len(), 1, "the dedup itself is unchanged: {set:?}");
+        assert!(set[0].filter.include_patterns().is_empty(), "the project entry won");
+        assert!(
+            logs.contains("registry 'acme': duplicate of an earlier entry for 'GHCR.io/acme/'"),
+            "the dropped entry must be named; captured:\n{logs}"
+        );
+        assert!(
+            logs.contains("include/exclude filter"),
+            "the warning must say the filter went with it; captured:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn duplicate_locator_warns_when_the_dropped_alias_differs() {
+        // The other observable loss: `glob/repo` will not resolve as a
+        // qualified reference, because that alias never reached the set.
+        // No filters anywhere, so the alias comparison is what fires.
+        let (set, logs) = resolve_capturing(
+            &[rc(Some("proj"), "ghcr.io/acme", true)],
+            &[rc(Some("glob"), "ghcr.io/acme", false)],
+        );
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].alias.as_deref(), Some("proj"), "first occurrence still wins");
+        assert!(
+            logs.contains("registry 'glob': duplicate of an earlier entry"),
+            "a dropped alias must be named; captured:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn a_redundant_identical_duplicate_is_not_warned() {
+        // The gate. Declaring the same registry, same alias, no filters, in
+        // both scopes is legitimate layering — nothing the user can observe
+        // was lost, and warning here would fire on every browse for a config
+        // that works exactly as written. Noise trains people to skim past the
+        // two warnings above, which are the ones that matter.
+        let (set, logs) = resolve_capturing(
+            &[rc(Some("acme"), "ghcr.io/acme", true)],
+            &[rc(Some("acme"), "ghcr.io/acme/", false)],
+        );
+        assert_eq!(set.len(), 1, "still deduped: {set:?}");
+        assert!(logs.is_empty(), "a redundant identical entry must be silent:\n{logs}");
+    }
+
+    #[test]
+    fn a_unique_locator_set_warns_about_nothing() {
+        // Two genuinely different sources: nothing is dropped, nothing is
+        // diagnosed.
+        let (set, logs) = resolve_capturing(
+            &[rc_filtered("acme", "ghcr.io/acme", &["acme/**"], &[])],
+            &[rc(Some("corp"), "registry.corp/team", false)],
+        );
+        assert_eq!(set.len(), 2);
+        assert!(logs.is_empty(), "a valid two-source config must log nothing:\n{logs}");
+    }
+
+    #[test]
+    fn both_warnings_escape_the_registry_name() {
+        // W2: the name is authored TOML echoed to a terminal, and
+        // `validate_registries` rejects only `char::is_control` — U+202E
+        // (RIGHT-TO-LEFT OVERRIDE) is not, so it arrives here intact and
+        // reverses the rest of the line in the user's terminal. Both arms
+        // interpolate the same expression, so both are asserted.
+        let hostile = "a\u{202e}b";
+        let (_, compile_logs) =
+            resolve_capturing(&[rc_filtered(hostile, "registry.acme", &["acme{unclosed"], &[])], &[]);
+        let (_, dup_logs) = resolve_capturing(
+            &[rc(Some("first"), "ghcr.io/acme", false)],
+            &[rc(Some(hostile), "ghcr.io/acme", false)],
+        );
+        for logs in [&compile_logs, &dup_logs] {
+            assert!(
+                !logs.contains('\u{202e}'),
+                "the raw bidi override must never reach the terminal; captured:\n{logs}"
+            );
+            assert!(
+                logs.contains(r"a\u{202e}b"),
+                "the escaped name must still be shown, or the user cannot tell which entry; captured:\n{logs}"
+            );
+        }
     }
 }

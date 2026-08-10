@@ -242,6 +242,86 @@ pub async fn open_log_file_off_thread(grim_home: std::path::PathBuf) -> Option<F
         .unwrap_or(None)
 }
 
+/// Test-only prerequisite for every `tracing::subscriber::set_default`
+/// capture helper in this crate.
+///
+/// `tracing-core` memoizes each callsite's `Interest` on its first hit, and
+/// while at most one dispatcher is registered — the normal state of this
+/// suite — `Dispatchers::rebuilder` returns `JustOne`, which computes that
+/// interest from `dispatcher::get_default`, i.e. **the dispatcher of
+/// whichever thread reached the callsite first** (tracing-core 0.1.36
+/// `callsite.rs:544,562,505`). A non-capturing test on another thread has no
+/// subscriber, so it caches `Interest::never()` process-wide, and a capture
+/// test that installed its own subscriber then observes an empty buffer.
+/// Measured at ~1.5% of full-suite runs at `--test-threads=64`.
+///
+/// Serializing the capture helpers against each other does not help: the
+/// thread that poisons the cache is an ordinary test that never touches such
+/// a lock, and holding one keeps the registered-dispatcher count at 1, which
+/// is exactly what selects the `JustOne` path.
+///
+/// It lives here because this module owns the crate's tracing-subscriber
+/// global — the same `set_global_default` one-shot the module doc reasons
+/// about above, seen from the test side.
+#[cfg(test)]
+pub mod tracing_capture {
+    use tracing::level_filters::LevelFilter;
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Metadata, span};
+
+    /// Enabled for nothing, but forces every callsite to ask at runtime.
+    struct AlwaysAsk;
+
+    impl tracing::Subscriber for AlwaysAsk {
+        fn register_callsite(&self, _: &Metadata<'_>) -> Interest {
+            // Never `always` (that skips `enabled` and would route every
+            // event in the suite here) and never `never` (that is the bug).
+            // `sometimes` defers to `enabled` on the *current* thread's
+            // dispatcher — the capture subscriber where one is installed,
+            // this no-op everywhere else.
+            Interest::sometimes()
+        }
+
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            // The global max level is the max over live dispatchers; a lower
+            // hint here would gate events out before `enabled` is consulted.
+            Some(LevelFilter::TRACE)
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    /// Install the guard. Call before `set_default` in any test that asserts
+    /// on captured `tracing` output. Idempotent, callable from any thread,
+    /// and takes no lock — so a panicking capture test cannot poison another.
+    pub fn arm() {
+        static ARMED: std::sync::Once = std::sync::Once::new();
+        ARMED.call_once(|| {
+            // The only failure mode is a global default already installed,
+            // and in a unit-test binary there is none: `init_tracing` is the
+            // crate's sole installer and `main` never runs here. So the error
+            // is unreachable, not benign — do NOT read this as "an existing
+            // global would do just as well". It would not: a
+            // `tracing_subscriber::fmt` subscriber answers `register_callsite`
+            // with `always` or `never` and never `sometimes`, and a cached
+            // `never` is precisely the interest memoization `AlwaysAsk` exists
+            // to defeat.
+            let _ = tracing::subscriber::set_global_default(AlwaysAsk);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +438,73 @@ mod tests {
         // Result is Some (fallback) or None (system tmpdir also unwritable);
         // either is acceptable — what we assert is no panic.
         let _ = open_log_file_off_thread(non_existent).await;
+    }
+
+    /// T-2: [`tracing_capture::arm`] is a call-site discipline with no runtime
+    /// test. Deleting one guard restores a flake measured at ~1.5% of
+    /// full-suite runs — by construction invisible in any single run, so the
+    /// whole suite stays green while the defect is live.
+    ///
+    /// The *invariant* is not a runtime property at all, which is why no
+    /// behavioural test can hold it: it is a source-level pairing rule — every
+    /// `tracing::subscriber::set_default` capture helper arms the guard first.
+    /// So pin it with the deterministic idiom this branch already uses for the
+    /// other call-site rule it cannot reach at runtime (`tui::app`'s
+    /// `include_str!` occurrence count, H-4).
+    ///
+    /// Unlike that one, this counts the **whole** file rather than the
+    /// production half: a capture helper lives inside `#[cfg(test)]` by
+    /// definition, so splitting there would leave nothing to count.
+    ///
+    /// It also walks `src/**` rather than listing files via `include_str!`,
+    /// which takes no glob. A literal list is the failure this test exists to
+    /// prevent, one level up: a capture helper added in an unlisted file would
+    /// go unguarded with the list — and the whole suite — still green.
+    /// Deriving the set means a new call site is covered the moment it lands.
+    #[test]
+    fn every_capture_helper_arms_the_interest_guard_t2() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("the src tree is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+
+        let mut total_helpers = 0;
+        for path in files {
+            // This file spells both needles as literals; counting itself would
+            // only assert on the assertion.
+            if path.ends_with("log_switch.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("every source file is UTF-8");
+            let helpers = source.matches("tracing::subscriber::set_default(").count();
+            let guards = source.matches("tracing_capture::arm();").count();
+            assert_eq!(
+                helpers,
+                guards,
+                "{}: {helpers} `set_default` capture helper(s) but {guards} `arm()` guard(s). \
+                 An unguarded helper caches `Interest::never()` process-wide and observes an empty \
+                 buffer at ~1.5% of full-suite runs — which no single green run distinguishes from \
+                 correct",
+                path.display()
+            );
+            total_helpers += helpers;
+        }
+        assert!(
+            total_helpers > 0,
+            "no capture helper found anywhere in src/ — the walk broke, and an equality that \
+             compares nothing to nothing passes for the wrong reason"
+        );
     }
 }

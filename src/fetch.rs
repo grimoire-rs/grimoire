@@ -1071,7 +1071,7 @@ mod tests {
         workspace: &std::path::Path,
     ) -> (FetchScope, Arc<dyn OciAccess>) {
         let ctx = Context::with_access(home.to_path_buf(), access);
-        let scope = crate::command::resolve_fetch_scope(&ctx, false, None, Some(workspace));
+        let scope = crate::command::resolve_fetch_scope(&ctx, false, None, Some(workspace)).expect("scope");
         let access = crate::command::access_seam(&ctx).expect("access");
         (scope, access)
     }

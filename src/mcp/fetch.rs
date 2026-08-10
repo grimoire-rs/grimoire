@@ -31,7 +31,7 @@ pub async fn fetch(ctx: &Context, args: &FetchToolArgs) -> anyhow::Result<crate:
         args.scope.global(),
         args.scope.config.as_deref(),
         args.scope.workspace.as_deref(),
-    );
+    )?;
     let access = crate::command::access_seam(ctx)?;
     crate::fetch::fetch_outcome(
         &scope,

@@ -92,7 +92,9 @@ pub struct GlobalOptions {
     /// Registry override for short identifiers and the browse set.
     /// Repeatable and comma-separated to span several registries at once
     /// (`--registry a,b` or `--registry a --registry b`); the first value is
-    /// the default short identifiers expand against.
+    /// the default short identifiers expand against. Collapses the browse
+    /// set to exactly these registries and browses them unfiltered — a
+    /// configured `include`/`exclude` does not apply.
     #[arg(long, global = true, value_delimiter = ',', action = clap::ArgAction::Append)]
     pub registry: Vec<String>,
 }
@@ -129,6 +131,36 @@ impl VerifyOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rendered help for the global flags.
+    fn global_help() -> String {
+        use clap::CommandFactory as _;
+
+        /// Minimal parse harness so the global flags render in isolation.
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            _global: GlobalOptions,
+        }
+
+        Harness::command().render_long_help().to_string()
+    }
+
+    #[test]
+    fn registry_flag_help_states_that_it_drops_the_browse_filter() {
+        // W-14 / U5: `--registry` silently discards a configured browse
+        // filter on the very registry it names, and this is the text
+        // `grim context --help` (and every other command's) renders for it.
+        // Collapsed first, because clap wraps to the terminal width; the
+        // trailing period is clap's to strip, so it is not asserted.
+        let collapsed = global_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains(
+                "Collapses the browse set to exactly these registries and browses them unfiltered — a configured `include`/`exclude` does not apply"
+            ),
+            "--registry must say it discards the filter; got:\n{collapsed}"
+        );
+    }
 
     #[test]
     fn output_format_default_is_plain() {
