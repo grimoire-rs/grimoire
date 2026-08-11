@@ -95,7 +95,21 @@ research-axes:
 
 ## Memory
 
-- **Active plan:** `.agents/plans/plan_registry_browse_filters.md`
+- **Active plan:** `.agents/plans/plan_registry_filter_fixes.md` — the fix
+  loop for `feat/registry-set-verb` plus two new designs (dual-candidate
+  matching, `--clear-include`/`--clear-exclude`). Planned 2026-08-11 at tier
+  high, `architect=on research=1 adversary=on`. Design record
+  `.agents/adr/adr_registry_filter_match_candidate.md` (supersedes
+  `adr_registry_browse_filters.md` § D3 and two of its rejected
+  alternatives); contracts `.agents/specs/design_registry_filter_candidate.md`
+  (C-001…C-030, S-001…S-022b); research
+  `.agents/research/research_registry_filter_candidate.md`. Input: the merged
+  high-tier review `.agents/handover_registry_set_review.md` (6 Block, 13
+  High, 12 Warn across two independent reviews) and the owner's nine
+  decisions of 2026-08-11. 4 WPs in 3 waves, critical path WP-A → WP-C → WP-D.
+  `Step: /hex-execute .agents/plans/plan_registry_filter_fixes.md`.
+
+- **Previous plan:** `.agents/plans/plan_registry_browse_filters.md`
   (per-registry browse `include`/`exclude` glob filters + derived TUI
   tree-root label). Planned 2026-08-09 at tier medium,
   `architect=on research=1 adversary=on`. Design record
@@ -109,7 +123,11 @@ research-axes:
   contradicted nothing — it tried to falsify the Block and two Highs and
   could not, and added one in-scope Warn (X1, silent dedup).
   **Converged 2026-08-09:** ten fix WPs merged across waves 5–6; the Block,
-  all 5 High and all 19 Warn addressed. `Step: awaiting /hex-review`.
+  all 5 High and all 19 Warn addressed. **Reviewed again 2026-08-11 at tier
+  high on `feat/registry-set-verb`** (the branch carrying its follow-on work):
+  Request Changes, findings merged into
+  `.agents/handover_registry_set_review.md` and planned as
+  `plan_registry_filter_fixes`. `Step: finalized`.
 
 ### Execution learnings, 2026-08-09 (for the next `/hex-execute`)
 
