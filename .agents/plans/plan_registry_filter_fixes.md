@@ -5,8 +5,42 @@
 - **Plan:** plan_registry_filter_fixes
 - **Parent plan:** meta-plan_promotion_1_0 (resume after `Step: finalized`)
 - **Active phase:** 1 — Execution (waves 1–3)
-- **Step:** `/hex-execute → Review-Fix Loop`
-- **Last update:** 2026-08-11 (waves 1–2 complete: **WP-C merged** (`b7e00d8`),
+- **Step:** finalized
+- **Last update:** 2026-08-11, at the `feat/registry-set-verb` tip (**finalized**:
+  `/hex-review` skipped by
+  owner decision — this plan was itself produced from a merged high-tier review,
+  so the review gate was already satisfied. `/finalize` rewrote `main..HEAD` from
+  21 non-merge commits (plus 5 merge commits) into **15** Conventional Commits
+  that fast-forward onto `main` (`a03e597`). The rewrite is content-identical:
+  the tree hash before and after is `bb7634a4`, and `git diff` across the rewrite
+  is empty. Three shaping decisions: the false `feat(config)!` breaking marker was
+  dropped (browse filters never shipped — `registry_filter.rs` is absent from
+  `v0.12.1` and that tag's `declaration.rs` declares no `include`/`exclude`),
+  along with its `BREAKING CHANGE` footer whose index-entry migration advice the
+  dual-candidate rule had already invalidated; WP-C's deliberately-red Specify
+  commit was squashed with its implementation so no commit in the range fails its
+  own tests; and the eight `docs(agents)` artifact commits became `chore(agents)`
+  so process history stays out of the changelog. Four pre-session commits were
+  missing `Signed-off-by`, which every commit on `main` carries — added, so all
+  15 now carry exactly one. `task --force verify` green on the rewritten history:
+  990 acceptance tests.
+  **Post-rebase SHAs** — the merge commits the table below cites no longer exist:
+  WP-A `61fb12e`, WP-B `4161ce3`, WP-C `d977ed9`, WP-D `c07b4bc`, adversary fixes
+  `1a6fd68`.
+  Earlier: **all four work packages merged**; `task --force
+  verify` green after each — 990 acceptance tests, 2612 unit tests. WP-D's panel
+  (doc, spec, quality, architect) returned four Blocks, every one a record
+  asserting the inverse of shipped behaviour: `json-interface.md` claimed the
+  write report's `value` tracks whether the locator *changed* when it echoes the
+  flag, with the covering test never exercising the same-locator case and its
+  name repeating the error; the superseding ADR's own migration checklist was
+  two-thirds undone, leaving two *Alternatives Considered* entries recording the
+  shipped matcher as rejected; "deduped by url" survived in three homes after
+  WP-A changed the key; and the C-031 guarantor comment — written from an
+  orchestrator error — was wrong in five homes. Spec-level convergence: **53 of
+  55 IDs fully discharged**, 0 missing, 0 unrequested, 1 contradicts (fixed),
+  1 partial (S-006, unfalsifiable by construction). Earlier: **WP-C merged**
+  (`b7e00d8`),
   `task --force verify` green — 990 acceptance tests. Its five-perspective panel
   (spec 18/18 with 13 mutations, quality `pass`, plus architect, security, doc)
   found **one Block, confirmed three times independently**: the flat
@@ -29,9 +63,10 @@
   transpositions become type errors) — the reorder is kept for the weaker
   reason. Two contracts added during execution (C-031, C-032) and fifteen edge
   cases resolved as E-1…E-15. WP-C is in Specify)
-- **State:** executing
+- **State:** done
 - **Tier:** high
-- **Next:** `/hex-execute .agents/plans/plan_registry_filter_fixes.md`
+- **Next:** none — branch is land-ready; the human decides the push and the
+  fast-forward onto `main`.
 
 ---
 
@@ -122,7 +157,7 @@ S-019 … S-022b (identity) — full text in the design spec.
 | **WP-A** | The dual-candidate matcher, every call site, and the identity **type**. **C-001…C-011, C-022, C-023, C-027, C-029, C-030; S-001…S-011.** Includes the two-host fixture (C-009, land first within the WP), `RowSource` + `row_source_of` + both `key()` methods (C-022/C-023), and the `CatalogGroup.alias` lint removal (C-027) — so cluster C never touches these files. | `src/config/registry_filter.rs`, `src/catalog/catalog_service.rs`, `src/config/registry_resolve.rs`, `src/command/search.rs`, `src/tui/tree.rs`, `test/tests/test_index_source.py`, plus C-011's two verbatim copies at `docs/src/configuration.md:491` and `docs/src/commands.md:743` (E-13 — the parity test cannot pass across a wave boundary) | L | 1 | — | panel | **merged** (`bdd32f6`, merge `244743b`) |
 | **WP-B** | `--clear-include`/`--clear-exclude`, the surviving-mutant Block, and the `fields` write-report array. **C-013…C-021; S-012…S-018.** Touches no string that states cluster A's rule — the `--help` text moved to WP-D — so this WP is genuinely wave-1-independent. | `src/command/config.rs`, `src/api/config_report.rs`, `src/api.rs` (the three new type re-exports only — E-9) | M | 1 | — | panel | **merged** (`bd8c6b5`, merge `8095988`) |
 | **WP-C** | Registry identity in the TUI: adopt `RowSource` as `TuiRow.source`, the health-line regression, `c019_filter_emptied`, the producer pin, the collision fix. **C-024, C-025, C-026, C-028; S-019…S-022b.** | `src/tui/**` — chiefly `app.rs`, `state.rs`, `render.rs`, `tree.rs`, `detail.rs`, plus the mechanical `TuiRow.source` fixture updates in `event.rs` and `update_check.rs` (E-15). Also deletes WP-A's four `#[allow(dead_code)]` in `src/config/registry_resolve.rs` and `src/catalog/catalog_service.rs` — the one declared cross-package exception (E-11) | M | 2 | WP-A | panel | **merged** (`42d14f3`, merge `b7e00d8`) |
-| **WP-D** | Records and published surfaces, written from the landed code. **C-012** — its first-paragraph obligation on every restatement surface, **including the live `--help` text at `src/command/config.rs:104-116`** — plus **C-032** (the three surfaces this change invalidates: the `json-interface.md` write-report shape, the two clear flags in `commands.md`, and `registry set` in the catalog reference), the rule files and the ADR/plan amendments. Carries no S-ID: every scenario is pinned by the WP that implements it, and this WP changes no behaviour. | `src/command/config.rs` (the `--include`/`--exclude` doc comments and their pinning test only), `src/config/declaration.rs`, `src/command/config_keys.rs`, `docs/src/configuration.md`, `docs/src/commands.md`, `docs/src/json-interface.md` (E-9), `catalog/skills/grim-usage/references/registries.md`, `test/tests/test_registries.py` (the `_ns_rel` docstring only — C-032), `.claude/rules/arch-principles.md`, `.claude/rules/subsystem-cli-commands.md`, `.agents/adr/adr_registry_browse_filters.md`, `.agents/plans/plan_registry_browse_filters.md`, `.agents/adr/adr_registry_default_dedup.md`, **`.agents/adr/adr_multi_registry_mcp.md`** (E-18) | M | 3 | WP-A, WP-B, WP-C | panel | pending |
+| **WP-D** | Records and published surfaces, written from the landed code. **C-012** — its first-paragraph obligation on every restatement surface, **including the live `--help` text at `src/command/config.rs:104-116`** — plus **C-032** (the three surfaces this change invalidates: the `json-interface.md` write-report shape, the two clear flags in `commands.md`, and `registry set` in the catalog reference), the rule files and the ADR/plan amendments. Carries no S-ID: every scenario is pinned by the WP that implements it, and this WP changes no behaviour. | `src/command/config.rs` (the `--include`/`--exclude` doc comments and their pinning test only), `src/config/declaration.rs`, `src/command/config_keys.rs`, `docs/src/configuration.md`, `docs/src/commands.md`, `docs/src/json-interface.md` (E-9), `catalog/skills/grim-usage/references/registries.md`, `test/tests/test_registries.py` (the `_ns_rel` docstring only — C-032), `.claude/rules/arch-principles.md`, `.claude/rules/subsystem-cli-commands.md`, `.agents/adr/adr_registry_browse_filters.md`, `.agents/plans/plan_registry_browse_filters.md`, `.agents/adr/adr_registry_default_dedup.md`, **`.agents/adr/adr_multi_registry_mcp.md`** (E-18), plus the round-1 widening: `.agents/adr/adr_grim_config_command.md`, `.agents/plans/plan_registry_browse_filters.md`, `.claude/rules/arch-principles.md`, `docs/src/upgrading.md`, and the C-031 guarantor comment in `src/config/registry_filter.rs`, `src/catalog/catalog_service.rs`, `src/config/registry_resolve.rs` (E-19) | M | 3 | WP-A, WP-B, WP-C | panel | **merged** (`23f0c71`, merge `a787702`) |
 
 **ID coverage.** C-001…C-032 and S-001…S-022 (plus S-022b) each appear in
 exactly one Scope cell above; no ID is uncovered and none is claimed twice.
@@ -287,6 +322,23 @@ from inside a worktree about to be removed. Each worktree needs
 `git submodule update --init --recursive` after `git worktree add`, and the
 commit hook wants its marker at `<worktree>/.claude/hooks/.state/commit-verified`
 (`mkdir -p` first).
+
+## Deferred findings — carried out of execution, for the owner
+
+None blocks landing. Each was found by a review perspective, verified, and
+deliberately not fixed in this plan's scope.
+
+| # | Finding | Why deferred |
+|---|---|---|
+| 1 | **`registry set` is recorded in no ADR.** It shipped at `d9f3be4` and WP-B extended it; `adr_grim_config_command.md` predates `--oci`/`--index`, `fields` and `set`. WP-D added a dated drift note pointing at `subsystem-cli-commands.md`, but writing an ADR for a released CLI surface is an **owner decision**, not a fix-pass action | needs a decision, not an edit |
+| 2 | **Three TUI surfaces bypass `sanitize_member_label`** while the health line escapes it (CWE-451, misrepresentation via bidi/zero-width in a config alias). Reproduced under a PTY. **Inherited** — byte-identical at the merge base | own issue; expanding WP-C's cell would have hidden it in a feature diff |
+| 3 | **`registry_labels` is now redundant state** — its key set is exactly `registry_order` and every value is recomputable, so `label_from_root_key`'s `alias:` branch is unreachable in production and a test exists only to keep two renderers in step. Deleting it is constrained: `render.rs`'s `contains_key` membership test is load-bearing for non-registry groups | predates this plan; a decision, not an accident |
+| 4 | **`KeySpec.description` overruns `subsystem-config-keys.md`'s ~160-char budget** (include/exclude now 643 chars). C-012 requires the new sentence to be there — `grim config registry fields` reads only `KeySpec`. Fixing the budget means moving *other* sentences into the `declaration.rs` continuation | separate change; the new sentence must stay |
+| 5 | **S-006 is `partial`** — pinned by a single positive assertion, not a before/after locator edit. The scenario is unfalsifiable by construction: `matches` has no locator parameter, so a locator edit cannot re-aim a pattern | a token, not a guard; nothing to strengthen |
+| 6 | **Two inert-and-removed constructs are unguarded against reintroduction** — the `registry_order` attribution fold and the `default_registry` chain entry. Re-adding either leaves the suite green | a guard would assert dead code stays absent |
+| 7 | **`TreeBuildOptions` takes two vectors that must stay index-aligned**, with `usize::MAX` as a silent absorber for a miss. `RegistryDisplay` exists to prevent that drift and is splatted into four independent fields one line later | Two Hats — a design change, not a fix |
+| 8 | **`TuiAction::ToggleScope` leaves rows and roots from different scopes.** Verified: `set_rows` has one production call site (`app.rs:1198`, in `apply_catalog_results`), so a toggle re-seeds `default_registry` and `registry_order` (scope B) while rows, `registry_locators` and `registry_labels` stay scope A's. Found by the cross-model adversary, graded Block by it; **downgraded after verification** — display-only, pre-existing in kind, and `docs/src/stability.md:129` excludes TUI appearance from the freeze | the one-line fix makes it **worse** (attributing A's rows against B's locators); the correct fix is reloading the catalog on toggle, a design change. Two builders independently agreed with the downgrade |
+| 9 | **"N update(s) available" now counts views, not artifacts.** After the adversary fix, an artifact visible through two views of one locator contributes 2 to the tally. Self-consistent with `outdated_count`'s documented "how many rows", but a user with a duplicated locator sees a number larger than their artifact count. Nobody has explicitly decided which the tally should report | an unmade display decision, not a defect; a one-line dedup inside `outdated_count` if artifact-counting is wanted |
 
 ## Constitution check
 

@@ -95,23 +95,39 @@ research-axes:
 
 ## Memory
 
-- **Active plan:** `.agents/plans/plan_registry_filter_fixes.md` — the fix
+- **Active plan:** `.agents/plans/meta-plan_promotion_1_0.md` — resumed as
+  parent now that the registry-filter fix loop is `Step: finalized`.
+
+- **Previous plan:** `.agents/plans/plan_registry_filter_fixes.md` — the fix
   loop for `feat/registry-set-verb` plus two new designs (dual-candidate
   matching, `--clear-include`/`--clear-exclude`). Planned 2026-08-11 at tier
   high, `architect=on research=1 adversary=on`. Design record
   `.agents/adr/adr_registry_filter_match_candidate.md` (supersedes
   `adr_registry_browse_filters.md` § D3 and two of its rejected
   alternatives); contracts `.agents/specs/design_registry_filter_candidate.md`
-  (C-001…C-030, S-001…S-022b); research
+  (C-001…C-032, S-001…S-023); research
   `.agents/research/research_registry_filter_candidate.md`. Input: the merged
   high-tier review `.agents/handover_registry_set_review.md` (6 Block, 13
   High, 12 Warn across two independent reviews) and the owner's nine
   decisions of 2026-08-11. 4 WPs in 3 waves, critical path WP-A → WP-C → WP-D.
-  `Step: /hex-execute .agents/plans/plan_registry_filter_fixes.md`.
+  **Executed 2026-08-11** at tier high — all four WPs merged, each behind a
+  full `task --force verify`. Panels found four Blocks, every one a record or
+  contract asserting the inverse of shipped behaviour; the cross-model
+  adversary (`codex:rescue`) then found a fifth defect at a package seam no
+  single panel could see (`mark_outdated_if_installed` flipped only the first
+  of two rows sharing a repo) and its own headline Block was downgraded after
+  verification. Spec convergence 53/55 IDs. **`/hex-review` skipped by owner
+  decision** — the plan was itself produced from a merged high-tier review.
+  **Finalized 2026-08-11** at the `feat/registry-set-verb` tip: 21 non-merge +
+  5 merge commits rewritten
+  to 15, content-identical (tree `bb7634a4` before and after). Nine deferred
+  findings are tabled in the plan for the owner.
+  `Step: finalized`.
 
-- **Previous plan:** `.agents/plans/plan_registry_browse_filters.md`
+- **Earlier plan:** `.agents/plans/plan_registry_browse_filters.md`
   (per-registry browse `include`/`exclude` glob filters + derived TUI
-  tree-root label). Planned 2026-08-09 at tier medium,
+  tree-root label). Its § D3 and two rejected alternatives are superseded by
+  the fix loop above. Planned 2026-08-09 at tier medium,
   `architect=on research=1 adversary=on`. Design record
   `.agents/adr/adr_registry_browse_filters.md` (D1–D13); evidence
   `.agents/research/research_registry_browse_filters.md`. **Executed
