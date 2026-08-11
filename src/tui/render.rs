@@ -16,6 +16,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::config::registry_resolve::RowSource;
+
 use super::detail::{
     DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REGISTRY, W_REPO, W_STATUS, W_TAG, catalog_width,
     detail_lines, scroll_max, viewport,
@@ -354,18 +356,6 @@ fn fit_hint(tiers: &[String], avail: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Drop a leading `default_registry/` from a reference for display only
-/// (the stored `repo` keeps the full reference for search and actions).
-fn strip_default_registry<'a>(repo: &'a str, default_registry: Option<&str>) -> &'a str {
-    if let Some(reg) = default_registry
-        && let Some(rest) = repo.strip_prefix(reg)
-        && let Some(rest) = rest.strip_prefix('/')
-    {
-        return rest;
-    }
-    repo
-}
-
 /// The Tag-column cell for a "Local" row (path declaration or dev record): the
 /// short content hash (`version`), since a local artifact has no registry tag.
 /// The path itself renders in the Repo cell. A not-installed row carries no
@@ -397,7 +387,7 @@ fn render_leaf(
     // path shows in the Repo cell).
     let tag_cell = match &r.pinned_version {
         Some(p) => format!("*{p}"),
-        None if r.source.as_deref() == Some("Local") => local_tag_cell(r),
+        None if matches!(r.source, RowSource::Local) => local_tag_cell(r),
         None if !r.version.is_empty() => r.version.clone(),
         None => r.latest_tag.clone(),
     };
@@ -604,7 +594,14 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 
     let mut lines = vec![
         DetailLine::Blank,
-        DetailLine::Identifier(key.clone()),
+        // Through `registry_label`, not raw: at depth 0 the node key IS the
+        // group's root key, and a registry root's key is TAGGED
+        // (`"alias:acme/ghcr.io/acme"`) — drawn verbatim it puts the internal
+        // encoding on the screen, which `RowSource::root_key`'s own contract
+        // forbids. For every other group the key is untagged, and
+        // `registry_label` passes an untagged key through unchanged, so the
+        // cumulative path a deeper group shows is unaffected.
+        DetailLine::Identifier(state.registry_label(key)),
         DetailLine::Blank,
         DetailLine::SectionLabel("Group Summary:"),
         DetailLine::Blank,
@@ -750,32 +747,33 @@ pub fn frame(state: &TuiState) -> RenderModel {
         // display label (alias or URL) and shorten Repo to the registry-relative
         // `repository` path.  Single-registry behavior is unchanged (D-ELIDE).
         let multi = state.is_multi_registry();
+        // The attribution set, hoisted out of the per-row closure: it is one
+        // value for the whole frame, and it is exactly what `tree::build`
+        // passes to the same `display_split` (E-15.1 — `default_registry` is a
+        // root key, so chaining it in here would be inert).
+        let configured: Vec<&str> = state.registry_locators.iter().map(String::as_str).collect();
         state
             .filtered
             .iter()
             .enumerate()
             .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
             .map(|(pos, i, r)| {
+                // The row's `(root, path)` split — the same seam the tree uses,
+                // so the Registry column and the shortened Repo cell attribute
+                // identically to it. Using `r.registry` directly would show the
+                // bare host and an un-shortened repo.
+                let (root, path) = super::tree::display_split(r, &configured);
                 let (repo_text, registry): (std::borrow::Cow<str>, Option<String>) = if multi {
-                    // Attribute the bare-host row to its configured registry (the
-                    // same split the tree uses): show that registry's label and
-                    // shorten Repo to the path relative to it. Using `r.registry`
-                    // directly would show the bare host and an un-shortened repo.
-                    let configured: Vec<&str> = state
-                        .registry_locators
-                        .iter()
-                        .chain(state.registry_order.iter())
-                        .map(String::as_str)
-                        .chain(state.default_registry.as_deref())
-                        .collect();
-                    let (reg, rel) = super::tree::display_split(r, &configured);
-                    (std::borrow::Cow::Owned(rel), Some(state.registry_label(&reg)))
+                    (std::borrow::Cow::Owned(path), Some(state.registry_label(&root)))
+                } else if Some(root.as_str()) == state.default_registry.as_deref() {
+                    // D-ELIDE, by the same root-key equality `tree::segments`
+                    // applies. It must NOT be a `strip_prefix` on `repo`:
+                    // `default_registry` is a ROOT KEY (`"locator:ghcr.io/acme"`),
+                    // which can never prefix a reference, so a literal strip
+                    // would leave every Repo cell rendering its full reference.
+                    (std::borrow::Cow::Owned(path), None)
                 } else {
-                    // Single-registry: existing elision behavior (D-ELIDE).
-                    (
-                        std::borrow::Cow::Borrowed(strip_default_registry(&r.repo, state.default_registry.as_deref())),
-                        None,
-                    )
+                    (std::borrow::Cow::Borrowed(r.repo.as_str()), None)
                 };
                 render_leaf(r, &repo_text, pos == state.selected, state.is_row_marked(i), registry)
             })
@@ -819,19 +817,21 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // a 0/0 root is 0/0 — the CLI's C-019 warning is a `tracing::warn!`, and
     // the whole alt-screen session's tracing output goes to `$GRIM_HOME/tui.log`.
     // P2: short-circuit to avoid any allocation when every list is empty.
-    // SEC1: map each URL through `sanitize_member_label` before joining so
-    // registry URLs from the catalog cannot inject terminal escape sequences.
+    // SEC1: map each name through `sanitize_member_label` before joining so
+    // registry names from the catalog cannot inject terminal escape sequences.
     let registry_health_status = {
         let h = &state.registry_health;
         if h.offline.is_empty() && h.truncated.is_empty() && h.filtered.is_empty() {
             String::new()
         } else {
-            // B: show the alias-based label (SEC1: sanitize against escape injection).
-            let clause = |label: &str, urls: &[String]| {
-                (!urls.is_empty()).then(|| {
-                    let names: Vec<String> = urls
+            // B: show the alias-based label (SEC1: sanitize against escape
+            // injection). The lists hold ROOT KEYS, not urls (C-024), so the
+            // `registry_label` hop is what keeps the tag off the screen.
+            let clause = |label: &str, keys: &[String]| {
+                (!keys.is_empty()).then(|| {
+                    let names: Vec<String> = keys
                         .iter()
-                        .map(|url| sanitize_member_label(&state.registry_label(url)))
+                        .map(|key| sanitize_member_label(&state.registry_label(key)))
                         .collect();
                     format!("{label}: {}", names.join(", "))
                 })
@@ -1592,7 +1592,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1624,7 +1624,7 @@ mod tests {
     #[test]
     fn render_leaf_local_row_tag_cell_shows_hash_not_registry_tag() {
         let mut r = row("ghcr.io/should-be-ignored", ArtifactState::Installed);
-        r.source = Some("Local".to_string());
+        r.source = RowSource::Local;
         r.repository = "./local-skill".to_string();
         r.version = "deadbee1".to_string();
         r.latest_tag = "latest".to_string();
@@ -1643,7 +1643,7 @@ mod tests {
     #[test]
     fn local_tag_cell_empty_hash_shows_placeholder() {
         let mut r = row("ghcr.io/should-be-ignored", ArtifactState::NotInstalled);
-        r.source = Some("Local".to_string());
+        r.source = RowSource::Local;
         r.repository = "./local-skill".to_string();
         r.version = String::new();
         r.pinned_version = None;
@@ -2426,6 +2426,57 @@ mod tests {
         }
     }
 
+    // SEC-W1: the group detail pane draws the selected node's key. At depth 0
+    // that key is the group's ROOT KEY, and a registry root's root key is
+    // tagged — so drawing it raw put `alias:acme/ghcr.io/acme` on the first
+    // frame of a real session, falsifying `RowSource::root_key`'s "a tagged
+    // key must never be displayed" and `registry_label`'s "can never leak to
+    // the screen through it". Routing through `registry_label` is what makes
+    // both true.
+    #[test]
+    fn tree_group_detail_identifier_never_shows_a_tagged_root_key() {
+        let sourced = |repo: &str| TuiRow {
+            source: RowSource::Alias {
+                alias: "acme".to_string(),
+                locator: "ghcr.io/acme".to_string(),
+            },
+            ..row(repo, ArtifactState::Installed)
+        };
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Tree;
+        s.set_rows(vec![
+            sourced("ghcr.io/acme/skills/alpha"),
+            sourced("ghcr.io/acme/skills/beta"),
+        ]);
+        s.set_registry_order(vec!["alias:acme/ghcr.io/acme".into(), "locator:ghcr.io/other".into()]);
+        s.set_registry_locators(vec!["ghcr.io/acme".into(), "ghcr.io/other".into()]);
+        s.set_registry_labels(
+            [("alias:acme/ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        // Position 0 is the registry root — the node whose key carries the tag.
+        s.selected = 0;
+        assert!(s.selected_is_group(), "position 0 must be the registry-root group");
+
+        let identifier = frame(&s)
+            .detail
+            .iter()
+            .find_map(|l| match l {
+                DetailLine::Identifier(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("the group detail pane always opens with an Identifier line");
+        assert_eq!(
+            identifier, "acme (ghcr.io/acme)",
+            "the registry root's Identifier must be its display label"
+        );
+        assert!(
+            !identifier.contains("alias:") && !identifier.contains("locator:"),
+            "no internal root-key tag may reach the screen: {identifier:?}"
+        );
+    }
+
     // Group-row col 3 must show the status glyph for rollup.worst(), NOT a
     // second copy of the rollup label. For an unmarked group, no mark prefix.
     // For a marked group (all descendants), the mark glyph prefixes it.
@@ -2793,7 +2844,7 @@ mod p2_render_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -2816,7 +2867,7 @@ mod p2_render_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -2982,7 +3033,7 @@ mod spec_multi_registry_render_tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -3334,6 +3385,9 @@ mod spec_multi_registry_render_tests {
             row_with_reg("localhost:5051", "tools/skills/b", ArtifactState::NotInstalled),
         ]);
         s.set_registry_order(vec!["localhost:5050/grimoire".into(), "localhost:5051/tools".into()]);
+        // E-15.1: the flat renderer attributes through `registry_locators`
+        // alone now that the `registry_order` fold is gone.
+        s.set_registry_locators(vec!["localhost:5050/grimoire".into(), "localhost:5051/tools".into()]);
         assert_eq!(s.view_mode, ViewMode::Flat);
         let m = frame(&s);
         assert!(

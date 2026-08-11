@@ -32,6 +32,7 @@ use crate::command::uninstall::undeclare_and_unlock;
 use crate::config::declaration::{ConfigOptions, DesiredSet};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
+use crate::config::registry_resolve::RowSource;
 use crate::config::scope::ConfigScope;
 use crate::config::{ResolvedOptions, ResolvedRegistry};
 use crate::env::grim_home;
@@ -913,11 +914,20 @@ fn drain_bundle_member_checks(
 ///
 /// Deferred Workstream-E scaffolding: the only producer of
 /// [`CheckMsg::CatalogReady`] is [`UpdateChecker::spawn_catalog_refresh`], a
-/// single-registry path `arm_background_checks` does not yet arm (the TUI's
-/// migration onto the multi-registry `catalog_service::load_catalog` seam is the
-/// deferred follow-up). This consumer + its `Catalog`-shaped sibling
-/// [`rows_from_catalog`] are retained, tested, and kept current (C4
-/// registry/repository fields) so re-arming is a one-line change, not a rebuild.
+/// single-registry path `arm_background_checks` does not yet arm. This
+/// consumer + its `Catalog`-shaped sibling [`rows_from_catalog`] are retained
+/// and tested, but **re-arming is no longer a one-line change**: migrating onto
+/// the multi-registry `catalog_service::load_catalog` seam
+/// (`adr_multi_registry_mcp.md` §1) is now a **precondition**, not a follow-up.
+///
+/// `rows_from_catalog` leaves every row [`RowSource::Unattributed`], and
+/// [`TuiState::merge_catalog_rows`] ends in `set_rows(fresh)` without touching
+/// `registry_order` / `registry_locators` / `registry_labels`. Arming this path
+/// as it stands would therefore turn *every* row unattributed against a
+/// `registry_order` full of tagged keys: each configured registry would render
+/// as an empty `0/0` D-EMPTY root beside a parallel bare-locator root holding
+/// all the rows — the same registry twice, one at 0/0, sorted to `usize::MAX`
+/// and missing its alias.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
         load_scope_for_badges(ctx);
@@ -1042,7 +1052,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 .collect();
             // Append the "Local" root: path-declared artifacts + dev records.
             // Sourced from the already-loaded declaration + install state (no
-            // extra registry I/O); each row carries `source = Some("Local")`
+            // extra registry I/O); each row carries `source = RowSource::Local`
             // so `tree::display_split` roots it under the Local group.
             rows.extend(local_rows(&config, lock.as_ref(), &install_state));
             apply_catalog_results(
@@ -1071,20 +1081,26 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
 ///
 /// `filtered` is this front-end's channel for the plan C-019 diagnostic — see
 /// [`c019_filter_emptied`], the single place that decides it.
+///
+/// All three lists hold **root keys** ([`RowSource::root_key`], C-024), the
+/// space [`registry_labels`] is keyed in — not raw locators. `render::frame`
+/// renders each element through [`TuiState::registry_label`], so a locator
+/// would miss the label map and print the bare url where the alias belongs.
 fn aggregate_registry_health(
     groups: &[catalog_service::CatalogGroup],
     registries: &[ResolvedRegistry],
 ) -> super::state::RegistryHealth {
     let mut health = super::state::RegistryHealth::default();
     for g in groups {
+        let key = g.key().root_key();
         if g.served_offline {
-            health.offline.push(g.registry.clone());
+            health.offline.push(key.clone());
         }
         if g.truncated {
-            health.truncated.push(g.registry.clone());
+            health.truncated.push(key.clone());
         }
         if c019_filter_emptied(g, registries) {
-            health.filtered.push(g.registry.clone());
+            health.filtered.push(key);
         }
     }
     health
@@ -1141,9 +1157,14 @@ fn c019_filter_emptied(group: &catalog_service::CatalogGroup, registries: &[Reso
     if !group.rows.is_empty() || group.rows_before_filter == 0 {
         return false;
     }
+    // C-025: resolve the entry by its ROOT KEY, not its locator. One file may
+    // declare a locator twice to split it into two filtered views; a
+    // locator-only lookup hands both groups the FIRST entry's filter, so the
+    // narrow view's verdict silently becomes the wide view's.
+    let key = group.key();
     registries
         .iter()
-        .find(|r| r.url == group.registry)
+        .find(|r| r.key() == key)
         .is_some_and(|r| !r.filter.include_patterns().is_empty() || !r.filter.exclude_patterns().is_empty())
 }
 
@@ -1217,7 +1238,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
     // and not the locator: one file may declare a locator twice to split it
     // into two filtered views, and re-deriving the root from the row's own
     // reference cannot tell those two apart — both views' rows look alike.
-    let source = source_key(group.alias.as_deref(), &group.registry);
+    let source = group.key();
     group
         .rows
         .iter()
@@ -1245,7 +1266,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
                 pinned_version: None,
                 state: row_state,
-                source: Some(source.clone()),
+                source: source.clone(),
             }
         })
         .collect()
@@ -1302,7 +1323,7 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 state: row_state,
                 // The background refresh walks a single OCI registry
                 // (`_catalog`); index sources never flow through this path.
-                source: None,
+                source: RowSource::Unattributed,
             }
         })
         .collect()
@@ -1496,7 +1517,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         // `pinned()` is always `None`), so `derive_row_state` would misread it
         // as `NotInstalled`. Re-derive it the way `local_rows` does, keyed on
         // the binding name (`repo`) instead.
-        r.state = if r.source.as_deref() == Some("Local") {
+        r.state = if matches!(r.source, RowSource::Local) {
             let kind = row_kind(&r.kind);
             let locked = locked_by_name.get(&(kind, r.repo.as_str())).copied();
             let locked_bundle = local_locked_bundle(lock.as_ref(), kind, &r.repo);
@@ -1720,7 +1741,7 @@ fn load_scope_for_badges(
 
 /// Synthesize the TUI rows for the "Local" root group.
 ///
-/// Two row sources, each tagged `source = Some("Local")` so
+/// Two row sources, each tagged `source = RowSource::Local` so
 /// [`super::tree::display_split`] roots them under the "Local" group and the
 /// registry attribution never fabricates an OCI host:
 ///
@@ -1822,8 +1843,8 @@ fn index_local_lock_entries(
 /// hash so the detail pane's `Path:`/`Hash:` rows render (never a registry
 /// tag); `repo` carries the config binding name — the routing key
 /// [`perform_local`]/[`perform_local_uninstall`] read back. `source =
-/// Some("Local")` roots the row under the Local group and keeps it out of the
-/// registry-only guards.
+/// RowSource::Local` roots the row under the Local group and keeps it out of
+/// the registry-only guards.
 fn local_row(
     kind: ArtifactKind,
     name: &str,
@@ -1852,7 +1873,7 @@ fn local_row(
         version,
         pinned_version: None,
         state: local_row_state(locked, locked_bundle, kind, name, install_state),
-        source: Some("Local".to_string()),
+        source: RowSource::Local,
     }
 }
 
@@ -2173,7 +2194,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     // A "Local" row deletes through the local seam: undeclare a path
     // declaration (config + lock) or drop a dev record — never the
     // registry-uninstall path below, which keys on a registry identity.
-    if row.source.as_deref() == Some("Local") {
+    if matches!(row.source, RowSource::Local) {
         return perform_local_uninstall(ctx, row);
     }
 
@@ -2288,7 +2309,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 
 /// Delete a "Local" row (path declaration or dev record).
 ///
-/// Dispatched from [`perform_uninstall`] when `row.source == Some("Local")`:
+/// Dispatched from [`perform_uninstall`] when `row.source == RowSource::Local`:
 ///
 /// - a **declared path** row is undeclared through the `remove` seam (config +
 ///   lock) and its materialized files are removed, and
@@ -2391,7 +2412,7 @@ async fn perform(
     // A "Local" row carries no registry identity (path declaration or dev
     // record), so it must route to the local seam BEFORE the empty-`registry`
     // guard below — that guard would otherwise reject it as malformed.
-    if row.source.as_deref() == Some("Local") {
+    if matches!(row.source, RowSource::Local) {
         return perform_local(ctx, row, is_update, progress, force).await;
     }
 
@@ -2483,7 +2504,7 @@ async fn perform(
 
 /// Install / update a "Local" row (path declaration or dev record).
 ///
-/// Dispatched from [`perform`] when `row.source == Some("Local")`, ahead of the
+/// Dispatched from [`perform`] when `row.source == RowSource::Local`, ahead of the
 /// registry-only path:
 ///
 /// - a **declared path** row re-materializes through the declared-install seam
@@ -2976,27 +2997,18 @@ impl RegistryDisplay {
     }
 }
 
-/// The tree-root key for one resolved source: its alias, or its locator when
-/// it declared none.
-///
-/// The key is an **entry** identity, not a locator, because one config file
-/// may declare a locator twice to split it into two filtered views — a wide
-/// entry beside a narrow one. Keying roots by locator merged those two views
-/// into one root that then took whichever alias the label map happened to
-/// keep, which is the whole reason this is a named function and not
-/// `r.url.clone()` at three call sites.
-fn source_key(alias: Option<&str>, url: &str) -> String {
-    alias.map_or_else(|| url.to_string(), str::to_string)
-}
-
 /// The resolved sources' root keys in precedence order — the input the tree's
 /// multi-registry root ordering (F13) and empty-registry roots (D-EMPTY)
 /// consume via [`TuiState::set_registry_order`].
+///
+/// The key is an **entry** identity, not a locator, because one config file
+/// may declare a locator twice to split it into two filtered views — a wide
+/// entry beside a narrow one. It comes from
+/// [`ResolvedRegistry::key`]/[`RowSource::root_key`] (C-023) rather than a
+/// local helper, so the tree, the labels and the health line cannot drift
+/// from `CatalogGroup`'s answer to the same question.
 fn registry_order(ctx: &TuiContext) -> Vec<String> {
-    ctx.registries
-        .iter()
-        .map(|r| source_key(r.alias.as_deref(), &r.url))
-        .collect()
+    ctx.registries.iter().map(|r| r.key().root_key()).collect()
 }
 
 /// The resolved sources' locators — what [`crate::tui::tree::display_split`]
@@ -3011,8 +3023,10 @@ fn registry_locators(ctx: &TuiContext) -> Vec<String> {
 /// is configured the label is `"{alias} ({url})"`; with no alias the url is
 /// both key and label (matching [`TuiState::registry_label`]'s fallback).
 ///
-/// Keyed by [`source_key`], not by url: two entries over one locator are two
-/// roots with two labels, and a url key can only hold one of them.
+/// Keyed by [`RowSource::root_key`], not by url: two entries over one locator
+/// are two roots with two labels, and a url key can only hold one of them.
+/// `TuiState::registry_label`'s miss path reconstructs this exact string from
+/// an `alias:` key (E-10.1), so the two spellings must stay in step.
 ///
 /// Plan S-018: a configured `include`/`exclude` **never** reaches this — the
 /// browse filter narrows rows, it does not rename or re-prefix a tree root
@@ -3027,7 +3041,7 @@ fn registry_labels(registries: &[ResolvedRegistry]) -> BTreeMap<String, String> 
                 Some(alias) => format!("{alias} ({url})", url = r.url),
                 None => r.url.clone(),
             };
-            (source_key(r.alias.as_deref(), &r.url), label)
+            (r.key().root_key(), label)
         })
         .collect()
 }
@@ -3037,15 +3051,15 @@ fn registry_labels(registries: &[ResolvedRegistry]) -> BTreeMap<String, String> 
 /// each root names its own registry and namespaced roots stay
 /// distinguishable.
 ///
-/// The elided value is the source's own **root key** ([`source_key`]), not
-/// `ctx.primary_registry`: for an index-only set the primary is `""` (index
-/// locators cannot expand short ids), which would never match the rows'
-/// source root and the single-source session would keep a redundant root.
-/// It is the key rather than the locator for the same reason the roots are —
-/// elision compares against what the row roots at.
+/// The elided value is the source's own **root key**
+/// ([`RowSource::root_key`]), not `ctx.primary_registry`: for an index-only
+/// set the primary is `""` (index locators cannot expand short ids), which
+/// would never match the rows' source root and the single-source session
+/// would keep a redundant root. It is the key rather than the locator for the
+/// same reason the roots are — elision compares against what the row roots at.
 fn elision_registry(ctx: &TuiContext) -> Option<String> {
     match ctx.registries.as_slice() {
-        [only] => Some(source_key(only.alias.as_deref(), &only.url)),
+        [only] => Some(only.key().root_key()),
         _ => None,
     }
 }
@@ -3257,7 +3271,7 @@ async fn perform_member(
         deprecated: None,
         pinned_version: None,
         state: crate::tui::state::ArtifactState::NotInstalled,
-        source: None,
+        source: RowSource::Unattributed,
     };
     // Use the member's own binding name (its lock/install key) for the
     // declaration, not the repo basename — they differ when the bundle aliases
@@ -3571,7 +3585,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -3671,11 +3685,16 @@ mod tests {
     }
 
     // GAP-2 extension: apply_catalog_results propagates non-empty labels map.
+    //
+    // C-024: the fixture is built by `registry_labels()` and looked up by the
+    // entry's own `root_key()`, never by a hand-written url key. The
+    // hand-built url-keyed map this test used to carry is exactly the shape
+    // that let the health-line regression through — it agreed with itself
+    // while production keyed the map one way and read it another.
     #[test]
     fn apply_catalog_results_propagates_registry_labels() {
         let mut s = TuiState::new();
-        let mut labels = BTreeMap::new();
-        labels.insert("ghcr.io/acme".to_string(), "acme (ghcr.io/acme)".to_string());
+        let reg = aliased_source("acme", "ghcr.io/acme", &[], &[]);
         apply_catalog_results(
             &mut s,
             vec![],
@@ -3687,15 +3706,16 @@ mod tests {
             false,
             RegistryDisplay {
                 elision: None,
-                order: vec!["acme".into()],
-                locators: vec!["ghcr.io/acme".into()],
-                labels,
+                order: vec![reg.key().root_key()],
+                locators: vec![reg.url.clone()],
+                labels: registry_labels(std::slice::from_ref(&reg)),
             },
         );
         assert_eq!(
-            s.registry_label("ghcr.io/acme"),
+            s.registry_label(&reg.key().root_key()),
             "acme (ghcr.io/acme)",
-            "registry_labels must be propagated to TuiState by apply_catalog_results"
+            "registry_labels must be propagated to TuiState by apply_catalog_results, \
+             addressable by the same root key `registry_labels` keyed it under"
         );
     }
 
@@ -3789,7 +3809,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
-            source: None,
+            source: RowSource::Unattributed,
         };
         let rows = vec![row];
 
@@ -3815,7 +3835,7 @@ mod tests {
     //
     // Design record: local_bundles_tui_group plan, "TUI Local group" —
     // `local_rows` synthesizes rows for (a) declared path artifacts and
-    // (b) dev records, tagging both `source = Some("Local")`; a
+    // (b) dev records, tagging both `source = RowSource::Local`; a
     // registry-declared artifact in the same config contributes no row.
 
     #[test]
@@ -3852,7 +3872,7 @@ mod tests {
             "a path declaration and a dev record must each produce one Local row: {rows:?}"
         );
         assert!(
-            rows.iter().all(|r| r.source.as_deref() == Some("Local")),
+            rows.iter().all(|r| matches!(r.source, RowSource::Local)),
             "every row synthesized by local_rows must carry source = Some(\"Local\"): {rows:?}"
         );
     }
@@ -4064,7 +4084,7 @@ mod tests {
 
     // ── TUI Local group: action dispatch ──────────────────────────────────────
     //
-    // `perform`/`perform_uninstall` dispatch a `Some("Local")` row into
+    // `perform`/`perform_uninstall` dispatch a `RowSource::Local` row into
     // `perform_local`/`perform_local_uninstall` BEFORE the registry-only guards
     // (empty-registry / "malformed catalog repo"), since a Local row carries no
     // registry identity at all. Each test drives a Local row with empty
@@ -4075,7 +4095,7 @@ mod tests {
     async fn perform_routes_local_row_before_empty_registry_guard() {
         let (_tmp, ctx) = drain_test_ctx();
         let mut row = installed_row("dummy/x");
-        row.source = Some("Local".to_string());
+        row.source = RowSource::Local;
         row.registry = String::new();
         row.repository = String::new();
 
@@ -4094,7 +4114,7 @@ mod tests {
     fn perform_uninstall_routes_local_row_before_the_registry_only_guard() {
         let (_tmp, ctx) = drain_test_ctx();
         let mut row = installed_row("dummy/x");
-        row.source = Some("Local".to_string());
+        row.source = RowSource::Local;
         row.repository = String::new();
 
         let result = perform_uninstall(&ctx, &row);
@@ -4163,15 +4183,19 @@ mod tests {
             )
             .expect("fixture patterns compile"),
         };
-        let labels = registry_labels(&[filtered("ghcr.io/acme", Some("acme")), filtered("registry.corp", None)]);
+        let aliased = filtered("ghcr.io/acme", Some("acme"));
+        let bare = filtered("registry.corp", None);
+        let labels = registry_labels(&[aliased.clone(), bare.clone()]);
         assert_eq!(
-            // Keyed by root key — the alias here, since one is declared.
-            labels.get("acme").map(String::as_str),
+            // Keyed by the entry's own root key. Derived from `key()` rather
+            // than spelled out, so this pins the keying behaviour and leaves
+            // the encoding free at its one seam (E-15.2).
+            labels.get(&aliased.key().root_key()).map(String::as_str),
             Some("acme (ghcr.io/acme)"),
             "an aliased root keeps the alias + url label, with no filter prefix"
         );
         assert_eq!(
-            labels.get("registry.corp").map(String::as_str),
+            labels.get(&bare.key().root_key()).map(String::as_str),
             Some("registry.corp"),
             "an unaliased root stays the bare url"
         );
@@ -4246,6 +4270,26 @@ mod tests {
         }
     }
 
+    /// [`source`] with an alias declared — the shape whose root key is neither
+    /// its locator nor its alias, and therefore the only one that can tell a
+    /// key-keyed label map from a url-keyed one (C-024).
+    fn aliased_source(alias: &str, url: &str, include: &[&str], exclude: &[&str]) -> ResolvedRegistry {
+        ResolvedRegistry {
+            alias: Some(alias.to_string()),
+            ..source(url, include, exclude)
+        }
+    }
+
+    /// A [`catalog_service::CatalogGroup`] for `url` declaring `alias`, holding
+    /// `rows` rows. `..group(url, n)` at the call site for the offline /
+    /// truncated / emptied variants.
+    fn aliased_group(alias: &str, url: &str, rows: usize) -> catalog_service::CatalogGroup {
+        catalog_service::CatalogGroup {
+            alias: Some(alias.to_string()),
+            ..group(url, rows)
+        }
+    }
+
     /// A freshly-loaded, untruncated group for `url` holding `rows` rows.
     /// Offline / truncated variants are `..group(url, n)` at the call site.
     fn group(url: &str, rows: usize) -> catalog_service::CatalogGroup {
@@ -4315,19 +4359,24 @@ mod tests {
 
         let health = aggregate_registry_health(&groups, &registries);
 
+        // C-024: the three lists hold ROOT KEYS — the space `registry_labels`
+        // is keyed in, so `render.rs`'s `registry_label` lookup hits. Derived
+        // from each fixture entry's own `key()` rather than spelled out, so
+        // this keeps its subject (which sources get named) while going red if
+        // the raw locator is pushed again (E-15.2).
         assert_eq!(
             health.offline,
-            vec!["ghcr.io/down"],
+            vec![registries[0].key().root_key()],
             "a degraded group is named offline"
         );
         assert_eq!(
             health.truncated,
-            vec!["ghcr.io/big"],
+            vec![registries[1].key().root_key()],
             "a capped group is named truncated"
         );
         assert_eq!(
             health.filtered,
-            vec!["ghcr.io/acme"],
+            vec![registries[2].key().root_key()],
             "an online source a filter left empty must be named, or its 0/0 root has no reason on screen"
         );
     }
@@ -4342,16 +4391,17 @@ mod tests {
     /// explanation their 0/0 root has.
     #[test]
     fn aggregate_registry_health_names_a_source_an_exclude_only_filter_emptied_ha() {
+        let reg = source("ghcr.io/acme", &[], &["**"]);
         let health = aggregate_registry_health(
             &[catalog_service::CatalogGroup {
                 rows_before_filter: 3,
                 ..group("ghcr.io/acme", 0)
             }],
-            &[source("ghcr.io/acme", &[], &["**"])],
+            std::slice::from_ref(&reg),
         );
         assert_eq!(
             health.filtered,
-            vec!["ghcr.io/acme"],
+            vec![reg.key().root_key()],
             "gate 1 reads EITHER list — the TUI cannot see which one emptied the source, and \
              the CLI's one-shot stderr line is not available behind the alt screen"
         );
@@ -4384,12 +4434,13 @@ mod tests {
         // `rows_before_filter: 0`, so gate 3 covers it — not a `served_offline`
         // gate, which W-2 removed for suppressing the genuine offline case
         // (`…_names_a_filter_emptied_source_served_from_cache_w2`).
+        let reg = filtered("ghcr.io/acme");
         let failed = aggregate_registry_health(
             &[catalog_service::CatalogGroup {
                 served_offline: true,
                 ..group("ghcr.io/acme", 0)
             }],
-            &[filtered("ghcr.io/acme")],
+            std::slice::from_ref(&reg),
         );
         assert!(
             failed.filtered.is_empty(),
@@ -4397,7 +4448,7 @@ mod tests {
         );
         assert_eq!(
             failed.offline,
-            vec!["ghcr.io/acme"],
+            vec![reg.key().root_key()],
             "and the offline clause is what names it"
         );
     }
@@ -4413,22 +4464,23 @@ mod tests {
     /// clauses are true here, and `render::frame` joins them with ` · `.
     #[test]
     fn aggregate_registry_health_names_a_filter_emptied_source_served_from_cache_w2() {
+        let reg = source("ghcr.io/acme", &["platform/**"], &[]);
         let health = aggregate_registry_health(
             &[catalog_service::CatalogGroup {
                 served_offline: true,
                 rows_before_filter: 3,
                 ..group("ghcr.io/acme", 0)
             }],
-            &[source("ghcr.io/acme", &["platform/**"], &[])],
+            std::slice::from_ref(&reg),
         );
         assert_eq!(
             health.filtered,
-            vec!["ghcr.io/acme"],
+            vec![reg.key().root_key()],
             "a cache served offline that the filter then emptied is a filter problem, not a network one"
         );
         assert_eq!(
             health.offline,
-            vec!["ghcr.io/acme"],
+            vec![reg.key().root_key()],
             "and the offline clause still names it — both are true of this source"
         );
     }
@@ -4452,20 +4504,467 @@ mod tests {
         );
     }
 
+    // ── C-024 / C-025 / C-026 — registry identity through the health line,
+    //    the per-view filter lookup, and the row producer ────────────────────
+
+    /// C-024: `RegistryHealth`'s three `Vec<String>` fields hold **root keys**,
+    /// the same space `registry_labels` is keyed in — so `render.rs`'s
+    /// `registry_label` lookup hits and the user reads the alias again.
+    ///
+    /// The regression this closes, measured on a real session:
+    ///
+    /// ```text
+    /// before:  Grimoire            filtered: acme (localhost:5002/uxrev)
+    /// after:   Grimoire                   filtered: localhost:5002/uxrev
+    /// ```
+    ///
+    /// Every fixture entry here is **aliased on purpose**: an aliased entry's
+    /// root key is neither its locator nor its alias, so it is the only shape
+    /// that can tell the two keyings apart. Reverting any one of the three
+    /// pushes to `g.registry.clone()` misses the map for that clause alone,
+    /// and the assertion for that clause alone goes red.
+    ///
+    /// Asserted on the **rendered label**, never on the raw key (E-10.2): the
+    /// key is an internal identity and its spelling is the spec's to move.
+    #[test]
+    fn aggregate_registry_health_names_sources_by_root_key_so_labels_resolve_c024() {
+        let registries = vec![
+            aliased_source("down", "ghcr.io/down", &[], &[]),
+            aliased_source("big", "ghcr.io/big", &[], &[]),
+            aliased_source("acme", "localhost:5002/uxrev", &["nothing/**"], &[]),
+        ];
+        let groups = vec![
+            catalog_service::CatalogGroup {
+                served_offline: true,
+                ..aliased_group("down", "ghcr.io/down", 0)
+            },
+            catalog_service::CatalogGroup {
+                truncated: true,
+                ..aliased_group("big", "ghcr.io/big", 2)
+            },
+            catalog_service::CatalogGroup {
+                rows_before_filter: 3,
+                ..aliased_group("acme", "localhost:5002/uxrev", 0)
+            },
+        ];
+
+        let mut s = TuiState::new();
+        s.set_registry_labels(registry_labels(&registries));
+        s.set_registry_health(aggregate_registry_health(&groups, &registries));
+
+        let rendered = |keys: &[String]| keys.iter().map(|k| s.registry_label(k)).collect::<Vec<_>>();
+        assert_eq!(
+            rendered(&s.registry_health.offline),
+            vec!["down (ghcr.io/down)"],
+            "the offline clause must resolve through the label map, not print a raw locator"
+        );
+        assert_eq!(
+            rendered(&s.registry_health.truncated),
+            vec!["big (ghcr.io/big)"],
+            "the truncated clause must resolve through the label map, not print a raw locator"
+        );
+        assert_eq!(
+            rendered(&s.registry_health.filtered),
+            vec!["acme (localhost:5002/uxrev)"],
+            "the filtered clause is the ENTIRE in-TUI signal that a filter is mis-aimed \
+             (a single-registry root is elided, D-ELIDE) — it must name the alias"
+        );
+    }
+
+    /// S-019, end to end through the renderer: one configured entry
+    /// `alias = "acme"`, `oci = "localhost:5002/uxrev"`, a filter that empties
+    /// it, and the composed status line reads
+    /// `filtered: acme (localhost:5002/uxrev)` — not the bare locator.
+    ///
+    /// The pair above pins the two halves separately; this pins that they
+    /// compose, which is the sentence the user actually reads.
+    #[test]
+    fn frame_health_line_names_the_alias_for_a_filter_emptied_source_s019() {
+        let registries = vec![aliased_source("acme", "localhost:5002/uxrev", &["nothing/**"], &[])];
+        let groups = vec![catalog_service::CatalogGroup {
+            rows_before_filter: 3,
+            ..aliased_group("acme", "localhost:5002/uxrev", 0)
+        }];
+
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.set_registry_labels(registry_labels(&registries));
+        s.set_registry_health(aggregate_registry_health(&groups, &registries));
+
+        assert_eq!(
+            frame(&s).status,
+            "filtered: acme (localhost:5002/uxrev)",
+            "S-019: the health line names the alias again"
+        );
+    }
+
+    /// C-025 / S-020: two views of ONE locator each get their **own** filter
+    /// verdict. `c019_filter_emptied` must resolve a group's entry by
+    /// `key()`, not by locator — `.find(|r| r.url == group.registry)` returns
+    /// whichever entry was declared first and hands both groups its filter.
+    ///
+    /// Both groups reach the registry lookup (empty now, non-empty before the
+    /// filter ran), so the lookup predicate is the only discriminator left.
+    /// Under the locator-only `find` the wide entry answers for both and
+    /// `filtered` comes back empty; swap the declaration order and it names
+    /// both. Asserting the exact one-element set catches either direction.
+    #[test]
+    fn c019_filter_emptied_resolves_each_view_by_its_own_key_c025_s020() {
+        let registries = vec![
+            // Declared first, unfiltered — the entry a locator-only lookup
+            // would hand to BOTH groups.
+            aliased_source("wide", "ghcr.io/acme", &[], &[]),
+            aliased_source("narrow", "ghcr.io/acme", &["nothing/**"], &[]),
+        ];
+        let groups = vec![
+            catalog_service::CatalogGroup {
+                rows_before_filter: 3,
+                ..aliased_group("wide", "ghcr.io/acme", 0)
+            },
+            catalog_service::CatalogGroup {
+                rows_before_filter: 3,
+                ..aliased_group("narrow", "ghcr.io/acme", 0)
+            },
+        ];
+
+        let mut s = TuiState::new();
+        s.set_registry_labels(registry_labels(&registries));
+        s.set_registry_health(aggregate_registry_health(&groups, &registries));
+
+        assert_eq!(
+            s.registry_health
+                .filtered
+                .iter()
+                .map(|k| s.registry_label(k))
+                .collect::<Vec<_>>(),
+            vec!["narrow (ghcr.io/acme)"],
+            "S-020: only the narrow view's root carries the `filtered:` clause — the wide \
+             view at the same locator authored no filter and must not be blamed for one"
+        );
+    }
+
+    /// A [`BadgeContext`] over an empty scope — enough for
+    /// [`project_group_rows`], which only reads it to derive each row's badge.
+    /// Returns the owned backing values too: the context borrows them.
+    fn empty_badge_scope() -> (
+        tempfile::TempDir,
+        InstallState,
+        AnchorRoots,
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<(ArtifactKind, String)>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_state = InstallState::empty(tmp.path());
+        let roots = test_roots(tmp.path());
+        (
+            tmp,
+            install_state,
+            roots,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        )
+    }
+
+    /// C-026: pin `project_group_rows` at its **producer**. `app.rs:1220` is
+    /// the one line that carries `1ed73aa`'s behaviour change, and replacing
+    /// it with the group's locator alone leaves the whole suite green —
+    /// `two_views_of_one_locator_are_two_named_roots` (tree.rs) hands
+    /// `TuiRow`s their `source` already set, so it pins the consumer and can
+    /// never see this.
+    ///
+    /// Two groups sharing a locator and differing only in alias must produce
+    /// two **distinct** row sources, and each must be its own group's key.
+    #[test]
+    fn project_group_rows_sources_two_views_of_one_locator_distinctly_c026() {
+        let (_tmp, install_state, roots, bundle_repos, repos) = empty_badge_scope();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &bundle_repos,
+            direct_repos: &repos,
+            snapshot_repos: &repos,
+        };
+        let wide = aliased_group("wide", "ghcr.io/acme", 1);
+        let narrow = aliased_group("narrow", "ghcr.io/acme", 1);
+
+        let wide_rows = project_group_rows(&wide, &badge);
+        let narrow_rows = project_group_rows(&narrow, &badge);
+        assert_eq!((wide_rows.len(), narrow_rows.len()), (1, 1), "one catalog row each");
+
+        assert_ne!(
+            wide_rows[0].source, narrow_rows[0].source,
+            "two entries over one locator must attribute their rows to two different roots — \
+             sourcing a row from the group's locator alone merges them and no consumer test sees it"
+        );
+        assert_eq!(
+            wide_rows[0].source,
+            wide.key(),
+            "each row carries the key of the ENTRY that produced it (C-023)"
+        );
+        assert_eq!(narrow_rows[0].source, narrow.key());
+    }
+
+    /// S-021: the producer-to-tree-root path, composed. `project_group_rows`
+    /// assigns the sources and `tree::display_split` turns them into roots;
+    /// the two halves are pinned separately above and in `tree.rs`, and this
+    /// is the one assertion that they meet.
+    #[test]
+    fn two_views_of_one_locator_root_at_two_distinct_keys_s021() {
+        let (_tmp, install_state, roots, bundle_repos, repos) = empty_badge_scope();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &bundle_repos,
+            direct_repos: &repos,
+            snapshot_repos: &repos,
+        };
+        let rows: Vec<TuiRow> = [
+            aliased_group("wide", "ghcr.io/acme", 1),
+            aliased_group("narrow", "ghcr.io/acme", 1),
+        ]
+        .iter()
+        .flat_map(|g| project_group_rows(g, &badge))
+        .collect();
+
+        // One locator, declared twice — what `registry_locators` carries.
+        let configured = ["ghcr.io/acme", "ghcr.io/acme"];
+        let root_of = |r: &TuiRow| crate::tui::tree::display_split(r, &configured).0;
+        assert_ne!(
+            root_of(&rows[0]),
+            root_of(&rows[1]),
+            "S-021: the same locator declared twice must render two named tree roots"
+        );
+    }
+
+    /// S-022: the handover's three-entry collision reproduction. One entry's
+    /// **alias** equals another entry's **locator**, and a third aliases the
+    /// reserved `"Local"` sentinel. Three distinct roots with three correct
+    /// labels, plus the synthetic Local root — four in total.
+    ///
+    /// Under the superseded `source_key` (alias when present, locator
+    /// otherwise, untagged) entries 1 and 2 both keyed `"acme.example"` and
+    /// entry 3 keyed `"Local"`: the label map collapsed to two, and the third
+    /// entry's rows merged into the Local group. Exit 0, no warning.
+    ///
+    /// The config-still-parses half of this scenario is acceptance-level —
+    /// `test/tests/test_tui_multi_registry.py`.
+    #[test]
+    fn three_colliding_entries_are_three_roots_plus_local_s022() {
+        let registries = vec![
+            // 1. unaliased, locator "acme.example"
+            source("acme.example", &[], &[]),
+            // 2. aliased "acme.example" — collides with entry 1's LOCATOR
+            aliased_source("acme.example", "other.example", &[], &[]),
+            // 3. aliased "Local" — collides with the synthetic group's sentinel
+            aliased_source("Local", "third.example", &[], &[]),
+        ];
+
+        let labels = registry_labels(&registries);
+        assert_eq!(
+            labels.len(),
+            3,
+            "three configured entries are three label-map rows: a key collision silently \
+             drops one and the surviving root wears the wrong alias — {labels:?}"
+        );
+        let label = |r: &ResolvedRegistry| labels.get(&r.key().root_key()).cloned();
+        assert_eq!(label(&registries[0]).as_deref(), Some("acme.example"));
+        assert_eq!(label(&registries[1]).as_deref(), Some("acme.example (other.example)"));
+        assert_eq!(label(&registries[2]).as_deref(), Some("Local (third.example)"));
+
+        let ctx = ctx_with_registries(registries.clone(), "acme.example");
+        let order = registry_order(&ctx);
+        // The fourth root: the synthetic Local group. `local_row` tags its
+        // rows `RowSource::Local`, so its root key must stay outside the
+        // configured set even with an entry aliased "Local".
+        let mut roots: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+        roots.insert(RowSource::Local.root_key());
+        assert_eq!(
+            roots.len(),
+            4,
+            "three configured roots plus the synthetic Local root are four distinct roots — {roots:?}"
+        );
+    }
+
+    /// S-022b: one alias declared at two locators (project `acme →
+    /// ghcr.io/acme`, global `acme → quay.io/acme`) is **two** roots. Both
+    /// survive `resolve_registries`' `(normalize_locator, alias)` dedup —
+    /// C-029's resolver-level test — and this is its TUI-level sibling.
+    ///
+    /// The pre-amendment `RowSource::Alias(String)` carried the alias alone
+    /// and rendered `"alias:acme"` for both: one merged root, the same
+    /// failure S-022 reaches by the other component of the dedup key.
+    #[test]
+    fn one_alias_at_two_locators_is_two_roots_s022b() {
+        let project = aliased_source("acme", "ghcr.io/acme", &[], &[]);
+        let global = aliased_source("acme", "quay.io/acme", &[], &[]);
+        let registries = vec![project.clone(), global.clone()];
+
+        assert_ne!(
+            project.key().root_key(),
+            global.key().root_key(),
+            "one alias at two locators is two entries, so it must be two root keys"
+        );
+
+        let labels = registry_labels(&registries);
+        assert_eq!(labels.len(), 2, "two roots carry two labels — {labels:?}");
+        assert_eq!(
+            labels.get(&project.key().root_key()).map(String::as_str),
+            Some("acme (ghcr.io/acme)")
+        );
+        assert_eq!(
+            labels.get(&global.key().root_key()).map(String::as_str),
+            Some("acme (quay.io/acme)")
+        );
+
+        let ctx = ctx_with_registries(registries, "ghcr.io/acme");
+        assert_eq!(
+            registry_order(&ctx),
+            vec![project.key().root_key(), global.key().root_key()],
+            "both entries take a root, in precedence order"
+        );
+    }
+
+    /// E-10.1: the `registry_label` miss path rebuilds the hit path's label
+    /// **byte-identically**, so a lookup miss degrades to nothing at all
+    /// rather than to a shorter string.
+    ///
+    /// This is the one assertion that spans both sides of that promise —
+    /// `registry_labels` (app.rs, the producer) and `label_from_root_key`
+    /// (state.rs, the fallback) live in different modules and can drift
+    /// silently. Returning the bare alias, or splitting the key at the last
+    /// `/` instead of the first, both break it here.
+    #[test]
+    fn registry_label_miss_rebuilds_the_hit_path_label_byte_identically_e10_1() {
+        // A multi-segment locator: a right-split would surface
+        // `acme/localhost:5002 (uxrev)` and only a left-split recovers the
+        // halves (E-10.3).
+        let reg = aliased_source("acme", "localhost:5002/uxrev", &[], &[]);
+        let key = reg.key().root_key();
+
+        let hit = registry_labels(std::slice::from_ref(&reg));
+        let miss = TuiState::new().registry_label(&key); // empty label map
+
+        assert_eq!(
+            hit.get(&key).map(String::as_str),
+            Some(miss.as_str()),
+            "the miss path must reconstruct exactly what `registry_labels` builds on a hit"
+        );
+        assert_eq!(
+            miss, "acme (localhost:5002/uxrev)",
+            "and that string is the alias + its whole locator"
+        );
+    }
+
+    /// The rows a single configured `entry` really produces — through the
+    /// production producer (`project_group_rows`), not hand-built. Lets a
+    /// D-ELIDE assertion compare against a *second, independently produced*
+    /// value instead of re-evaluating the function under test.
+    fn rows_sourced_at(entry: &ResolvedRegistry) -> Vec<TuiRow> {
+        let (_tmp, install_state, roots, bundle_repos, repos) = empty_badge_scope();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &bundle_repos,
+            direct_repos: &repos,
+            snapshot_repos: &repos,
+        };
+        let g = catalog_service::CatalogGroup {
+            alias: entry.alias.clone(),
+            ..group(&entry.url, 1)
+        };
+        project_group_rows(&g, &badge)
+    }
+
+    /// The tree/flat root a row produced by `entry` actually lands on — the
+    /// value D-ELIDE has to equal for the root to be elided.
+    fn root_of_row_sourced_at(entry: &ResolvedRegistry) -> String {
+        let rows = rows_sourced_at(entry);
+        crate::tui::tree::display_split(&rows[0], &[entry.url.as_str()]).0
+    }
+
     #[test]
     fn elision_registry_returns_some_for_single_registry() {
         // D-ELIDE: exactly one registry → elide its prefix from tree labels.
-        let ctx = ctx_with_registries(
-            vec![ResolvedRegistry {
-                url: "ghcr.io/acme".to_string(),
-                alias: None,
-                is_default: true,
-                kind: crate::config::registry_resolve::SourceKind::Registry,
-                filter: crate::config::registry_filter::RegistryFilter::default(),
-            }],
-            "ghcr.io/acme",
-        );
-        assert_eq!(elision_registry(&ctx), Some("ghcr.io/acme".to_string()));
+        //
+        // The elided value is the entry's own ROOT KEY, not its locator and
+        // not its alias — elision compares against what the rows root at.
+        //
+        // The expectation is that root, taken off a real row via
+        // `project_group_rows` + `display_split`, NOT `entry.key().root_key()`
+        // — which is `elision_registry`'s entire body, making the assertion
+        // `assert_eq!(f(x), f(x))`: green for every encoding, and therefore
+        // blind to the flat-view elision break this pass fixes. E-10.2 rider:
+        // a derived expectation must never be the function-under-test's own
+        // body.
+        let bare = ResolvedRegistry {
+            url: "ghcr.io/acme".to_string(),
+            alias: None,
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        };
+        let ctx = ctx_with_registries(vec![bare.clone()], "ghcr.io/acme");
+        assert_eq!(elision_registry(&ctx), Some(root_of_row_sourced_at(&bare)));
+
+        // The aliased case is the discriminating one: its root key is neither
+        // `url` nor `alias`, so an elision that fell back to either would
+        // stop matching the rows' root and the single-source session would
+        // keep a redundant root.
+        let aliased = ResolvedRegistry {
+            alias: Some("acme".to_string()),
+            ..bare
+        };
+        let ctx = ctx_with_registries(vec![aliased.clone()], "ghcr.io/acme");
+        assert_eq!(elision_registry(&ctx), Some(root_of_row_sourced_at(&aliased)));
+    }
+
+    /// D-ELIDE in the **flat** view — the composed path the unit assertion
+    /// above cannot reach, and the one that regressed: `elision_registry`
+    /// started returning a tagged root key while the flat branch still fed it
+    /// to a literal `repo.strip_prefix(reg)`, so every Repo cell rendered its
+    /// full reference inside a fixed-width window and long names truncated.
+    ///
+    /// **`default_registry` is DERIVED here, never hand-written.** Every other
+    /// `set_default_registry` fixture spells an untagged literal production no
+    /// longer produces — a self-agreeing fixture that agrees with the *old*
+    /// strip and is blind by construction. This one takes `elision_registry` /
+    /// `registry_order` / `registry_locators` straight off the context and the
+    /// rows straight off `project_group_rows`, so the fixture cannot disagree
+    /// with the producer.
+    #[test]
+    fn flat_single_registry_elides_the_root_from_the_repo_cell() {
+        // Both single-registry shapes: unaliased — the common case, including
+        // the zero-config built-in fallback, whose entry carries `alias: None`
+        // — and aliased, whose root key is neither its url nor its alias.
+        for only in [
+            source("ghcr.io/acme", &[], &[]),
+            aliased_source("acme", "ghcr.io/acme", &[], &[]),
+        ] {
+            let ctx = ctx_with_registries(vec![only.clone()], "ghcr.io/acme");
+            let mut s = TuiState::new();
+            s.view_mode = crate::tui::state::ViewMode::Flat;
+            s.set_default_registry(elision_registry(&ctx));
+            s.set_registry_order(registry_order(&ctx));
+            s.set_registry_locators(registry_locators(&ctx));
+            s.set_rows(rows_sourced_at(&only));
+
+            let cell = crate::tui::render::frame(&s).rows[0].columns[0].clone();
+            assert_eq!(
+                cell.trim_end(),
+                "platform/skill-0",
+                "the single registry's root must be elided from the Repo cell ({only:?})"
+            );
+            assert!(
+                !cell.contains("ghcr.io"),
+                "and no part of the locator may survive in it ({only:?}): {cell:?}"
+            );
+        }
     }
 
     #[test]
@@ -4497,47 +4996,44 @@ mod tests {
     fn registry_order_preserves_precedence_order() {
         // F13: registry roots in the tree follow the precedence order of
         // `[[registries]]` declarations — first declared = first root.
-        let ctx = ctx_with_registries(
-            vec![
-                ResolvedRegistry {
-                    url: "ghcr.io/acme".to_string(),
-                    alias: None,
-                    is_default: true,
-                    kind: crate::config::registry_resolve::SourceKind::Registry,
-                    filter: crate::config::registry_filter::RegistryFilter::default(),
-                },
-                ResolvedRegistry {
-                    url: "registry.corp.example/team".to_string(),
-                    alias: Some("internal".to_string()),
-                    is_default: false,
-                    kind: crate::config::registry_resolve::SourceKind::Registry,
-                    filter: crate::config::registry_filter::RegistryFilter::default(),
-                },
-            ],
-            "ghcr.io/acme",
-        );
+        let bare = ResolvedRegistry {
+            url: "ghcr.io/acme".to_string(),
+            alias: None,
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        };
+        let aliased = ResolvedRegistry {
+            url: "registry.corp.example/team".to_string(),
+            alias: Some("internal".to_string()),
+            is_default: false,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        };
+        let ctx = ctx_with_registries(vec![bare.clone(), aliased.clone()], "ghcr.io/acme");
         assert_eq!(
             registry_order(&ctx),
-            // Root KEYS: the alias when one is declared, the locator when
-            // none is — two entries may share a locator, so the locator
-            // cannot be the identity.
-            vec!["ghcr.io/acme".to_string(), "internal".to_string()],
+            // Root KEYS, in declaration order — an ENTRY identity, not a
+            // locator: two entries may share a locator, so the locator cannot
+            // be the identity, and the alias alone cannot either (S-022b).
+            // Derived from `key()`, so a locator-keyed or alias-keyed
+            // regression goes red without this test owning the encoding
+            // (E-15.2).
+            vec![bare.key().root_key(), aliased.key().root_key()],
         );
     }
 
     #[test]
     fn registry_order_single_entry_returns_one_element_vec() {
-        let ctx = ctx_with_registries(
-            vec![ResolvedRegistry {
-                url: "ghcr.io/acme".to_string(),
-                alias: None,
-                is_default: true,
-                kind: crate::config::registry_resolve::SourceKind::Registry,
-                filter: crate::config::registry_filter::RegistryFilter::default(),
-            }],
-            "ghcr.io/acme",
-        );
-        assert_eq!(registry_order(&ctx), vec!["ghcr.io/acme".to_string()]);
+        let only = ResolvedRegistry {
+            url: "ghcr.io/acme".to_string(),
+            alias: None,
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        };
+        let ctx = ctx_with_registries(vec![only.clone()], "ghcr.io/acme");
+        assert_eq!(registry_order(&ctx), vec![only.key().root_key()]);
     }
 
     #[test]
@@ -4909,7 +5405,7 @@ mod tests {
         let mut row = installed_row("local-pack");
         row.kind = "bundle".to_string();
         row.repo = "local-pack".to_string();
-        row.source = Some("Local".to_string());
+        row.source = RowSource::Local;
         row.state = ArtifactState::NotInstalled;
 
         let label = perform_local(&ctx, &row, false, &SilentProgress, false)
@@ -5870,7 +6366,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -6009,7 +6505,7 @@ mod tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::Installed,
-                source: None,
+                source: RowSource::Unattributed,
             },
         ]);
         state.scope_label = "project".to_string();
@@ -6210,7 +6706,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }];
 
         // resolve_member_tag must return the catalog row's tag, not "latest".
@@ -6275,7 +6771,7 @@ mod p2_app_member_node_tests {
             deprecated: None,
             pinned_version: pinned_version.map(|s| s.to_string()),
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 

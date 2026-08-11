@@ -13,6 +13,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::registry_resolve::RowSource;
+
 use super::state::{ArtifactState, TuiRow};
 
 /// Options controlling how [`build`] partitions rows into the hierarchy.
@@ -35,19 +37,24 @@ pub struct TreeBuildOptions {
     /// matching rows (D-EMPTY). Empty in single-registry / elided sessions —
     /// the tree is then byte-identical to the pre-multi-registry behavior.
     ///
-    /// A key is the entry's alias, or its locator when it declared none. It
-    /// is an *entry* identity because one file may declare a locator twice to
-    /// split it into two filtered views, and those are two roots.
+    /// In production a key is always a [`RowSource::root_key`] rendering —
+    /// `"alias:{alias}/{locator}"`, `"locator:{locator}"`, or the `"Local"`
+    /// sentinel — i.e. **tagged**, never the bare locator the superseded
+    /// `source_key` produced. (This module's own fixtures still pass bare
+    /// strings: nothing here parses a key, so they exercise the ordering and
+    /// D-EMPTY paths just as well.) It is an *entry* identity because one file
+    /// may declare a locator twice to split it into two filtered views, and
+    /// those are two roots.
     pub registry_order: Vec<String>,
     /// The configured locators a bare-host row is attributed against — the
     /// registry side of the `(root, path)` split. Separate from
     /// `registry_order` because two entries may share one locator.
     ///
-    /// `registry_order` is folded into the attribution set as well: a root
-    /// key IS its locator whenever the entry declared no alias (the shape
-    /// every pre-alias caller passes), and an alias in the set is inert —
-    /// attribution matches only at a reference's leading host boundary, which
-    /// an alias cannot occupy.
+    /// **This is the whole attribution set.** `registry_order` used to be
+    /// folded in on the premise that a root key *is* its locator whenever the
+    /// entry declared no alias; tagging made that false, and the fold inert —
+    /// no reference can begin `alias:`/`locator:`, so nothing ever matched
+    /// through it. A caller must pass every locator here (E-15.1).
     pub registry_locators: Vec<String>,
 }
 
@@ -475,20 +482,20 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
     // exempt that namespace from compression.
     let mut exempt: BTreeSet<(usize, String)> = BTreeSet::new();
 
-    // The configured registries the tree groups by: the multi-registry browse
-    // set (`registry_order`) plus the single-registry `default_registry`. Rows
-    // arrive with a BARE-HOST registry and the namespace folded into the
-    // repository (`registry="localhost:5050"`, `repository="grimoire/skills/x"`)
-    // — that is the `Identifier::parse` split the lock/install-state match on,
-    // so it must NOT change. `attribute_registry` re-splits each row at the
-    // configured registry boundary purely for grouping/display.
-    let configured: Vec<&str> = opts
-        .registry_locators
-        .iter()
-        .chain(opts.registry_order.iter())
-        .map(String::as_str)
-        .chain(opts.default_registry.as_deref())
-        .collect();
+    // The configured registries the tree groups by: the browse set's locators,
+    // and only those. Rows arrive with a BARE-HOST registry and the namespace
+    // folded into the repository (`registry="localhost:5050"`,
+    // `repository="grimoire/skills/x"`) — that is the `Identifier::parse` split
+    // the lock/install-state match on, so it must NOT change.
+    // `attribute_registry` re-splits each row at the configured registry
+    // boundary purely for grouping/display.
+    //
+    // `default_registry` is deliberately NOT chained in: it is a root key
+    // (`"locator:ghcr.io/acme"`), and no reference can begin with a tag, so the
+    // entry only ever matched nothing — the same inert fold E-15.1 removed for
+    // `registry_order`. A caller must pass every locator via
+    // `registry_locators`.
+    let configured: Vec<&str> = opts.registry_locators.iter().map(String::as_str).collect();
 
     for &i in filtered {
         let Some(r) = rows.get(i) else {
@@ -598,25 +605,29 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
 ///
 /// A row that names its source (`row.source`) roots at that **entry's key** —
 /// the identity that lets two views of one locator be two roots, and the
-/// synthetic `"Local"` group be its own. The path below it is whatever the
+/// synthetic `Local` group be its own. The path below it is whatever the
 /// entry's own locator does not cover: attribution against `configured` when
 /// one matches (an OCI source, whose namespace belongs to the root, not the
 /// path), the full reference when none does. An index locator is not an OCI
 /// prefix, so attribution declines for index rows — which is right, because
 /// fabricating a bare-host root would split a namespaced ref like
-/// `ghcr.io/grimoire-rs` into two stacked nodes. A row with no source
-/// re-attributes to the longest configured prefix, root and all.
+/// `ghcr.io/grimoire-rs` into two stacked nodes. An
+/// [`RowSource::Unattributed`] row re-attributes to the longest configured
+/// prefix, root and all.
+///
+/// This early return is also what discharges E-3: `Unattributed.root_key()`
+/// is `""`, and it never reaches the tree because this arm never asks for it.
 ///
 /// Shared with the flat-list renderer (`render.rs`) so the Registry column
 /// and the shortened Repo cell attribute identically to the tree.
 pub(super) fn display_split(row: &TuiRow, configured: &[&str]) -> (String, String) {
     match &row.source {
-        Some(source) => (
-            source.clone(),
+        RowSource::Unattributed => attribute_registry(&row.registry, &row.repository, configured),
+        source => (
+            source.root_key(),
             attributed(&row.registry, &row.repository, configured)
                 .map_or_else(|| format!("{}/{}", row.registry, row.repository), |(_, path)| path),
         ),
-        None => attribute_registry(&row.registry, &row.repository, configured),
     }
 }
 
@@ -983,6 +994,9 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The root-key constructor, so these tests derive the expected root keys
+    // instead of hardcoding the tagged spelling (E-10.2).
+    use crate::config::registry_resolve::row_source_of;
     use crate::tui::state::TuiRow;
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -1006,7 +1020,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1037,7 +1051,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1052,22 +1066,30 @@ mod tests {
     }
 
     /// Build a `TuiRow` that came from a package-index source: `source`
-    /// carries the index locator, `registry`/`repository` the OCI split of
-    /// the pointer's `ref` (bare host + path, as `index_source` stores it).
-    fn index_row(source: &str, registry: &str, repository: &str, kind: &str) -> TuiRow {
+    /// carries the index entry's identity, `registry`/`repository` the OCI
+    /// split of the pointer's `ref` (bare host + path, as `index_source`
+    /// stores it). Unaliased, so the root key is `"locator:{locator}"`.
+    fn index_row(locator: &str, registry: &str, repository: &str, kind: &str) -> TuiRow {
         TuiRow {
             oci: crate::catalog::OciMeta::default(),
-            source: Some(source.to_string()),
+            source: RowSource::Locator(locator.to_string()),
             ..row2(registry, repository, kind, ArtifactState::NotInstalled)
         }
     }
 
+    /// The tree-root key an unaliased source (index or OCI) roots at — what
+    /// `display_split` now returns for it. Derived from `root_key()` so these
+    /// tests pin the rooting behaviour, never the key encoding (E-10.2).
+    fn source_root(locator: &str) -> String {
+        row_source_of(None, locator).root_key()
+    }
+
     /// Build a synthesized "Local" row (path declaration or dev record):
-    /// `source = Some("Local")`, no registry.
+    /// `source = RowSource::Local`, no registry.
     fn local_row(repository: &str, kind: &str) -> TuiRow {
         TuiRow {
             oci: crate::catalog::OciMeta::default(),
-            source: Some("Local".to_string()),
+            source: RowSource::Local,
             ..row2("", repository, kind, ArtifactState::Installed)
         }
     }
@@ -1108,14 +1130,14 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             registry_locators: Vec::new(),
-            registry_order: vec!["https://index.example".to_string()],
+            registry_order: vec![source_root("https://index.example")],
         };
         let t = build(&rows, &[0], &opts);
         let s = shape(&t);
         assert_eq!(
             s,
             vec![
-                ("https://index.example".to_string(), 0, true),
+                (source_root("https://index.example"), 0, true),
                 ("ghcr.io/grimoire-rs/skills".to_string(), 1, true),
                 ("grim-usage".to_string(), 2, false),
             ],
@@ -1142,7 +1164,7 @@ mod tests {
                 "bundle",
             ),
         ];
-        let opts = opts_default(Some("https://index.example"));
+        let opts = opts_default(Some(&source_root("https://index.example")));
         let t = build(&rows, &[0, 1], &opts);
         let s = shape(&t);
         assert_eq!(
@@ -1176,15 +1198,18 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
-            registry_locators: Vec::new(),
-            registry_order: vec!["https://index.example".to_string(), "ghcr.io/acme".to_string()],
+            // E-15.1: attribution reads `registry_locators` alone now that the
+            // `registry_order` fold is gone. The index locator is not an OCI
+            // prefix, so only the OCI entry contributes one.
+            registry_locators: vec!["ghcr.io/acme".to_string()],
+            registry_order: vec![source_root("https://index.example"), "ghcr.io/acme".to_string()],
         };
         let t = build(&rows, &[0, 1], &opts);
         let s = shape(&t);
         assert_eq!(
             s,
             vec![
-                ("https://index.example".to_string(), 0, true),
+                (source_root("https://index.example"), 0, true),
                 ("ghcr.io/grimoire-rs/skills".to_string(), 1, true),
                 ("grim-usage".to_string(), 2, false),
                 ("ghcr.io/acme".to_string(), 0, true),
@@ -1198,7 +1223,7 @@ mod tests {
     // ── TUI Local group (path declarations + dev records) ────────────────────
 
     // Design record: local_bundles_tui_group plan, "TUI Local group" — a row
-    // with `source = Some("Local")` roots under a top-level "Local" group via
+    // with `source = RowSource::Local` roots under a top-level "Local" group via
     // the same `display_split` seam the index-source rows use (D-TREE); an
     // ordinary registry row is unaffected and keeps its own root.
     #[test]
@@ -1564,7 +1589,8 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
-            registry_locators: Vec::new(),
+            // E-15.1: attribution reads `registry_locators` alone.
+            registry_locators: vec!["localhost:5050/grimoire".to_string()],
             registry_order: vec!["localhost:5050/grimoire".to_string()],
         };
         let t = build(&rows, &[0], &opts);
@@ -1596,7 +1622,11 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
-            registry_locators: Vec::new(),
+            // E-15.1: attribution reads `registry_locators` alone.
+            registry_locators: vec![
+                "localhost:5050/grimoire".to_string(),
+                "localhost:5051/tools".to_string(),
+            ],
             registry_order: vec![
                 "localhost:5050/grimoire".to_string(),
                 "localhost:5051/tools".to_string(),
@@ -1623,26 +1653,32 @@ mod tests {
     // one name, with no way to see which filter admitted what.
     #[test]
     fn two_views_of_one_locator_are_two_named_roots() {
+        // Both entries alias the SAME locator — the S-022b shape. `RowSource`
+        // carries both halves, so the two keys differ; the expectations are
+        // built from `root_key()` rather than spelled out, so this test pins
+        // the two-roots behaviour and not the key encoding (E-10.2).
+        let wide_key = row_source_of(Some("wide"), "ghcr.io");
+        let mine_key = row_source_of(Some("mine"), "ghcr.io");
         let mut wide = row2("ghcr.io", "acme/skills/a", "skill", ArtifactState::NotInstalled);
-        wide.source = Some("wide".to_string());
+        wide.source = wide_key.clone();
         let mut mine = row2("ghcr.io", "mine/skills/b", "skill", ArtifactState::NotInstalled);
-        mine.source = Some("mine".to_string());
+        mine.source = mine_key.clone();
         let opts = TreeBuildOptions {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
             // One locator, declared twice — the roots are the entry keys.
             registry_locators: vec!["ghcr.io".to_string(), "ghcr.io".to_string()],
-            registry_order: vec!["wide".to_string(), "mine".to_string()],
+            registry_order: vec![wide_key.root_key(), mine_key.root_key()],
         };
         let t = build(&[wide, mine], &[0, 1], &opts);
         assert_eq!(
             shape(&t),
             vec![
-                ("wide".to_string(), 0, true),
+                (wide_key.root_key(), 0, true),
                 ("acme/skills".to_string(), 1, true),
                 ("a".to_string(), 2, false),
-                ("mine".to_string(), 0, true),
+                (mine_key.root_key(), 0, true),
                 ("mine/skills".to_string(), 1, true),
                 ("b".to_string(), 2, false),
             ],
@@ -1664,7 +1700,10 @@ mod tests {
             default_registry: Some("localhost:5050/grimoire".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
-            registry_locators: Vec::new(),
+            // E-15.1: attribution reads `registry_locators` alone. The bare
+            // `default_registry` used to be folded in here implicitly; a root
+            // key can never attribute a row, so the caller supplies the locator.
+            registry_locators: vec!["localhost:5050/grimoire".to_string()],
             registry_order: Vec::new(),
         };
         let t = build(&rows, &[0], &opts);
@@ -1757,7 +1796,9 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
-            registry_locators: Vec::new(),
+            // E-15.1: attribution reads `registry_locators` alone — both
+            // overlapping locators must be here for longest-prefix to choose.
+            registry_locators: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
             registry_order: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
         };
         let t = build(&rows, &[0, 1], &opts);
@@ -2543,6 +2584,7 @@ mod tests {
 mod p2_member_node_tests {
     use std::collections::{BTreeSet, HashMap};
 
+    use crate::config::registry_resolve::RowSource;
     use crate::oci::ArtifactKind;
     use crate::tui::bundle_members::{BundleMemberCache, BundleMemberKey, MemberNode};
     use crate::tui::state::{ArtifactState, TuiRow};
@@ -2567,7 +2609,7 @@ mod p2_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -3029,7 +3071,7 @@ mod spec_multi_registry_tree_tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 

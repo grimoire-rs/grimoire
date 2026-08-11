@@ -482,3 +482,67 @@ def test_tui_seam_registry_result_order_matches_declaration_order(
         f"declaration order must be preserved: reg1 artifact (idx={idx_reg1}) must appear "
         f"before reg2 artifact (idx={idx_reg2}) in search results (F13); repos: {repos}"
     )
+
+
+# ---------------------------------------------------------------------------
+# S-022 — a root-key collision must not narrow what the config accepts
+# ---------------------------------------------------------------------------
+
+
+def test_colliding_alias_and_locator_names_still_load(
+    grim_at, project_dir: Path
+) -> None:
+    """S-022, Principle 9 half: a config whose entry names collide across the
+    alias/locator boundary must keep loading — exit 0, all three entries
+    resolved.
+
+    Two deliberate collisions in one file:
+
+    1. entry 2's **alias** equals entry 1's **locator** (``acme.example``);
+    2. entry 3's alias is ``Local`` — the reserved sentinel the TUI's
+       synthetic path-declaration / dev-record group roots at.
+
+    All of it parses on ``v0.12.1``: ``validate_registries`` constrains an
+    alias to non-empty, trimmed, no ``/``, no control characters, and unique
+    *among aliases* — nothing compares an alias to the locator set and nothing
+    reserves a name. The TUI-side collision is closed by making the root key
+    injective (``RowSource``), **not** by rejecting the config; rejecting it
+    would narrow an input a released build accepts.
+
+    So this test's job is to fail if the collision is ever "fixed" at the
+    config layer instead. The distinct-roots half is a unit test
+    (``three_colliding_entries_are_three_roots_plus_local_s022``,
+    ``src/tui/app.rs``); this half needs a real parse, and ``context`` is the
+    network-free command that reports the resolved set.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\n'
+        'oci = "acme.example"\n'
+        '\n'
+        '[[registries]]\n'
+        'alias = "acme.example"\n'
+        'oci = "other.example"\n'
+        '\n'
+        '[[registries]]\n'
+        'alias = "Local"\n'
+        'oci = "third.example"\n'
+        '\n'
+        '[skills]\n'
+        '\n'
+        '[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "context", check=False)
+    assert result.returncode == 0, (
+        "an alias colliding with another entry's locator, and an alias equal to the "
+        f"reserved 'Local' sentinel, must both still load; stderr: {result.stderr}"
+    )
+
+    regs = json.loads(result.stdout)["registries"]
+    resolved = [(r.get("alias"), r["url"]) for r in regs]
+    assert resolved == [
+        (None, "acme.example"),
+        ("acme.example", "other.example"),
+        ("Local", "third.example"),
+    ], f"all three entries must survive resolution, in declaration order; got: {resolved}"

@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::catalog::{OciMeta, SearchQuery};
+use crate::config::registry_resolve::RowSource;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
 
@@ -189,14 +190,28 @@ pub struct TuiRow {
     pub pinned_version: Option<String>,
     /// The install status of this repository in the active scope.
     pub state: ArtifactState,
-    /// The browse-source locator this row came from, set **only** for
-    /// package-index sources (`[[registries]] index = …` or the built-in
-    /// index fallback). Display-only: the tree and the flat Registry column
-    /// group the row under this source root instead of fabricating a
-    /// registry root from the OCI host — the index locator is not an OCI
-    /// prefix, so longest-prefix attribution can never match it. `None`
-    /// for OCI registry sources; never used for lock/install matching.
-    pub source: Option<String>,
+    /// Which browse source this row is attributed to (C-028) — the injective
+    /// root identity the tree and the flat Registry column group it under.
+    ///
+    /// An **entry** identity, not a locator: one config file may declare a
+    /// locator twice to split it into two filtered views, and those are two
+    /// roots ([`RowSource`] carries both halves so they cannot merge). Every
+    /// variant occurs here:
+    ///
+    /// - [`RowSource::Alias`] / [`RowSource::Locator`] — the configured entry
+    ///   that produced the row, for an OCI *and* an index source alike.
+    /// - [`RowSource::Local`] — the synthetic local / dev-record group.
+    /// - [`RowSource::Unattributed`] — no attribution; the row re-attributes
+    ///   by longest configured prefix. The background single-registry refresh
+    ///   (`rows_from_catalog`) is the producer that leaves it unset. **Its
+    ///   root is then a bare locator, which can never equal a
+    ///   [`Self::registry_order`] entry** (those are tagged root keys), so
+    ///   arming that path without migrating it onto `catalog_service` would
+    ///   split every registry into a populated bare-locator root and an empty
+    ///   `0/0` configured one — see `app::drain_catalog_ready`.
+    ///
+    /// Display-only — never used for lock/install matching.
+    pub source: RowSource,
 }
 
 /// Per-registry health summary, aggregated from the loaded
@@ -205,14 +220,19 @@ pub struct TuiRow {
 /// One seam for the status line: offline registries and truncated registries
 /// are named so the user can tell which registries need attention.
 ///
+/// Every list holds **root keys** ([`crate::config::registry_resolve::RowSource::root_key`]),
+/// not urls — one locator may be declared twice as two entries with two
+/// verdicts, and `app::aggregate_registry_health` keys them apart (C-024).
+/// The status line resolves each through [`TuiState::registry_label`].
+///
 /// C6 stub — aggregation logic is implement phase (T4).
 #[derive(Debug, Clone, Default)]
 pub struct RegistryHealth {
-    /// Registry URLs that were served from offline / stale cache.
+    /// Root keys of sources that were served from offline / stale cache.
     pub offline: Vec<String>,
-    /// Registry URLs whose browse window was truncated at the cap.
+    /// Root keys of sources whose browse window was truncated at the cap.
     pub truncated: Vec<String>,
-    /// Registry URLs showing nothing while a browse filter is configured —
+    /// Root keys of sources showing nothing while a browse filter is configured —
     /// the TUI's channel for the plan C-019 diagnostic, which the CLI emits
     /// as a `tracing::warn!` the alt-screen session can never show (all
     /// tracing output is redirected to `$GRIM_HOME/tui.log` for the whole
@@ -308,10 +328,12 @@ pub struct TuiState {
     /// resolved source yields a root even with zero matching rows. Empty in
     /// single-registry / elided sessions.
     ///
-    /// A key is the entry's alias, or its locator when it declared none — an
-    /// *entry* identity, not a locator, because one file may declare a
-    /// locator twice to split it into two filtered views and those are two
-    /// roots. [`Self::registry_locators`] carries the locators.
+    /// A key is a **tagged** [`crate::config::registry_resolve::RowSource::root_key`]
+    /// rendering — `"alias:{alias}/{locator}"` or `"locator:{locator}"` —
+    /// never a bare alias and never a bare locator. It is an *entry* identity
+    /// because one file may declare a locator twice to split it into two
+    /// filtered views, and those are two roots.
+    /// [`Self::registry_locators`] carries the locators.
     pub registry_order: Vec<String>,
     /// The resolved sources' locators, for attributing a bare-host row to the
     /// configured registry it came from. Parallel to [`Self::registry_order`]
@@ -351,12 +373,16 @@ pub struct TuiState {
     ///
     /// C6 stub — aggregation wired in implement phase (T4).
     pub registry_health: RegistryHealth,
-    /// Display labels for registries: maps registry URL → configured alias.
+    /// Display labels for registries: maps a source's **root key**
+    /// ([`crate::config::registry_resolve::RowSource::root_key`]) to the string
+    /// it renders as — `"{alias} ({url})"` when the entry declared an alias,
+    /// the bare url otherwise.
     ///
-    /// When a `[[registries]]` entry has an `alias`, it is stored here so
-    /// the flat list's Registry column and the tree registry-root rows can
-    /// show the alias instead of the raw URL. Falls back to the URL when
-    /// no alias was configured (see [`Self::registry_label`]).
+    /// Keyed by root key rather than by url because two entries may share one
+    /// locator and carry two labels, and read through
+    /// [`Self::registry_label`], which rebuilds the same string from the key
+    /// on a miss — so the flat list's Registry column and the tree
+    /// registry-root rows never show the tagged key itself.
     ///
     /// Populated on each successful catalog load via [`Self::set_registry_labels`].
     pub registry_labels: BTreeMap<String, String>,
@@ -923,26 +949,29 @@ impl TuiState {
         self.registry_health = health;
     }
 
-    /// Store registry URL → display label mapping. Replaces the previous map
+    /// Store root key → display label mapping. Replaces the previous map
     /// wholesale; called from `apply_catalog_results` on each successful load.
     ///
-    /// Each entry maps a registry URL to its configured alias (or to the URL
-    /// itself when no alias was declared), so display code can call
+    /// Each entry maps a [`RowSource::root_key`] to `"{alias} ({url})"` (or to
+    /// the bare url when no alias was declared), so display code can call
     /// [`Self::registry_label`] without knowing whether an alias was set.
     pub fn set_registry_labels(&mut self, labels: BTreeMap<String, String>) {
         self.registry_labels = labels;
     }
 
-    /// Return the display label for a registry URL.
+    /// Return the display label for a browse source's **root key**
+    /// ([`RowSource::root_key`]).
     ///
-    /// Returns the mapped alias when one was set via [`Self::set_registry_labels`],
-    /// otherwise returns the URL unchanged. Callers can always use this as the
-    /// display string without a separate alias-existence check.
-    pub fn registry_label(&self, url: &str) -> String {
+    /// Returns the mapped label when one was set via
+    /// [`Self::set_registry_labels`], otherwise reconstructs it from the key
+    /// itself — see [`label_from_root_key`]. Callers can always use this as
+    /// the display string without a separate lookup-existence check, and a
+    /// tagged key can never leak to the screen through it.
+    pub fn registry_label(&self, key: &str) -> String {
         self.registry_labels
-            .get(url)
+            .get(key)
             .cloned()
-            .unwrap_or_else(|| url.to_string())
+            .unwrap_or_else(|| label_from_root_key(key))
     }
 
     /// Whether more than one registry is currently in scope.
@@ -1514,6 +1543,41 @@ fn leaf_name(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
+/// Rebuild a display label from a [`RowSource::root_key`] when the label map
+/// has no entry for it — the lookup-miss half of [`TuiState::registry_label`],
+/// and the guarantee that a tagged key never reaches the screen (C-022
+/// consequence 1, as amended by E-10.1).
+///
+/// What each key shape degrades to:
+///
+/// | Key | Label |
+/// |---|---|
+/// | `"alias:{alias}/{locator}"` | `"{alias} ({locator})"` — **byte-identical** to the hit path (`app::registry_labels`), so a miss costs nothing at all |
+/// | `"locator:{locator}"` | `"{locator}"` — the tag strips whole |
+/// | anything else (`"Local"`, a bare url, `""`) | itself, unchanged |
+///
+/// **Split at the *first* `/` after the `alias:` tag, never the last**
+/// (E-10.3): a locator contains `/` and an alias cannot
+/// ([`crate::config::project_config::validate_registries`] rejects one that
+/// does), so a left-split recovers both halves exactly while `rsplit_once`
+/// would return garbage for any multi-segment locator.
+fn label_from_root_key(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("alias:") {
+        // `split_once` is the left-split E-10.3 requires; `rsplit_once` would
+        // hand back `acme/localhost:5002 (uxrev)` for a namespaced locator.
+        // A tagged key always carries the separator, so the `None` arm is
+        // unreachable from `root_key` and degrades to the alias alone.
+        return match rest.split_once('/') {
+            Some((alias, locator)) => format!("{alias} ({locator})"),
+            None => rest.to_string(),
+        };
+    }
+    if let Some(locator) = key.strip_prefix("locator:") {
+        return locator.to_string();
+    }
+    key.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1537,7 +1601,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -2218,7 +2282,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -3111,7 +3175,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
-            source: None,
+            source: RowSource::Unattributed,
         };
         s.set_rows(vec![bundle_row]);
         s.set_default_registry(Some("reg".to_string()));
@@ -3345,6 +3409,9 @@ mod tests {
 #[cfg(test)]
 mod p2_state_member_node_tests {
     use super::*;
+    // The root-key constructor, so the `registry_label` fallback tests derive
+    // their keys instead of hardcoding the tagged spelling (E-10.2).
+    use crate::config::registry_resolve::row_source_of;
     use crate::tui::bundle_members::{BundleMemberCache, MemberNode};
 
     fn bundle_tui_row(repo: &str) -> TuiRow {
@@ -3366,7 +3433,7 @@ mod p2_state_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -3635,6 +3702,12 @@ mod p2_state_member_node_tests {
     }
 
     // registry_label falls back to the URL when no alias is configured.
+    //
+    // Extended for C-022 consequence 1: the fallback is also the guarantee
+    // that a TAGGED root key never reaches the screen. An unaliased entry's
+    // key strips its `locator:` tag and comes back as the bare locator, which
+    // is what this test's original spelling asserted for an untagged key —
+    // both shapes must land on the same string.
     #[test]
     fn registry_label_falls_back_to_url_when_no_alias() {
         let s = TuiState::new(); // empty labels
@@ -3643,6 +3716,83 @@ mod p2_state_member_node_tests {
             "ghcr.io/other",
             "registry_label must fall back to the URL itself when not mapped"
         );
+        assert_eq!(
+            s.registry_label(&row_source_of(None, "ghcr.io/other").root_key()),
+            "ghcr.io/other",
+            "an unaliased entry's root key strips its tag whole — the user never reads `locator:`"
+        );
+    }
+
+    /// E-10.1: a miss on an **aliased** entry's key rebuilds the full
+    /// `"{alias} ({locator})"` label. The test above covers only the no-alias
+    /// case, which is why the tagged-key leak survived it: an `alias:` key
+    /// passed straight through would print `alias:acme/ghcr.io/acme` on
+    /// screen, and a naive `strip_prefix("alias:")` would print
+    /// `acme/ghcr.io/acme`.
+    ///
+    /// The keys are derived from `row_source_of(..).root_key()` rather than
+    /// spelled out: this pins the round trip through the two functions, and
+    /// leaves the encoding free to move at its one seam (E-10.2 / E-15.2).
+    #[test]
+    fn registry_label_miss_rebuilds_the_full_label_for_an_alias_key_e10_1() {
+        let s = TuiState::new(); // empty labels — every lookup misses
+        assert_eq!(
+            s.registry_label(&row_source_of(Some("acme"), "ghcr.io/acme").root_key()),
+            "acme (ghcr.io/acme)",
+            "an `alias:` key rebuilds the alias AND its locator — returning the bare alias \
+             degrades the label instead of leaving it unchanged"
+        );
+    }
+
+    /// E-10.3: split an `alias:` key at the **first** `/`, never the last.
+    /// A locator contains `/` and an alias cannot
+    /// (`validate_registries` rejects one that does), so a left-split recovers
+    /// both halves exactly while `rsplit_once` returns garbage for any
+    /// multi-segment locator — `acme/localhost:5002 (uxrev)` for the entry
+    /// below. Every real-world locator with a namespace is multi-segment, so
+    /// this is the common case, not an edge one.
+    #[test]
+    fn registry_label_miss_splits_an_alias_key_at_the_first_slash_e10_3() {
+        let s = TuiState::new();
+        assert_eq!(
+            s.registry_label(&row_source_of(Some("acme"), "localhost:5002/uxrev").root_key()),
+            "acme (localhost:5002/uxrev)",
+            "the alias is everything before the FIRST `/` after the tag; the locator is the \
+             entire remainder, verbatim"
+        );
+        // Three segments, to prove the rule is not "split at the second `/`".
+        assert_eq!(
+            s.registry_label(&row_source_of(Some("deep"), "ghcr.io/acme/team").root_key()),
+            "deep (ghcr.io/acme/team)"
+        );
+    }
+
+    /// E-10.1's third clause: anything that is not a tagged key passes
+    /// through unchanged. `"Local"` is the sentinel the synthetic group roots
+    /// at and it must keep rendering as itself; a bare url is what a caller
+    /// outside the root-key space (or a pre-tagging fixture) hands in.
+    #[test]
+    fn registry_label_miss_passes_an_untagged_key_through_e10_1() {
+        let s = TuiState::new();
+        assert_eq!(
+            s.registry_label(&RowSource::Local.root_key()),
+            "Local",
+            "the Local sentinel is not a tagged key and must render as itself"
+        );
+        assert_eq!(s.registry_label("registry.corp"), "registry.corp");
+        assert_eq!(s.registry_label(""), "");
+    }
+
+    /// A mapped label always wins over the reconstruction — the fallback is
+    /// the miss path, not a rewrite of the hit path.
+    #[test]
+    fn registry_label_prefers_the_mapped_label_over_the_reconstruction() {
+        let mut s = TuiState::new();
+        let key = row_source_of(Some("acme"), "ghcr.io/acme").root_key();
+        let mut labels = BTreeMap::new();
+        labels.insert(key.clone(), "mapped".to_string());
+        s.set_registry_labels(labels);
+        assert_eq!(s.registry_label(&key), "mapped");
     }
 
     // is_multi_registry is false when registry_order has one entry.

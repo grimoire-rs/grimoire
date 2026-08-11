@@ -188,10 +188,6 @@ impl CatalogGroup {
     /// cannot drift. Returns only `Alias` or `Locator`: `Local` and
     /// `Unattributed` exist for `TuiRow.source` and are unreachable from a
     /// configured entry.
-    #[allow(
-        dead_code,
-        reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
-    )]
     pub(crate) fn key(&self) -> RowSource {
         row_source_of(self.alias.as_deref(), &self.registry)
     }

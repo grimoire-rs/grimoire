@@ -16,6 +16,7 @@
 
 use super::bundle_members::MemberNode;
 use super::state::{ArtifactState, TuiRow};
+use crate::config::registry_resolve::RowSource;
 
 /// Catalog column widths (chars) — the projection pads/truncates to
 /// these so the table aligns regardless of how long an identifier is.
@@ -138,7 +139,7 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
     // A "Local" row (path declaration or dev record) carries no registry tag —
     // its `repository` field holds the declared source path and `version` the
     // short content hash, surfaced here as dedicated `Path:`/`Hash:` rows.
-    if r.source.as_deref() == Some("Local") {
+    if matches!(r.source, RowSource::Local) {
         lines.push(DetailLine::MetaEntry {
             label: "Path:",
             value: r.repository.clone(),
@@ -487,7 +488,7 @@ mod tests {
             version: "1.0.0".to_string(),
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -647,7 +648,7 @@ mod tests {
     #[test]
     fn detail_lines_show_path_and_hash_for_local_row() {
         let mut row = tui_row(None);
-        row.source = Some("Local".to_string());
+        row.source = RowSource::Local;
         row.repository = "./local-skill".to_string();
         row.version = "deadbee1".to_string();
         let lines = detail_lines(Some(&row));
@@ -657,7 +658,7 @@ mod tests {
 
     #[test]
     fn detail_lines_omit_path_and_hash_for_registry_row() {
-        // A registry-sourced row (`source: None`) must never show the
+        // A registry-sourced row (`RowSource::Unattributed`) must never show the
         // Local-only Path:/Hash: rows.
         let lines = detail_lines(Some(&tui_row(None)));
         assert_eq!(meta_value(&lines, "Path:"), None);

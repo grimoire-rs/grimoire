@@ -693,6 +693,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::registry_resolve::RowSource;
     use crate::tui::state::{ArtifactState, TuiRow};
 
     fn row(repo: &str) -> TuiRow {
@@ -714,7 +715,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1271,6 +1272,7 @@ mod tests {
 #[cfg(test)]
 mod p2_event_member_node_tests {
     use super::*;
+    use crate::config::registry_resolve::RowSource;
     use crate::tui::bundle_members::{BundleMemberCache, MemberNode};
     use crate::tui::state::{ArtifactState, TuiRow, TuiState};
     use crate::tui::tree::DisplayRow;
@@ -1294,7 +1296,7 @@ mod p2_event_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1317,7 +1319,7 @@ mod p2_event_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 
@@ -1885,6 +1887,7 @@ mod p2_event_member_node_tests {
 #[cfg(test)]
 mod tree_event_tests {
     use super::*;
+    use crate::config::registry_resolve::RowSource;
     use crate::tui::state::{ArtifactState, TuiRow, TuiState};
 
     fn two_leaf_state() -> TuiState {
@@ -1908,7 +1911,7 @@ mod tree_event_tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
-                source: None,
+                source: RowSource::Unattributed,
             },
             TuiRow {
                 oci: crate::catalog::OciMeta::default(),
@@ -1927,7 +1930,7 @@ mod tree_event_tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
-                source: None,
+                source: RowSource::Unattributed,
             },
         ]);
         s.set_default_registry(Some("reg".to_string()));
@@ -2066,7 +2069,7 @@ mod tree_event_tests {
             deprecated: None,
             pinned_version: None,
             state: crate::tui::state::ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         };
         let mut s = TuiState::new();
         s.view_mode = ViewMode::Flat;
@@ -2110,7 +2113,7 @@ mod tree_event_tests {
             deprecated: None,
             pinned_version: None,
             state: crate::tui::state::ArtifactState::NotInstalled,
-            source: None,
+            source: RowSource::Unattributed,
         };
         let mut s = TuiState::new();
         s.view_mode = ViewMode::Flat;
@@ -2146,6 +2149,7 @@ mod tree_event_tests {
 #[cfg(test)]
 mod bug2_group_batch_state_gate_tests {
     use super::*;
+    use crate::config::registry_resolve::RowSource;
     use crate::tui::state::{ArtifactState, TuiRow, TuiState};
 
     fn group_row(repo: &str, state: ArtifactState) -> TuiRow {
@@ -2167,7 +2171,7 @@ mod bug2_group_batch_state_gate_tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 

@@ -398,6 +398,7 @@ impl Drop for UpdateChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::registry_resolve::RowSource;
     use crate::oci::Algorithm;
 
     fn digest(seed: &[u8]) -> Digest {
@@ -423,7 +424,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
-            source: None,
+            source: RowSource::Unattributed,
         }
     }
 

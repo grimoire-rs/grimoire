@@ -148,10 +148,6 @@ impl ResolvedRegistry {
     /// it shares with `CatalogGroup::key`, so the two cannot drift. Returns
     /// only `Alias` or `Locator`: `Local` and `Unattributed` exist for
     /// `TuiRow.source` and are unreachable from a configured entry.
-    #[allow(
-        dead_code,
-        reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
-    )]
     pub(crate) fn key(&self) -> RowSource {
         row_source_of(self.alias.as_deref(), &self.url)
     }
@@ -186,10 +182,6 @@ impl ResolvedRegistry {
 /// is deliberately *not* [`normalize_locator`]'s form: that is the `seen`
 /// dedup key, a different concept (C-029), and the two must not be unified.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(
-    dead_code,
-    reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
-)]
 pub(crate) enum RowSource {
     /// The synthetic local / dev-record group. Not a configured entry.
     Local,
@@ -204,10 +196,6 @@ pub(crate) enum RowSource {
     Unattributed,
 }
 
-#[allow(
-    dead_code,
-    reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
-)]
 impl RowSource {
     /// Render into the tree's existing `String`-keyed space (`Node` keys,
     /// `registry_labels`, `registry_order` all stay `String`, so no tree
@@ -753,8 +741,9 @@ mod tests {
         // `command::release`. `config::registry_resolve`'s own 39 tests all
         // pass without it, which is precisely the coverage gap this closes.
         //
-        // Its TUI-level sibling is S-022b: today's `source_key(Some("acme"),
-        // url)` returns `"acme"` for both of these, merging two roots.
+        // Its TUI-level sibling is S-022b: the superseded `source_key` keyed a
+        // root by its alias alone, so both of these keyed `"acme"` and merged
+        // into one root. [`RowSource::root_key`] carries both halves.
         let set = resolve_registries(
             &[],
             &[rc(Some("acme"), "ghcr.io/acme", false)],
