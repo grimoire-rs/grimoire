@@ -320,9 +320,9 @@ not become a resolution or security boundary.
 
 | Assertion | ADR clause | Scenario |
 |---|---|---|
-| A forced `--registry` browse applies no filter — `resolve_registries`' forced branch constructs entries with `RegistryFilter::default()`, so `include_is_empty` short-circuits and neither candidate is consulted | D9 | S-007 |
+| A forced `--registry` browse applies no filter — `resolve_registries`' forced branch constructs entries with `RegistryFilter::default()`, so every candidate is tested against two empty sets and admitted | D9 | S-007 |
 | `CatalogScope::Complete` is never filtered — the match arm at `catalog_service.rs:339-341` is total over the enum and `Complete` returns `true` unconditionally, so `grim status --check` still sees every declared artifact's `deprecated`/`replaced_by` | D5, D6 | S-008 |
-| An excluded reference resolves, locks and installs byte-identically to a visible one — filtering is read-time only and `src/resolve/` never sees a `ResolvedRegistry` or the catalog | D6 | S-009 |
+| An excluded reference **resolves** byte-identically to a visible one — filtering is read-time only and `src/resolve/` never sees a `ResolvedRegistry` or the catalog | D6 | S-009 |
 
 Each needs a test. The `Complete` one must go red if the match arm's
 `CatalogScope::Complete => true` is mutated to call `matches`.
@@ -380,6 +380,55 @@ the exclude hits via the qualified candidate, and its bare candidate
 `include = ["localhost:5000/**"]` never matches any row's bare candidate: the
 OCI `<name>` grammar forbids `:`, so no repository path can spell a
 port-bearing host.
+
+**S-023 — a mixed-case registry host does not match a lowercase pattern
+(documented caveat, accepted).** *Added 2026-08-11; found independently by
+the researcher and quality perspectives in Review-Fix round 1, both with
+binary repros.*
+
+An entry declared `oci = "GHCR.io/acme"` keeps that casing all the way into
+`CatalogEntry.registry` — `trim_locator`'s own doc is explicit that the
+stored url is identity and is "never case- or slash-folded", and
+`oci_host_case_variants_dedup` (`registry_resolve.rs:923-935`) pins it. The
+qualified candidate is therefore `GHCR.io/acme/tools`, and
+`include = ["ghcr.io/**"]` — the DNS-conventional spelling every doc example
+uses — admits nothing.
+
+**This is new surface.** Before this change no host ever entered a candidate,
+so no case difference could affect a pattern at all. `compile_pattern` leaves
+`case_insensitive` at `false`, justified in its own doc as "OCI repository
+names are lowercase by spec" — true of the *path* half only. The
+`distribution/reference` grammar makes `alpha-numeric := /[a-z0-9]+/` for
+paths but lets `domain-component` carry uppercase, and grim mirrors that
+asymmetry exactly (`identifier.rs:87` enforces lowercase for repositories;
+there is no registry equivalent).
+
+Both directions were reproduced against a release binary:
+
+- **include**: warns and is recoverable — the C-019 diagnostic fires
+  (`filter admitted 0 of 2 repositories`), exit 0.
+- **exclude**: **silent** — `exclude = ["QUAY.IO/**"]` hides nothing, exit 0,
+  no diagnostic. This is a new instance of the fail-open the owner accepted
+  in decision 7, on a surface that did not previously exist.
+
+**Accepted, not fixed, this round.** Cost is not the obstacle — under
+C-001's exact-capacity construction, folding the host is a ~10-byte ASCII
+scan with zero extra allocations. The obstacles are that folding the
+*candidate* without the *pattern* leaves a half-fixed asymmetry (a
+lowercase-config / uppercase-pattern config would still fail), that a glob
+has no decidable host portion to fold (`*/tools` has none), and that folding
+breaks C-001's stated `repo()` byte-equality. The validation route — reject a
+mixed-case host at load — is closed by Principle 9: it narrows an input that
+parses on `v0.12.1`.
+
+**Obligations this round:** one sentence under `#browse-filters` naming the
+caveat (WP-D, C-032), and a correction to `qualified_candidate`'s doc, which
+currently claims "a case difference between the locator and the row's
+registry can no longer make a strip quietly not fire" — true of the *deleted*
+strip, and misleading beside the sensitivity it does not mention (WP-A).
+
+**Routed to the owner** as a deferred question: fold the host segment in a
+later round, or keep the caveat.
 
 ---
 
@@ -721,9 +770,22 @@ legibly and would surface as mojibake in any accidental display.
 **`src/config/` deliberately owns this tree-key format.** `root_key`'s only
 callers live in `src/tui/` (C-023's four sites, C-024's three), so the
 `"alias:"`/`"locator:"` tags are a format two modules share. It stays beside
-the type it renders rather than moving to `src/tui/`: the alternative puts an
-`impl RowSource` in the TUI and inverts the same coupling without removing
-it. This sentence is the ownership statement — do not leave it implicit.
+the type it renders. This sentence is the ownership statement — do not leave
+it implicit.
+
+> **Rationale corrected 2026-08-11 (WP-A Review-Fix, architect).** The
+> original justification — "the alternative puts an `impl RowSource` in the
+> TUI and inverts the same coupling without removing it" — **is false about
+> Rust**: an inherent `impl` must live in the defining *crate*, not the
+> defining *module*, so `impl RowSource { fn root_key }` in `src/tui/` is
+> perfectly legal and would genuinely remove `config`'s knowledge of the
+> tree's key space.
+>
+> The conclusion stands on better ground: **`CatalogGroup` produces a
+> `RowSource` too, and it lives in `catalog`, not `tui`** — so a `tui`-side
+> rendering would be reachable from a non-TUI producer. That is the reason
+> to keep it in `config`. (Moving the impl now would also collide with WP-C
+> for zero behaviour change.)
 
 **Tests:**
 - `row_source_of(Some("acme.example"), "x").root_key() != row_source_of(None, "acme.example").root_key()` (alias vs locator);
@@ -1216,20 +1278,47 @@ Raised by the WP-A post-stub architect. The whole dual-candidate rule rests
 on `registry` being a bare host and `repository` carrying the entire
 namespaced path — that is what makes S-005 (`oci` ≡ `index`), S-006 (a
 locator edit cannot re-aim a pattern) and "a bare pattern is host-agnostic"
-true. Both production constructors do satisfy it — `Catalog::build` passes
-`split_host_namespace(registry).0` (`registry_catalog.rs:690`, `:713`,
-`:722`) and `IndexPackage::into_entry` splits on the first `/`
-(`index_source.rs:88`) — but **no contract states it and no test asserts
-it**. If either constructor ever passed the namespaced locator instead, every
-authored bare pattern would silently re-aim with no diagnostic: precisely the
-failure class this ADR exists to delete.
+true. The invariant does hold — but **this contract originally named the
+wrong guarantor**, and the correction matters because it changes what a
+useful test must exercise.
+
+> **Corrected 2026-08-11 (WP-A Review-Fix round 1, quality perspective,
+> verified).** The claim was "`Catalog::build` passes
+> `split_host_namespace(registry).0`, so the host is `/`-free". **False.**
+> `split_host_namespace`'s fall-through arm is `_ => (registry, None)`
+> (`registry_catalog.rs:855`), which returns the string **whole** when the
+> namespace half is empty — and its own existing pin says so outright:
+> `assert_eq!(split_host_namespace("ghcr.io/"), ("ghcr.io/", None));`
+> (`registry_catalog.rs:1766`).
+>
+> The real guarantor is **`trim_locator`** (`registry_resolve.rs:104-106`),
+> applied at all five `ResolvedRegistry` construction sites (`:299`, `:345`,
+> `:382`, `:425`, `:433`), with `load_catalog` passing `reg.url` straight
+> through (`catalog_service.rs:285`, `:294`). `IndexPackage::into_entry`
+> guards its own path separately, rejecting an empty registry outright
+> (`index_source.rs:89-91`).
+
+If the trim were ever dropped, every authored bare pattern would silently
+re-aim with no diagnostic: precisely the failure class this ADR exists to
+delete.
 
 **New contract C-031, cluster A, owner WP-A.** `CatalogEntry.registry`
-contains no `/`. One assertion over the fixture set
-(`!entry.registry.contains('/')` for every seeded entry, including the new
-two-host fixture from C-009) plus a line in `qualified_candidate`'s doc
-naming the premise. No production change — this pins an invariant that
-already holds.
+contains no `/`.
+
+**A fixture-set assertion alone does not discharge it.** `seed_catalog`
+writes the `registry` field as a JSON literal and `seeded_catalog` reads it
+back through `Catalog::load`, so **no constructor runs** and
+`!entry.registry.contains('/')` merely re-asserts the fixture's own literals
+— delete `trim_locator` and it stays green. The test must exercise the real
+path; the cheapest form that goes red under the regression is
+
+```rust
+assert!(!split_host_namespace(trim_locator("ghcr.io/")).0.contains('/'));
+```
+
+beside the fixture loop. Both the `qualified_candidate` doc and the test
+comment must name **`trim_locator`** as the guarantor, not
+`split_host_namespace`.
 
 ### E-10 — three consequences of the `Alias` amendment (WP-C's, decided here)
 
@@ -1295,6 +1384,142 @@ green and the crash stayed live. So:
   suggestion, and WP-C's own clippy run is what proves the deletion is safe.
 - **WP-C's post-merge verification is where it is checked.** If the attribute
   is still present after WP-C merges, that is a failed gate.
+
+### E-12 — what `fields` reports: the write, not the invocation
+
+Four gaps WP-B's Specify pass found in C-021 and refused to guess at. All four
+resolve the same way, and the governing rule is `subsystem-cli.md`'s **"Report
+actual results — a command reports what happened, not an echo of its
+input."**
+
+**1. A locator kind swap emits *both* elements.** `run_registry_set` sets
+`rc.oci = Some(..)` **and** `rc.index = None` in one closure, so
+`registry set acme --index …` on an OCI entry performs two mutations. It
+reports two:
+
+```json
+[ { "field": "oci",   "action": "cleared" },
+  { "field": "index", "action": "set", "value": "https://…" } ]
+```
+
+`oci` precedes `index` because `RegistryField::ALL` orders them so. Emitting
+only the named side would hide a mutation the command actually performed —
+exactly the class of quiet report the review round exists to close. C-021's
+worked example shows one element only because its fixture's entry carried no
+`index` to clear.
+
+**The converse, stated (WP-B Implement raised it; the reading is confirmed):**
+the unnamed locator side emits `cleared` **only when it actually held a
+value**. `registry set acme --index …` on an entry that was already
+index-only emits **no** `oci` element — reporting `oci cleared` where there
+was no `oci` would be a phantom, and `fields` describes writes that happened.
+This is also the only reading consistent with the pinned test
+`registry_set_reports_one_element_per_touched_field_in_all_order`, which does
+`--oci` on an entry carrying no `index` and asserts `index` is absent.
+
+That branch had **no witness** — two mutations of the `had_oci`/`had_index`
+guards survived all 2570 tests — so WP-B added
+`registry_set_kind_swap_reports_both_locator_sides`, covering all four
+states. Do not remove it.
+
+**2. A named field whose value did not change still emits its element.**
+`registry set acme --default` on an already-default entry, or `--oci` with
+the identical locator, emits `{"field":"default","action":"set","value":true}`
+all the same. `fields` describes **the assignment the write performed and the
+resulting state**, not a before/after diff — the code assigns
+unconditionally, and making the report diff-aware would require a pre-read
+the command does not do and a consumer contract nobody asked for. Element
+presence therefore means "this field was written", never "this field
+changed".
+
+**3. E-7's cell example is corrected to `ALL` order.** E-7 illustrated
+`oci=ghcr.io/moved, include=2, exclude cleared, default=true` — *declaration*
+order, which contradicts C-021 assertion 4's `RegistryField::ALL` order once
+the cell is derived from `fields`. The correct rendering of that same edit is:
+
+```
+oci=ghcr.io/moved, default=true, include=2, exclude cleared
+```
+
+**4. The cell grammar is normative, not illustrative.** Segments joined with
+`", "`, in `fields` order:
+
+| Element | Segment |
+|---|---|
+| `set` on a locator (`oci`/`index`) | `{field}={value}` |
+| `set` on `default` | `default={true\|false}` |
+| `set` on a list (`include`/`exclude`) | `{field}={count}` — the count, not the patterns |
+| `cleared` | `{field} cleared` |
+
+An empty `fields` renders the cell exactly as today (blank for a filter-only
+edit is no longer reachable, since a filter-only edit now populates `fields`).
+
+**5. `docs/src/json-interface.md` must document the two clearing routes'
+asymmetry** (WP-D, under C-032). `grim config unset registry.acme.include`
+reports `action: "unset"` with `fields: []`; `registry set acme
+--clear-include` reports `action: "registry-set"` with a `cleared` element.
+Both routes are kept by owner decision 9 and `fields` is scoped to `registry
+set`, so the asymmetry is intended — but a consumer diffing the two paths
+must be able to read it somewhere rather than discover it.
+
+**6. C-018's `add.rs` guard is depended on, not edited.**
+`write_config_omits_filters_when_unset` (`src/command/add.rs:1313`) is in no
+work package's file set, and that is correct: C-018 states a clear needs **no
+write-layer change**, precisely because `write_config`'s existing emptiness
+guard already omits an empty list. WP-B covers the contract from
+`run_registry_set`'s side plus an acceptance test, which satisfies C-018's
+"or add its sibling". **No builder may remove or weaken that guard** — it is
+the mechanism the contract rests on.
+
+### E-13 — C-011's two `docs/src` copies move to WP-A, or wave 1 cannot merge green
+
+WP-A's Implement pass ends at **2578 passed, 1 failed**, and the single
+failure is C-011's own parity test: `BROWSE_FILTER_REMEDY` now carries the
+new string while `docs/src/configuration.md:491` and
+`docs/src/commands.md:743` still carry the old one. Those two lines sat in
+WP-D's cell, in **wave 3**.
+
+That is a plan defect, not a build problem. The merge discipline requires
+`task --force verify` green **after every merge**, and WP-A merges first — so
+as written, wave 1 could not merge without a red gate, and the redness would
+persist through WP-B and WP-C's merges too.
+
+**C-011's two `docs/src` lines move to WP-A.** The parity assertion spans
+exactly three sites — the producer constant and the two copies — and a
+constant cannot move without them. Splitting a verbatim-string parity across
+two waves is what created the gap.
+
+**This does not collide with WP-D.** WP-D still owns both files for **C-012**,
+its first-paragraph obligation, at different lines. The two packages are
+never concurrent (WP-D depends on WP-A, and the merge order is serialized
+A → B → C → D), so the disjointness invariant — which governs *concurrently
+running* work packages — is not touched. WP-D's brief must simply not
+re-litigate the remedy string it will find already correct.
+
+**WP-D keeps the two agent-facing carriers**
+(`catalog/skills/grim-usage/references/registries.md:271`,
+`.claude/rules/subsystem-cli-commands.md:27`), which are *corrections* of the
+pre-`f790273` wording rather than re-derivations, and which no parity test
+reaches.
+
+### E-14 — the dispatch-site flag swap is guarded only at the acceptance layer
+
+WP-B's Implement pass measured it and reported it rather than papering over
+it: **swapping `*clear_include` / `*clear_exclude` in the `run` dispatch arm
+(`config.rs:230-231`) leaves the entire 2570-test unit suite green.** Five
+acceptance tests catch it, and nothing else does.
+
+This is a **structural property of the layout, not a defect, and not
+actionable.** Every unit test calls `run_registry_set` directly, so none can
+observe how `run` forwards into it; the acceptance layer is the only place
+the dispatch arm is exercised at all, and it does catch the swap. The guard
+exists — it is simply not where a reader scanning the unit tests would look
+for it.
+
+Recorded so a later reviewer who re-derives the mutation does not file it as
+an uncovered path, and so nobody "fixes" it by duplicating the dispatch arm
+into a unit test that would only re-assert clap's own wiring. The same shape
+applies to `*default`, which shipped with the identical exposure.
 
 ### E-4 — `config` exports no constructor for `Local` / `Unattributed`
 
