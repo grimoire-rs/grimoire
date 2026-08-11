@@ -1323,9 +1323,38 @@ useful test must exercise.
 > guards its own path separately, rejecting an empty registry outright
 > (`index_source.rs:89-91`).
 
-If the trim were ever dropped, every authored bare pattern would silently
-re-aim with no diagnostic: precisely the failure class this ADR exists to
-delete.
+> **Corrected again 2026-08-11 (WP-D Review-Fix round 1, doc perspective,
+> verified at HEAD). The correction above over-swung, and this one is the
+> record.** It is not `trim_locator` *instead of* `split_host_namespace`;
+> for an `oci` source the two are **load-bearing in series**, and naming
+> only one points a future maintainer at the wrong file.
+>
+> - **`split_host_namespace` is what removes the namespace.**
+>   `Catalog::build` calls it (`registry_catalog.rs:690`) and spawns every
+>   entry under the returned `host` (`:713`, `:722`), so `oci =
+>   "ghcr.io/acme"` yields `registry = "ghcr.io"`, `repository =
+>   "acme/foo"`. Nothing else does that. Refactor it and every authored
+>   pattern silently re-aims.
+> - **`trim_locator` is the upstream guard on its fall-through arm.** `_ =>
+>   (registry, None)` (`registry_catalog.rs:855`) returns the string whole,
+>   pinned by `assert_eq!(split_host_namespace("ghcr.io/"), ("ghcr.io/",
+>   None))` (`:1766`). Only a **bare-host** locator reaches that arm — a
+>   locator with a non-empty namespace half has its slash absorbed by the
+>   split either way — so the trim is what stops `ghcr.io/` from landing a
+>   `/` in every entry's `registry`.
+>
+> Two further clauses in the block above are wrong as written and are
+> withdrawn: `load_catalog` does **not** pass `reg.url` to the matcher —
+> the browse site is `reg.filter.matches(&e.registry, &e.repository)`
+> (`catalog_service.rs:356`), and `reg.url` reaches only the catalog
+> *build* and `CatalogGroup.registry`; and "It is *not*
+> `split_host_namespace`" inverts the relationship outright. The `index`
+> half is unaffected — `IndexPackage::into_entry` remains its own,
+> independent guard (`index_source.rs:88-91`).
+
+If either guard were ever dropped, every authored bare pattern would
+silently re-aim with no diagnostic: precisely the failure class this ADR
+exists to delete.
 
 **New contract C-031, cluster A, owner WP-A.** `CatalogEntry.registry`
 contains no `/`.
@@ -1341,9 +1370,10 @@ path; the cheapest form that goes red under the regression is
 assert!(!split_host_namespace(trim_locator("ghcr.io/")).0.contains('/'));
 ```
 
-beside the fixture loop. Both the `qualified_candidate` doc and the test
-comment must name **`trim_locator`** as the guarantor, not
-`split_host_namespace`.
+beside the fixture loop — it composes exactly the two guards, in the order
+the production path applies them. Both the `qualified_candidate` doc and the
+test comment must name **both**: `split_host_namespace` as what removes the
+namespace, `trim_locator` as the upstream guard on its fall-through arm.
 
 ### E-10 — three consequences of the `Alias` amendment (WP-C's, decided here)
 

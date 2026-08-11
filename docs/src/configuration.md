@@ -343,9 +343,11 @@ include = ["acme/platform/**", "acme/tools/**"]
 exclude = ["acme/platform/legacy/**"]
 ```
 
-The patterns above carry no registry host: a pattern is matched against the
-row's repository path, whatever the entry's own locator is, as "Patterns
-match the repository path" further down explains in full.
+Every pattern is tested against two strings — the repository path
+(`acme/tools`) and the fully-qualified reference (`ghcr.io/acme/tools`) — and
+a hit on either counts. The patterns above carry no registry host, so they
+match on every host; adding one narrows them to that host. "Patterns match
+two candidates" further down explains it in full.
 
 A repository is shown when the `include` list is empty **or** at least one
 `include` pattern matches it, **and** no `exclude` pattern matches. The two
@@ -418,10 +420,11 @@ as `acme/platform{,/**}` — the common case needs no wildcards at all. Every
 other pattern is used verbatim.
 
 **The expansion grows downward only, never leftward.** `acme/platform`
-becomes `acme/platform{,/**}` — a suffix — so it still has to match the
-candidate from its very first segment. It is not a search for a name
-appearing anywhere. This is the shape that surprises people, because a bare
-name reads like one:
+becomes `acme/platform{,/**}` — a suffix — so it still has to match a
+candidate from that candidate's very first segment. It is not a search for a
+name appearing anywhere, and the second candidate does not rescue it: `hex`
+matches neither `acme/arcana/hex` nor `ghcr.io/acme/arcana/hex`. This is the
+shape that surprises people, because a bare name reads like one:
 
 | Pattern | Candidate | Matches? |
 |---|---|---|
@@ -445,44 +448,67 @@ pattern has to mean one thing on every checkout; grim pins that rather than
 inheriting the platform-dependent default its glob engine would otherwise
 apply.
 
-**Patterns match the repository path.** A pattern is tested against the
-row's `repository` — the reference with the registry host removed, and
-nothing else removed. The entry's own `oci` / `index` locator is not an
-input:
+**Patterns match two candidates.** A pattern is tested against **two** strings
+derived from the row — its `repository` path, and the fully-qualified
+`registry/repository` reference — and a hit on either counts. The entry's own
+`oci` / `index` locator is part of neither:
 
-| This entry's locator | Catalog row | Pattern matches against |
-|---|---|---|
-| `ghcr.io` | `ghcr.io/acme/platform/foo` | `acme/platform/foo` |
-| `ghcr.io/acme` | `ghcr.io/acme/platform/foo` | `acme/platform/foo` |
-| `https://index.grimoire.rs` | `ghcr.io/acme/foo` | `acme/foo` |
+| This entry's locator | Catalog row | Bare candidate | Qualified candidate |
+|---|---|---|---|
+| `ghcr.io` | `ghcr.io/acme/tools` | `acme/tools` | `ghcr.io/acme/tools` |
+| `ghcr.io/acme` | `ghcr.io/acme/tools` | `acme/tools` | `ghcr.io/acme/tools` |
+| `https://index.grimoire.rs` | `quay.io/acme/tools` | `acme/tools` | `quay.io/acme/tools` |
 
 One rule for both source kinds, and the same answer at every locator depth.
-The practical consequences are all of the "it silently stopped matching"
-class, and they are gone:
+Two consequences follow directly, and they are the whole point:
+
+- **A bare pattern is host-agnostic.** `include = ["acme/tools"]` admits that
+  repository on every host the source serves.
+- **A host-qualified pattern selects one host.**
+  `include = ["ghcr.io/acme/tools"]` admits it only from `ghcr.io`, which is
+  what lets an index spanning several registries be filtered per host.
+
+The practical failures this deletes are all of the "it silently stopped
+matching" class:
 
 - **Editing an entry's own locator cannot re-aim its patterns.** Moving
   `oci = "ghcr.io/acme"` to `oci = "ghcr.io"` used to change what every
   pattern in that entry was matched against, so an `include` that had worked
   for months began matching nothing — valid config, exit `0`, empty catalog.
-- **A case difference between locator and row no longer matters.** It used to
-  make the prefix strip quietly not fire, disabling the entry's filter.
+- **A case difference between locator and row no longer disables a filter.**
+  It used to make the prefix strip quietly not fire. (Case still matters
+  *inside* a pattern that spells a host — see the caveat below.)
 - **A pattern is portable.** Copying `acme/platform/**` between two entries —
   at different depths, or from an `oci` entry to an `index` one — means the
   same thing in both.
 
-The accepted cost is narrow: an index whose rows span two registry **hosts**
-cannot tell them apart, since `ghcr.io/acme/tools` and `quay.io/acme/tools`
-are both `acme/tools`. Two `[[registries]]` entries never contend, whatever
-they point at — a filter is only ever applied to rows served by its own
-source.
+**`exclude` wins once, over the combined verdict.** The two lists are not two
+whole-filter answers OR-ed together: grim asks "did any `include` pattern hit
+either candidate?" and "did any `exclude` pattern hit either candidate?", then
+shows the row when the first is true and the second is false. So
+`include = ["acme/tools"]` with `exclude = ["quay.io/acme/tools"]` hides
+exactly the `quay.io` row and keeps every other host's — the host-qualified
+`exclude` does not disarm the bare `include` everywhere.
 
-This is deliberately **not** the string the [TUI][grim-tui] tree prints
-beneath a source's root. The tree attributes a row to the **longest**
-configured locator, so with both `ghcr.io` and `ghcr.io/acme` declared the
-row `ghcr.io/acme/tools/foo` *displays* as `tools/foo` while every filter
-matches it as `acme/tools/foo`. The tree is a display and reshapes itself as
-you add sources; a pattern must not. Write patterns from the reference, not
-from the tree.
+**A mixed-case registry host does not match a lowercase pattern.** An entry
+declared `oci = "GHCR.io/acme"` keeps that spelling into the qualified
+candidate (`GHCR.io/acme/tools`), and matching is case-sensitive, so
+`include = ["ghcr.io/**"]` admits nothing and `exclude = ["QUAY.IO/**"]`
+hides nothing. The `include` direction warns (`filter admitted 0 of N`); the
+`exclude` direction is **silent** — the same "an exclude you wrote stops
+hiding anything" direction the fail-open above takes, on a surface that did
+not exist before the host entered a candidate. This is a documented caveat,
+not a fixed one: write a host in a pattern exactly as the entry's own locator
+spells it. The repository half is unaffected — OCI repository paths are
+lowercase by spec; only the host component may carry uppercase.
+
+Neither candidate is the string the [TUI][grim-tui] tree prints beneath a
+source's root. The tree attributes a row to the **longest** configured
+locator, so with both `ghcr.io` and `ghcr.io/acme` declared the row
+`ghcr.io/acme/tools/foo` *displays* as `tools/foo` while a filter matches it
+as `acme/tools/foo` or `ghcr.io/acme/tools/foo`. The tree is a display and
+reshapes itself as you add sources; a pattern must not. Write patterns from
+the reference, not from the tree.
 
 When a pattern does miss, the signal is a warning naming the source and the
 counts:
@@ -538,8 +564,28 @@ and applies only the flags it is given, so it changes a filter without
 disturbing the entry's locator, default flag, or position.
 `grim config set registry.<alias>.include <glob>` replaces the whole list
 with **exactly one** pattern — a comma is glob alternation syntax, never a
-separator, so nothing is ever split on one. Clearing a list is `grim config
-unset registry.<alias>.include`.
+separator, so nothing is ever split on one.
+
+**Clearing a list has two routes, and both are supported.** A list flag given
+zero times means "leave this field alone", so emptying one needs its own
+flag: `grim config registry set <alias> --clear-include` (and
+`--clear-exclude`) empties that side while leaving the entry's locator,
+default flag, position, and other list untouched. `grim config unset
+registry.<alias>.include` does the same thing through the dotted-key surface.
+Both are silent on any list length — including an already-empty one, which
+exits `0` and leaves the rest of the entry untouched — and both write the
+emptied list as **no key at all**, byte-identical to an entry that was never
+filtered. The *file* is still rewritten by the lossy serializer described at
+the top of this page; a clear changes nothing in the entry, not nothing on
+disk.
+`--clear-include` conflicts with `--include` on the same call (exit `64`);
+naming no field at all is also exit `64`.
+
+The two routes differ only in what they report. `registry set --clear-include`
+reports `action: "registry-set"` with a `{"field":"include","action":"cleared"}`
+row in its `fields` array; `config unset` reports `action: "unset"` with an
+empty `fields`. See [the JSON interface](./json-interface.md#config-write-fields)
+for the full write-report shape.
 
 Calling `set` on an entry that already carries more than one pattern
 **discards the rest**: exit `0`, with a warning naming how many were

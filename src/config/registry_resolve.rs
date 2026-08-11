@@ -950,16 +950,17 @@ mod tests {
 
     #[test]
     fn a_bare_host_locator_reaches_the_catalog_without_a_trailing_slash_c031() {
-        // **design C-031's guarantor, exercised on the real path.**
-        // `CatalogEntry.registry` must carry no `/`, and what enforces that is
-        // `trim_locator` — NOT `Catalog::build`'s
-        // `split_host_namespace(url).0`, whose fall-through arm returns the
-        // string whole when the namespace half is empty
+        // **design C-031's *second* guarantor, exercised on the real path.**
+        // `CatalogEntry.registry` must carry no `/`. The namespace removal is
+        // `Catalog::build`'s `split_host_namespace` — this test does not pin
+        // that half. It pins the other one: that split's fall-through arm
+        // returns the string whole when the namespace half is empty
         // (`split_host_namespace("ghcr.io/") == ("ghcr.io/", None)`, pinned in
-        // `catalog::registry_catalog`). `load_catalog` passes `reg.url`
-        // straight through, so a surviving trailing slash lands in every
-        // entry's `registry` field and silently re-aims every authored bare
-        // pattern, with no diagnostic.
+        // `catalog::registry_catalog`), and only a **bare-host** locator
+        // reaches it. `load_catalog` passes `reg.url` to the catalog build
+        // untouched, so without `trim_locator` a surviving trailing slash
+        // lands in every entry's `registry` field and silently re-aims every
+        // authored bare pattern, with no diagnostic.
         //
         // Its own test rather than a case inside
         // `every_construction_site_stores_the_locator_without_trailing_slashes`:

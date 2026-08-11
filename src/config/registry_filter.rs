@@ -524,18 +524,32 @@ impl RegistryFilter {
 ///
 /// **The premise this rests on (design C-031): `CatalogEntry.registry` carries
 /// no `/`** — it is a bare host, and `repository` carries the entire namespaced
-/// path. **The guarantor for an `oci` source is `registry_resolve`'s
-/// `trim_locator`**, applied at every
-/// `ResolvedRegistry` construction site, with `load_catalog` passing `reg.url`
-/// straight through. It is *not* `split_host_namespace`: that function's
-/// fall-through arm returns the string **whole** when the namespace half is
-/// empty, which its own pin states outright
-/// (`split_host_namespace("ghcr.io/") == ("ghcr.io/", None)`). For an index
-/// source the guarantor is `IndexPackage::into_entry`, which splits on the
-/// first `/` and rejects an empty registry. That is what makes a bare pattern
-/// host-agnostic and what keeps an `oci` entry and an `index` entry agreeing
-/// on the same row; drop the trim and every authored bare pattern silently
+/// path. **For an `oci` source two functions guarantee that, in series**
+/// (design E-8, corrected twice — do not collapse them back into one):
+///
+/// - `catalog::registry_catalog`'s **`split_host_namespace`** is what removes
+///   the namespace. `Catalog::build` splits the locator and spawns every entry
+///   under the returned bare `host`, so `ghcr.io/acme` yields
+///   `registry = "ghcr.io"`, `repository = "acme/foo"`. Nothing else does
+///   that; re-aim it and every authored pattern re-aims with it.
+/// - `registry_resolve`'s **`trim_locator`**, applied at every
+///   `ResolvedRegistry` construction site, is the **upstream guard on that
+///   split's fall-through arm** — `_ => (registry, None)` returns the string
+///   whole when the namespace half is empty, which its own pin states outright
+///   (`split_host_namespace("ghcr.io/") == ("ghcr.io/", None)`). Only a
+///   bare-host locator reaches that arm, so the trim is what keeps a trailing
+///   slash out of `registry`.
+///
+/// For an index source neither applies: the guarantor is
+/// `IndexPackage::into_entry`, which splits on the first `/` and rejects an
+/// empty registry. Together that is what makes a bare pattern host-agnostic
+/// and what keeps an `oci` entry and an `index` entry agreeing on the same
+/// row; drop either `oci`-side guard and every authored bare pattern silently
 /// re-aims with no diagnostic.
+///
+/// The filter itself never sees a locator: the browse site passes
+/// `(&e.registry, &e.repository)` from the catalog entry, never
+/// `ResolvedRegistry.url`.
 ///
 /// One rule for both source kinds: `matches` has no access to
 /// `ResolvedRegistry.kind` and must not gain any (design C-008). The entry's own

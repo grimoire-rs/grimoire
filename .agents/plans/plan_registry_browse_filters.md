@@ -116,6 +116,15 @@ write-only, and C-020 needs the authored strings back out.
 
 ### C-005 — Candidate derivation
 
+> **Superseded 2026-08-11 by design
+> `design_registry_filter_candidate.md` C-001/C-002 and
+> `adr_registry_filter_match_candidate.md`.** There is no strip and no single
+> candidate. Every pattern is tested against **two** strings — the bare
+> repository path (`acme/tools`) and the fully-qualified reference
+> `{registry}/{repository}` (`ghcr.io/acme/tools`) — and a hit on either
+> counts, identically for `oci` and `index` sources. The entry's own locator
+> is part of neither. The table below is history; do not implement from it.
+
 ```
 repo      = "{entry.registry}/{entry.repository}"
 candidate = repo.strip_prefix("{source.url}/").unwrap_or(repo)
@@ -398,6 +407,24 @@ review-blocking defect.
   > example, empirically reproduced there against the real binary. Patterns
   > on an index entry must be qualified with the registry the index points
   > into, same as C-005's own candidate table already shows for that row.
+
+  > **SUPERSEDED 2026-08-11 by
+  > [`adr_registry_filter_match_candidate.md`](../adr/adr_registry_filter_match_candidate.md)
+  > — the correction directly above now states the inverse of what ships,
+  > and this is the plan's shareable one-liner, so read this note before the
+  > block it corrects.** Dual-candidate matching tests every pattern against
+  > **both** the bare repository path and the fully-qualified reference, so
+  > on an index source a **bare** `acme/platform/**` now hits the bare
+  > candidate (`acme/platform/foo`) exactly as it does on an `oci` source.
+  > "Patterns on an index entry must be qualified with the registry the
+  > index points into" is **false as a requirement**. `browse_candidate`,
+  > the `source.url` strip, and the per-source-kind asymmetry the correction
+  > rests on are all gone.
+  >
+  > **The example above is still correct and needs no edit** — a qualified
+  > pattern is one of the two spellings that work. What changed is that it
+  > is now a *choice* (select one host) rather than an obligation, and the
+  > bare spelling is the host-agnostic one.
 - Brace alternation survives intact on this surface:
   `--include 'acme/{platform,tools}/**'`.
 - Repeating a flag **accumulates**; the flags do not replace each other.
@@ -508,6 +535,23 @@ one warning naming the source, the counts, and a doc anchor:
 registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
 ```
 
+> **Superseded 2026-08-11 (dual-candidate branch). The remedy clause above
+> is history — the shipped string reads:**
+>
+> ```
+> registry 'acme': filter admitted 0 of 148 repositories; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters
+> ```
+>
+> The **predicate is unchanged** — still one trigger, still gated on a
+> non-empty `include` list, still silent on a correct exclude-only emptying
+> and under a non-empty query. Only the remedy clause moved, because the
+> cause it named no longer exists: a pattern is now tested against both the
+> bare repository path and the fully-qualified reference, and the entry's own
+> locator is part of neither. The producer constant
+> (`catalog_service::BROWSE_FILTER_REMEDY`) and its two `docs/src` copies are
+> held byte-identical by a parity test; this plan record is not, which is why
+> the old string is quoted rather than edited in place.
+
 **Wording amended 2026-08-09 (owner decision).** The original string was
 `include patterns matched 0 of 148 repositories`, and the WP-D quality review
 reproduced it stating something false: with `include = ["acme/**"]` and
@@ -530,13 +574,23 @@ between two entries whose urls differ in depth fails the same way. The 0/0
 root (C-017) makes that *visible* but not *diagnosable*; this line supplies
 the reason.
 
+> **Superseded 2026-08-11.** Both failure modes in the paragraph above are
+> **gone**: the entry's own locator is part of no candidate, so editing it
+> cannot re-aim a pattern, and a pattern copied between entries at different
+> depths means the same thing in both. The diagnostic survives, for the
+> *other* authoring mistake it always also covered — a pattern anchored at
+> the wrong first segment, which no candidate rescues (`hex` matches neither
+> `acme/arcana/hex` nor `ghcr.io/acme/arcana/hex`). That, plus the
+> case-sensitive-host caveat (design S-023), is what "admitted 0 of N" now
+> points at.
+
 - Warning only. Never an error, never a non-zero exit — consistent with the
   fail-open stance (C-008).
-- **Carries a doc anchor** (wave-1, H-3(a)): the message above ends with
-  `; patterns are relative to this entry's own locator — see
-  https://grimoire.rs/configuration.html#browse-filters`, matching the
+- **Carries a doc anchor** (wave-1, H-3(a)): the message ends with a
+  cause-and-remedy clause and the `#browse-filters` anchor, matching the
   sibling `_catalog` warning `grim search` already carries one for
-  (`src/command/search.rs`). Before wave-1 the message named no cause and
+  (`src/command/search.rs`). *(The clause itself was re-derived on
+  2026-08-11 — see the superseding block above; the anchor is unchanged.)* Before wave-1 the message named no cause and
   no remedy — the sole diagnostic for the two authoring mistakes the docs
   call "otherwise completely silent" pointed nowhere.
 - **Only on the unqueried browse** (wave-1, H-3(b)). `considered` counts
@@ -645,8 +699,23 @@ sentence to lead with:
 > **The source being filtered controls the very string its own filter is
 > matched against.**
 
-A pattern is tested against the candidate derived from the row the source
-served — for an index entry, the `ref` the index itself published (C-005).
+> **Mechanism reference updated 2026-08-11 by
+> [`adr_registry_filter_match_candidate.md`](../adr/adr_registry_filter_match_candidate.md).**
+> The structural argument below is **unchanged and still the sentence to
+> lead with** — it is about who controls the string, not about how the
+> string is derived. Only its citation moved: C-005's single
+> source-relative candidate is superseded, and a pattern is now tested
+> against **two** candidates derived from the row (`CatalogEntry.registry`
+> and `.repository`), the bare repository path and the fully-qualified
+> reference. Both are still built entirely from what the source served, so
+> the source still controls both. The worked demonstration below is
+> unaffected: `ghcr.io/acme/internal/**` matches neither
+> `ACME/internal/secret` nor `ghcr.io/ACME/internal/secret`, matching being
+> case-sensitive.
+
+A pattern is tested against the candidates derived from the row the source
+served — for an index entry, the `ref` the index itself published (C-005,
+superseded; see the note above).
 Re-publishing the same artifact under a differently-spelled pointer yields a
 row the pattern no longer matches, and nothing verifies that a source's
 string describes what it points at. Demonstrated against the shipped binary:

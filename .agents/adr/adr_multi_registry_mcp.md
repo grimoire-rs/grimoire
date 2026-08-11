@@ -90,6 +90,48 @@ deferred to a follow-up workstream.
 > which `arm_background_checks` no longer arms — re-wiring it onto
 > `load_catalog` is the remaining smaller follow-up.
 
+> **Amended 2026-08-11 (dual-candidate / registry-identity branch, design
+> E-18.2 — written from the landed code).** The note above under-describes
+> what a re-arm now costs, and the row identity it assumes has changed shape.
+> Four clauses:
+>
+> 1. **`TuiRow.source` is a typed `RowSource`, not an `Option<String>`.** The
+>    tree and flat-view root key is `RowSource::root_key()`, a **tagged,
+>    display-only** rendering — `alias:{alias}/{locator}`, `locator:{locator}`,
+>    `Local`, or `""` for an unattributed row. It is an internal identity for
+>    grouping and ordering only: it is never a lock key, never an install key,
+>    and never reaches the screen — every display path routes through
+>    `registry_label`, whose parser strips the tag.
+> 2. **Re-arming `spawn_catalog_refresh` is no longer a one-line change.**
+>    The seam is `UpdateChecker::spawn_catalog_refresh`
+>    (`src/tui/update_check.rs:255`), whose spawned task calls
+>    `Catalog::load_or_refresh_coordinated` for a single registry (`:267`);
+>    `app.rs`'s event loop does not call it. Its
+>    `Catalog`-shaped consumer produces `RowSource::Unattributed` rows, which
+>    root in *locator* space, while `registry_order` is in *root-key* space;
+>    `merge_catalog_rows` replaces the row set without touching the three
+>    vectors. A naive re-arm therefore renders every registry twice after the
+>    first refresh — once as an empty `0/0` root — with the duplicate rows
+>    sorted to `usize::MAX` and every alias lost. Migrating the seam onto
+>    `catalog_service::load_catalog` is a **precondition** of re-arming, not an
+>    optimisation to do afterwards.
+> 3. **The encoding has exactly one seam, and its parser is part of that
+>    seam.** `src/config/` owns `root_key()`; `src/tui/state.rs`'s
+>    `label_from_root_key` is the only reader. Both move together or neither
+>    moves. The producer's tag spellings and the `/` separator are pinned at
+>    the producer precisely because the split is a **left**-split at the first
+>    `/` — exact only because `validate_registries` rejects a `/` in an alias,
+>    a guarantee no other separator carries.
+> 4. **`registry_order` and `registry_locators` are two projections of one
+>    ordered set, index-aligned by construction.** `registry_order` holds root
+>    keys (what a row roots at, what precedence ordering and single-source
+>    elision compare against); `registry_locators` holds the matching locators
+>    (what locator-prefix attribution needs). A key absent from
+>    `registry_order` sorts to `usize::MAX` — a deliberate and **silent**
+>    fallback, whose one legitimate resident is `Local`. Any future producer
+>    that fills one vector must fill the other in the same change, or rows
+>    land at the end of the tree with no diagnostic.
+
 ### 2. Multiple registries — additive `[[registries]]`
 
 Config gains an optional `[[registries]]` array of `RegistryConfig { alias:
@@ -100,7 +142,25 @@ backward compatible. A new `resolve_registries(...)` list resolver orders
 them (`--registry`/env forced front → project `[[registries]]` → global
 `[[registries]]` → legacy `default_registry` folded in **only if no
 `[[registries]]` exist** → built-in fallback only when otherwise empty),
-deduped by url. The single-default precedence chain
+deduped by url.
+
+> **Amended 2026-08-11 — the dedup key is no longer the url alone.**
+> `resolve_registries` keys its `seen` set on the pair
+> `(normalize_locator(locator), alias)` (`registry_resolve.rs`), so one
+> locator declared twice under two different aliases survives as **two**
+> browse sources instead of collapsing into one; only a genuine repeat —
+> same alias, same locator — collapses, which is how a project entry
+> shadows its global twin. Deliberate, pinned as design C-029/S-022b: the
+> two entries are two *filtered views* of one locator, and collapsing them
+> would silently discard one entry's browse filter. An unaliased entry keys
+> on `(locator, None)`, so every pre-alias config behaves exactly as this
+> paragraph describes. The **forced** `--registry` branch is unchanged and
+> still keys on the locator alone — it hard-codes `alias: None`, so a pair
+> key would degenerate there anyway. Full rationale:
+> [`adr_registry_default_dedup.md`](./adr_registry_default_dedup.md), which
+> is the ADR describing this behaviour as *released*.
+
+The single-default precedence chain
 (`resolve_default_registry`) is kept verbatim for commands that need one
 registry. `ResolvedScope` carries the registry list the same way it carries
 `options`.

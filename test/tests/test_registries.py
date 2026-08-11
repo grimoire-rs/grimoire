@@ -885,13 +885,16 @@ def _toml_list(patterns: tuple[str, ...]) -> str:
 
 
 def _ns_rel(ns: str, *patterns: str) -> tuple[str, ...]:
-    """Anchor ns-relative patterns onto the repository path grim matches.
+    """Anchor ns-relative patterns onto a candidate grim actually matches.
 
-    A pattern is tested against the row's repository path — the reference
-    with the registry HOST removed and nothing else removed — so a filter on
-    a source rooted at ``<host>/<ns>`` still has to name ``<ns>`` itself. The
-    entry's own locator is not an input, which is why this is spelled at the
-    call site rather than derived from it.
+    A pattern is tested against TWO strings — the row's repository path and
+    its fully-qualified ``<registry>/<repository>`` reference — and a hit on
+    either counts. Both are anchored at their own first segment, so a filter
+    on a source rooted at ``<host>/<ns>`` still has to name ``<ns>`` itself:
+    the bare candidate starts at ``<ns>`` and the qualified one at
+    ``<host>``. These fixtures qualify with ``<ns>``, hitting the bare
+    candidate. The entry's own locator is part of neither candidate, which is
+    why this is spelled at the call site rather than derived from it.
     """
     return tuple(f"{ns}/{p}" for p in patterns)
 
@@ -918,7 +921,16 @@ def _filtered_config(
 
 
 def _visible_candidates(runner, ns: str, *extra: str) -> set[str]:
-    """The browse-visible rows of ``ns``, as source-relative candidates."""
+    """The browse-visible rows of ``ns``, shortened for readable assertions.
+
+    The returned strings are the rows with ``<host>/<ns>/`` stripped off —
+    a display convenience so an expectation reads ``{"platform/foo"}``
+    rather than the full reference. Despite the function name, they are
+    **not** match candidates: a pattern is tested against the row's
+    repository path (``<ns>/platform/foo``) and its fully-qualified
+    reference (``<host>/<ns>/platform/foo``), and this returns neither.
+    Never derive an expected pattern from this shape.
+    """
     rows = runner.json("search", "--refresh", *extra)["items"]
     prefix = f"{REGISTRY_HOST}/{ns}/"
     return {r["repo"].removeprefix(prefix) for r in rows if r["repo"].startswith(prefix)}
@@ -990,9 +1002,12 @@ def test_zero_match_filter_warns_on_stderr_and_still_exits_zero(
 ) -> None:
     """A filter that admits nothing is legal, loud, and green (S-004, S-017).
 
-    Editing a source's `oci` url re-points every relative pattern in that
-    entry (the candidate is source-relative, plan C-005), so the failure mode
-    this guards is a browse that silently goes empty. `load_catalog` emits the
+    A pattern anchored at the wrong first segment matches neither candidate
+    — not the repository path, not the fully-qualified reference — so the
+    failure mode this guards is a browse that silently goes empty. (Before
+    the dual-candidate rule this docstring blamed a locator edit re-pointing
+    a source-relative pattern; a locator is now part of no candidate and
+    cannot re-aim anything.) `load_catalog` emits the
     C-019 line once per affected source; nothing else in the tree proves it
     reaches a real process's stderr — the unit layer tests `zero_match_warning`
     as a pure function and the capturing subscriber only sees the seam.
@@ -1357,21 +1372,32 @@ def test_exclude_that_removes_nothing_stays_silent(
 ) -> None:
     """A no-op exclude must NOT warn — the trigger was tried and removed.
 
-    W12 briefly shipped an `admitted N of N` trigger here, aimed at the
-    authoring mistake this fixture builds: the match candidate is
-    source-relative (plan C-005), the source is `<host>/grim-test/<uuid>`,
-    every candidate is `platform/...`, so `grim-test/**` repeats a segment
-    already spelled in the `oci` and excludes zero of them.
+    **Why the exclude is a no-op, under the rule that actually ships.** The
+    fixture publishes `<host>/<ns>/platform/foo` and excludes `platform/**`.
+    Every pattern is tested against two strings — the repository path
+    (`<ns>/platform/foo`) and the fully-qualified reference
+    (`<host>/<ns>/platform/foo`) — and both anchor at their own first
+    segment, which is `<ns>` and `<host>` respectively. Neither begins with
+    `platform/`, so the pattern matches nothing and every row survives.
 
-    **Do not add it back.** `N of N` is also the permanent steady state of a
-    *correct* exclude with nothing to match yet — `exclude = ["archive/**"]`
-    against a source that has no `archive/*` repository is right, will work
-    the day one is published, and would warn on every browse until then.
-    Counts cannot tell the two apart, and no state ever clears the false
-    one. Worse, the remedy clause the message carries tells a user whose
-    patterns *are* source-relative that they are not, so the trigger burns
-    the credibility of `admitted 0 of N`, which shares that sentence and
-    does attach to a real symptom: you asked to see a set and saw nothing.
+    **The previous explanation was impossible, and had been since
+    `f790273`.** It claimed the candidate was source-relative (plan C-005)
+    and that the authoring mistake was writing `grim-test/**`. The fixture
+    writes `platform/**`, and under a source-relative candidate — the
+    row with the entry's own `oci` stripped, i.e. bare `platform/foo` —
+    `platform/**` would have *matched* and this test would have failed.
+    A docstring that contradicts its own fixture is worse than none: it
+    sends the next reader looking for a bug in the matcher. Do not restore
+    it, and do not reintroduce "source-relative" here in any form.
+
+    **Do not add the trigger back.** `N of N` is also the permanent steady
+    state of a *correct* exclude with nothing to match yet —
+    `exclude = ["archive/**"]` against a source that has no `archive/*`
+    repository is right, will work the day one is published, and would warn
+    on every browse until then. Counts cannot tell the two apart, and no
+    state ever clears the false one. That would burn the credibility of
+    `admitted 0 of N`, which shares the same remedy sentence and does
+    attach to a real symptom: you asked to see a set and saw nothing.
 
     The rows assertion is what still earns this test its place — it pins
     that a no-op exclude is genuinely a no-op, which is the half that was

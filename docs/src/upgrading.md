@@ -211,9 +211,18 @@ explicitly; nothing else recovers it, and that is deliberate.
   and `antigravity`, where they previously emitted none. The field already
   documented "projection typo guards" as its content; nothing was added,
   removed, or retyped.
+- **`grim config registry fields` and `grim config list --format json` emit
+  two more rows.** The addressable per-registry field set grew from three
+  (`oci`, `index`, `default`) to five with the [browse
+  filters][browse-filters] — `include` and `exclude` joined it. Rows are
+  **appended** to the existing `{"items": […]}` list and nothing was removed,
+  renamed or retyped, so a consumer indexing the first three positionally is
+  unaffected; one that assumed the list had exactly three entries will see
+  five. Field positions are frozen and the list is append-only.
 
 <!-- internal -->
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
+[browse-filters]: ./configuration.md#browse-filters
 [stability]: ./stability.md
 [unstable]: ./stability.md#unstable
 [status]: ./commands.md#status

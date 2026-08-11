@@ -107,12 +107,14 @@ pub enum RegistryCommand {
         /// direct reference to a hidden package still resolves and installs.
         /// Repeatable, never comma-separated — a comma is glob alternation
         /// syntax, so `--include '{platform,tools}/**'` is one pattern.
-        /// Matched against the row's REPOSITORY PATH — the reference with the
-        /// registry host removed and nothing else removed. Under
-        /// `--oci ghcr.io/acme` and under `--index`, alike, the row
-        /// 'ghcr.io/acme/platform/foo' is matched as 'acme/platform/foo', so
-        /// this entry's own locator never changes what a pattern means. Every
-        /// pattern anchors at the START of that path — a wildcard-free one
+        /// Tested against TWO strings: the row's repository path
+        /// ('acme/tools') and its fully-qualified reference
+        /// ('ghcr.io/acme/tools'). A hit on either counts, so a bare pattern
+        /// matches on every host and a host-qualified pattern matches on that
+        /// host only. Under `--oci ghcr.io/acme` and under `--index`, alike,
+        /// this entry's own locator never changes what a pattern means — it is
+        /// part of neither candidate. Every pattern anchors at the START of
+        /// whichever candidate it is tested against — a wildcard-free one
         /// expands downward only ('hex' means 'hex{,/**}'), so to match a name
         /// wherever it sits write '**/hex'.
         #[arg(long)]
@@ -120,8 +122,9 @@ pub enum RegistryCommand {
         /// Browse-filter glob hiding matching repositories from this
         /// registry. Affects browsing only — a direct reference to a hidden
         /// package still resolves and installs. Repeatable, never
-        /// comma-separated, and anchored the same way (see `--include`);
-        /// wins over `--include` where both match.
+        /// comma-separated, and tested against the same two candidates,
+        /// anchored the same way (see `--include`); wins over `--include`
+        /// where both match.
         #[arg(long)]
         exclude: Vec<String>,
         /// Mark this registry as the default (clears any prior default).
@@ -1405,7 +1408,10 @@ fn run_registry_add(
 /// A repeatable list flag replaces that whole list, so this is the one write
 /// path that can grow a browse filter past a single pattern —
 /// `config set registry.<alias>.include` writes exactly one and discards the
-/// rest (C-012).
+/// rest (**plan C-012** — `.agents/plans/plan_registry_browse_filters.md`;
+/// the two numbering spaces cited in this file overlap in range, and
+/// `design_registry_filter_candidate.md`'s own C-012 is a different
+/// contract).
 ///
 /// Holding the entry's index is the point of the verb. The old remedy for a
 /// multi-pattern edit was `registry rm` + re-`add`, but `add` *pushes*, so
@@ -3806,10 +3812,13 @@ mod tests {
     }
 
     #[test]
-    fn registry_set_reports_the_locator_only_when_it_changed() {
-        // `ConfigWriteReport.value` is single-valued, so a filter-only edit
-        // has nothing honest to put there — null beats echoing a locator the
-        // call never touched.
+    fn registry_set_reports_the_locator_the_call_named() {
+        // `value` tracks *naming*, not *changing*: it is `locator.map(..)`,
+        // derived from the flags with no read of the stored entry. A
+        // filter-only edit has nothing honest to put in a single-valued field,
+        // so it reports null — but a locator flag echoes back even when it
+        // names the value the entry already held. The third case below is the
+        // one that pins that, and the docs say the same.
         let (_tmp, _config_path, ctx) = project_scope();
         run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
             .map(|_| ())
@@ -3842,6 +3851,20 @@ mod tests {
             .expect("a locator edit must succeed");
         match report {
             ConfigReport::Write(w) => assert_eq!(w.value.as_deref(), Some("ghcr.io/other")),
+            _ => panic!("expected a write report"),
+        }
+
+        // Re-naming the locator the entry already holds. No field changed, and
+        // the report still carries it: `value` answers "what did the call
+        // name", never "what moved".
+        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], false, &[], false)
+            .expect("re-naming the current locator must succeed");
+        match report {
+            ConfigReport::Write(w) => assert_eq!(
+                w.value.as_deref(),
+                Some("ghcr.io/other"),
+                "value echoes the flag; it is not a before/after diff"
+            ),
             _ => panic!("expected a write report"),
         }
     }
@@ -3939,16 +3962,27 @@ mod tests {
 
     #[test]
     fn registry_add_help_states_how_a_pattern_is_anchored() {
-        // W-16 / H-2: what a pattern is matched against is the rule users get
-        // wrong most, so `--help` has to state it rather than defer to the
-        // docs. Both halves are pinned: the candidate is the repository path
-        // (`registry_filter::browse_candidate`), and it is the SAME for an
-        // `--oci` and an `--index` entry — the asymmetry that used to exist
-        // here is exactly what sent people to a pattern matching nothing.
+        // W-16 / H-2 / design C-012: what a pattern is matched against is the
+        // rule users get wrong most, so `--help` has to state it rather than
+        // defer to the docs. Both candidates are pinned by a worked example —
+        // `registry_filter::qualified_candidate` produces the second one — and
+        // the rule is the SAME for an `--oci` and an `--index` entry; the
+        // asymmetry that used to exist here is exactly what sent people to a
+        // pattern matching nothing.
         let collapsed = registry_add_help().split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            collapsed.contains("'ghcr.io/acme/platform/foo' is matched as 'acme/platform/foo'"),
-            "the help must show a worked row, not just name the rule:\n{collapsed}"
+            collapsed.contains("'acme/tools'"),
+            "the help must show a worked bare candidate, not just name the rule:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("'ghcr.io/acme/tools'"),
+            "the help must show a worked fully-qualified candidate too — naming one \
+             candidate is how the superseded single-candidate rule read:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("with the registry host removed"),
+            "the superseded single-candidate wording must be gone, not merely \
+             supplemented:\n{collapsed}"
         );
         assert!(
             collapsed.contains("--index"),
@@ -3960,9 +3994,10 @@ mod tests {
         );
         // The other half of "anchored", and the one a bare name hides: the
         // wildcard-free expansion is a SUFFIX, so `hex` never matches
-        // `ghcr.io/acme/arcana/hex`. On an index entry — whose candidate is
-        // the whole ref — that makes a bare name match nothing at all, which
-        // reads as the filter being broken rather than mis-anchored.
+        // `acme/arcana/hex` — nor the qualified `ghcr.io/acme/arcana/hex`,
+        // since both candidates are anchored at their own first segment. A
+        // bare name therefore matches nothing at all, which reads as the
+        // filter being broken rather than mis-anchored.
         assert!(
             collapsed.contains("'**/hex'"),
             "the help must give the leading-`**/` form for 'match it wherever it sits':\n{collapsed}"

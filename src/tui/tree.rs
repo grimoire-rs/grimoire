@@ -1340,7 +1340,9 @@ mod tests {
 
     // Codex-M regression: a namespaced default_registry (host + namespace,
     // e.g. "ghcr.io/acme") must elide the WHOLE prefix from the tree root —
-    // matching the flat view's `strip_default_registry` — not just the host.
+    // matching the flat view — not just the host. (Both views now share the
+    // one `display_split` seam; `strip_default_registry`, the third party
+    // this comment used to name, was deleted with that unification — E-17.3.)
     #[test]
     fn namespaced_default_registry_root_is_fully_elided() {
         // row() splits on first '/', giving registry="ghcr.io" — wrong for a

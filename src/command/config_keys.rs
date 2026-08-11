@@ -248,10 +248,12 @@ impl RegistryField {
             value_type: ValueType::StringList { default: None },
             title: "Include patterns",
             description: "Narrows registry browsing to repositories matching at least one of these \
-                           glob patterns. Values are never comma-split (a comma is glob alternation), so `grim \
-                           config set` writes exactly one pattern and replaces the whole list. Combines \
-                           with `exclude` on the same entry, unlike Cargo's mutually exclusive \
-                           fields. Unset (the default) shows every repository from this registry. \
+                           glob patterns. Each pattern is tested against two strings — the repository path \
+                           (`acme/tools`) and the fully-qualified reference (`ghcr.io/acme/tools`) — and a hit \
+                           on either counts, so a bare pattern matches on every host while a host-qualified \
+                           pattern matches on that host only. Values are never comma-split (a comma is glob \
+                           alternation), so `grim config set` writes exactly one pattern and replaces the whole \
+                           list. Unset (the default) shows every repository from this registry. \
                            Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
@@ -261,10 +263,12 @@ impl RegistryField {
             value_type: ValueType::StringList { default: None },
             title: "Exclude patterns",
             description: "Hides repositories matching any of these glob patterns from registry \
-                           browsing. Values are never comma-split (a comma is glob alternation), so `grim \
-                           config set` writes exactly one pattern and replaces the whole list. Combines with \
-                           `include` on the same entry, unlike Cargo's mutually exclusive fields, and \
-                           wins when a repository matches both. Unset (the default) hides nothing. \
+                           browsing. Each pattern is tested against two strings — the repository path \
+                           (`acme/tools`) and the fully-qualified reference (`ghcr.io/acme/tools`) — and a hit \
+                           on either counts, so a bare pattern hides on every host while a host-qualified \
+                           pattern hides on that host only. Values are never comma-split (a comma is glob \
+                           alternation), so `grim config set` writes exactly one pattern and replaces the whole \
+                           list. Wins over `include` wherever both match. Unset (the default) hides nothing. \
                            Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
@@ -398,18 +402,41 @@ mod tests {
     /// explicitly rather than only via the generic schema-matching test.
     #[test]
     fn registry_field_all_keeps_the_shipped_prefix_in_order() {
-        // `ALL` is append-only, and the ORDER of its first three entries is a
-        // frozen on-the-wire contract: `grim config registry fields
-        // --format json` maps over `ALL`, and the shipped VS Code extension
-        // addresses the `default` row positionally as `items[2]`. Inserting a
-        // variant anywhere before index 3 moves that row and breaks the
-        // extension (Principle 9). The length assertion below and the
-        // key-vector assertion in `api::config_report` both survive an
+        // `ALL` is append-only, and the ORDER of all five shipped entries is
+        // now a frozen on-the-wire contract, on two released surfaces:
+        //
+        // - `grim config registry fields --format json` maps over `ALL`, and
+        //   the shipped VS Code extension addresses the `default` row
+        //   positionally as `items[2]` — that is what froze indices 0..3.
+        // - `registry set`'s write-report `fields` array is emitted in `ALL`
+        //   order too (design C-021), so two invocations touching the same
+        //   fields produce byte-identical arrays. That froze indices 3 and 4
+        //   as well, which is why the prefix below is `..5` rather than the
+        //   `..3` this test originally guarded.
+        //
+        // **It stays a PREFIX slice, never `&RegistryField::ALL` whole.** A
+        // sixth variant makes `ALL` a `[RegistryField; 6]`, and arrays only
+        // implement `PartialEq` at equal lengths — comparing the whole array
+        // against a 5-element literal is `can't compare [T; 6] with [T; 5]`,
+        // a COMPILE error on the one change this discipline explicitly
+        // allows. Slicing keeps an append green and an insert or reorder red,
+        // which is the whole point.
+        //
+        // Inserting a variant anywhere within the first five moves a row on
+        // one surface or both (Principle 9). The length assertion below and
+        // the key-vector assertion in `api::config_report` both survive an
         // accidental insert — only this one fails.
         assert_eq!(
-            &RegistryField::ALL[..3],
-            &[RegistryField::Oci, RegistryField::Index, RegistryField::Default],
-            "append to RegistryField::ALL, never insert — items[2] must stay `default`"
+            &RegistryField::ALL[..5],
+            &[
+                RegistryField::Oci,
+                RegistryField::Index,
+                RegistryField::Default,
+                RegistryField::Include,
+                RegistryField::Exclude,
+            ],
+            "append to RegistryField::ALL, never insert — items[2] must stay `default`, \
+             and `registry set`'s `fields` order must stay byte-stable"
         );
     }
 
@@ -707,6 +734,25 @@ mod tests {
             "{spec_key}: spec description must be a prefix of the schema description; \
              spec={spec_description:?} schema={normalized:?}"
         );
+        // The prefix check above is one-directional: it cannot see a superseded
+        // sentence in a LATER paragraph, and that is exactly how the old
+        // browse-filter candidate rule reached the *published* schema (design
+        // C-012). This is the only negative guard on the generated-schema path
+        // — `registry_add_help_states_how_a_pattern_is_anchored` guards clap's
+        // help, which is a different string. Both superseded spellings are
+        // listed: `f790273`'s and the locator-relative one it replaced.
+        for superseded in [
+            "registry host removed",
+            "source-relative",
+            "relative to this entry's own locator",
+        ] {
+            assert!(
+                !normalized.contains(superseded),
+                "{spec_key}: the published schema still carries superseded wording \
+                 {superseded:?} — it must be gone, not merely supplemented; \
+                 schema={normalized:?}"
+            );
+        }
     }
 
     #[test]

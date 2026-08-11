@@ -131,7 +131,7 @@ The supported dotted keys are:
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
-| `registry.<alias>.include` | one glob pattern | A [browse filter](./configuration.md#browse-filters) narrowing what this registry shows in `grim search`, the TUI, and `grim_search`. `set` stores **exactly one** pattern, replacing the whole list — a comma is glob alternation syntax, never a separator, so nothing is split on one; a pattern carrying a comma outside a `{…}` group is stored verbatim and warned about. `set` on an entry that already carries more than one pattern **discards the rest** — exit `0`, with a warning naming the count. Write several patterns with repeated `--include` flags on `grim config registry add` (new entry) or `grim config registry set` (existing one), or by hand. A pattern that is empty, whitespace-only, carries a control character, exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile exits `65` — the same set a config-file read rejects with `78`, since both compile the pattern the way the browse filter itself is built. A sixth cap bounds the whole list rather than one pattern — 64 KiB summed as compiled — reachable only through `registry add`/`set`'s accumulated flags (exit `65`) or a hand-edited file (exit `78`); a single `set` call writes one pattern and can never trip it alone. `unset` clears the list; `get` on an empty list exits `1`. |
+| `registry.<alias>.include` | one glob pattern | A [browse filter](./configuration.md#browse-filters) narrowing what this registry shows in `grim search`, the TUI, and `grim_search`. `set` stores **exactly one** pattern, replacing the whole list — a comma is glob alternation syntax, never a separator, so nothing is split on one; a pattern carrying a comma outside a `{…}` group is stored verbatim and warned about. `set` on an entry that already carries more than one pattern **discards the rest** — exit `0`, with a warning naming the count. Write several patterns with repeated `--include` flags on `grim config registry add` (new entry) or `grim config registry set` (existing one), or by hand. A pattern that is empty, whitespace-only, carries a control character, exceeds 1024 bytes, nests `{` more than 32 levels deep, or fails to compile exits `65` — the same set a config-file read rejects with `78`, since both compile the pattern the way the browse filter itself is built. A sixth cap bounds the whole list rather than one pattern — 64 KiB summed as compiled — reachable only through `registry add`/`set`'s accumulated flags (exit `65`) or a hand-edited file (exit `78`); a single `set` call writes one pattern and can never trip it alone. `unset` clears the list — `grim config registry set <alias> --clear-include` is the equally supported second clearing route; `get` on an empty list exits `1`. |
 | `registry.<alias>.exclude` | one glob pattern | Same shape and rules as `include`, hiding matching repositories instead. Combines with `include` on the same entry and wins wherever both match. |
 
 Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
@@ -181,10 +181,32 @@ browse filter grows past one pattern after the entry exists. `--oci` and
 `--index` swap the entry's kind, clearing the other side. `--default` sets
 the flag and clears every other entry's, like `registry use`; it cannot
 *unset* one, since the default has to live somewhere — move it by naming
-another entry. Clearing a filter is `grim config unset
-registry.<alias>.include`, which `set` deliberately cannot express, since a
-flag given zero times means "leave it alone". An alias that does not exist
-exits `64`, as does a `set` naming no field at all.
+another entry. An alias that does not exist exits `64`, as does a `set`
+naming no field at all.
+
+`--clear-include` and `--clear-exclude` are the two flags `add` does not
+have. A list flag given zero times means "leave this field alone", so
+emptying a list needs its own flag rather than a spelling of "no patterns":
+
+```sh
+grim config registry set acme --clear-include                 # unfilter the include side
+grim config registry set acme --clear-exclude --oci ghcr.io/acme2   # combine with any other flag
+```
+
+Each conflicts with its own list flag — `--clear-include --include 'a/**'`
+exits `64` — and neither conflicts with the other side, so a single call can
+clear one list and rewrite the other. A clear is **silent** at every list
+length, including an already-empty one: exit `0`, the entry otherwise
+untouched, no warning. (The *file* is still rewritten — every `grim config`
+write re-serializes it, as [above](#config) — so "unchanged" is a claim
+about the entry, never about the bytes on disk.) It is not `config set`'s single-pattern replacement, which does warn
+when it discards patterns; a clear says what it does in its own flag name.
+The emptied list is written as **no key at all**, byte-identical to an entry
+that was never filtered.
+
+`grim config unset registry.<alias>.include` is the second, equally supported
+clearing route, through the dotted-key surface. The two differ only in what
+they report — see [JSON output](#config-json) below.
 
 Unlike the `rm` + re-`add` round-trip it replaces, `set` keeps the entry's
 position in `[[registries]]`. That matters: when no entry declares `default`,
@@ -206,7 +228,8 @@ shapes are:
 |-----------|------------|
 | `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
-| `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…","dry_run":bool}` — `dry_run` is `true` only for `set --dry-run`; every other write verb always reports `false` |
+| `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…","dry_run":bool,"fields":[]}` — `dry_run` is `true` only for `set --dry-run`; every other write verb always reports `false`. `fields` is always present and always `[]` on these five verbs |
+| `registry set` | the same object, with `fields` carrying one row per field the call wrote: `{"field":"oci"\|"index"\|"default"\|"include"\|"exclude","action":"set","value":…}` or `{"field":"…","action":"cleared"}` (no `value` key on a cleared row). Rows follow `RegistryField::ALL` order — `oci, index, default, include, exclude` — so two calls touching the same fields emit byte-identical arrays. `value` is the locator the call **named** with `--oci`/`--index`, and `null` when neither flag was given — it echoes the flag, never a comparison against the stored entry |
 | `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null,"constraints":{"item_pattern":"…","item_width":integer} or null}` |
 | `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
 | `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
@@ -224,6 +247,42 @@ filter as a `Filters` cell carrying **counts** (`2 include, 1 exclude`, or
 which has no width to lose.
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set`. The `scope` field is `project` or `global`.
+
+`fields` reports **the write, not the invocation**. A field named with the
+value it already held still emits its row — element presence means "this
+field was written", never "this field changed" — and a `--oci`/`--index` kind
+swap emits *two* rows, the named side `set` and the unnamed side `cleared`,
+because the command really did perform both mutations. The unnamed locator
+side is the one exception to "not a diff": it emits `cleared` only when it
+actually held a value, since reporting a locator cleared where none existed
+would be a phantom write. `fields` is also scoped to the entry named by
+`key`: `--default` demotes whichever sibling entry held the flag, and that
+sibling's change is **not** reported here — no row ever names another alias.
+
+**Three CLI surfaces reach the same browse-filter field**, and their reports
+differ. Two of them clear a list, and both clearing routes are supported —
+neither is deprecated in favour of the other:
+
+| Call | `action` | `fields` | Warns? |
+|---|---|---|---|
+| `registry set acme --include 'a/**'` | `registry-set` | `[{"field":"include","action":"set","value":["a/**"]}]` | no |
+| `registry set acme --clear-include` | `registry-set` | `[{"field":"include","action":"cleared"}]` | no |
+| `config set registry.acme.include 'a/**'` | `set` | `[]` | **yes**, when it discards patterns |
+| `config unset registry.acme.include` | `unset` | `[]` | no |
+
+`config set` is the narrow one: it writes exactly one pattern and replaces
+the whole list, so on an entry already carrying more than one it warns naming
+the discarded count (exit stays `0`). A clear through either of its two
+routes is silent at every list length. The asymmetry is intended —
+`fields` is scoped to `registry set` — but a consumer diffing the routes has
+to be able to read it somewhere rather than discover it.
+
+The plain one-row table renders `fields` into its `Value` cell, segments
+joined with `", "` in the same order: `{field}={locator}` for a locator,
+`default={true|false}`, `{field}={count}` for a list (the count, not the
+patterns), and `{field} cleared` for a cleared row. On the five other write
+verbs `fields` is `[]` and the cell keeps its previous meaning, the `value`
+string.
 
 ### Exit codes {#config-exit-codes}
 
@@ -943,7 +1002,7 @@ the collapsible tree view by default and toggling to a flat kind-grouped list
 (press `t`; set [`options.tui.default_view`][options-tui] to `"flat"` to open
 there instead). When
 more than one registry is configured, the flat list adds a leading **Registry**
-column showing the configured alias (or the raw URL when no alias was set), and
+column showing `alias (url)` (or the raw URL when no alias was set), and
 the Repo cell is shortened to the registry-relative path so names stay readable.
 It supports multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
@@ -955,8 +1014,8 @@ Like [`grim search`](#search), a registry declaring an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) shows only the
 repositories its patterns admit — and a source whose filter admits nothing
 keeps its tree root, rolled up as `0/0`, rather than vanishing from the
-tree. The root label is unaffected: it stays the configured alias (or the raw
-locator), exactly as without a filter. `--registry` collapses the browse and
+tree. The root label is unaffected: it stays `alias (url)` (or the raw
+locator when no alias was set), exactly as without a filter. `--registry` collapses the browse and
 applies no filter at all. Like the registry set itself, a filter is read
 once at startup — editing `include`/`exclude` in `grimoire.toml` while the
 TUI is open has no effect until you quit and reopen it.
@@ -969,8 +1028,12 @@ in a `filtered:` clause alongside the existing `offline:` and `truncated:`
 ones:
 
 ```text
-offline: ghcr.io/down · truncated: ghcr.io/big · filtered: acme
+offline: ghcr.io/down · truncated: ghcr.io/big · filtered: acme (localhost:5002/uxrev)
 ```
+
+Each name in those clauses is the source's **tree-root label** — `alias (url)`
+for an aliased entry, the bare locator for one without an alias — so the
+status line and the tree root read as the same source rather than as two.
 
 That clause is what explains a `0/0` root without leaving the TUI. It names
 a source only when its own filter can be shown to have caused the empty

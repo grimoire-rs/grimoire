@@ -258,46 +258,64 @@ pub struct RegistryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
     /// Narrows registry browsing to repositories matching at least one of
-    /// these glob patterns. Values are never comma-split (a comma is glob
+    /// these glob patterns. Each pattern is tested against two strings — the
+    /// repository path (`acme/tools`) and the fully-qualified reference
+    /// (`ghcr.io/acme/tools`) — and a hit on either counts, so a bare pattern
+    /// matches on every host while a host-qualified pattern matches on that
+    /// host only. Values are never comma-split (a comma is glob
     /// alternation), so `grim config set` writes exactly one pattern and
-    /// replaces the whole list. Combines with `exclude` on the same entry, unlike
-    /// Cargo's mutually exclusive fields. Unset (the default) shows every
+    /// replaces the whole list. Unset (the default) shows every
     /// repository from this registry. Affects browsing only; a direct
     /// reference to a hidden package still resolves and installs.
+    ///
+    /// Combines with `exclude` on the same entry, unlike Cargo's mutually
+    /// exclusive fields. This entry's own `oci`/`index` locator is part of
+    /// neither candidate, so editing the locator cannot re-aim a pattern
+    /// written against it.
     ///
     /// Several patterns need repeated `--include` flags, on `grim config
     /// registry add` for a new entry or `grim config registry set` for an
     /// existing one — the latter edits in place, keeping the entry's
-    /// position and every field it does not name. The browsing surfaces are
-    /// `grim search`, the TUI, and the MCP `grim_search` tool.
+    /// position and every field it does not name. Emptying the list is
+    /// `grim config registry set --clear-include` or `grim config unset
+    /// registry.<alias>.include`. The browsing surfaces are `grim search`,
+    /// the TUI, and the MCP `grim_search` tool.
     ///
     /// A pattern with none of `* ? [ ] { } \` auto-expands to also match
     /// everything beneath it (`acme` behaves as `acme{,/**}`); every other
-    /// pattern is used verbatim. Patterns match against the row's path
-    /// relative to this entry's own `oci`/`index` locator, never the
-    /// fully-qualified `registry/repository` ref — normally the same
-    /// string the TUI tree shows beneath this source's root, though the
-    /// tree strips the longest locator across *all* configured entries, so
-    /// the two differ for a row one entry's locator nests inside another's.
-    /// A pattern always means the same thing wherever its own entry points.
+    /// pattern is used verbatim, and every pattern anchors at the first
+    /// segment of whichever candidate it is tested against. Neither
+    /// candidate is the string the TUI tree shows beneath this source's
+    /// root: the tree strips the longest locator across *all* configured
+    /// entries, and a pattern never does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// Hides repositories matching any of these glob patterns from
-    /// registry browsing. Values are never comma-split (a comma is glob
+    /// registry browsing. Each pattern is tested against two strings — the
+    /// repository path (`acme/tools`) and the fully-qualified reference
+    /// (`ghcr.io/acme/tools`) — and a hit on either counts, so a bare pattern
+    /// hides on every host while a host-qualified pattern hides on that
+    /// host only. Values are never comma-split (a comma is glob
     /// alternation), so `grim config set` writes exactly one pattern and
-    /// replaces the whole list. Combines with `include` on the same entry, unlike
-    /// Cargo's mutually exclusive fields, and wins when a repository
-    /// matches both. Unset (the default) hides nothing. Affects browsing
+    /// replaces the whole list. Wins over `include` wherever both match.
+    /// Unset (the default) hides nothing. Affects browsing
     /// only; a direct reference to a hidden package still resolves and
     /// installs.
     ///
-    /// Several patterns need repeated `--exclude` flags on `grim config
-    /// registry add`; to change them on an existing entry, re-create it
-    /// with `grim config registry rm <alias>`, then `grim config registry
-    /// add`. The browsing surfaces are `grim search`, the TUI, and the MCP
+    /// Combines with `include` on the same entry, unlike Cargo's mutually
+    /// exclusive fields. Exclude-wins is applied once to the combined
+    /// per-list verdicts, not as two whole-filter verdicts OR-ed together:
+    /// `include = ["acme/tools"]` with `exclude = ["quay.io/acme/tools"]`
+    /// hides exactly the `quay.io` row and keeps every other host's.
+    ///
+    /// Several patterns need repeated `--exclude` flags, on `grim config
+    /// registry add` for a new entry or `grim config registry set` for an
+    /// existing one; emptying the list is `grim config registry set
+    /// --clear-exclude` or `grim config unset registry.<alias>.exclude`.
+    /// The browsing surfaces are `grim search`, the TUI, and the MCP
     /// `grim_search` tool.
     ///
-    /// Same auto-expansion and match-candidate rules as `include`; see its
+    /// Same auto-expansion and anchoring rules as `include`; see its
     /// doc comment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,

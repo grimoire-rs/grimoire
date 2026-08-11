@@ -12,6 +12,24 @@
       net-new crate, `bstr`)
 **Domain Tags:** api, integration, tui
 **Supersedes:** N/A
+**Superseded By:** [`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md)
+— **partially, § D3 only.** That ADR replaces D3's decision text and its
+first amendment block (plus two of D3's rejected alternatives) with
+dual-candidate matching. **D1, D2, D4–D13 stand unchanged in mechanism**,
+including D5, D6 and D9 — the filter did not become a resolution or security
+boundary.
+
+Two qualifications on that sentence, both about *this* file rather than the
+superseding one:
+
+- **"in mechanism" is load-bearing for D2.** Its text says "*the* candidate"
+  in the singular and there are now two. The rule it states is untouched;
+  read it quantified over both candidates, and see the dated pointer at D2
+  itself for what that does — and does not — mean.
+- **"unchanged" means unchanged *by the candidate decision*.** **D7 is
+  withdrawn** and **D12 is amended** by this ADR's own 2026-08-09 /
+  2026-08-10 amendment blocks, which the later ADR never touched. D7's
+  section text below still reads as live; the withdrawal is the answer.
 **Research artifact:**
 [`research_registry_browse_filters.md`](../research/research_registry_browse_filters.md)
 
@@ -108,6 +126,23 @@ A row is shown iff:
   include pattern; **and**
 - the candidate matches no exclude pattern.
 
+> **Amended 2026-08-11 by
+> [`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md).**
+> "The candidate" above is singular; there are now **two** — the bare
+> repository path and the fully-qualified `{registry}/{repository}`. Read
+> each bullet quantified over both: a row passes the include check if
+> *either* candidate matches an include pattern, and fails the exclude check
+> if *either* matches an exclude pattern.
+>
+> **The precedence mechanism is what stands unchanged, and the distinction
+> is not pedantic.** Exclude-wins is applied **once**, to the two combined
+> per-list verdicts — it is *not* two whole-filter answers OR-ed together.
+> Those readings differ: with `include = ["acme/tools"]` and
+> `exclude = ["quay.io/acme/tools"]`, the per-list reading hides exactly the
+> `quay.io` row and keeps every other host's, while a whole-filter OR would
+> keep the `quay.io` row because the bare candidate passes the filter on its
+> own. The worked example in the superseding ADR is the authority.
+
 Empty include is implemented as *skipping the include check*, never as
 compiling a synthetic `**` — so an empty list cannot be broken by a glob
 subtlety. This is the Artifactory model. It is deliberately **not** the
@@ -118,6 +153,39 @@ trap*. grim borrows gitignore's glob **tokens** (via globset) and neither
 tool's **ordering model**.
 
 ### D3. The match candidate is the row's source-relative path
+
+> **SUPERSEDED 2026-08-11 by
+> [`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md).
+> Everything in D3 below — the decision text, the table, the `AMENDED
+> 2026-08-09` block, and the two rejected alternatives it carries — is
+> **history**, kept because the later ADR's rationale is unreadable without
+> it. Do not implement from it.**
+>
+> **The rule as it ships:** every pattern is tested against **two** strings —
+> the bare repository path (`acme/tools`) and the fully-qualified reference
+> `{registry}/{repository}` (`ghcr.io/acme/tools`) — and a hit on either
+> counts. Identical for `oci` and `index` sources, no per-kind branch, and
+> **the declaring entry's own locator is part of neither candidate**. So a
+> bare pattern is host-agnostic, a host-qualified pattern selects one host,
+> and editing a locator can no longer re-aim a pattern written against it.
+> Exclude-wins is applied **once**, to the combined per-list verdicts.
+>
+> Two intermediate states are worth naming, because a reader tracing this
+> file's history will meet them: `f790273` first replaced the
+> locator-relative strip with the bare repository path (host removed), and
+> the dual-candidate rule then added the qualified candidate beside it.
+> Neither the strip nor the bare-only rule survives.
+>
+> The two `strip_prefix`-specific amendments below (`trim_locator`,
+> `classify_index`) describe a code path that no longer exists in the
+> matcher. `trim_locator` itself is still load-bearing, but **not for the
+> reason an earlier draft of this block gave** (corrected 2026-08-11, design
+> E-8's second correction): what removes the namespace and makes
+> `CatalogEntry.registry` a bare host — the unstated premise the qualified
+> candidate rests on — is `Catalog::build`'s **`split_host_namespace`**.
+> `trim_locator` is the *upstream guard* on that split's fall-through arm,
+> which returns the locator whole when the namespace half is empty. Both are
+> load-bearing, in series; neither is a *filter* concern any more.
 
 For each row in a group, the candidate string is
 
@@ -565,7 +633,12 @@ does not merely *not want* the filter — hiding a declared artifact's
 deprecation notice from it is a correctness bug. Naming the scope puts that
 reasoning in the type, where the next reader finds it.
 
-**Why source-relative and not fully-qualified.** The filter is declared
+**Why source-relative and not fully-qualified.** *(Superseded 2026-08-11
+with D3 — recorded as history. The answer shipped is "both": a pattern is
+tested against the bare repository path* and *the fully-qualified reference,
+so neither spelling has to be forced on the author. See
+[`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md).)*
+The filter is declared
 inside the `[[registries]]` entry that already names the source, so "within
 this source" is the reading the config's own structure suggests. It is also
 the string the TUI already shows beneath that source's root, so patterns and
@@ -608,14 +681,33 @@ nothing on screen explains.
   caller, so a filtered build poisons `status --check` across processes;
   and it re-opens the summary/keyword-match loss `catalog_service.rs`
   already documents avoiding.
-- **Match against the fully-qualified `registry/repository`.** Uniform
-  across source kinds and unambiguous. Rejected: it forces the source's own
-  url into every pattern declared inside that source's entry, and diverges
-  from what the TUI shows beneath the root.
-- **Match against `CatalogRow::repository` alone.** Rejected: for an index
-  source `repository` is host-stripped, so `acme/foo` on `ghcr.io` and on
-  `docker.io` collide into one pattern space — and the built-in fallback
-  browse source *is* an index.
+> **The next two rejections are SUPERSEDED 2026-08-11 by
+> [`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md),
+> which is named in that ADR's `Supersedes:` field.** Each is now **one half
+> of what ships**: the matcher tests every pattern against *both* the
+> fully-qualified reference and the bare repository path, and a hit on
+> either counts (`RegistryFilter::matches`,
+> `src/config/registry_filter.rs`). Neither spelling is forced on an author,
+> which is what dissolved the objection in each. They are kept below because
+> the reasoning still holds as *reasoning* — read as the cost of picking
+> either one **alone**, not as a verdict on the rule.
+
+- **Match against the fully-qualified `registry/repository`.** *(Superseded
+  — this is now one of the two candidates.)* Uniform across source kinds and
+  unambiguous. Rejected: it forces the source's own url into every pattern
+  declared inside that source's entry, and diverges from what the TUI shows
+  beneath the root. **Why that no longer bites:** the qualified candidate
+  sits *beside* the bare one, so a host-qualified pattern is a deliberate
+  choice an author makes to select one host, never a tax on every pattern.
+- **Match against `CatalogRow::repository` alone.** *(Superseded — this is
+  the other candidate.)* Rejected: for an index source `repository` is
+  host-stripped, so `acme/foo` on `ghcr.io` and on `docker.io` collide into
+  one pattern space — and the built-in fallback browse source *is* an index.
+  **Why that no longer bites — and why the rule is *dual*-candidate rather
+  than bare-only:** the collision is real, and the qualified candidate is
+  exactly the escape from it. An author who needs to separate the two hosts
+  writes `ghcr.io/acme/foo`; one who does not writes `acme/foo` and gets
+  both.
 - **A single pattern list plus a mode toggle (the Harbor shape), or
   ordered first-match-wins rules (the rsync shape).** Rejected: the first
   cannot express include-then-subtract at all; the second makes rule order

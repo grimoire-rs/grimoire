@@ -42,12 +42,39 @@ Verified precedence, top to bottom:
 
 1. forced single (`--registry` flag / `$GRIM_DEFAULT_REGISTRY`) →
    collapses to exactly one (`registry_resolve.rs:60-67`);
-2. `[[registries]]` (project then global, deduped by url) — authoritative,
+2. `[[registries]]` (project then global, deduped by the
+   **`(normalized locator, alias)` pair** — see the amendment below, which
+   is what this line says at `v0.12.1` and no longer says at HEAD) —
+   authoritative,
    `normalize_primary` picks the first `default = true` else first entry
    (`registry_resolve.rs:69-84`, `99-107`);
 3. legacy `default_registry` chain (project > global > fallback
    `grim.ocx.sh`) only when no `[[registries]]` exist anywhere
    (`registry_resolve.rs:86-96`).
+
+> **Amended 2026-08-11 — "deduped by url" is no longer the whole key.** This
+> is the one ADR in this family describing *released* behaviour, so the drift
+> matters. At `v0.12.1` the `seen` set in `resolve_registries` was keyed on
+> `normalize_locator(locator)` alone; **at HEAD it is keyed on the pair
+> `(normalize_locator(locator), alias)`** (`alias: Option<String>`). One
+> locator declared twice under two different aliases therefore survives as
+> **two** browse sources rather than collapsing into one — deliberate, and
+> pinned as design C-029/S-022b: the two entries are two *filtered views* of
+> one locator, and collapsing them would silently discard one entry's browse
+> filter. An entry with no alias keys on `(locator, None)`, so the old
+> behaviour is intact for every unaliased config.
+>
+> The **forced** branch (`--registry`) is unchanged and still keys on
+> `normalize_locator(url)` alone — and it could not do otherwise: it
+> hard-codes `alias: None` on every entry it constructs
+> (`registry_resolve.rs:292`), so a pair key would **provably** degenerate
+> to the locator key there. The design reason is the same one the mechanics
+> encode: a forced browse carries no filter, so two spellings of one locator
+> have nothing to distinguish them.
+>
+> This amendment is unrelated to the dual-candidate match rule that landed in
+> the same branch; it is dated drift found while auditing the surrounding
+> records. Nothing else in this ADR changes.
 
 The footgun: a config carrying **both** fields silently honors the array
 and discards `default_registry` with no warning. Worse, the two **writers**

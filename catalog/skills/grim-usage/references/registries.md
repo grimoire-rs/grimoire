@@ -96,8 +96,14 @@ alias = "internal"
 oci = "registry.corp.example/team"
 ```
 
-Project entries take precedence over global entries; duplicate locators
-are deduped, first occurrence wins.
+Project entries take precedence over global entries. Deduplication keys on
+the **locator *and* the alias together** (trailing slashes and host case
+ignored), first occurrence wins — so only a genuine repeat collapses, which
+is how a project entry shadows its global twin. One locator declared twice
+under two different aliases is **two** browse sources on purpose: they are
+two filtered views of one registry, and collapsing them would silently
+discard one entry's `include`/`exclude`. An entry with no alias keys on the
+locator alone.
 
 Browse-set precedence (what `grim search`, `grim tui`, and `grim mcp`
 browse):
@@ -185,18 +191,28 @@ splitting it into several indices.
 [[registries]]
 alias = "acme"
 index = "https://index.acme.internal"
-include = ["ghcr.io/acme/platform/**", "ghcr.io/acme/tools/**"]
+include = ["acme/platform/**", "acme/tools/**"]
 exclude = ["ghcr.io/acme/platform/legacy/**"]
 ```
 
-The patterns are qualified with the registry (`ghcr.io`) the index points
-into, not written bare as `acme/platform/**` — an index entry has no
-locator to strip from the candidate string, see [Pattern rules](#pattern-rules).
+Both spellings work, and they mean different things. Every pattern is tested
+against **two** strings — the repository path (`acme/tools`) and the
+fully-qualified reference (`ghcr.io/acme/tools`) — and a hit on either
+counts. So the bare `include` patterns above admit those namespaces on
+whatever host the index serves them from, while the host-qualified `exclude`
+hides the legacy subtree on `ghcr.io` only. Same rule for an `oci` entry and
+an `index` entry; see [Pattern rules](#pattern-rules).
 
 A repository is shown when the `include` list is empty **or** an `include`
 pattern matches it, **and** no `exclude` pattern matches. The two lists
 combine on one entry (unlike Cargo's mutually exclusive pair) and `exclude`
 wins where both match. An entry setting neither is unfiltered.
+
+Exclude-wins is applied **once**, to the combined verdicts — not as two
+whole-filter answers OR-ed together. `include = ["acme/tools"]` with
+`exclude = ["quay.io/acme/tools"]` therefore hides exactly the `quay.io` row
+and keeps every other host's; the host-qualified `exclude` does not disarm
+the bare `include` everywhere.
 
 ### Not access control {#not-access-control}
 
@@ -248,27 +264,47 @@ else:
 - A pattern containing none of `* ? [ ] { } \` auto-expands to also match
   everything beneath it: `acme/platform` behaves as `acme/platform{,/**}`.
   Every other pattern is used verbatim. Brace alternation is one pattern:
-  `acme/{platform,tools}/**`.
-- Patterns match the row's `registry/repository` with **this entry's own**
-  `oci`/`index` url stripped from the front — not the fully-qualified ref.
-  With `oci = "ghcr.io/acme"`, the row `ghcr.io/acme/platform/foo` is
-  matched as `platform/foo`. An index source has no registry root to strip,
-  so its candidate is the whole reference.
-- That is usually what the TUI tree shows beneath the source's root, but
-  the tree strips the *longest* locator across **all** entries while a
-  pattern strips only its own. With both `ghcr.io` and `ghcr.io/acme`
-  declared, `ghcr.io/acme/tools/foo` displays as `tools/foo` yet the
-  `ghcr.io` entry must match it as `acme/tools/**`. The locality is
-  deliberate: adding an unrelated entry never re-aims an existing filter.
-- Editing an entry's **own** locator does re-aim its patterns. A case
-  difference silently makes every pattern in that entry match nothing — it
-  passes validation untouched. (A trailing slash, `oci = "ghcr.io/acme/"`,
-  does **not**: it is trimmed before the prefix strip.) The one signal is a
-  stderr warning; the exit code stays `0` and the source's tree root still
-  renders at a `0/0` rollup:
+  `acme/{platform,tools}/**`. The expansion is a **suffix**, so every
+  pattern still anchors at the first segment of whichever candidate it is
+  tested against — `hex` matches neither `acme/arcana/hex` nor
+  `ghcr.io/acme/arcana/hex`; write `**/hex` for "wherever it sits".
+- **Two candidates, a hit on either counts.** Every pattern is tested
+  against the row's repository path **and** its fully-qualified
+  `registry/repository` reference. For the row `ghcr.io/acme/tools` those
+  are `acme/tools` and `ghcr.io/acme/tools`. One rule for an `oci` entry
+  and an `index` entry alike — there is no per-kind branch and no
+  host-detection heuristic.
+- Consequently a **bare** pattern is host-agnostic (`acme/tools` admits
+  that repository from every host a source serves) and a **host-qualified**
+  pattern selects one host (`ghcr.io/acme/tools` admits it only from
+  `ghcr.io`). That is how an index spanning several registries is filtered
+  per host.
+- **The entry's own `oci`/`index` locator is part of neither candidate.**
+  Editing the locator cannot re-aim a pattern written against it, and a
+  pattern copied between two entries — at different depths, or from an
+  `oci` entry to an `index` one — means the same thing in both. Never tell
+  a user to write a pattern relative to their locator; that rule was
+  removed.
+- Neither candidate is what the TUI tree shows beneath the source's root.
+  The tree strips the *longest* locator across **all** entries; a pattern
+  strips nothing. With both `ghcr.io` and `ghcr.io/acme` declared,
+  `ghcr.io/acme/tools/foo` displays as `tools/foo` yet a filter matches it
+  as `acme/tools/foo` or `ghcr.io/acme/tools/foo`. Write patterns from the
+  reference, never from the tree.
+- **A mixed-case registry host does not match a lowercase pattern.** An
+  entry declared `oci = "GHCR.io/acme"` keeps that spelling into the
+  qualified candidate, and matching is case-sensitive, so
+  `include = ["ghcr.io/**"]` admits nothing (warns) and
+  `exclude = ["QUAY.IO/**"]` hides nothing (**silently**). Documented
+  caveat, not a fixed one: spell a host in a pattern exactly as the entry's
+  locator spells it. Only the host half is affected — OCI repository paths
+  are lowercase by spec.
+- A pattern that matches nothing is legal. The one signal is a stderr
+  warning; the exit code stays `0` and the source's tree root still renders
+  at a `0/0` rollup:
 
   ```text
-  registry 'acme': filter admitted 0 of 148 repositories; patterns are relative to this entry's own locator — see https://grimoire.rs/configuration.html#browse-filters
+  registry 'acme': filter admitted 0 of 148 repositories; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters
   ```
 
   Emitted once per affected source per browse, for one shape only: a
@@ -299,22 +335,55 @@ grim config registry add acme --oci ghcr.io/acme \
   --include 'acme/platform/**' --include 'acme/tools/**' \
   --exclude 'acme/platform/legacy/**'
 
+grim config registry set acme \
+  --include 'acme/platform/**' --include 'acme/tools/**'   # edit in place
+grim config registry set acme --clear-exclude              # empty one list
 grim config set registry.acme.include 'acme/{platform,tools}/**'
 grim config get registry.acme.include --format json
 ```
 
 `--include`/`--exclude` are repeatable and accumulate; **neither is ever
-comma-split**, because a comma is glob alternation syntax. This is the only
-CLI path that writes a multi-pattern list — `grim config set
-registry.<alias>.include` replaces the whole list with **exactly one**
-pattern, and warns naming the discarded count when the entry carried more
-than one. Confirm the current flags with `grim config registry add --help`.
+comma-split**, because a comma is glob alternation syntax. `add` (new entry)
+and `set` (existing entry) are the only CLI paths that write a multi-pattern
+list — `grim config set registry.<alias>.include` replaces the whole list
+with **exactly one** pattern, and warns naming the discarded count when the
+entry carried more than one. Confirm the current flags with `grim config
+registry set --help`.
 
-Growing a filter is a re-create, not a second `add`: `grim config registry
-add acme …` on an alias that already exists is a data error (`64`) — the
-error names both `config set` (single pattern) and the re-create sequence
-(`registry rm acme`, then `registry add` again with the full set of
-`--include`/`--exclude` flags) as the two ways forward.
+Growing a filter on an existing entry is `grim config registry set`, **not**
+a second `add` and no longer a re-create: `grim config registry add acme …`
+on an alias that already exists is a usage error (`64`). `set` applies only
+the flags it is given, leaving the entry's locator, default flag, and
+position untouched — position matters, because when no entry declares
+`default` the *first* one wins, so the old `rm` + re-`add` round trip could
+silently move the default.
+
+Emptying a list has **two** supported routes, and a list flag given zero
+times is neither of them (that means "leave this field alone"):
+
+```sh
+grim config registry set acme --clear-include      # flag route
+grim config unset registry.acme.include            # dotted-key route
+```
+
+Both are silent at every list length — including an already-empty list, which
+exits `0` and leaves the rest of the entry untouched — and both write the
+emptied list as **no key at all**, indistinguishable from an entry that was
+never filtered. The file itself is still rewritten by the lossy serializer
+(below); "unchanged" is about the entry, not the bytes. `--clear-include` conflicts with `--include` on the same call
+(`64`); a `set` naming no field at all is also `64`. The two differ only in
+their JSON report: the flag route is `action: "registry-set"` with a
+`{"field":"include","action":"cleared"}` element in `fields`, the dotted-key
+route is `action: "unset"` with `fields: []`.
+
+`registry set`'s write report carries an always-present `fields` array — one
+element per field the call wrote, in the frozen `oci, index, default,
+include, exclude` order, each `{"field":…,"action":"set","value":…}` or
+`{"field":…,"action":"cleared"}` (a cleared element has no `value` key).
+Every other write verb reports `fields: []`. It describes the write, not a
+diff: a field named with the value it already held still emits its element,
+and a `--oci`/`--index` kind swap emits two (the named side `set`, the
+emptied side `cleared`).
 
 `grim config get` comma-joins a multi-pattern list for display and is
 **not round-trippable**: feeding that string back to `set` stores it as one
@@ -376,11 +445,23 @@ lock on every change.
   ```sh
   grim config registry add acme --oci ghcr.io/acme        # registry entry (needs --oci XOR --index)
   grim config registry add hub --index https://index.grimoire.rs  # index entry — see Index Sources
+  grim config registry set acme --oci ghcr.io/acme2   # edit in place; unnamed fields keep their value
+  grim config registry set acme --clear-include       # empty a browse-filter list
   grim config registry use acme                       # set default, clearing all others atomically
+  grim config registry show acme                      # one entry's fields
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
   grim config registry fields                         # per-field metadata (oci/index/default/include/exclude) — works with no config at all
   ```
+
+  `registry set` edits an **existing** entry, applying only the flags it is
+  given and keeping the entry's position; `add` refuses an alias that
+  already exists (`64`). It takes `add`'s `--oci` / `--index` /
+  `--include` / `--exclude` / `--default` plus `--clear-include` /
+  `--clear-exclude`, which `add` does not have. `--oci` and `--index` swap
+  the entry's kind, clearing the other side. `--default` sets the flag and
+  clears every other entry's; it cannot *unset* one — move the default by
+  naming another entry.
 
   `registry use` is the correct way to change the default registry.
 
@@ -391,9 +472,10 @@ scripts cleanly (`$(grim config get options.clients)`), exiting `1` when the
 key is valid but unset. Add `--format json` to any subcommand for
 machine-readable output.
 
-**Every grim write is lossy**: comments and the `#:schema` directive are
-stripped from `grimoire.toml` on any `grim config` / `grim add` / `grim
-remove`. The full dotted-key list, JSON shapes, and exit codes live in the
+**Every grim write is lossy**: comments are stripped from `grimoire.toml` on
+any `grim config` / `grim add` / `grim remove`, and so is any key whose value
+collapses to the default. The one exception is a **leading `#:schema` editor
+directive, which every rewrite preserves** at the top of the file. The full dotted-key list, JSON shapes, and exit codes live in the
 [command reference][config-cmd] — never memorize them; confirm with `grim
 config --help`.
 

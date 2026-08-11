@@ -222,11 +222,88 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
-| `config set` / `unset` / `registry add` / `set` / `rm` / `use` | `{action, key, value, scope, dry_run}` — `dry_run` is `true` only for `config set --dry-run`, `false` for every other write verb (`unset` has no `--dry-run` flag). `registry set` reports `value` only when the call changed the locator; a filter-only edit reports `null` | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set` |
+| `config set` / `unset` / `registry add` / `set` / `rm` / `use` | `{action, key, value, scope, dry_run, fields}` — `dry_run` is `true` only for `config set --dry-run`, `false` for every other write verb (`unset` has no `--dry-run` flag). `value` keeps its per-verb meaning: for `registry set` it is the locator the call **named** — the argument of `--oci`/`--index` — and `null` when neither flag was given (a filter-only or `--default`-only edit reports `null`), which is why the structured `fields` array exists beside it. It echoes the flag and is never compared against the stored entry, so naming an entry's current locator reports that locator, not `null`. `fields` is an always-present array, `[]` on all five other write verbs and one element per field `registry set` wrote — see [the `fields` array](#config-write-fields) | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set` |
 | `config registry show` | `{alias, oci, index, include, exclude, default}` — both locator keys present, exactly one non-null; `include`/`exclude` always-present arrays, `[]` when unfiltered | — |
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
+
+### The config write `fields` array {#config-write-fields}
+
+Every config write report carries `fields`. It is `[]` on `config set`,
+`config unset`, `registry add`, `registry rm` and `registry use`, and never
+an absent key — the [always-present rule](#null-policy) applies to it like
+any other optional field, so `[]` on an older-shaped verb and `[]` on a
+`registry set` that wrote nothing are the same value, and there is no
+"absent" state to distinguish.
+
+Only `registry set` populates it, with one element per field the call wrote:
+
+```json
+{
+  "action": "registry-set",
+  "key": "registry.acme",
+  "value": "ghcr.io/moved",
+  "scope": "project",
+  "dry_run": false,
+  "fields": [
+    { "field": "oci",     "action": "set",     "value": "ghcr.io/moved" },
+    { "field": "default", "action": "set",     "value": true },
+    { "field": "include", "action": "set",     "value": ["a/**", "b/**"] },
+    { "field": "exclude", "action": "cleared" }
+  ]
+}
+```
+
+- `field` is the short field name — `oci`, `index`, `default`, `include` or
+  `exclude`, the same vocabulary [`config registry
+  fields`](#shapes-items) uses.
+- `action` is `"set"` or `"cleared"`. A `"cleared"` element carries **no**
+  `value` key at all — not `value: null`. `null` already means two things in
+  this object family (`value`'s per-verb "not applicable", and an additive
+  field's "does not apply"), and a cleared row encodes an *event* rather than
+  a state, so it gets its own explicit discriminator instead of a third
+  overload. Discriminate on `action`, never on the presence of `value`.
+- `value` on a `"set"` element takes the field's own JSON type: a string for
+  `oci`/`index`, an array of strings for `include`/`exclude`, a boolean for
+  `default`.
+- Element order follows the frozen `oci, index, default, include, exclude`
+  sequence, so two calls touching the same fields emit byte-identical arrays.
+
+**It reports the write, not the invocation.** A field named with the value it
+already held still emits its element — presence means "this field was
+written", never "this field changed", and there is no before/after diff to
+read out of it. A `--oci`/`--index` kind swap emits **two** elements, the
+named side `set` and the unnamed side `cleared`, because the command really
+performed both mutations; the unnamed locator side is the one place prior
+state is consulted, emitting `cleared` only when it actually held a value, so
+a locator that was already absent is never reported as cleared. A list side
+is not so conditioned: `--clear-include` on an already-empty list still emits
+its `cleared` element.
+
+**It is scoped to the entry named by `key`.** `--default` also demotes
+whichever sibling entry held the flag, and that write is not reported here —
+no element ever names another alias. A consumer reading `fields` as
+"everything this call did to `grimoire.toml`" would miss it.
+
+**Three CLI surfaces reach the same browse-filter field, and they report
+differently.** Two of them clear a list; both clearing routes are supported
+and neither is deprecated in favour of the other:
+
+| Call | `action` | `fields` | Warns |
+|---|---|---|---|
+| `registry set acme --include 'a/**'` | `registry-set` | `[{"field":"include","action":"set","value":["a/**"]}]` | no |
+| `registry set acme --clear-include` | `registry-set` | `[{"field":"include","action":"cleared"}]` | no |
+| `config set registry.acme.include 'a/**'` | `set` | `[]` | **yes**, on stderr, when the call discards patterns it did not name |
+| `config unset registry.acme.include` | `unset` | `[]` | no |
+
+`config set` writes exactly one pattern and replaces the whole list, so on an
+entry already carrying more than one it warns naming the discarded count
+(exit stays `0`); a clear through either route is silent at every list
+length. The asymmetry is intended — `fields` is scoped to `registry set` —
+but a consumer diffing the routes needs to read it here rather than discover
+it. A cleared list is written as an absent key, so a subsequent `registry
+show` reports `include: []` whichever route did the clearing.
 
 ### The fetch exception {#fetch}
 

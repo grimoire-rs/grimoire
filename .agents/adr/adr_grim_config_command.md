@@ -206,6 +206,36 @@ grim config registry list               # all registries (default marked)
 # Output:  global --format json|plain  (existing global flag)
 ```
 
+> **Drift note, 2026-08-11 — the block above is the surface as *designed*;
+> four things shipped differently.** Recorded here rather than rewritten, so
+> the decision and its outcome stay distinguishable. The maintained index of
+> the shipped surface is `.claude/rules/subsystem-cli-commands.md`, and
+> `docs/src/commands.md` is the reference.
+>
+> 1. **`registry add` takes `--oci` / `--index`, not `--url`.** The
+>    single-locator design became two mutually exclusive kinds when package
+>    indexes landed; `--url` survives only as a hidden alias for `--oci`.
+>    `add` also gained repeatable `--include` / `--exclude` browse-filter
+>    globs.
+> 2. **A sixth registry verb, `registry set`, exists** — edit an entry in
+>    place, same flags as `add` plus `--clear-include` / `--clear-exclude`,
+>    applying only the flags given and keeping the entry's position.
+>    Naming no field is exit 64. **No ADR records it**; see the note below.
+> 3. **A seventh, `registry fields`**, lists the five addressable
+>    per-registry field names and their static metadata — the only `config`
+>    verb that resolves no scope and works with no `grimoire.toml` present.
+> 4. **`config list` has `--all`, not `--show-origin`**, and reads exactly
+>    one scope rather than an effective merge. `--show-origin` was removed
+>    as dead surface for that reason (`config.rs:1859`); `config set` gained
+>    `--dry-run`.
+>
+> **`registry set` is recorded in no ADR at all.** That is a real gap and it
+> is left open deliberately: whether it warrants its own ADR, an amendment
+> here, or nothing is an owner decision, not a documentation fix. Design
+> record meanwhile:
+> [`design_registry_filter_candidate.md`](../specs/design_registry_filter_candidate.md)
+> and [`plan_registry_filter_fixes.md`](../plans/plan_registry_filter_fixes.md).
+
 ### Key namespace (dotted ↔ model)
 
 | Dotted key | Model field | Type / value parsing |

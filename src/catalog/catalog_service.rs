@@ -1187,10 +1187,12 @@ mod tests {
         // `index`), S-006 (a locator edit cannot re-aim a pattern) and "a bare
         // pattern is host-agnostic" true.
         //
-        // **The guarantor is `registry_resolve`'s `trim_locator`, applied at
-        // every `ResolvedRegistry` construction site, with `load_catalog`
-        // passing `reg.url` straight through — NOT `split_host_namespace`,**
-        // whose fall-through arm returns the string whole when the namespace
+        // **Two `oci`-side guarantors, in series** (design E-8, corrected
+        // twice): `registry_catalog`'s `split_host_namespace` removes the
+        // namespace — `Catalog::build` spawns every entry under the bare host
+        // it returns — and `registry_resolve`'s `trim_locator`, applied at
+        // every `ResolvedRegistry` construction site, guards that split's
+        // fall-through arm, which returns the string whole when the namespace
         // half is empty (`split_host_namespace("ghcr.io/") == ("ghcr.io/",
         // None)`, pinned in `registry_catalog`). The `index` half has its own
         // guard: `IndexPackage::into_entry` splits on the first `/` and
