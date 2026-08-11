@@ -1664,6 +1664,98 @@ called it inert-rather-than-wrong; this records that the inertness is exactly
 what puts it beyond a red-first gate. It is verified by the four tests going
 green again on corrected fixtures, not by a new assertion.
 
+### E-17 — four rulings from WP-C's Review-Fix round 1
+
+**1. E-10.2 gains a rider: a derived expectation must not be the
+function-under-test's own body.** `app.rs`'s
+`elision_registry_returns_some_for_single_registry` read
+`assert_eq!(elision_registry(&ctx), Some(bare.key().root_key()))` while
+`elision_registry`'s entire body is `Some(only.key().root_key())` —
+`assert_eq!(f(x), f(x))`.
+
+**Precision, corrected from the round-1 ledger:** this did **not** let a
+mutation survive. Mutating the body breaks the self-agreement, so mutation 9
+dies and the Specify phase's "zero survivors" was honest. What the tautology
+was blind to is a **consumer-side encoding mismatch** — producer and expectation
+moved together while `strip_default_registry`, a third party, did not. That is
+the hole the Block walked through. Derivation buys encoding freedom; the rider
+is what keeps it from also buying blindness. Fixed by asserting against the root
+a **real row** lands on (`project_group_rows` + `display_split`), an
+independently produced second value.
+
+**2. E-16.2 undercounted the fold-removal breakage by one — it is five, not
+four.** The fifth is
+`render::spec_multi_registry_render_tests::spec_flat_multi_registry_bare_host_row_attributes_to_configured`
+— the **`render.rs` fold site's own fixture**. E-15.1 correctly found the fold
+at two sites; E-16.2 then enumerated only the `tree.rs`-side fixtures. The fix
+is a fixture correction, not a weakened test: it adds `set_registry_locators`
+beside the retained `set_registry_order` (which also drives `is_multi_registry`,
+so dropping it would silently disable the branch under test), and the assertion
+is byte-unchanged. Confirmed by four perspectives, one of them by deleting the
+added line and reading the failure.
+
+**3. The `default_registry` overload, and the Block it produced.**
+`elision_registry` returning a tagged root key is **correct** and must stay:
+`tree.rs`'s `segments` compares `default_registry` against a root key. The
+defect was that the same value was *also* chained into the locator-prefix
+attribution set, and fed to `strip_default_registry`'s literal
+`repo.strip_prefix`, which a tagged key can never satisfy.
+
+Resolved by making the flat single-registry branch apply D-ELIDE as the same
+root-key equality the tree uses, via `display_split`. `strip_default_registry`
+is deleted and `tree.rs`'s `.chain(default_registry)` removed, so both
+`configured` sets are `registry_locators` alone. This also makes
+`display_split`'s "attribute identically to the tree" doc true — it was false,
+because the single-registry branch never called it.
+
+**Two reviewer prescriptions were verified wrong and rejected**, recorded so
+they are not re-proposed: reverting `elision_registry` to a bare locator (breaks
+tree elision at the `segments` comparison), and making `render.rs`'s tree-root
+label lookup unconditional (at depth > 0 the node key is the cumulative path
+while the label is the short segment, so it would render the full path for every
+non-registry group — the `contains_key` guard is load-bearing).
+
+**4. SP-1's accepted gap has a second site.** Re-adding the inert
+`.chain(default_registry)` to the tree's attribution set leaves the suite green,
+exactly as re-adding the `registry_order` fold does. Both are removal-proven and
+reintroduction-unguarded, for the same reason: an inert entry has no observable
+effect to assert on. Recorded, not guarded — a guard would assert that dead code
+stays absent.
+
+### E-18 — two surfaces WP-C's review added to WP-D's cell
+
+**1. `docs/src/commands.md`'s TUI health-line worked example** reads
+`filtered: acme`. `registry_labels()` has always built `"{alias} ({url})"` for a
+hit — never a bare alias — so the example has been wrong at every point in this
+branch's history. WP-C is the first point at which the correct format becomes a
+**tested** contract (S-019 pins
+`"filtered: acme (localhost:5002/uxrev)"`), which is what makes it checkable
+rather than best-effort. Not one of C-032's three surfaces — a new item.
+
+**2. `adr_multi_registry_mcp.md` needs an amendment, four clauses.** Its §1 note
+is the record of the deferred catalog-refresh seam, and WP-C invalidates the
+promise it carries:
+
+1. `TuiRow.source` is a typed `RowSource`, and the tree/flat root key is
+   `RowSource::root_key()` — a **tagged, display-only** rendering
+   (`alias:{alias}/{locator}` / `locator:{locator}` / `Local` / `""`), never a
+   lock or install key.
+2. **Re-arming `spawn_catalog_refresh` is no longer a one-line change.** Its
+   `Catalog`-shaped consumer produces `Unattributed` rows that root in *locator*
+   space while `registry_order` is in *root-key* space, and `merge_catalog_rows`
+   replaces the row set without touching the three vectors — so the first
+   refresh after a naive re-arm renders every registry twice, once as an empty
+   `0/0` root, with rows sorted to `usize::MAX` and aliases lost. Migrating onto
+   `catalog_service::load_catalog` is a **precondition**, not an optimisation.
+   (The in-code note at that seam was corrected in WP-C's fix pass; this is the
+   durable record.)
+3. The encoding has exactly one seam, and its parser (`label_from_root_key`) is
+   part of it.
+4. The `registry_order` / `registry_locators` contract: two projections of one
+   ordered set, index-aligned by construction, with `usize::MAX` the deliberate
+   — and silent — fallback for a key outside the set. `Local` is its one
+   legitimate resident.
+
 ### E-4 — `config` exports no constructor for `Local` / `Unattributed`
 
 By design. `row_source_of` structurally cannot return either, and both
