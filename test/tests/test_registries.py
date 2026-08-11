@@ -135,6 +135,69 @@ def test_search_multi_registry_browses_all_declared(
     )
 
 
+def test_search_json_carries_source_attribution(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """Every ``grim search --format json`` item names the configured entry it
+    was browsed from, so a client can root results by alias the way the TUI
+    tree does.
+
+    ``repo`` names the *artifact's* registry host, not the entry's locator, so
+    the attribution cannot be reconstructed downstream — it has to ride the row.
+    An entry that declares no alias reports ``alias: null`` (an explicit null,
+    never an absent key) with its locator still present.
+    """
+    ns1 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns2 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns3 = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    for ns, name in ((ns1, "skill-in-ns1"), (ns2, "skill-in-ns2"), (ns3, "skill-in-ns3")):
+        make_artifact(
+            f"{ns}/{name}",
+            "skill",
+            {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: from {ns}\n---\n# S\n"},
+            tag="latest",
+        )
+
+    # Two aliased entries plus a third that declares no alias.
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\n'
+        f'alias = "reg1"\n'
+        f'oci = "{REGISTRY_HOST}/{ns1}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'alias = "reg2"\n'
+        f'oci = "{REGISTRY_HOST}/{ns2}"\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'oci = "{REGISTRY_HOST}/{ns3}"\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    rows = runner.json("search", "--refresh")["items"]
+    by_name = {r["repo"].rsplit("/", 1)[-1]: r for r in rows}
+    for name in ("skill-in-ns1", "skill-in-ns2", "skill-in-ns3"):
+        assert name in by_name, f"{name} must be browsed; got {list(by_name)}"
+
+    assert by_name["skill-in-ns1"]["source"] == {
+        "alias": "reg1",
+        "locator": f"{REGISTRY_HOST}/{ns1}",
+    }
+    assert by_name["skill-in-ns2"]["source"] == {
+        "alias": "reg2",
+        "locator": f"{REGISTRY_HOST}/{ns2}",
+    }
+    unaliased = by_name["skill-in-ns3"]["source"]
+    assert "alias" in unaliased, "key present even when the entry declares no alias"
+    assert unaliased["alias"] is None
+    assert unaliased["locator"] == f"{REGISTRY_HOST}/{ns3}"
+
+
 @pytest.mark.parametrize("style", ["comma", "repeat"])
 def test_search_multi_registry_flag_browses_all(
     grim_at, project_dir: Path, registry: str, style: str

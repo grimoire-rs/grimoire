@@ -11,13 +11,15 @@
 //! in its `Status` cell (e.g. `installed,deprecated`).
 //!
 //! JSON format: `{"items": [...]}` where each item is a
-//! `{kind, repo, summary, description, version, latest_tag, repository,
-//! revision, created, deprecated, status}` object (uniform `items`
-//! envelope, per subsystem-cli-api.md).
+//! `{kind, repo, source, summary, description, version, latest_tag,
+//! repository, revision, created, deprecated, status}` object (uniform
+//! `items` envelope, per subsystem-cli-api.md).
 //! The `description` stays full and untruncated; both `version` and the
-//! representative `latest_tag` are kept; `repository` is the HTTPS source URL
-//! or `null`; `revision`/`created` are the git provenance (`--git` opt-in) or
-//! `null`; `deprecated` is the deprecation message or `null`.
+//! representative `latest_tag` are kept; `source` is the `{alias, locator}`
+//! attribution of the configured registry entry the row came from;
+//! `repository` is the HTTPS source URL or `null`; `revision`/`created` are
+//! the git provenance (`--git` opt-in) or `null`; `deprecated` is the
+//! deprecation message or `null`.
 
 use std::io::{self, Write};
 
@@ -26,6 +28,32 @@ use serde::{Serialize, Serializer};
 use crate::cli::printer::{Printable, print_table, terminal_width, truncate_ellipsis};
 use crate::install::status_badge::StatusBadge;
 
+/// Which configured registry entry a row was browsed from — the JSON
+/// rendering of [`crate::config::registry_resolve::RowSource`]'s `Alias` /
+/// `Locator` variants, which is what the TUI roots its tree by.
+///
+/// A row cannot be attributed from its `repo` alone: that names the
+/// *artifact's* registry host, while the entry's locator is a host plus an
+/// optional namespace for an `oci` source and an index url for an `index`
+/// one — and a single index serves rows from many hosts. Carrying both halves
+/// keeps the identity injective the same way `RowSource::Alias` does (one
+/// alias may be declared at two locators across scopes).
+///
+/// Deliberately **not** the tagged `RowSource::root_key()` rendering: that key
+/// is documented display-forbidden and internal to the tree, and emitting it
+/// would freeze it into the JSON contract. A client that wants a root key
+/// builds its own from these two halves.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchSource {
+    /// The configured alias, or `null` when the entry declared none (an
+    /// unaliased `[[registries]]` entry, a `--registry` flag, or the legacy
+    /// single-registry fallback).
+    pub alias: Option<String>,
+    /// The entry's locator, byte-identical to the configured `[[registries]]`
+    /// value it was resolved from.
+    pub locator: String,
+}
+
 /// One catalog match annotated with its install status.
 #[derive(Debug, Clone)]
 pub struct SearchEntry {
@@ -33,6 +61,8 @@ pub struct SearchEntry {
     pub kind: Option<String>,
     /// The `registry/repository` reference.
     pub repo: String,
+    /// Which configured registry entry contributed this row.
+    pub source: SearchSource,
     /// The catalog description, if any.
     pub description: Option<String>,
     /// The short catalog summary, if any. Preferred over `description`
@@ -71,9 +101,10 @@ impl Serialize for SearchEntry {
         // Field count below is asserted by
         // `json_carries_replaced_by_plain_table_does_not` — adding a field
         // here requires bumping both, or the test fails.
-        let mut s = serializer.serialize_struct("SearchEntry", 12)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 13)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
+        s.serialize_field("source", &self.source)?;
         s.serialize_field("summary", &self.summary)?;
         s.serialize_field("description", &self.description)?;
         s.serialize_field("version", &self.version)?;
@@ -178,10 +209,19 @@ impl Printable for SearchReport {
 mod tests {
     use super::*;
 
+    /// An unaliased source, the shape a `--registry` browse produces.
+    fn src() -> SearchSource {
+        SearchSource {
+            alias: None,
+            locator: "localhost:5000".to_string(),
+        }
+    }
+
     fn entry(repo: &str, status: StatusBadge) -> SearchEntry {
         SearchEntry {
             kind: Some("skill".to_string()),
             repo: repo.to_string(),
+            source: src(),
             summary: None,
             repository: None,
             revision: None,
@@ -236,6 +276,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
+            source: src(),
             summary: Some("blurb".to_string()),
             repository: None,
             revision: None,
@@ -261,6 +302,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("rule".to_string()),
             repo: "localhost:5000/acme/y".to_string(),
+            source: src(),
             summary: None,
             repository: None,
             revision: None,
@@ -283,6 +325,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
+            source: src(),
             summary: Some("short blurb".to_string()),
             repository: None,
             revision: None,
@@ -306,6 +349,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
+            source: src(),
             summary: None,
             repository: None,
             revision: None,
@@ -331,6 +375,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
+            source: src(),
             summary: Some(long.clone()),
             repository: None,
             revision: None,
@@ -354,6 +399,7 @@ mod tests {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
+            source: src(),
             summary: Some("short".to_string()),
             repository: None,
             revision: None,
@@ -469,10 +515,10 @@ mod tests {
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 12-field object still round-trips. This count is linked to
+        // The full 13-field object still round-trips. This count is linked to
         // the manual `Serialize for SearchEntry` impl's serialize_struct count
         // — the two must move together.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 12);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 13);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
@@ -485,6 +531,45 @@ mod tests {
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("x2"), "plain table unchanged");
+    }
+
+    #[test]
+    fn json_carries_source_attribution_plain_table_does_not() {
+        // An aliased entry: both halves ride the row, so a client can root by
+        // alias the way the TUI tree does.
+        let mut aliased = entry("ghcr.io/acme/skills/x", StatusBadge::Installed);
+        aliased.source = SearchSource {
+            alias: Some("acme".to_string()),
+            locator: "ghcr.io/acme".to_string(),
+        };
+        let mut buf = Vec::new();
+        SearchReport::new(vec![aliased.clone()]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"][0]["source"]["alias"], "acme");
+        assert_eq!(v["items"][0]["source"]["locator"], "ghcr.io/acme");
+
+        // An unaliased entry: `alias` is an explicit null, never an absent key,
+        // and the locator is still there — attribution is never guessed.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::NotInstalled)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let source = v["items"][0]["source"].as_object().expect("source is an object");
+        assert!(source.contains_key("alias"), "key present even when unaliased");
+        assert!(source["alias"].is_null());
+        assert_eq!(source["locator"], "localhost:5000");
+
+        // The plain table stays five columns — no attribution leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![aliased]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("acme (ghcr.io"), "plain table unchanged");
+        assert_eq!(
+            out.lines().next().unwrap().split_whitespace().count(),
+            5,
+            "header still five columns"
+        );
     }
 
     #[test]

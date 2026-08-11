@@ -25,7 +25,7 @@
 
 use clap::Args;
 
-use crate::api::search_report::{SearchEntry, SearchReport};
+use crate::api::search_report::{SearchEntry, SearchReport, SearchSource};
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
 use crate::catalog::{BadgeContext, SearchQuery};
 use crate::cli::exit_code::ExitCode;
@@ -151,14 +151,26 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // filter apart from one caused by a `_catalog`-gated registry.
     let any_rows_before_filter = results.any_rows_before_filter();
 
-    // Flatten the registry groups into the flat search table (sorted by
-    // `registry/repository`).
+    // Flatten the registry groups into the flat search table, carrying each
+    // group's source attribution onto its rows — the alias/locator pair no
+    // consumer can reconstruct from `repo` alone (an index serves rows from
+    // many hosts). Same order as `CatalogResults::into_flat_rows`: groups in
+    // declaration/precedence order, each group's rows already sorted by
+    // repository.
     let entries: Vec<SearchEntry> = results
-        .into_flat_rows()
+        .groups
         .into_iter()
-        .filter(|r| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
-        .map(|r| SearchEntry {
+        .flat_map(|g| {
+            let source = SearchSource {
+                alias: g.alias,
+                locator: g.registry,
+            };
+            g.rows.into_iter().map(move |r| (source.clone(), r))
+        })
+        .filter(|(_, r)| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
+        .map(|(source, r)| SearchEntry {
             repo: r.repo(),
+            source,
             kind: r.kind,
             summary: r.summary,
             description: r.description,

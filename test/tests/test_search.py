@@ -187,6 +187,27 @@ def test_search_surfaces_replaced_by(
     assert current["replaced_by"] is None, "always-present null when no replacement"
 
 
+def test_search_flag_registry_reports_unaliased_source(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `--registry` browse carries no configured alias, so every item's
+    `source` is `{alias: null, locator: <the flag value>}` — populated from the
+    forced entry, never guessed from the row's own reference."""
+    make_artifact(
+        f"{unique_repo}/flagged",
+        "skill",
+        {"flagged/SKILL.md": "---\nname: flagged\n---\n# f\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    locator = f"{REGISTRY_HOST}/{unique_repo}"
+
+    rows = runner.json("search", unique_repo, "--registry", locator, "--refresh")["items"]
+    assert rows, "the published artifact must be browsed"
+    for row in rows:
+        assert row["source"] == {"alias": None, "locator": locator}
+
+
 def test_search_query_miss_is_empty_array_exit_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

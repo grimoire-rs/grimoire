@@ -586,9 +586,18 @@ output shows the one-line summary (truncated to the terminal); piped
 output and `--format json` keep the full description, and JSON adds a
 `repository` URL field for tooling.
 
+Each JSON item also carries a `source` object — `{alias, locator}` — naming
+the `[[registries]]` entry it was browsed from, the same attribution the TUI
+roots its tree by. Group a flat result set by its source with
+`jq '.items | group_by(.source.alias // .source.locator)'`. `alias` is `null` when the
+entry declares none (and under `--registry`); `locator` is the configured
+value verbatim, which `repo` does not carry — `repo` names the artifact's own
+registry host, and one index source serves rows from many hosts.
+
 ```sh
 grim search review
 grim search --refresh --registry ghcr.io/acme --format json
+grim search --format json | jq '.items | group_by(.source.alias // .source.locator)'
 ```
 
 A registry declaring a [browse filter](#browse-filters) contributes only the

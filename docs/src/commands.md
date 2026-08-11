@@ -833,6 +833,18 @@ artifact has none — and a `replaced_by` field — the authored
 [successor reference](./publishing.md#metadata-replaced-by), or `null` when
 none. Neither is shown in the plain table.
 
+Every JSON item also carries a `source` object — `{alias, locator}` — naming
+the configured [`[[registries]]`](./configuration.md#multiple-registries) entry
+the row was browsed from. It is the same attribution the [TUI](#tui) roots its
+registry tree by, and it is what lets a client group a flat result set by
+alias. `alias` is `null` when the entry declares none, and under `--registry`
+or the legacy single-registry fallback, which have no alias to report;
+`locator` is byte-identical to the configured value. Neither half is derivable
+from `repo`: that names the *artifact's* registry host, while an entry's
+locator is a host plus an optional namespace for an `oci` source and the index
+url for an `index` one — and one index serves rows from many hosts. Like
+`repository`, `source` is JSON-only; the plain table keeps its five columns.
+
 A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
 default** — unless it is installed in the active scope (directly or via a
 bundle), in which case it stays listed so you can see what you have. Pass
