@@ -1377,6 +1377,23 @@ def test_registry_set_naming_no_field_exits_64(
         f"the message must route clearing a filter to unset; "
         f"got: {result.stderr!r}"
     )
+    # S-015 / C-015: the guard widened to admit a clear-only edit, so its
+    # message must enumerate the clear flags too.  A message listing five
+    # flags for a six-flag guard tells the user the clear route does not
+    # exist.  The ``config unset`` sentence above stays — owner decision 9
+    # keeps both clearing routes valid.
+    for flag in (
+        "--oci/--index",
+        "--include",
+        "--exclude",
+        "--clear-include",
+        "--clear-exclude",
+        "--default",
+    ):
+        assert flag in result.stderr, (
+            f"the guard's message must enumerate {flag}, or it contradicts "
+            f"the guard it backs; got: {result.stderr!r}"
+        )
 
 
 def test_registry_set_with_a_bad_pattern_writes_nothing(
@@ -1465,4 +1482,308 @@ def test_registry_set_reports_registry_set_action(
     doc = runner.json("config", "registry", "set", "acme", "--oci", "ghcr.io/other")
     assert doc["value"] == "ghcr.io/other", (
         f"a locator edit reports the new locator; got: {doc!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `registry set --clear-include` / `--clear-exclude` (design C-013 … C-021)
+# ---------------------------------------------------------------------------
+
+
+def _acme_with_both_filters(runner: GrimRunner) -> None:
+    """Seed ``acme`` with BOTH filter lists, a locator and no default.
+
+    Both sides are populated on purpose: the two clear flags travel as two
+    adjacent booleans all the way down, so a fixture that filtered only one
+    side could not tell them apart.
+    """
+    runner.run(
+        "config", "registry", "add", "acme",
+        "--oci", "ghcr.io/acme",
+        "--include", "a/**", "--include", "b/**",
+        "--exclude", "legacy/**",
+    )
+
+
+def test_registry_set_clear_include_keeps_the_other_side(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-012 — clearing one list leaves the other, the locator and the flag.
+
+    ``--clear-include`` is the additive route to the one edit patch semantics
+    cannot express: a flag given zero times means "leave it alone", so there
+    was no way to say "make this list empty" without ``config unset``.  Both
+    halves are asserted — the targeted list empties AND the other side
+    survives — because asserting only "something cleared" cannot distinguish
+    the two flags from each other.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    runner.run("config", "registry", "set", "acme", "--clear-include")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == [], f"--clear-include must empty include; got: {shown!r}"
+    assert shown["exclude"] == ["legacy/**"], (
+        f"the exclude list must survive --clear-include; got: {shown!r}"
+    )
+    assert shown["oci"] == "ghcr.io/acme", f"the locator is untouched; got: {shown!r}"
+    assert shown["default"] is False, f"the default flag is untouched; got: {shown!r}"
+
+
+def test_registry_set_clear_exclude_keeps_the_include_side(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-012, mirrored — ``--clear-exclude`` empties only the exclude list."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    runner.run("config", "registry", "set", "acme", "--clear-exclude")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["exclude"] == [], f"--clear-exclude must empty exclude; got: {shown!r}"
+    assert shown["include"] == ["a/**", "b/**"], (
+        f"the include list must survive --clear-exclude; got: {shown!r}"
+    )
+
+
+def test_registry_set_clear_and_include_together_exit_64_from_clap(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-013 — the flag pair is refused by clap, before any alias lookup.
+
+    The alias is deliberately one that does not exist: ``conflicts_with``
+    fires during parsing, so the user must get clap's conflict error rather
+    than ``no registry 'ghost'``.  A handler-level check would report the
+    alias first and hide the real mistake.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run(
+        "config", "registry", "set", "ghost",
+        "--clear-include", "--include", "a/**",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"--clear-include with --include must exit 64; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert "no registry" not in result.stderr, (
+        f"the conflict must fire before alias resolution; got: {result.stderr!r}"
+    )
+    assert "--clear-include" in result.stderr, (
+        f"clap's error must name the conflicting flag; got: {result.stderr!r}"
+    )
+
+
+def test_registry_set_with_only_a_clear_flag_exits_0(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-014 — a clear IS a change, so the "nothing to change" guard lets it by.
+
+    The guard exists so a ``set`` naming no field cannot take the lock and
+    report a write that never happened.  A clear-only invocation names a field
+    and must not be caught by it.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    result = runner.run(
+        "config", "registry", "set", "acme", "--clear-include", check=False
+    )
+    assert result.returncode == 0, (
+        f"a clear alone must be enough to act; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+
+
+def test_registry_set_clear_include_twice_is_idempotent(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-016 — a clear of an already-empty list still exits 0 and changes nothing.
+
+    Idempotence is what makes the flag safe to emit unconditionally from a UI
+    that does not know the current list.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    runner.run("config", "registry", "set", "acme", "--clear-include")
+    after_first = (project_dir / "grimoire.toml").read_text()
+
+    result = runner.run(
+        "config", "registry", "set", "acme", "--clear-include", check=False
+    )
+    assert result.returncode == 0, (
+        f"a repeated clear must still exit 0; "
+        f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+    assert (project_dir / "grimoire.toml").read_text() == after_first, (
+        "a repeated clear must leave grimoire.toml byte-identical"
+    )
+
+
+def test_registry_set_clear_writes_no_include_key_at_all(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-017 / C-018 — a cleared list round-trips as an ABSENT key.
+
+    Not ``include = []``: the written entry is byte-identical to one that
+    never carried the key, which is what makes a clear and a never-filtered
+    entry indistinguishable to every downstream reader.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    runner.run("config", "registry", "set", "acme", "--clear-include")
+    written = (project_dir / "grimoire.toml").read_text()
+
+    assert "include" not in written, (
+        f"a cleared list must leave no include key; got:\n{written}"
+    )
+    entry = tomllib.loads(written)["registries"][0]
+    assert "include" not in entry, (
+        f"and the parsed table must not carry the key either; got: {entry!r}"
+    )
+    assert entry["exclude"] == ["legacy/**"], (
+        f"the other side must still be written; got: {entry!r}"
+    )
+
+
+def test_registry_set_default_only_keeps_the_include_list(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """S-018 / C-020 row 1 — patch semantics hold in the other direction.
+
+    The scenario the surviving mutant destroys silently: with
+    ``if !include.is_empty() {`` mutated to ``{``, the include arm runs on
+    EVERY edit with an empty slice, so a ``--default``-only call wipes a
+    committed browse filter at exit 0 with no diagnostic.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    runner.run("config", "registry", "set", "acme", "--default")
+
+    shown = runner.json("config", "registry", "show", "acme")
+    assert shown["include"] == ["a/**", "b/**"], (
+        f"a --default-only edit must not touch include; got: {shown!r}"
+    )
+    assert shown["exclude"] == ["legacy/**"], (
+        f"a --default-only edit must not touch exclude; got: {shown!r}"
+    )
+    assert shown["default"] is True, f"the flag it named did move; got: {shown!r}"
+
+
+def test_registry_set_reports_one_fields_element_per_touched_field(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """C-021 assertions 3 + 4 over the real binary — the VS Code interface.
+
+    ``fields`` carries one element per field the call touched, in
+    ``RegistryField::ALL``'s frozen order (``oci, index, default, include,
+    exclude``) — deliberately NOT the enum's declaration order (``oci, index,
+    include, exclude, default``), which an implementation iterating the enum
+    would produce.  A cleared field carries an explicit ``"cleared"`` action
+    and NO ``value`` key: ``value``'s own ``null`` already means "not
+    applicable to this verb", and a third nested meaning would overload it.
+
+    Then reads the entry back with ``registry show`` and holds every claim in
+    ``fields`` against it — the only assertion in the suite that ties the
+    report to the file it describes.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    doc = runner.json(
+        "config", "registry", "set", "acme",
+        "--oci", "ghcr.io/moved",
+        "--include", "x/**",
+        "--clear-exclude",
+        "--default",
+    )
+    assert doc["fields"] == [
+        {"field": "oci", "action": "set", "value": "ghcr.io/moved"},
+        {"field": "default", "action": "set", "value": True},
+        {"field": "include", "action": "set", "value": ["x/**"]},
+        {"field": "exclude", "action": "cleared"},
+    ], f"got: {doc!r}"
+    assert [f["field"] for f in doc["fields"]] != [
+        "oci", "include", "exclude", "default",
+    ], f"declaration order is the trap — iterate ALL, never the enum; got: {doc!r}"
+    cleared = doc["fields"][-1]
+    assert "value" not in cleared, (
+        f"a cleared element must carry no value key at all — not null; "
+        f"got: {cleared!r}"
+    )
+
+    # `fields` is re-derived from the flags rather than emitted at the write
+    # sites, so nothing in the Rust suite ties it to what landed on disk —
+    # the report tests never re-read the config and the config tests never
+    # look at the report, so a divergence in either direction passes both.
+    # Read the entry back and hold `fields`' own claims against it; a cleared
+    # list claims the empty list.
+    shown = runner.json("config", "registry", "show", "acme")
+    claimed = {f["field"]: f.get("value", []) for f in doc["fields"]}
+    for field, value in claimed.items():
+        assert shown[field] == value, (
+            f"`fields` claimed {field}={value!r} but the entry reads "
+            f"{shown[field]!r}; got: {shown!r}"
+        )
+    assert shown["index"] is None, (
+        f"an untouched field emits no element and must not have moved; got: {shown!r}"
+    )
+
+
+def test_registry_set_clear_only_reports_just_that_field(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """C-021 assertion 3 — the exact element a clear-only edit emits."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    _acme_with_both_filters(runner)
+
+    doc = runner.json("config", "registry", "set", "acme", "--clear-exclude")
+    assert doc["fields"] == [{"field": "exclude", "action": "cleared"}], (
+        f"an untouched field emits nothing; got: {doc!r}"
+    )
+
+
+def test_config_set_carries_an_empty_fields_array(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """C-021 assertion 2 — ``fields`` is always present, ``[]`` on a released verb.
+
+    Additive-safety under ``docs/src/stability.md`` depends on the key being
+    present on EVERY write report, never absent: a consumer distinguishing
+    "not applicable" from "older grim" reads the key, not its absence.
+    ``subsystem-cli-api.md`` bans ``skip_serializing_if`` in ``src/api/`` for
+    the same reason.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+
+    doc = runner.json("config", "set", "registry.acme.include", "a/**")
+    assert doc["fields"] == [], (
+        f"a released verb must emit an empty fields array, never omit it; "
+        f"got: {doc!r}"
     )

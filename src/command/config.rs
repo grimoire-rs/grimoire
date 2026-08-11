@@ -15,8 +15,9 @@
 use clap::{Args, Subcommand};
 
 use crate::api::config_report::{
-    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryFieldEntry,
-    RegistryFieldsReport, RegistryListReport, RegistryRow, RegistryShowReport, WriteAction,
+    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryFieldChange,
+    RegistryFieldChangeAction, RegistryFieldEntry, RegistryFieldValue, RegistryFieldsReport, RegistryListReport,
+    RegistryRow, RegistryShowReport, WriteAction,
 };
 use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
@@ -139,14 +140,22 @@ pub enum RegistryCommand {
         index: Option<String>,
         /// Replace the whole include list with these patterns. Repeatable and
         /// never comma-separated, exactly as on `add`. Given zero times the
-        /// list is left untouched — clear it with `grim config unset
-        /// registry.<alias>.include`.
+        /// list is left untouched — empty it with `--clear-include` or with
+        /// `grim config unset registry.<alias>.include`.
         #[arg(long)]
         include: Vec<String>,
         /// Replace the whole exclude list with these patterns. Same repeat and
         /// clearing rules as `--include`.
         #[arg(long)]
         exclude: Vec<String>,
+        /// Clear the include list, leaving the entry unfiltered on that
+        /// side. Conflicts with `--include`.
+        #[arg(long, conflicts_with = "include")]
+        clear_include: bool,
+        /// Clear the exclude list, leaving the entry unfiltered on that
+        /// side. Conflicts with `--exclude`.
+        #[arg(long, conflicts_with = "exclude")]
+        clear_exclude: bool,
         /// Make this registry the default (clears any prior default). Absent
         /// leaves the current default flag as it is — this flag cannot unset
         /// one, because the default has to live somewhere; move it by naming
@@ -207,8 +216,20 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 index,
                 include,
                 exclude,
+                clear_include,
+                clear_exclude,
                 default,
-            } => run_registry_set(ctx, alias, oci.as_deref(), index.as_deref(), *default, include, exclude),
+            } => run_registry_set(
+                ctx,
+                alias,
+                oci.as_deref(),
+                index.as_deref(),
+                *default,
+                include,
+                *clear_include,
+                exclude,
+                *clear_exclude,
+            ),
             RegistryCommand::Rm { alias } => run_registry_rm(ctx, alias),
             RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
             RegistryCommand::Show { alias } => run_registry_show(ctx, alias),
@@ -1238,6 +1259,7 @@ fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Resu
             value: Some(stored),
             scope: origin,
             dry_run,
+            fields: Vec::new(),
         }),
         ExitCode::Success,
     ))
@@ -1262,6 +1284,7 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
             value: None,
             scope: origin,
             dry_run: false,
+            fields: Vec::new(),
         }),
         ExitCode::Success,
     ))
@@ -1364,6 +1387,7 @@ fn run_registry_add(
             value: Some(locator.to_string()),
             scope: origin,
             dry_run: false,
+            fields: Vec::new(),
         }),
         ExitCode::Success,
     ))
@@ -1371,9 +1395,15 @@ fn run_registry_add(
 
 /// Edit an existing registry entry **in place**, leaving unnamed fields alone.
 ///
-/// Patch semantics: a flag given replaces its field, a flag absent leaves it
-/// untouched. A repeatable list flag replaces that whole list, so this is the
-/// one write path that can grow a browse filter past a single pattern —
+/// Patch semantics, in three states rather than two: a flag given replaces its
+/// field, a flag absent leaves it untouched, and a list flag absent *with its
+/// `--clear-*` twin given* empties the field. That third state is the whole
+/// reason the clear flags exist — "give me an empty list" is the one edit a
+/// repeatable flag cannot express, since giving it zero times already means
+/// "leave it alone" (design C-013…C-016).
+///
+/// A repeatable list flag replaces that whole list, so this is the one write
+/// path that can grow a browse filter past a single pattern —
 /// `config set registry.<alias>.include` writes exactly one and discards the
 /// rest (C-012).
 ///
@@ -1387,14 +1417,33 @@ fn run_registry_add(
 /// `--default` only ever *sets* the flag (clearing every other entry's, like
 /// `registry use`). There is deliberately no way to unset it here: the default
 /// has to live somewhere, so it moves by naming another entry.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "design C-014: the two clear flags travel flat, exactly as `default` already does. Collapsing this signature into a params struct is deliberately deferred — mixing a refactor into a feature diff violates the Two Hats Rule (quality-core.md)"
+)]
 fn run_registry_set(
     ctx: &Context,
     alias: &str,
     oci: Option<&str>,
     index: Option<&str>,
+    // The one edit patch semantics cannot express: a list flag given zero
+    // times means "leave it alone", so emptying a list needs its own flag
+    // (design C-013…C-016). Clap's `conflicts_with` rules out the same-side
+    // pair, so `--clear-include` and `--include` never both arrive.
+    //
+    // Each clear flag sits BESIDE the list it clears rather than beside the
+    // other clear flag. With no two `bool`s adjacent, every pairwise
+    // transposition of the three becomes a type error at compile time —
+    // otherwise a swap in the `run` dispatch arm is invisible to all 2570
+    // unit tests, since every one of them calls this function directly and
+    // none can observe how `run` forwards into it (design E-14, superseded).
+    // `make_default`'s identical exposure on `registry use`'s side is a
+    // released signature and stays as it is (Two Hats).
     make_default: bool,
     include: &[String],
+    clear_include: bool,
     exclude: &[String],
+    clear_exclude: bool,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
     // Unlike `add`, neither locator flag is the "leave it alone" case; clap's
     // `conflicts_with` rejects both at once, so only three shapes reach here.
@@ -1407,11 +1456,19 @@ fn run_registry_set(
     // A `set` naming no field would take the lock, rewrite the file and report
     // a change that never happened. Exit 64 instead — the same class as a
     // missing alias, and the one thing clap cannot express as an arg rule.
-    if locator.is_none() && !make_default && include.is_empty() && exclude.is_empty() {
+    if locator.is_none()
+        && !make_default
+        && include.is_empty()
+        && exclude.is_empty()
+        && !clear_include
+        && !clear_exclude
+    {
         return Err(super::config_usage(format!(
             "nothing to change for registry '{}'; name at least one of \
-             --oci/--index, --include, --exclude, --default. To clear a browse \
-             filter use `grim config unset registry.{}.include`",
+             --oci/--index, --include, --exclude, --clear-include, \
+             --clear-exclude, --default. To clear a browse filter use \
+             --clear-include/--clear-exclude, or with \
+             `grim config unset registry.{}.include`",
             alias.escape_debug(),
             alias.escape_debug()
         )));
@@ -1437,13 +1494,12 @@ fn run_registry_set(
     // Before the pattern checks, mirroring `add`'s duplicate-alias ordering:
     // `registry set <missing> --include '<malformed>'` is a usage error about
     // the alias, not a value error about a pattern with nowhere to go.
-    if !scope.registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
+    let Some(existing) = find_registry(&scope.registries, alias) else {
         return Err(super::config_usage(format!(
             "no registry '{}'; add it with `grim config registry add`",
             alias.escape_debug()
         )));
-    }
-
+    };
     check_filter_flags(alias, include, exclude)?;
 
     let _guard = acquire_config_lock(&scope)?;
@@ -1465,11 +1521,25 @@ fn run_registry_set(
             rc.index = is_index.then(|| locator.to_string());
         });
     }
+    // `else if` rather than a second `if`. Clap's `conflicts_with` rules the
+    // "patterns given AND cleared" pair out — but only at the ONE production
+    // call site (`run`'s dispatch arm); the unit tests call this function
+    // directly and bypass clap entirely, so this is a call-site guarantee, not
+    // a proof about the parameters. On a direct both-given call the patterns
+    // simply win, which is the sane reading and needs no assertion.
+    //
+    // Neither arm may run on an empty slice with no clear flag — that is the
+    // surviving mutant C-020 row 1 exists to kill, and it silently destroys a
+    // committed filter on every unrelated edit.
     if !include.is_empty() {
         set_registry_field(&mut registries, alias, |rc| rc.include = include.to_vec());
+    } else if clear_include {
+        set_registry_field(&mut registries, alias, |rc| rc.include.clear());
     }
     if !exclude.is_empty() {
         set_registry_field(&mut registries, alias, |rc| rc.exclude = exclude.to_vec());
+    } else if clear_exclude {
+        set_registry_field(&mut registries, alias, |rc| rc.exclude.clear());
     }
 
     commit_config(&scope, &scope.options, &registries)?;
@@ -1483,9 +1553,91 @@ fn run_registry_set(
             value: locator.map(|(l, _)| l.to_string()),
             scope: origin,
             dry_run: false,
+            fields: registry_set_fields(
+                locator,
+                existing,
+                make_default,
+                include,
+                clear_include,
+                exclude,
+                clear_exclude,
+            ),
         }),
         ExitCode::Success,
     ))
+}
+
+/// The `fields` array of a `registry set` write report — one element per field
+/// the write touched, in `RegistryField::ALL` order (design C-021).
+///
+/// Built by iterating `ALL` and mapping each member through an **exhaustive**
+/// match, so the order and every spelling come from `config_keys.rs`
+/// structurally and a sixth `RegistryField` becomes a compile error here
+/// rather than a row silently missing from a released JSON surface. Iterating
+/// the enum instead would emit `RegistryField`'s *declaration* order, which
+/// differs from `ALL`'s frozen positional order on purpose (design E-6).
+///
+/// It reports the write, not the invocation (design E-12): a field named with
+/// a value it already held still emits its element — `fields` describes the
+/// assignment performed and the resulting state, never a before/after diff.
+///
+/// `existing` is the entry as it stood **before** the write, and is read for
+/// exactly one thing: which locator side actually held a value, so a kind swap
+/// reports `cleared` for the side it emptied and nothing for a side that was
+/// already absent. It is the caller's own `&RegistryConfig`, passed instead of
+/// two derived `bool`s so the parameter list stays inside clippy's threshold
+/// without an `allow`.
+fn registry_set_fields(
+    locator: Option<(&str, bool)>,
+    existing: &RegistryConfig,
+    make_default: bool,
+    include: &[String],
+    clear_include: bool,
+    exclude: &[String],
+    clear_exclude: bool,
+) -> Vec<RegistryFieldChange> {
+    let set_string = |value: &str| RegistryFieldChangeAction::Set {
+        value: RegistryFieldValue::String(value.to_string()),
+    };
+    // Mirrors the write arms above: a non-empty list is a replacement, an
+    // empty one with the clear flag is a clear, and neither is a no-op row.
+    let list = |patterns: &[String], clear: bool| {
+        if patterns.is_empty() {
+            clear.then_some(RegistryFieldChangeAction::Cleared)
+        } else {
+            Some(RegistryFieldChangeAction::Set {
+                value: RegistryFieldValue::List(patterns.to_vec()),
+            })
+        }
+    };
+
+    RegistryField::ALL
+        .into_iter()
+        .filter_map(|field| {
+            let action = match field {
+                RegistryField::Oci => match locator {
+                    Some((url, false)) => Some(set_string(url)),
+                    Some((_, true)) => existing.oci.is_some().then_some(RegistryFieldChangeAction::Cleared),
+                    None => None,
+                },
+                RegistryField::Index => match locator {
+                    Some((url, true)) => Some(set_string(url)),
+                    Some((_, false)) => existing.index.is_some().then_some(RegistryFieldChangeAction::Cleared),
+                    None => None,
+                },
+                // `--default` only ever sets; there is no way to unset it here.
+                RegistryField::Default => make_default.then_some(RegistryFieldChangeAction::Set {
+                    value: RegistryFieldValue::Bool(true),
+                }),
+                RegistryField::Include => list(include, clear_include),
+                RegistryField::Exclude => list(exclude, clear_exclude),
+            };
+            action.map(|action| RegistryFieldChange {
+                field: field.field_name(),
+                action,
+            })
+        })
+        .collect()
 }
 
 fn run_registry_rm(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
@@ -1511,6 +1663,7 @@ fn run_registry_rm(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, 
             value: None,
             scope: origin,
             dry_run: false,
+            fields: Vec::new(),
         }),
         ExitCode::Success,
     ))
@@ -1540,6 +1693,7 @@ fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport,
             value: None,
             scope: origin,
             dry_run: false,
+            fields: Vec::new(),
         }),
         ExitCode::Success,
     ))
@@ -3441,9 +3595,19 @@ mod tests {
         // place cannot, so the assertion is on the index, not the value.
         let (_tmp, config_path, ctx) = project_scope();
         three_entries(&ctx);
-        run_registry_set(&ctx, "first", None, None, false, &["platform/**".to_string()], &[])
-            .map(|_| ())
-            .expect("editing the first entry must succeed");
+        run_registry_set(
+            &ctx,
+            "first",
+            None,
+            None,
+            false,
+            &["platform/**".to_string()],
+            false,
+            &[],
+            false,
+        )
+        .map(|_| ())
+        .expect("editing the first entry must succeed");
 
         let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
         let order: Vec<_> = scope.registries.iter().filter_map(|r| r.alias.as_deref()).collect();
@@ -3479,7 +3643,9 @@ mod tests {
             None,
             false,
             &["platform/**".to_string(), "{tools,libs}/**".to_string()],
+            false,
             &[],
+            false,
         )
         .map(|_| ())
         .expect("a filter-only edit must succeed");
@@ -3506,9 +3672,19 @@ mod tests {
         run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
             .map(|_| ())
             .expect("seed add must succeed");
-        run_registry_set(&ctx, "acme", None, Some("https://index.acme.internal"), false, &[], &[])
-            .map(|_| ())
-            .expect("swapping to an index must succeed");
+        run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.acme.internal"),
+            false,
+            &[],
+            false,
+            &[],
+            false,
+        )
+        .map(|_| ())
+        .expect("swapping to an index must succeed");
 
         let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
         let rc = find_registry(&scope.registries, "acme").expect("entry survives");
@@ -3521,10 +3697,10 @@ mod tests {
         // Same invariant `registry use` holds: exactly one default.
         let (_tmp, config_path, ctx) = project_scope();
         three_entries(&ctx);
-        run_registry_set(&ctx, "second", None, None, true, &[], &[])
+        run_registry_set(&ctx, "second", None, None, true, &[], false, &[], false)
             .map(|_| ())
             .expect("promoting an entry must succeed");
-        run_registry_set(&ctx, "third", None, None, true, &[], &[])
+        run_registry_set(&ctx, "third", None, None, true, &[], false, &[], false)
             .map(|_| ())
             .expect("promoting another entry must succeed");
 
@@ -3546,9 +3722,19 @@ mod tests {
         for pattern in ["platform/**", "acme{unclosed"] {
             let (_tmp, config_path, ctx) = project_scope();
             let before = std::fs::read_to_string(&config_path).expect("config readable");
-            let err = run_registry_set(&ctx, "ghost", None, None, false, &[pattern.to_string()], &[])
-                .map(|_| ())
-                .expect_err("a missing alias must be refused");
+            let err = run_registry_set(
+                &ctx,
+                "ghost",
+                None,
+                None,
+                false,
+                &[pattern.to_string()],
+                false,
+                &[],
+                false,
+            )
+            .map(|_| ())
+            .expect_err("a missing alias must be refused");
             assert_eq!(
                 crate::error::classify_error(&err),
                 ExitCode::UsageError,
@@ -3571,9 +3757,19 @@ mod tests {
             .map(|_| ())
             .expect("seed add must succeed");
         let before = std::fs::read_to_string(&config_path).expect("config readable");
-        let err = run_registry_set(&ctx, "acme", None, None, false, &["acme{unclosed".to_string()], &[])
-            .map(|_| ())
-            .expect_err("an invalid pattern must be rejected");
+        let err = run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            None,
+            false,
+            &["acme{unclosed".to_string()],
+            false,
+            &[],
+            false,
+        )
+        .map(|_| ())
+        .expect_err("an invalid pattern must be rejected");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert_eq!(
             std::fs::read_to_string(&config_path).expect("config readable"),
@@ -3594,7 +3790,7 @@ mod tests {
             .map(|_| ())
             .expect("seed add must succeed");
         let before = std::fs::read_to_string(&config_path).expect("config readable");
-        let err = run_registry_set(&ctx, "acme", None, None, false, &[], &[])
+        let err = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false)
             .map(|_| ())
             .expect_err("a set naming no field must be refused");
         assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
@@ -3619,8 +3815,18 @@ mod tests {
             .map(|_| ())
             .expect("seed add must succeed");
 
-        let (report, code) = run_registry_set(&ctx, "acme", None, None, false, &["a/**".to_string()], &[])
-            .expect("a filter-only edit must succeed");
+        let (report, code) = run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            None,
+            false,
+            &["a/**".to_string()],
+            false,
+            &[],
+            false,
+        )
+        .expect("a filter-only edit must succeed");
         assert_eq!(code, ExitCode::Success);
         match report {
             ConfigReport::Write(w) => {
@@ -3632,7 +3838,7 @@ mod tests {
             _ => panic!("expected a write report"),
         }
 
-        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], &[])
+        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], false, &[], false)
             .expect("a locator edit must succeed");
         match report {
             ConfigReport::Write(w) => assert_eq!(w.value.as_deref(), Some("ghcr.io/other")),
@@ -3665,10 +3871,13 @@ mod tests {
                     index,
                     include,
                     exclude,
+                    clear_include,
+                    clear_exclude,
                     default,
                 } => {
                     assert_eq!(alias, "acme");
                     assert!(oci.is_none() && index.is_none() && !default);
+                    assert!(!clear_include && !clear_exclude);
                     assert_eq!(
                         include,
                         vec!["acme/platform/**".to_string(), "acme/{tools,labs}/**".to_string()],
@@ -3824,5 +4033,581 @@ mod tests {
         clear_all_defaults(&mut registries);
         set_registry_default(&mut registries, "y", true);
         assert_eq!(registries.iter().filter(|r| r.default).count(), 1);
+    }
+
+    // ── `registry set --clear-include` / `--clear-exclude` (C-013 … C-021) ──
+
+    /// An `acme` entry carrying BOTH filter lists plus a locator — the fixture
+    /// every clear witness below edits one field of. Both sides are populated
+    /// on purpose: `run_registry_set` takes two adjacent `bool` parameters
+    /// whose positional swap compiles silently, so a witness that seeded only
+    /// one side could not tell the two flags apart.
+    fn acme_with_both_filters(ctx: &Context) {
+        run_registry_add(
+            ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            false,
+            &["a/**".to_string(), "b/**".to_string()],
+            &["legacy/**".to_string()],
+        )
+        .map(|_| ())
+        .expect("seed add must succeed");
+    }
+
+    /// Re-parse the written config and hand back `acme`'s entry, cloned so the
+    /// scope it borrows from can be dropped at the end of the call.
+    fn reread_acme(ctx: &Context, config_path: &std::path::Path) -> RegistryConfig {
+        let scope = scope_resolution::resolve(ctx, false, Some(config_path)).expect("re-parse");
+        find_registry(&scope.registries, "acme")
+            .expect("the entry survives every edit")
+            .clone()
+    }
+
+    #[test]
+    fn registry_set_clear_include_conflicts_with_include() {
+        // C-013 / C-020 row 4: `--clear-include` and `--include` are the same
+        // field from opposite directions, so clap refuses the pair before the
+        // handler runs. Deleting `conflicts_with = "include"` turns this red —
+        // and would also make C-016's `else if` reachable with both set, which
+        // is the shape the contract declares unreachable.
+        assert!(
+            parse(&["registry", "set", "acme", "--clear-include", "--include", "a/**"]).is_err(),
+            "--clear-include and --include are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn registry_set_clear_exclude_conflicts_with_exclude() {
+        // C-013 / C-020 row 4, the exclude half — pinned separately because
+        // the two attributes are two independent edits.
+        assert!(
+            parse(&["registry", "set", "acme", "--clear-exclude", "--exclude", "legacy/**"]).is_err(),
+            "--clear-exclude and --exclude are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn registry_set_clears_one_side_while_writing_the_other() {
+        // C-013 / C-016: only the SAME-side pair conflicts. Clearing one list
+        // while writing the other is one legal invocation, and it is the shape
+        // that proves the two `else if` arms are independent rather than one
+        // shared branch — a `conflicts_with` widened to the cross pair would
+        // fail here.
+        let a = parse(&["registry", "set", "acme", "--clear-include", "--exclude", "legacy/**"])
+            .expect("clearing one side while writing the other must parse");
+        match a.command {
+            ConfigCommand::Registry(r) => match r.command {
+                RegistryCommand::Set {
+                    include,
+                    exclude,
+                    clear_include,
+                    clear_exclude,
+                    ..
+                } => {
+                    assert!(clear_include, "--clear-include must reach the handler as true");
+                    assert!(!clear_exclude, "an absent --clear-exclude stays false");
+                    assert!(include.is_empty(), "no --include was given");
+                    assert_eq!(exclude, vec!["legacy/**".to_string()]);
+                }
+                _ => panic!("expected Set"),
+            },
+            _ => panic!("expected Registry"),
+        }
+    }
+
+    #[test]
+    fn registry_set_with_only_a_clear_flag_is_not_nothing_to_change() {
+        // C-015 / S-014 / C-020 row 3: a clear IS a change, so the widened
+        // guard must let it through. Deleting `&& !clear_include` from the
+        // guard puts this call back on the exit-64 path — the assertion is on
+        // the exit code, because the guard returns before any list moves.
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+            .expect("a clear-only edit must be accepted");
+        assert_eq!(code, ExitCode::Success);
+
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+            .expect("a clear-exclude-only edit must be accepted");
+        assert_eq!(code, ExitCode::Success);
+    }
+
+    #[test]
+    fn registry_set_naming_no_field_names_the_clear_flags_too() {
+        // C-015 / S-015: the guard widened, so the message it backs must widen
+        // with it — a message enumerating five flags for a six-flag guard tells
+        // the user the clear route does not exist. The `config unset` sentence
+        // stays: owner decision 9 keeps both routes valid.
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let msg = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false)
+            .map(|_| ())
+            .expect_err("a set naming no field must still be refused")
+            .to_string();
+        for flag in [
+            "--oci/--index",
+            "--include",
+            "--exclude",
+            "--clear-include",
+            "--clear-exclude",
+            "--default",
+        ] {
+            assert!(
+                msg.contains(flag),
+                "the guard's message must enumerate {flag}, or it contradicts the guard: {msg}"
+            );
+        }
+        assert!(
+            msg.contains("grim config unset registry.acme.include"),
+            "the second clearing route stays valid and stays named: {msg}"
+        );
+    }
+
+    #[test]
+    fn registry_set_clear_include_empties_only_the_include_list() {
+        // C-016 / C-020 row 2 / S-012. Both halves are asserted, never just
+        // "something cleared": the targeted list must empty AND the other side
+        // must survive, so a swap of the two adjacent `bool` parameters fails
+        // here rather than passing silently.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+            .map(|_| ())
+            .expect("--clear-include must succeed");
+
+        let rc = reread_acme(&ctx, &config_path);
+        assert!(
+            rc.include.is_empty(),
+            "--clear-include must empty include; got: {:?}",
+            rc.include
+        );
+        assert_eq!(
+            rc.exclude,
+            vec!["legacy/**".to_string()],
+            "the exclude list must survive a --clear-include (a swapped bool pair fails here)"
+        );
+        assert_eq!(rc.oci.as_deref(), Some("ghcr.io/acme"), "the locator is untouched");
+        assert!(!rc.default, "the default flag is untouched");
+    }
+
+    #[test]
+    fn registry_set_clear_exclude_empties_only_the_exclude_list() {
+        // C-016 / C-020 row 2 / S-012, mirrored. The mirror is the assertion
+        // that names which flag did the work: without it, `clear_include` and
+        // `clear_exclude` are interchangeable at every call site in the suite.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+            .map(|_| ())
+            .expect("--clear-exclude must succeed");
+
+        let rc = reread_acme(&ctx, &config_path);
+        assert!(
+            rc.exclude.is_empty(),
+            "--clear-exclude must empty exclude; got: {:?}",
+            rc.exclude
+        );
+        assert_eq!(
+            rc.include,
+            vec!["a/**".to_string(), "b/**".to_string()],
+            "the include list must survive a --clear-exclude (a swapped bool pair fails here)"
+        );
+        assert_eq!(rc.oci.as_deref(), Some("ghcr.io/acme"), "the locator is untouched");
+    }
+
+    #[test]
+    fn registry_set_preserves_the_filter_lists_when_editing_any_other_field() {
+        // C-020 row 1 / S-018 — the surviving-mutant witness, and the reason
+        // the clear flags are designed together with it. Mutating
+        // `if !include.is_empty() {` to `{` runs the arm on EVERY edit with an
+        // empty slice, silently destroying a committed filter list at exit 0.
+        // The mirror form: seed both lists, edit each OTHER field in turn, and
+        // assert the untouched lists did not move.
+        let include = || vec!["a/**".to_string(), "b/**".to_string()];
+        let exclude = || vec!["legacy/**".to_string()];
+
+        // `--default` only — the handover's exact reproduction.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", None, None, true, &[], false, &[], false)
+            .map(|_| ())
+            .expect("a --default-only edit must succeed");
+        let rc = reread_acme(&ctx, &config_path);
+        assert_eq!(rc.include, include(), "a --default-only edit must not touch include");
+        assert_eq!(rc.exclude, exclude(), "a --default-only edit must not touch exclude");
+
+        // `--oci` only.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", Some("ghcr.io/moved"), None, false, &[], false, &[], false)
+            .map(|_| ())
+            .expect("a locator-only edit must succeed");
+        let rc = reread_acme(&ctx, &config_path);
+        assert_eq!(rc.include, include(), "a locator edit must not touch include");
+        assert_eq!(rc.exclude, exclude(), "a locator edit must not touch exclude");
+
+        // `--exclude` only — the cross-list direction. (The `--include`-only
+        // direction is already pinned by
+        // `registry_set_leaves_every_field_it_was_not_given`.)
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            None,
+            false,
+            &[],
+            false,
+            &["new/**".to_string()],
+            false,
+        )
+        .map(|_| ())
+        .expect("an exclude-only edit must succeed");
+        let rc = reread_acme(&ctx, &config_path);
+        assert_eq!(rc.include, include(), "writing exclude must not touch include");
+        assert_eq!(
+            rc.exclude,
+            vec!["new/**".to_string()],
+            "the named list is replaced wholesale"
+        );
+    }
+
+    #[test]
+    fn registry_set_clear_is_silent_at_every_list_length() {
+        // C-017: a clear says what it does in its own flag name, so it warns
+        // about nothing — unlike `config set`'s single-pattern replacement,
+        // which warns precisely because it destroys a list under a report that
+        // reads as an addition (`warn_on_discarded_patterns`). Both lengths are
+        // pinned: 1, and the >1 length that makes the other path warn.
+        for patterns in [vec!["a/**".to_string()], vec!["a/**".to_string(), "b/**".to_string()]] {
+            let (_tmp, _config_path, ctx) = project_scope();
+            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &patterns, &[])
+                .map(|_| ())
+                .expect("seed add must succeed");
+            let logs = capture_logs(|| {
+                run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+                    .map(|_| ())
+                    .expect("--clear-include must succeed");
+            });
+            assert!(
+                !logs.contains("WARN"),
+                "a clear of {} pattern(s) must be silent; got:\n{logs}",
+                patterns.len()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_set_clear_round_trips_as_an_absent_key() {
+        // C-018 / S-017: an emptied list is written as NO key at all —
+        // byte-identical to an entry that never carried one. The mechanism is
+        // `write_config`'s own emptiness guard (`add.rs:978-984`), so a clear
+        // needs no write-layer change; this pins the property from the caller's
+        // side, where a builder can actually break it.
+        let (_tmp, cleared_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+            .map(|_| ())
+            .expect("--clear-include must succeed");
+        let cleared = std::fs::read_to_string(&cleared_path).expect("config written");
+
+        assert!(
+            !cleared.contains("include ="),
+            "a cleared list must leave no `include =` line; got:\n{cleared}"
+        );
+        assert!(
+            reread_acme(&ctx, &cleared_path).include.is_empty(),
+            "and the file must re-parse to an empty include list"
+        );
+
+        // The same entry, never filtered on the include side.
+        let (_tmp, never_path, never_ctx) = project_scope();
+        run_registry_add(
+            &never_ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            false,
+            &[],
+            &["legacy/**".to_string()],
+        )
+        .map(|_| ())
+        .expect("seed add must succeed");
+        assert_eq!(
+            cleared,
+            std::fs::read_to_string(&never_path).expect("config written"),
+            "a cleared entry must be byte-identical to one that never had the key"
+        );
+    }
+
+    #[test]
+    fn registry_set_clear_include_is_idempotent() {
+        // C-019 / S-016: the second clear is not an error and changes nothing.
+        // Idempotence is what makes the flag safe to emit unconditionally from
+        // a UI that does not know the current list.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+            .map(|_| ())
+            .expect("the first clear must succeed");
+        let after_first = std::fs::read_to_string(&config_path).expect("config readable");
+
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+            .expect("a clear of an already-empty list must still exit 0");
+        assert_eq!(code, ExitCode::Success);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            after_first,
+            "a repeated clear must leave the file byte-identical"
+        );
+        let rc = reread_acme(&ctx, &config_path);
+        assert!(rc.include.is_empty());
+        assert_eq!(
+            rc.exclude,
+            vec!["legacy/**".to_string()],
+            "and it must still leave the other side alone"
+        );
+    }
+
+    #[test]
+    fn registry_set_clear_reports_a_cleared_field_carrying_no_value_key() {
+        // C-021 assertion 3. The discriminator is an explicit `"cleared"`
+        // action, never a bare `null`: `ConfigWriteReport.value`'s own null
+        // already means "not applicable to this verb", and a third nested
+        // meaning would overload the token. So the assertion is on key
+        // ABSENCE — `value == null` would pass a `null`-encoded design and
+        // is exactly what this must reject.
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let (report, _code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+            .expect("--clear-exclude must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        let fields = serde_json::to_value(&w.fields).expect("fields serialize");
+        assert_eq!(
+            fields,
+            serde_json::json!([{ "field": "exclude", "action": "cleared" }]),
+            "a clear-only edit reports exactly one element, for the side it cleared"
+        );
+        let element = fields[0].as_object().expect("each element is an object");
+        assert!(
+            !element.contains_key("value"),
+            "a `cleared` element must carry NO `value` key — not `value: null`; got: {element:?}"
+        );
+    }
+
+    #[test]
+    fn registry_set_reports_one_element_per_touched_field_in_all_order() {
+        // C-021 assertion 4, and design E-6's trap. `RegistryField::ALL`'s
+        // order is `Oci, Index, Default, Include, Exclude`, while the enum's
+        // own DECLARATION order is `Oci, Index, Include, Exclude, Default` —
+        // they differ, and the VS Code extension indexes `ALL` positionally.
+        // The fixture touches `default` AND both filter lists precisely so the
+        // two orders are distinguishable.
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let (report, _code) = run_registry_set(
+            &ctx,
+            "acme",
+            Some("ghcr.io/moved"),
+            None,
+            true,
+            &["a/**".to_string(), "b/**".to_string()],
+            false,
+            &[],
+            true,
+        )
+        .expect("a multi-field edit must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        let fields = serde_json::to_value(&w.fields).expect("fields serialize");
+
+        // `index` was never named, so it must not appear at all.
+        let expected_order: Vec<&str> = RegistryField::ALL
+            .into_iter()
+            .map(RegistryField::field_name)
+            .filter(|name| *name != "index")
+            .collect();
+        let emitted: Vec<&str> = fields
+            .as_array()
+            .expect("fields is an array")
+            .iter()
+            .map(|e| e["field"].as_str().expect("each element names its field"))
+            .collect();
+        assert_eq!(
+            emitted, expected_order,
+            "elements follow `RegistryField::ALL`'s frozen order, not the enum's declaration order"
+        );
+        assert_ne!(
+            emitted,
+            vec!["oci", "include", "exclude", "default"],
+            "declaration order is the trap E-6 names — iterate ALL, never the enum"
+        );
+
+        assert_eq!(
+            fields,
+            serde_json::json!([
+                { "field": "oci",     "action": "set",     "value": "ghcr.io/moved" },
+                { "field": "default", "action": "set",     "value": true },
+                { "field": "include", "action": "set",     "value": ["a/**", "b/**"] },
+                { "field": "exclude", "action": "cleared" },
+            ]),
+            "each element carries the field's own JSON type; untouched fields emit nothing"
+        );
+    }
+
+    #[test]
+    fn registry_set_kind_swap_reports_both_locator_sides() {
+        // Design E-12 §1, the half no other test reaches. `--index` on an OCI
+        // entry writes `rc.oci = None` AND `rc.index = Some(..)` in one
+        // closure, so the command performs two mutations and must report two —
+        // reporting only the named side would hide a write that happened, the
+        // exact class of quiet report `subsystem-cli.md`'s "report actual
+        // results, not an echo of the input" forbids. `oci` precedes `index`
+        // because `RegistryField::ALL` orders them so.
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        let (report, _code) = run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.example"),
+            false,
+            &[],
+            false,
+            &[],
+            false,
+        )
+        .expect("a kind swap must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([
+                { "field": "oci",   "action": "cleared" },
+                { "field": "index", "action": "set", "value": "https://index.example" },
+            ]),
+            "a kind swap reports the side it cleared as well as the side it set"
+        );
+
+        // The entry is index-only now, so re-pointing the index clears
+        // nothing: without the `had_oci` guard this would report a phantom
+        // `oci cleared` on an entry that has not declared an `oci` at all.
+        let (report, _code) = run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.other"),
+            false,
+            &[],
+            false,
+            &[],
+            false,
+        )
+        .expect("re-pointing the index must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([{ "field": "index", "action": "set", "value": "https://index.other" }]),
+            "an absent `oci` is not `cleared` — nothing was there to clear"
+        );
+
+        // The mirror: the entry now carries an `index`, so swapping back
+        // clears that side and reports it. `oci` still precedes `index` — the
+        // order is `ALL`'s, never "named field first".
+        let (report, _code) = run_registry_set(&ctx, "acme", Some("ghcr.io/back"), None, false, &[], false, &[], false)
+            .expect("swapping back must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([
+                { "field": "oci",   "action": "set", "value": "ghcr.io/back" },
+                { "field": "index", "action": "cleared" },
+            ]),
+            "the mirror swap reports both sides too, still in `RegistryField::ALL` order"
+        );
+
+        // And the guard's own witness: an entry that never declared an `index`
+        // has nothing to clear, so a plain `--oci` edit reports ONE element.
+        // Dropping the `had_index` guard would add a phantom `index cleared`
+        // row to every locator edit grim has ever written.
+        let (_tmp, _config_path, fresh) = project_scope();
+        acme_with_both_filters(&fresh);
+        let (report, _code) = run_registry_set(
+            &fresh,
+            "acme",
+            Some("ghcr.io/moved"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+        )
+        .expect("a locator edit must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([{ "field": "oci", "action": "set", "value": "ghcr.io/moved" }]),
+            "an absent side is not `cleared` — nothing was there to clear"
+        );
+
+        // Design E-12 §2, the clause with no witness until here: element
+        // presence means "this field was written", never "this field changed".
+        // The entry now carries `ghcr.io/moved`; naming that same locator
+        // again still emits its element, because the code assigns
+        // unconditionally and `fields` describes the assignment performed and
+        // the resulting state, not a before/after diff. Making the report
+        // diff-aware would need a pre-read the command does not do.
+        let (report, _code) = run_registry_set(
+            &fresh,
+            "acme",
+            Some("ghcr.io/moved"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+        )
+        .expect("re-naming the same locator must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([{ "field": "oci", "action": "set", "value": "ghcr.io/moved" }]),
+            "a locator re-named with the value it already held still emits its element"
+        );
+
+        // The same clause on the flag side. `--default` on an entry that is
+        // already the default writes `true` over `true` and reports it.
+        run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false)
+            .map(|_| ())
+            .expect("promoting the entry must succeed");
+        let (report, _code) = run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false)
+            .expect("re-promoting the default entry must succeed");
+        let ConfigReport::Write(w) = report else {
+            panic!("expected a write report");
+        };
+        assert_eq!(
+            serde_json::to_value(&w.fields).expect("fields serialize"),
+            serde_json::json!([{ "field": "default", "action": "set", "value": true }]),
+            "an already-default entry re-flagged still emits its element"
+        );
     }
 }

@@ -22,7 +22,8 @@
 //! JSON format:
 //! - `Get`: `{"key":"…","value":"…"|null,"set":bool,"scope":"…"}`.
 //! - `Write`: single object matching struct fields, incl. always-present
-//!   `dry_run`.
+//!   `dry_run` and `fields` (`[]` on every write verb except `registry
+//!   set`, which carries one row per field it touched).
 //! - `List`: `{"items": [...]}` of [`ConfigEntry`] objects — every item
 //!   always carries the full metadata shape `{"key","value","set","type",
 //!   "title","description","default","values","constraints"}`
@@ -174,7 +175,7 @@ impl fmt::Display for WriteAction {
 /// Plain format: one-row table — `Action | Key | Value | Scope | Dry Run`.
 ///
 /// JSON format: `{"action": "…", "key": "…", "value": "…"|null, "scope": "…",
-/// "dry_run": bool}`.
+/// "dry_run": bool, "fields": […]}`.
 #[derive(Debug, Serialize)]
 pub struct ConfigWriteReport {
     /// What kind of write this confirms.
@@ -190,19 +191,57 @@ pub struct ConfigWriteReport {
     /// always `false` for every other write verb, which has no dry-run
     /// surface.
     pub dry_run: bool,
+    /// One row per registry field `registry set` touched, in
+    /// `RegistryField::ALL` order. Always present — `[]` for every write
+    /// verb other than `registry set` (`subsystem-cli-api.md` bans
+    /// `skip_serializing_if` in `src/api/`, so this never vanishes).
+    ///
+    /// **Scoped to the entry named by [`Self::key`], never to the whole
+    /// file.** `--default` also demotes whichever sibling entry held the flag
+    /// (`clear_all_defaults`, the same invariant `registry use` keeps), and
+    /// that sibling's change is not reported here — no element names another
+    /// alias. A consumer reading `fields` as "everything this write did to
+    /// `grimoire.toml`" would miss it.
+    pub fields: Vec<RegistryFieldChange>,
 }
 
 impl Printable for ConfigWriteReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
-        let value_str = self.value.as_deref().unwrap_or("");
+        // `value` is single-valued, so a `registry set` that moved several
+        // fields has no one value to name and printed a blank cell. The cell
+        // summarises `fields` instead — keyed on `fields` being non-empty
+        // rather than on the action, because `fields` is `[]` on the other
+        // five verbs (design E-7), so one expression covers all six and their
+        // cells stay byte-identical without a verb-sniffing branch.
+        //
+        // Both user-derived cells are `escape_debug`d — `key`, which
+        // interpolates the entry's alias, and the value, whether it comes from
+        // `self.value` or from a summarised locator. `char::is_control` (the
+        // screen `validate_registries` puts an alias through) is FALSE for the
+        // bidi and zero-width format characters, and the locator is never
+        // control-screened at all, so an unescaped cell puts a real U+202E or
+        // ESC byte on the one line a user reads to confirm what grim just
+        // wrote. `validate_registries` relies on display-time escaping here
+        // rather than narrowing its input; every sibling registry renderer
+        // (`registry list`, `registry show`, `config list`, `grim context`)
+        // already makes the same call.
+        let value_str = if self.fields.is_empty() {
+            self.value.as_deref().unwrap_or_default().escape_debug().to_string()
+        } else {
+            self.fields
+                .iter()
+                .map(RegistryFieldChange::summary)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         print_table(
             w,
             &["Action", "Key", "Value", "Scope", "Dry Run"],
             &[vec![
                 self.action.to_string(),
-                self.key.clone(),
-                value_str.to_string(),
+                self.key.escape_debug().to_string(),
+                value_str,
                 self.scope.to_string(),
                 self.dry_run.to_string(),
             ]],
@@ -212,6 +251,98 @@ impl Printable for ConfigWriteReport {
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
         crate::cli::printer::write_json_pretty(w, self)
     }
+}
+
+/// One field `registry set` touched, reported in
+/// [`ConfigWriteReport::fields`].
+///
+/// JSON: `{"field": "…", "action": "set", "value": …}` for a field that was
+/// set, or `{"field": "…", "action": "cleared"}` for one that was cleared —
+/// deliberately **no** `value` key on a `"cleared"` row (not `value: null`).
+/// `ConfigWriteReport.value`'s own `null` already means "not applicable to
+/// this write verb"; a `"cleared"` row encodes an *event*, not a *state*, so
+/// it gets its own explicit discriminator rather than overloading `null` a
+/// second way (design C-021).
+///
+/// **The event is "the clear was applied", not "something was removed", and
+/// the two sides of `fields` differ on that.** A list row
+/// (`include`/`exclude`) emits `cleared` whenever `--clear-include` /
+/// `--clear-exclude` was given, including on an already-empty list where the
+/// file comes out byte-unchanged; it is deliberately not conditioned on prior
+/// content, because guarding it would make `registry set acme
+/// --clear-include` on an unfiltered entry report `fields: []` and bring back
+/// the blank `Value` cell design E-12 §4 says is no longer reachable. A
+/// locator row (`oci`/`index`) *is* so conditioned — the unnamed side of a
+/// kind swap emits `cleared` only when it actually held a value, since
+/// reporting a locator cleared where none existed would be a phantom write
+/// (design E-12 §1).
+#[derive(Debug, Serialize)]
+pub struct RegistryFieldChange {
+    /// The short field name — one of [`RegistryField::field_name`]'s
+    /// values (`"oci"`, `"index"`, `"default"`, `"include"`, `"exclude"`).
+    ///
+    /// [`RegistryField::field_name`]: crate::command::config_keys::RegistryField::field_name
+    pub field: &'static str,
+    /// Whether the field was set or cleared, and the new value when set.
+    /// Flattened so `action` (and any `value`) sit alongside `field` in the
+    /// row rather than nested under it.
+    #[serde(flatten)]
+    pub action: RegistryFieldChangeAction,
+}
+
+impl RegistryFieldChange {
+    /// This row as one segment of [`ConfigWriteReport`]'s plain `Value` cell,
+    /// joined with `", "` in `fields` order.
+    ///
+    /// The grammar is normative (design E-12 §4): `{field}={value}` for a
+    /// locator, `default={bool}`, `{field}={count}` for a list — the count,
+    /// never the patterns, matching the `Filters` cell `registry list` and
+    /// `show` already print — and `{field} cleared` for a clear, so a cleared
+    /// field reads as the event it is rather than as an empty value.
+    ///
+    /// The locator is the one segment carrying config-file text, so it is
+    /// `escape_debug`d here — `field` is `&'static str` and the count and flag
+    /// are machine-formatted. Keeping the list side a count is what keeps
+    /// authored pattern text out of this renderer entirely.
+    fn summary(&self) -> String {
+        let field = self.field;
+        match &self.action {
+            RegistryFieldChangeAction::Cleared => format!("{field} cleared"),
+            RegistryFieldChangeAction::Set { value } => match value {
+                RegistryFieldValue::String(locator) => format!("{field}={}", locator.escape_debug()),
+                RegistryFieldValue::List(patterns) => format!("{field}={}", patterns.len()),
+                RegistryFieldValue::Bool(flag) => format!("{field}={flag}"),
+            },
+        }
+    }
+}
+
+/// Discriminates a [`RegistryFieldChange`] row.
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum RegistryFieldChangeAction {
+    /// The field was set to a new value.
+    Set {
+        /// The new value, in the field's own JSON type.
+        value: RegistryFieldValue,
+    },
+    /// The field was cleared (`--clear-include` / `--clear-exclude`).
+    /// Serializes with no sibling `value` key at all.
+    Cleared,
+}
+
+/// The JSON type a [`RegistryFieldChangeAction::Set`] value takes, matching
+/// the touched field's own shape: a string for `oci`/`index`, an array of
+/// strings for `include`/`exclude`, a boolean for `default`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum RegistryFieldValue {
+    /// `oci` / `index`.
+    String(String),
+    /// `include` / `exclude`.
+    List(Vec<String>),
+    /// `default`.
+    Bool(bool),
 }
 
 /// Result of `grim config list`.
@@ -763,6 +894,7 @@ mod tests {
             value: Some("claude".to_string()),
             scope: Origin::Project,
             dry_run: false,
+            fields: Vec::new(),
         };
         let mut buf: Vec<u8> = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -777,25 +909,33 @@ mod tests {
 
     #[test]
     fn config_write_report_json_pins_frozen_shape() {
-        // Frozen shape: exactly these 5 keys, always present (additive-only
-        // JSON contract — a future field must widen this set, never replace it).
+        // Frozen shape: exactly these 6 keys, always present (additive-only
+        // JSON contract — a future field must widen this set, never replace
+        // it). `fields` (design C-021) is the field that widened it here.
         let r = ConfigWriteReport {
             action: WriteAction::Set,
             key: "options.clients".to_string(),
             value: Some("claude".to_string()),
             scope: Origin::Project,
             dry_run: true,
+            fields: Vec::new(),
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         let obj = v.as_object().expect("write report must serialize as an object");
         let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
-        let expected: std::collections::BTreeSet<&str> =
-            ["action", "key", "value", "scope", "dry_run"].into_iter().collect();
+        let expected: std::collections::BTreeSet<&str> = ["action", "key", "value", "scope", "dry_run", "fields"]
+            .into_iter()
+            .collect();
         assert_eq!(
             keys, expected,
             "ConfigWriteReport JSON must pin exactly the frozen shape"
         );
         assert_eq!(v["dry_run"], true);
+        assert_eq!(
+            v["fields"],
+            serde_json::json!([]),
+            "fields must be [] for a released verb"
+        );
     }
 
     #[test]
@@ -808,6 +948,7 @@ mod tests {
             value: Some("claude".to_string()),
             scope: Origin::Project,
             dry_run: false,
+            fields: Vec::new(),
         };
         let mut buf: Vec<u8> = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -832,6 +973,7 @@ mod tests {
             value: Some("claude".to_string()),
             scope: Origin::Project,
             dry_run: true,
+            fields: Vec::new(),
         };
         let mut buf: Vec<u8> = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -840,6 +982,156 @@ mod tests {
             text.contains("true"),
             "dry_run true must render as 'true'; got: {text:?}"
         );
+    }
+
+    /// The `Value` cell of a one-row write table, read positionally off this
+    /// render's own header line so an EMPTY cell stays distinguishable from an
+    /// absent one (splitting on the column gap would erase it). Asserts the
+    /// Single-Table Rule on the way past: one header row, one data row.
+    ///
+    /// The offsets are **char** offsets, because `print_table` pads with
+    /// `cell.chars().count()` — column starts in the data row are char
+    /// positions, not byte positions. `find` hands back a byte offset, which
+    /// is the same number only while the header is ASCII, so that is asserted
+    /// rather than assumed. Slicing the row by those numbers as a BYTE range
+    /// (`row.get(start..end)`) would misread whenever a cell left of `Value`
+    /// carries a multi-byte char — and `Key` carries a user-supplied alias,
+    /// which `validate_registries` permits to be non-ASCII.
+    fn value_cell(text: &str) -> String {
+        let mut lines = text.lines();
+        let header = lines.next().expect("a header row");
+        let row = lines.next().expect("a data row");
+        assert!(
+            lines.next().is_none(),
+            "the Single-Table Rule allows exactly one data row; got: {text:?}"
+        );
+        assert!(
+            header.is_ascii(),
+            "`find`'s byte offset is only a char offset while the header is ASCII; got: {header:?}"
+        );
+        let start = header.find("Value").expect("a Value column");
+        let end = header.find("Scope").expect("a Scope column");
+        row.chars()
+            .skip(start)
+            .take(end - start)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn config_write_report_plain_summarises_registry_set_fields_in_the_value_cell() {
+        // C-021 assertion 6 (design E-7) — the contract's only behavioural
+        // obligation. `value` is single-valued, so a filter-only `registry set`
+        // prints a BLANK cell today; the cell instead summarises `fields`.
+        // Only `registry set`'s cell may move, and only because that verb is
+        // unreleased.
+        let r = ConfigWriteReport {
+            action: WriteAction::RegistrySet,
+            key: "registry.acme".to_string(),
+            value: Some("ghcr.io/moved".to_string()),
+            scope: Origin::Project,
+            dry_run: false,
+            fields: vec![
+                RegistryFieldChange {
+                    field: "oci",
+                    action: RegistryFieldChangeAction::Set {
+                        value: RegistryFieldValue::String("ghcr.io/moved".to_string()),
+                    },
+                },
+                RegistryFieldChange {
+                    field: "default",
+                    action: RegistryFieldChangeAction::Set {
+                        value: RegistryFieldValue::Bool(true),
+                    },
+                },
+                RegistryFieldChange {
+                    field: "include",
+                    action: RegistryFieldChangeAction::Set {
+                        value: RegistryFieldValue::List(vec!["a/**".to_string(), "b/**".to_string()]),
+                    },
+                },
+                RegistryFieldChange {
+                    field: "exclude",
+                    action: RegistryFieldChangeAction::Cleared,
+                },
+            ],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let cell = value_cell(&text);
+
+        // Design E-12 §4's grammar is NORMATIVE, and containment checks alone
+        // cannot see it: replayed against five single-token mutants, only
+        // "the locator arm drops the field name" went red — an arm printing
+        // the include PATTERNS instead of their count, a `{field}=cleared`
+        // spelling, a `'; '` separator and an off-by-one count all survived.
+        // The pattern-count clause is the one the plain renderer's security
+        // property rests on, so the whole cell is pinned byte-for-byte.
+        assert_eq!(
+            cell, "oci=ghcr.io/moved, default=true, include=2, exclude cleared",
+            "the cell grammar is normative: `{{field}}={{value}}` for a locator, \
+             `default={{bool}}`, `{{field}}={{count}}` for a list — the count, never \
+             the patterns — and `{{field}} cleared` for a clear, joined with `, ` \
+             in `fields` order; got: {text:?}"
+        );
+
+        assert!(!cell.is_empty(), "a multi-field edit must not print a blank cell");
+        for touched in ["oci", "default", "include", "exclude"] {
+            assert!(
+                cell.contains(touched),
+                "the summary must name every field the call touched; {touched} missing from {cell:?}"
+            );
+        }
+        assert!(
+            !cell.contains("index"),
+            "an untouched field must not appear in the summary; got: {cell:?}"
+        );
+        assert!(
+            cell.contains("cleared"),
+            "a cleared field must read as an event, not as a value; got: {cell:?}"
+        );
+        assert!(
+            cell.contains("ghcr.io/moved"),
+            "a set locator keeps its value in the summary; got: {cell:?}"
+        );
+    }
+
+    #[test]
+    fn config_write_report_plain_leaves_every_released_verb_s_value_cell_alone() {
+        // C-021 assertion 6, the other half. `fields` is `[]` on all five
+        // released verbs, so deriving the summary from `!fields.is_empty()`
+        // (E-7) leaves their cells byte-identical — a verb-sniffing branch
+        // that got the condition wrong would show up right here.
+        for (action, value, expected) in [
+            (WriteAction::Set, Some("claude".to_string()), "claude"),
+            (WriteAction::Unset, None, ""),
+            (
+                WriteAction::RegistryAdded,
+                Some("ghcr.io/acme".to_string()),
+                "ghcr.io/acme",
+            ),
+            (WriteAction::RegistryRemoved, None, ""),
+            (WriteAction::RegistryDefault, None, ""),
+        ] {
+            let r = ConfigWriteReport {
+                action,
+                key: "registry.acme".to_string(),
+                value,
+                scope: Origin::Project,
+                dry_run: false,
+                fields: Vec::new(),
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            let text = String::from_utf8(buf).unwrap();
+            assert_eq!(
+                value_cell(&text),
+                expected,
+                "{action}'s Value cell must stay exactly as it shipped; got: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -957,6 +1249,83 @@ mod tests {
         assert!(
             !text.contains(BIDI_OVERRIDE),
             "no raw bidi override may reach stdout; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn config_write_report_plain_escapes_the_key_and_both_value_sources_ws3() {
+        // The write report was the last `grim config` renderer emitting
+        // config-file text raw, and it is the line a user reads to confirm what
+        // grim just wrote. Three cells carry that text and all three are
+        // asserted: `key` (interpolates the alias), `value` (the locator, on a
+        // verb whose `fields` is empty), and the locator inside a `fields`
+        // summary. `char::is_control` — the only screen an alias passes — is
+        // FALSE for U+202E, and the locator is never control-screened at all.
+        for report in [
+            ConfigWriteReport {
+                action: WriteAction::RegistryAdded,
+                key: format!("registry.zz{BIDI_OVERRIDE}acme"),
+                value: Some(format!("ghcr.io/{ESC}[2J{ESC}[Hwiped")),
+                scope: Origin::Project,
+                dry_run: false,
+                fields: Vec::new(),
+            },
+            ConfigWriteReport {
+                action: WriteAction::RegistrySet,
+                key: format!("registry.zz{BIDI_OVERRIDE}acme"),
+                value: None,
+                scope: Origin::Project,
+                dry_run: false,
+                fields: vec![RegistryFieldChange {
+                    field: "oci",
+                    action: RegistryFieldChangeAction::Set {
+                        value: RegistryFieldValue::String(format!("ghcr.io/{ESC}[2J{ESC}[Hwiped")),
+                    },
+                }],
+            },
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            report.print_plain(&mut buf).unwrap();
+            let text = String::from_utf8(buf).unwrap();
+            assert!(!text.contains(ESC), "no raw ESC byte may reach stdout; got: {text:?}");
+            assert!(
+                !text.contains(BIDI_OVERRIDE),
+                "no raw bidi override may reach stdout; got: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_write_report_plain_leaves_a_non_ascii_alias_readable() {
+        // The boundary for the escape above, and the witness for `value_cell`'s
+        // char-offset contract. `escape_debug` passes printable non-ASCII
+        // through, and `validate_registries` permits it in an alias — so the
+        // `Key` cell can be multi-byte while `print_table` still pads by CHARS.
+        // Reading the row by a byte range would slide the window here.
+        let r = ConfigWriteReport {
+            action: WriteAction::RegistrySet,
+            key: "registry.café".to_string(),
+            value: None,
+            scope: Origin::Project,
+            dry_run: false,
+            fields: vec![RegistryFieldChange {
+                field: "include",
+                action: RegistryFieldChangeAction::Set {
+                    value: RegistryFieldValue::List(vec!["a/**".to_string(), "b/**".to_string()]),
+                },
+            }],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("registry.café"),
+            "a printable non-ASCII alias must render verbatim; got: {text:?}"
+        );
+        assert_eq!(
+            value_cell(&text),
+            "include=2",
+            "the Value cell must stay readable beside a multi-byte Key cell; got: {text:?}"
         );
     }
 
