@@ -7,13 +7,18 @@
 //! [`crate::catalog::load_catalog`] seam (the one `search` / `tui` / `mcp`
 //! share): each registry's cached catalog is loaded or coordinately
 //! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split
-//! AND of terms over kind / repo / summary / description / keywords, plus
-//! bare kind keywords — `skill`/`rule`/`bundle` and plurals — acting as kind
-//! filters; an empty query lists everything), and badged against the scope's
-//! lock + install-state. An explicit `--registry` (repeatable /
-//! comma-separated) collapses the browse set to exactly those registries;
-//! otherwise the declared `[[registries]]` (or the single default) are all
-//! browsed and flattened into one table.
+//! AND of terms fuzzy-matched over kind / repo / summary / description /
+//! keywords, plus bare kind keywords — `skill`/`rule`/`bundle` and plurals —
+//! acting as kind filters; an empty query lists everything), and badged
+//! against the scope's lock + install-state. An explicit `--registry`
+//! (repeatable / comma-separated) collapses the browse set to exactly those
+//! registries; otherwise the declared `[[registries]]` (or the single
+//! default) are all browsed and flattened into one table.
+//!
+//! That table is then ranked **globally by relevance** — see
+//! [`rank_by_relevance`] — because fuzzy matching admits far more rows than
+//! the substring matching it replaced. The unqueried browse is never sorted,
+//! so it still reads in registry-declaration order.
 //!
 //! State is data: `search` always exits 0 on the *browse* — no results, a
 //! filter that admits nothing, and an unreachable registry are all exit 0.
@@ -43,11 +48,14 @@ use super::scope_resolution;
 /// `grim search` arguments.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Search terms, whitespace-split and ANDed: each term substring-matches
+    /// Search terms, whitespace-split and ANDed: each term fuzzy-matches
     /// (case-insensitive) any of kind / repo / summary / description /
-    /// keywords. A bare kind keyword (`skill`/`rule`/`bundle`, singular or
-    /// plural) filters by kind instead of matching as text. Empty ⇒ list the
-    /// whole catalog. Results are narrowed further by each source's
+    /// keywords. Fuzzy means subsequence — a term's letters must appear in
+    /// order but need not be adjacent, so `kubctl` finds `kube-control`.
+    /// Results are ranked by relevance, best match first. A bare kind keyword
+    /// (`skill`/`rule`/`bundle`, singular or plural) filters by kind instead
+    /// of matching as text. Empty ⇒ list the whole catalog, unranked, in
+    /// registry order. Results are narrowed further by each source's
     /// `include`/`exclude` browse filter — `grim context` shows the active
     /// patterns.
     pub query: Option<String>,
@@ -154,10 +162,10 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // Flatten the registry groups into the flat search table, carrying each
     // group's source attribution onto its rows — the alias/locator pair no
     // consumer can reconstruct from `repo` alone (an index serves rows from
-    // many hosts). Same order as `CatalogResults::into_flat_rows`: groups in
+    // many hosts). Base order is `CatalogResults::into_flat_rows`': groups in
     // declaration/precedence order, each group's rows already sorted by
     // repository.
-    let entries: Vec<SearchEntry> = results
+    let mut scored: Vec<(i64, (SearchSource, crate::catalog::CatalogRow))> = results
         .groups
         .into_iter()
         .flat_map(|g| {
@@ -168,7 +176,18 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             g.rows.into_iter().map(move |r| (source.clone(), r))
         })
         .filter(|(_, r)| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
-        .map(|(source, r)| SearchEntry {
+        // Every row here already passed the same matcher inside `load_catalog`,
+        // so it scores; a `None` would mean the two disagreed, and sorting it
+        // last is the honest degradation (never dropping a row the filter
+        // admitted).
+        .map(|(source, r)| (r.score(&parsed).unwrap_or(i64::MIN), (source, r)))
+        .collect();
+
+    rank_by_relevance(&mut scored, &parsed);
+
+    let entries: Vec<SearchEntry> = scored
+        .into_iter()
+        .map(|(_, (source, r))| SearchEntry {
             repo: r.repo(),
             source,
             kind: r.kind,
@@ -204,6 +223,30 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     }
 
     Ok((SearchReport::new(entries), ExitCode::Success))
+}
+
+/// Sort the flattened rows by relevance, descending, in place.
+///
+/// Fuzzy matching admits far more rows than the substring matching it
+/// replaced, so ranking is what keeps the best hit visible — and it is
+/// **global**, across every registry group rather than within each. The
+/// per-entry `source` attribution keeps every row traceable to the
+/// `[[registries]]` entry that served it, so leaving declaration order behind
+/// loses no information.
+///
+/// `sort_by` is stable, so equal scores keep the incoming order (groups in
+/// declaration/precedence order, repository-sorted within each) and identical
+/// inputs render identically.
+///
+/// An **empty** query is skipped outright rather than sorted on its all-zero
+/// scores: the unqueried browse listing must stay byte-for-byte what it was
+/// before ranking existed. Extracted so the ordering is unit-testable without
+/// a live registry.
+fn rank_by_relevance<T>(scored: &mut [(i64, T)], query: &SearchQuery) {
+    if query.is_empty() {
+        return;
+    }
+    scored.sort_by(|(a, _), (b, _)| b.cmp(a));
 }
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
@@ -445,6 +488,41 @@ mod tests {
         // Nothing considered anywhere — every source came back empty before
         // any filter ran — is the condition the hint was written for.
         assert!(warn_unsupported_browse(false, true, true, false));
+    }
+
+    #[test]
+    fn rank_by_relevance_sorts_descending_across_registry_groups() {
+        // Ranking is global: a strong hit from the second registry outranks a
+        // weak hit from the first, which declaration order would have put on
+        // top. The payload stands in for (source, row) — only the ordering is
+        // under test.
+        let mut scored = vec![(10, "reg-a/weak"), (90, "reg-b/strong"), (50, "reg-a/mid")];
+        rank_by_relevance(&mut scored, &SearchQuery::parse("review"));
+        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
+        assert_eq!(order, vec!["reg-b/strong", "reg-a/mid", "reg-a/weak"]);
+    }
+
+    #[test]
+    fn rank_by_relevance_is_stable_on_ties() {
+        // Equal scores must keep the incoming order — groups in declaration
+        // order, repository-sorted within each — so identical inputs render
+        // identically run to run.
+        let mut scored = vec![(7, "reg-a/alpha"), (7, "reg-a/beta"), (7, "reg-b/gamma")];
+        rank_by_relevance(&mut scored, &SearchQuery::parse("review"));
+        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
+        assert_eq!(order, vec!["reg-a/alpha", "reg-a/beta", "reg-b/gamma"]);
+    }
+
+    #[test]
+    fn rank_by_relevance_leaves_the_unqueried_browse_untouched() {
+        // The empty-query browse listing must be byte-for-byte what it was
+        // before ranking existed. Scores are all 0 there, so a sort would be a
+        // no-op *today* — but this pins the skip so a future non-zero baseline
+        // score cannot silently reorder the browse.
+        let mut scored = vec![(0, "z/last"), (0, "a/first")];
+        rank_by_relevance(&mut scored, &SearchQuery::parse("   "));
+        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
+        assert_eq!(order, vec!["z/last", "a/first"]);
     }
 
     #[test]

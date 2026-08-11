@@ -74,6 +74,14 @@ unicode-width = "0.2"
 # `bstr` — everything else it needs is already in Cargo.lock via `regex`.
 # See adr_registry_browse_filters.md and research_registry_browse_filters.md.
 globset = "0.4"
+# Fuzzy (subsequence) matching + relevance scoring for the one shared search
+# matcher (`src/catalog/search_match.rs`), which backs `grim search`, the TUI
+# search bar and the MCP `grim_search` tool. skim's SkimMatcherV2: MIT,
+# `&self` scoring API, `Send + Sync`, no net-new transitive crate beyond
+# `thread_local`. Frozen upstream since 2020 — accepted, because the
+# algorithm is stable and only this one module names the crate, so swapping
+# it (e.g. for nucleo-matcher, MPL-2.0) stays a one-file change.
+fuzzy-matcher = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

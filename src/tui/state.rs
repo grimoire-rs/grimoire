@@ -1524,26 +1524,47 @@ impl TuiState {
 
     /// Recompute `filtered` from `rows` against the current query using the
     /// shared [`SearchQuery`] matcher, so the TUI search bar and `grim
-    /// search` apply identical semantics: whitespace-split AND-of-terms over
-    /// kind / repo / summary / description / keywords, plus bare kind
-    /// keywords (`skill`/`rule`/`bundle` ± plural) that filter by kind. The
-    /// query is parsed once, then every row is matched against it.
+    /// search` apply identical semantics: whitespace-split AND-of-terms
+    /// **fuzzy**-matched over kind / repo / summary / description /
+    /// keywords, plus bare kind keywords (`skill`/`rule`/`bundle` ± plural)
+    /// that filter by kind. The query is parsed once, then every row is
+    /// scored against it.
+    ///
+    /// With a query present, `filtered` is ordered by **relevance** — fuzzy
+    /// matching admits far more rows than the substring matching it
+    /// replaced, so the best hit has to surface without scrolling. Equal
+    /// scores tie-break on row index, i.e. on `set_rows`' kind-then-leaf-name
+    /// order, so the list never reshuffles between identical queries. An
+    /// empty query scores every row 0 and skips the sort entirely, leaving
+    /// the browse listing exactly as `set_rows` built it.
+    ///
+    /// The tree view needs nothing of its own: [`super::tree::build`]
+    /// consumes `filtered` in order, so leaves inherit this ranking within
+    /// each registry root.
     fn recompute_filter(&mut self) {
         let query = SearchQuery::parse(&self.query);
-        self.filtered = self
+        let mut scored: Vec<(i64, usize)> = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| {
+            .filter_map(|(i, r)| {
                 // Keep a row when the query matches AND it is not a hidden,
                 // deprecated, uninstalled artifact. An installed deprecated row
                 // (any state other than NotInstalled — covers direct + bundle)
                 // always stays visible.
-                query.matches_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords)
-                    && !(self.hide_deprecated && r.deprecated.is_some() && r.state == ArtifactState::NotInstalled)
+                let hidden = self.hide_deprecated && r.deprecated.is_some() && r.state == ArtifactState::NotInstalled;
+                if hidden {
+                    return None;
+                }
+                let score = query.score_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords)?;
+                Some((score, i))
             })
-            .map(|(i, _)| i)
             .collect();
+        if !query.is_empty() {
+            // Descending by score, ascending by row index on a tie.
+            scored.sort_by(|(sa, ia), (sb, ib)| sb.cmp(sa).then_with(|| ia.cmp(ib)));
+        }
+        self.filtered = scored.into_iter().map(|(_, i)| i).collect();
     }
 }
 
@@ -1934,6 +1955,67 @@ mod tests {
         s.apply_query("python");
         assert_eq!(s.filtered.len(), 1);
         assert_eq!(s.selected_row().unwrap().repo, "acme/python");
+    }
+
+    #[test]
+    fn filter_is_fuzzy_via_shared_matcher() {
+        // The search bar inherits subsequence matching: a dropped letter still
+        // finds the row. Fails under the previous substring matcher.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row("acme/kube-control", "d", &[], ArtifactState::NotInstalled),
+            row("acme/python", "d", &[], ArtifactState::NotInstalled),
+        ]);
+        s.apply_query("kubctl");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "acme/kube-control");
+    }
+
+    #[test]
+    fn query_orders_filtered_by_relevance() {
+        // Ranking is what keeps fuzzy usable: the row actually NAMED for the
+        // query must come first, even though `set_rows` sorts by leaf name and
+        // would otherwise put `aaa-decoy` (whose description merely mentions
+        // it) above `review`.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row(
+                "acme/aaa-decoy",
+                "does a review of things",
+                &[],
+                ArtifactState::NotInstalled,
+            ),
+            row("acme/review", "unrelated blurb", &[], ArtifactState::NotInstalled),
+        ]);
+        // Base order is leaf-name alphabetical: the decoy sorts first.
+        assert_eq!(s.rows[0].repo, "acme/aaa-decoy");
+
+        s.apply_query("review");
+        assert_eq!(s.filtered.len(), 2, "both rows match; ranking decides order");
+        assert_eq!(
+            s.rows[s.filtered[0]].repo, "acme/review",
+            "the name hit must rank above the description hit"
+        );
+    }
+
+    #[test]
+    fn empty_query_keeps_set_rows_order() {
+        // The browse listing must be untouched by ranking: an empty query
+        // scores every row 0 and skips the sort, so `filtered` stays in
+        // `set_rows`' kind-then-leaf-name order.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row("acme/gamma", "d", &[], ArtifactState::NotInstalled),
+            row("acme/alpha", "d", &[], ArtifactState::NotInstalled),
+            row("acme/beta", "d", &[], ArtifactState::NotInstalled),
+        ]);
+        s.apply_query("");
+        assert_eq!(s.filtered, vec![0, 1, 2]);
+        let repos: Vec<&str> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(repos, vec!["acme/alpha", "acme/beta", "acme/gamma"]);
     }
 
     #[test]

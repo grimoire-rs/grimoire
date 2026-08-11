@@ -572,11 +572,16 @@ counterpart for offline.
 ## Search, TUI, and MCP {#search-tui-and-mcp}
 
 `grim search [query]` splits the query on whitespace and ANDs the terms —
-each term substring-matches (case-insensitive) any of an entry's kind,
-repository, summary, description, or keywords. A bare kind keyword
-(`skill`/`rule`/`bundle`, singular or plural) filters by kind instead of
-matching as text; an empty query lists the whole catalog. Confirm the
-match fields and kind-filter keywords with `grim search --help`. When
+each term fuzzy-matches (case-insensitive) any of an entry's kind,
+repository, summary, description, or keywords. Fuzzy means subsequence, as
+in fzf: the letters must appear in order but need not be adjacent, so
+`kubctl` finds `kube-control` (a mistyped letter is not forgiven — only a
+missing one). Results are ranked by relevance, best first, across all
+browsed registries; the unqueried browse is unranked and lists registry by
+registry. A bare kind keyword (`skill`/`rule`/`bundle`, singular or plural)
+filters by kind instead of matching as text; an empty query lists the whole
+catalog. Confirm the match fields and kind-filter keywords with
+`grim search --help`. When
 `[[registries]]` are configured, all
 of them are browsed and flattened into one table. The catalog is cached
 under `$GRIM_HOME` — pass `--refresh` to rebuild it from the registry,

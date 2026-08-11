@@ -129,6 +129,23 @@ impl CatalogRow {
     pub fn repo(&self) -> String {
         format!("{}/{}", self.registry, self.repository)
     }
+
+    /// This row's relevance score for `query`, or `None` when it does not
+    /// match — the ranking half of the shared matcher.
+    ///
+    /// Projects exactly the fields
+    /// [`super::registry_catalog::CatalogEntry::matches`] projects, so the
+    /// score a front-end ranks by is derived from the same view of the row
+    /// that admitted it in the first place.
+    pub fn score(&self, query: &SearchQuery) -> Option<i64> {
+        query.score_fields(
+            self.kind.as_deref(),
+            &self.repo(),
+            self.summary.as_deref().unwrap_or(""),
+            self.description.as_deref().unwrap_or(""),
+            &self.keywords,
+        )
+    }
 }
 
 /// One registry's slice of the result set — the TUI tree's root node.

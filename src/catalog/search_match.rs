@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The single shared search matcher for `grim search` and the TUI filter.
+//! The single shared search matcher for `grim search` (and, through it, the
+//! MCP `grim_search` tool) and the TUI filter.
 //!
 //! A raw query string is parsed once into a [`SearchQuery`]: ASCII
 //! whitespace splits it into tokens, each lowercased. A bare *kind keyword*
@@ -9,31 +10,68 @@
 //! (never a literal text term); every other token is a text term. Matching
 //! is an AND across all of them:
 //!
-//! - each text term must independently substring-match *any* of an entry's
+//! - each text term must independently **fuzzy**-match *any* of an entry's
 //!   kind, repo, summary, description, or keywords (case-insensitive), and
 //! - if any kind filter is present, the entry's kind must equal one of them.
 //!
 //! An empty / all-whitespace query matches everything.
 //!
-//! [`SearchQuery::prefilter_term`] derives the cheap repository-name
-//! prefilter the bounded catalog build uses. A single substring cannot
-//! express the full AND across multiple terms, but it can still narrow the
-//! build *soundly*: because matching ANDs every term, any repo whose **name**
-//! satisfies a multi-term query must contain every term, so prefiltering by
-//! any one term is a superset of the name-matches — never dropping one. We
-//! pick the **longest** term (the most selective substring) so a multi-term
-//! query like `rust async` scopes the build to repos containing `async`
-//! instead of falling back to the capped lexicographic browse window. The
-//! in-memory matcher then re-applies the full AND.
+//! Fuzzy here means *subsequence* matching in the fzf/skim sense: the term's
+//! characters must appear in order but need not be adjacent, so `kubctl`
+//! finds `kube-control`. It is a strict superset of the substring matching
+//! this module used to do — nothing that matched before stops matching.
+//! Substitutions and transpositions are **not** tolerated (`kuberentes` does
+//! not find `kubernetes`); that is the deliberate, conventional trade
+//! (fzf, skim, Helix and VS Code's palette all behave this way).
 //!
-//! Trade-off: the prefilter only narrows by repository *name*. A query whose
-//! terms match solely a summary/description/keyword (never the repo name) is
-//! still served from the capped browse window, and the build records whether
-//! that cap was hit (see [`super::registry_catalog::Catalog::truncated`]). A
-//! kind-only query (no text terms) has no substring to scope by and likewise
-//! takes the browse window.
+//! Because fuzzy matching admits far more rows than substring matching,
+//! ranking is load-bearing: [`SearchQuery::score_fields`] returns a
+//! relevance score, and every consumer sorts by it whenever the query is
+//! non-empty. [`SearchQuery::matches_fields`] is the boolean view of the
+//! same computation, kept for callers that only decide visibility.
+//!
+//! The scoring shape: each term scores against every field independently and
+//! keeps its best field, weighted so a name hit outranks a blurb hit (see
+//! [`weight`]); the entry's score is the sum over terms. Scoring each
+//! term separately is what preserves the cross-field AND — one term may hit
+//! the repo while another hits only the keywords, and the entry still
+//! matches.
+
+use std::sync::LazyLock;
+
+use fuzzy_matcher::FuzzyMatcher as _;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::oci::artifact_kind::ArtifactKind;
+
+/// The shared fuzzy matcher.
+///
+/// `SkimMatcherV2` scores through `&self` and is `Send + Sync`, so one
+/// process-wide instance serves every surface (its internal scratch cache is
+/// thread-local). `ignore_case` is explicit rather than relying on the
+/// default smart-case: [`SearchQuery::parse`] has already lowercased every
+/// term, so smart-case would silently never engage and the intent would be
+/// invisible.
+static MATCHER: LazyLock<SkimMatcherV2> = LazyLock::new(|| SkimMatcherV2::default().ignore_case());
+
+/// Per-field score multipliers, highest first: a term hit in the artifact's
+/// *name* is worth more than the same hit buried in its description.
+///
+/// ponytail: hand-tuned ratios, not a learned model — the only property that
+/// matters is the ordering repo > summary ≈ keywords > description ≈ kind.
+/// Retune only against a real catalog if ranking reads wrong.
+mod weight {
+    /// Repository path (and its trailing leaf segment).
+    pub const REPO: i64 = 3;
+    /// One-line summary annotation.
+    pub const SUMMARY: i64 = 2;
+    /// Authored keywords.
+    pub const KEYWORDS: i64 = 2;
+    /// Full description.
+    pub const DESCRIPTION: i64 = 1;
+    /// The artifact kind, matched as free text.
+    pub const KIND: i64 = 1;
+}
 
 /// A parsed search query: lowercased text terms plus parsed kind filters.
 ///
@@ -75,14 +113,9 @@ impl SearchQuery {
 
     /// Whether this query matches an entry projected to its fields.
     ///
-    /// Field-agnostic so both `CatalogEntry` and the TUI's `TuiRow` call it
-    /// with borrowed views. Semantics:
-    ///
-    /// - an empty query matches everything;
-    /// - if [`Self::kinds`] is non-empty, the entry's `kind` (lowercased)
-    ///   must equal one of them (AND with the text terms);
-    /// - each text term must independently substring-match (case-insensitive)
-    ///   *any* of: kind, repo, summary, description, or any keyword.
+    /// The boolean view of [`Self::score_fields`] — see it for the full
+    /// semantics. Kept as its own method because most callers only decide
+    /// visibility and never rank.
     pub fn matches_fields(
         &self,
         kind: Option<&str>,
@@ -91,8 +124,37 @@ impl SearchQuery {
         description: &str,
         keywords: &[String],
     ) -> bool {
+        self.score_fields(kind, repo, summary, description, keywords).is_some()
+    }
+
+    /// This query's relevance score for an entry projected to its fields, or
+    /// `None` when the query does not match it.
+    ///
+    /// Field-agnostic so both `CatalogEntry` and the TUI's `TuiRow` call it
+    /// with borrowed views. Semantics:
+    ///
+    /// - an empty query matches everything, scoring `0` — every entry ties,
+    ///   so a sort by score leaves the caller's own browse order intact;
+    /// - if [`Self::kinds`] is non-empty, the entry's `kind` (lowercased)
+    ///   must equal one of them (AND with the text terms) — an **exact**
+    ///   gate, never fuzzy: `skill` is a filter keyword, not a search term;
+    /// - each text term must independently fuzzy-match *any* of: kind, repo,
+    ///   summary, description, or any keyword. A term matching nothing fails
+    ///   the whole entry (AND), and each term contributes its best field's
+    ///   weighted score.
+    ///
+    /// Scores are comparable only within one query — the weights and skim's
+    /// own bonuses make no claim to an absolute scale.
+    pub fn score_fields(
+        &self,
+        kind: Option<&str>,
+        repo: &str,
+        summary: &str,
+        description: &str,
+        keywords: &[String],
+    ) -> Option<i64> {
         if self.is_empty() {
-            return true;
+            return Some(0);
         }
         if !self.kinds.is_empty() {
             let kind_ok = kind
@@ -100,47 +162,47 @@ impl SearchQuery {
                 .as_deref()
                 .is_some_and(|k| self.kinds.iter().any(|wanted| wanted.to_string() == k));
             if !kind_ok {
-                return false;
+                return None;
             }
         }
-        self.terms.iter().all(|term| {
-            kind.is_some_and(|k| k.to_lowercase().contains(term))
-                || repo.to_lowercase().contains(term)
-                || summary.to_lowercase().contains(term)
-                || description.to_lowercase().contains(term)
-                || keywords.iter().any(|k| k.to_lowercase().contains(term))
+        // Sum of per-term bests: `try_fold` short-circuits on the first term
+        // that matches nothing, which is the AND.
+        self.terms.iter().try_fold(0, |total, term| {
+            Some(total + best_field_score(term, kind, repo, summary, description, keywords)?)
         })
     }
+}
 
-    /// The repository-name prefilter for the bounded catalog build.
-    ///
-    /// Returns the **longest** text term, which soundly narrows the build:
-    /// matching ANDs every term, so any repo whose *name* satisfies the query
-    /// must contain each term — prefiltering by one term yields a superset of
-    /// the name-matches and drops none. The longest term is the most selective
-    /// substring, so it scopes a multi-term query (e.g. `rust async`) far
-    /// tighter than the lexicographic browse window an empty prefilter forces.
-    ///
-    /// Returns the empty string (⇒ capped browse window) only when there is no
-    /// text term to scope by: a kind-only query, or an empty query. Terms of
-    /// equal length tie-break to the first, keeping the result deterministic.
-    ///
-    /// The in-memory matcher always re-applies the full AND, so a prefilter
-    /// that is broader than the query (terms matching summary/description/
-    /// keywords rather than the name) only affects build *coverage*, never
-    /// correctness of the rows that survive.
-    #[allow(
-        dead_code,
-        reason = "production load_catalog deliberately skips build-time prefiltering (see catalog_service.rs doc) for identical cross-frontend results; kept for load_or_refresh callers and its own test suite"
-    )]
-    pub fn prefilter_term(&self) -> &str {
-        // `fold` keeps the first term of any equal-length tie (a strict `>`
-        // never replaces an equally-long earlier term), unlike `max_by_key`
-        // which would keep the last — so the prefilter is order-stable.
-        self.terms
-            .iter()
-            .fold("", |best: &str, term| if term.len() > best.len() { term } else { best })
-    }
+/// The best weighted score any single field yields for one term, or `None`
+/// when the term matches no field at all.
+///
+/// The repository is scored twice — against the full `registry/org/name`
+/// reference and against its trailing leaf segment — keeping the better of
+/// the two. skim penalizes matches spread across a long haystack, so without
+/// the leaf pass a hit on `ghcr.io/acme/code-review`'s actual *name* would
+/// score below an incidental mention in some other entry's short summary.
+fn best_field_score(
+    term: &str,
+    kind: Option<&str>,
+    repo: &str,
+    summary: &str,
+    description: &str,
+    keywords: &[String],
+) -> Option<i64> {
+    let scored = |haystack: &str, weight: i64| MATCHER.fuzzy_match(haystack, term).map(|s| s * weight);
+    let leaf = repo.rsplit('/').next().unwrap_or(repo);
+
+    [
+        scored(repo, weight::REPO),
+        scored(leaf, weight::REPO),
+        scored(summary, weight::SUMMARY),
+        scored(description, weight::DESCRIPTION),
+        kind.and_then(|k| scored(k, weight::KIND)),
+        keywords.iter().filter_map(|k| scored(k, weight::KEYWORDS)).max(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
 /// Map a lowercased token to a kind filter, accepting both singular and
@@ -285,47 +347,100 @@ mod tests {
     }
 
     #[test]
-    fn prefilter_term_is_the_sole_text_term() {
-        assert_eq!(SearchQuery::parse("review").prefilter_term(), "review");
-        assert_eq!(SearchQuery::parse("  Review ").prefilter_term(), "review");
+    fn fuzzy_matches_a_subsequence_that_substring_matching_would_miss() {
+        // The point of the change: dropped letters still find the artifact.
+        // Every assertion here failed under the previous `contains` matcher.
+        assert!(SearchQuery::parse("kubctl").matches_fields(Some("skill"), "acme/kube-control", "", "", &[]));
+        assert!(SearchQuery::parse("revew").matches_fields(Some("skill"), "acme/code-review", "", "", &[]));
+        // A subsequence hit works in the non-name fields too.
+        assert!(SearchQuery::parse("fmtng").matches_fields(Some("rule"), "acme/x", "", "", &kw(&["formatting"])));
     }
 
     #[test]
-    fn prefilter_term_picks_the_longest_term_for_multi_term() {
-        // The longest (most selective) term scopes the build instead of the
-        // capped browse window an empty prefilter would force.
-        assert_eq!(SearchQuery::parse("rust async").prefilter_term(), "async");
-        assert_eq!(SearchQuery::parse("a longest mid").prefilter_term(), "longest");
-        // Case-folded by the parser, so the prefilter is already lowercase.
-        assert_eq!(SearchQuery::parse("Go ASYNCHRONY").prefilter_term(), "asynchrony");
+    fn fuzzy_is_still_ordered_and_not_a_bag_of_characters() {
+        // Subsequence, not set-membership: the characters must appear in
+        // order, so a scramble of an artifact's own letters must not match.
+        assert!(!SearchQuery::parse("lortnoc").matches_fields(Some("skill"), "acme/control", "", "", &[]));
+        // Substitutions/transpositions are deliberately not tolerated.
+        assert!(!SearchQuery::parse("kuberentes").matches_fields(Some("skill"), "acme/kubernetes", "", "", &[]));
+        // A character absent from every field still fails the entry.
+        assert!(!SearchQuery::parse("zzz").matches_fields(
+            Some("skill"),
+            "acme/control",
+            "blurb",
+            "text",
+            &kw(&["fmt"])
+        ));
     }
 
     #[test]
-    fn prefilter_term_ties_break_to_first_for_determinism() {
-        // Equal-length terms must resolve deterministically to the first.
-        assert_eq!(SearchQuery::parse("lint rust").prefilter_term(), "lint");
-        assert_eq!(SearchQuery::parse("rust lint").prefilter_term(), "rust");
-    }
-
-    #[test]
-    fn prefilter_term_empty_for_zero_text_terms() {
-        // No text term to scope by ⇒ empty prefilter ⇒ capped browse window.
-        assert_eq!(SearchQuery::parse("").prefilter_term(), "");
-        // Kind-only query: the kind keyword is not a text term and the kind
-        // string is not in the repo name, so there is nothing to scope by.
-        assert_eq!(SearchQuery::parse("rule").prefilter_term(), "");
-    }
-
-    #[test]
-    fn prefilter_term_uses_longest_text_term_alongside_a_kind_filter() {
-        // A kind filter does not suppress the prefilter: the text term still
-        // scopes the build by name. The in-memory matcher re-applies the kind
-        // filter and the full AND, so build coverage improves without changing
-        // which rows survive.
-        assert_eq!(SearchQuery::parse("skill review").prefilter_term(), "review");
+    fn empty_query_scores_zero_so_browse_order_survives_a_sort() {
+        // Consumers sort by score; an empty query must tie every entry so the
+        // browse listing keeps the order its caller built.
+        let q = SearchQuery::parse("  ");
+        assert_eq!(q.score_fields(Some("skill"), "acme/x", "", "", &[]), Some(0));
         assert_eq!(
-            SearchQuery::parse("rules formatting lint").prefilter_term(),
-            "formatting"
+            q.score_fields(Some("rule"), "z/other", "blurb", "text", &kw(&["k"])),
+            Some(0)
         );
+    }
+
+    #[test]
+    fn no_match_scores_none_and_agrees_with_matches_fields() {
+        let q = SearchQuery::parse("review");
+        assert_eq!(q.score_fields(Some("skill"), "acme/lint", "", "", &[]), None);
+        assert!(!q.matches_fields(Some("skill"), "acme/lint", "", "", &[]));
+        // And a hit scores positively.
+        let hit = q.score_fields(Some("skill"), "acme/code-review", "", "", &[]);
+        assert!(hit.is_some_and(|s| s > 0), "a real hit must score above zero: {hit:?}");
+    }
+
+    #[test]
+    fn a_name_hit_outranks_a_description_only_hit() {
+        // Field weighting: the artifact actually *called* review must rank
+        // above one that merely mentions the word in prose.
+        let q = SearchQuery::parse("review");
+        let name = q
+            .score_fields(Some("skill"), "ghcr.io/acme/code-review", "", "", &[])
+            .expect("name hit");
+        let prose = q
+            .score_fields(Some("skill"), "ghcr.io/acme/lint", "", "does a review of things", &[])
+            .expect("description hit");
+        assert!(name > prose, "name {name} must outrank description {prose}");
+    }
+
+    #[test]
+    fn a_long_repository_path_does_not_bury_a_leaf_name_hit() {
+        // The leaf pass: skim penalizes a match spread through a long
+        // haystack, so a deeply-nested repo whose own NAME is the query must
+        // still outrank an unrelated entry that only mentions it in prose.
+        let q = SearchQuery::parse("review");
+        let nested = q
+            .score_fields(Some("skill"), "registry.example.com/org/team/sub/review", "", "", &[])
+            .expect("leaf hit");
+        let prose = q
+            .score_fields(Some("skill"), "a/b", "", "review of things", &[])
+            .expect("description hit");
+        assert!(nested > prose, "leaf {nested} must outrank description {prose}");
+    }
+
+    #[test]
+    fn kind_filter_stays_exact_and_never_fuzzy() {
+        // `skill` is a filter keyword, not a search term: it must not fuzzy
+        // its way onto a different kind. Regression guard for treating the
+        // kind gate as just another scored field.
+        let q = SearchQuery::parse("skill");
+        assert!(q.matches_fields(Some("skill"), "acme/x", "", "", &[]));
+        assert!(!q.matches_fields(Some("rule"), "acme/skillful-rules", "skill-like", "", &[]));
+    }
+
+    #[test]
+    fn multi_term_and_holds_under_fuzzy_matching() {
+        // The cross-field AND is what per-term scoring preserves: one term
+        // may hit the repo while the other hits only the keywords.
+        let q = SearchQuery::parse("rst lnt");
+        assert!(q.matches_fields(Some("rule"), "acme/rust-style", "", "", &kw(&["lint"])));
+        // Second term absent everywhere ⇒ the whole entry fails.
+        assert!(!q.matches_fields(Some("rule"), "acme/rust-style", "", "", &kw(&["quality"])));
     }
 }

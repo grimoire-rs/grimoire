@@ -50,10 +50,13 @@ impl ScopeToolArgs {
 /// Arguments for the `grim_search` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchToolArgs {
-    /// Search terms, whitespace-split and ANDed: each term substring-matches
+    /// Search terms, whitespace-split and ANDed: each term fuzzy-matches
     /// (case-insensitive) any of kind / repo / summary / description /
-    /// keywords. A bare kind keyword (`skill`/`rule`/`bundle`/`agent`, singular
-    /// or plural) filters by kind. Omit to list the whole catalog.
+    /// keywords. Fuzzy means subsequence — a term's letters must appear in
+    /// order but need not be adjacent, so `kubctl` finds `kube-control`;
+    /// results come back ranked by relevance, best match first. A bare kind
+    /// keyword (`skill`/`rule`/`bundle`/`agent`, singular or plural) filters
+    /// by kind. Omit to list the whole catalog, unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,
 

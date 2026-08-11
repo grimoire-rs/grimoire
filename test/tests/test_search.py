@@ -377,6 +377,86 @@ def test_search_multi_term_is_and(
     )
 
 
+def test_search_is_fuzzy_and_ranks_a_name_hit_first(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Terms match as subsequences, and results come back ranked.
+
+    ``kubctl`` never appears literally anywhere, so this query returns
+    nothing under substring matching. Two entries match it fuzzily — one
+    through its repository *name*, one only through its description — and
+    the name hit must sort first.
+
+    Same warm-then-``--offline`` shape as the AND test above: the build is
+    the capped browse window, so the scoped catalog is warmed with
+    ``--refresh`` and the fuzzy query then narrows the warm cache.
+    """
+    make_artifact(
+        f"{unique_repo}/kube-control",
+        "skill",
+        {"kube-control/SKILL.md": "---\nname: kube-control\n---\n# k\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "unrelated blurb"},
+    )
+    # Sorts FIRST alphabetically, so a pass here cannot be luck: only
+    # relevance ranking can put `kube-control` ahead of it.
+    make_artifact(
+        f"{unique_repo}/aaa-decoy",
+        "skill",
+        {"aaa-decoy/SKILL.md": "---\nname: aaa-decoy\n---\n# d\n"},
+        tag="latest",
+        annotations={
+            "org.opencontainers.image.description": "drives a kube-control cluster"
+        },
+    )
+    runner = grim_at(project_dir)
+
+    warm = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+    warm_repos = {r["repo"].split("/")[-1] for r in warm}
+    assert {"kube-control", "aaa-decoy"} <= warm_repos, (
+        f"warm catalog must hold both repos, got {warm_repos}"
+    )
+
+    rows = runner.json(
+        "--offline", "search", "kubctl", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
+    )["items"]
+    repos = [r["repo"] for r in rows]
+    assert any(r.endswith(f"{unique_repo}/kube-control") for r in repos), (
+        f"`kubctl` must fuzzy-match `kube-control`, got {repos}"
+    )
+    assert repos[0].endswith(f"{unique_repo}/kube-control"), (
+        f"the name hit must rank above the description-only hit, got {repos}"
+    )
+
+
+def test_search_fuzzy_does_not_forgive_a_mistyped_letter(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Subsequence matching tolerates a *missing* letter, not a wrong one.
+
+    Pins the documented boundary of the fuzzy contract: a transposition
+    (`kuberentes` for `kubernetes`) is still a miss, so the widening has a
+    stated edge rather than matching everything.
+    """
+    make_artifact(
+        f"{unique_repo}/kubernetes",
+        "skill",
+        {"kubernetes/SKILL.md": "---\nname: kubernetes\n---\n# k\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )
+    rows = runner.json(
+        "--offline", "search", "kuberentes", "--registry", f"{REGISTRY_HOST}/{unique_repo}"
+    )["items"]
+    assert rows == [], f"a transposed query must not match, got {rows}"
+
+
 def test_search_kind_keyword_filters(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

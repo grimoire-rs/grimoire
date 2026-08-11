@@ -776,13 +776,29 @@ deleted files, same dropped record — and the undeclare half is a no-op
 ## grim search {#search}
 
 `grim search [query]` searches the registry catalog by case-insensitive
-substring against repository, summary, description, and keywords; an empty
-query lists the whole catalog. The query is whitespace-split and the terms
-are ANDed — every term must match somewhere. A bare kind keyword (`skill`,
-`rule`, `agent`, `mcp`, `bundle` — singular or plural) filters by kind
-instead of matching as text, so `grim search skill review` finds skills
+**fuzzy** match against repository, summary, description, and keywords; an
+empty query lists the whole catalog. The query is whitespace-split and the
+terms are ANDed — every term must match somewhere. A bare kind keyword
+(`skill`, `rule`, `agent`, `mcp`, `bundle` — singular or plural) filters by
+kind instead of matching as text, so `grim search skill review` finds skills
 matching "review". When `[[registries]]` are configured, all
 of them are browsed and the results are flattened into one table.
+
+Fuzzy means **subsequence** matching, the same shape [fzf][fzf] and most
+editor command palettes use: a term's letters must appear in order, but need
+not be adjacent. So `grim search kubctl` finds `kube-control`, and a term
+may span a hyphen or a path separator. Letters typed *wrongly* are not
+forgiven — `kuberentes` does not find `kubernetes`, because the `n` and `e`
+are transposed rather than merely missing.
+
+Because a fuzzy query matches many more repositories than a substring one,
+results are **ranked by relevance**, best match first, across every browsed
+registry at once. A hit on the artifact's own name outranks the same word
+found only in a description. Ranking replaces registry-declaration order
+whenever there is a query; every row still names the registry that served it
+in its source column (and in the `source` object under `--format json`). The
+unqueried browse is not ranked and still lists registry by registry, in
+declaration order.
 `--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
 browse to exactly the registries it names — repeatable and comma-separated
 (`--registry a,b` or `--registry a --registry b`), first value is primary.
@@ -1478,3 +1494,4 @@ registers the same entry — in every detected client, not just Claude Code
 [json-rpc]: https://www.jsonrpc.org/specification
 [clap]: https://docs.rs/clap/latest/clap/
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/
+[fzf]: https://github.com/junegunn/fzf
