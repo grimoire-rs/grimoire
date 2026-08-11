@@ -806,8 +806,8 @@ impl TuiState {
         self.clients = clients;
     }
 
-    /// Flip the row whose `repo` matches to [`ArtifactState::Outdated`], but
-    /// **only** when it is currently [`ArtifactState::Installed`].
+    /// Flip **every** row whose `repo` matches to [`ArtifactState::Outdated`],
+    /// but only those currently [`ArtifactState::Installed`].
     ///
     /// This is the single merge primitive the background update-check feeds
     /// its registry-aware "a newer pin exists" result through. The guard is
@@ -817,15 +817,26 @@ impl TuiState {
     /// cannot override), and re-flipping an already-`Outdated` row is a
     /// no-op. Unknown `repo` is a silent no-op (the row may have been
     /// filtered or replaced by a catalog refresh between schedule and
-    /// drain). Returns `true` when a flip actually happened.
+    /// drain). Returns `true` when at least one row flipped.
+    ///
+    /// **`repo` is not a row key.** One config may declare a locator twice
+    /// under two entries, and when both entries' browse filters admit the
+    /// same package `app::project_group_rows` emits two rows with the same
+    /// `repo` under distinct [`RowSource`]s (S-022b). The checker dedupes
+    /// its in-flight work on `(repo, generation)`, so one message arrives
+    /// for both rows — matching only the first would leave one browse root
+    /// showing `Installed` beside the other's `Outdated`, and undercount
+    /// [`Self::outdated_count`], which tallies rows. One network check per
+    /// artifact stays right; the fan-out belongs here, on application.
     pub fn mark_outdated_if_installed(&mut self, repo: &str) -> bool {
-        if let Some(row) = self.rows.iter_mut().find(|r| r.repo == repo)
-            && row.state == ArtifactState::Installed
-        {
-            row.state = ArtifactState::Outdated;
-            return true;
+        let mut flipped = false;
+        for row in &mut self.rows {
+            if row.repo == repo && row.state == ArtifactState::Installed {
+                row.state = ArtifactState::Outdated;
+                flipped = true;
+            }
         }
-        false
+        flipped
     }
 
     /// How many rows are currently in the [`ArtifactState::Outdated`] state —
@@ -1962,6 +1973,54 @@ mod tests {
 
         // An unknown repo is a silent no-op.
         assert!(!s.mark_outdated_if_installed("r/ghost"));
+    }
+
+    /// The S-022b shape: one config declares one locator twice under two
+    /// aliases, so `app::project_group_rows` emits **two** rows carrying the
+    /// same `repo` under two distinct [`RowSource`]s. The checker dedupes
+    /// in-flight work on `(repo, generation)`, so exactly one
+    /// `CheckMsg::RowOutdated` arrives for what is now two rows — a
+    /// first-match flip would leave one tree root showing `Installed` while
+    /// the other shows `Outdated`, and undercount the status-line tally.
+    #[test]
+    fn mark_outdated_flips_every_row_sharing_the_repo() {
+        let mut s = TuiState::new();
+        let mut wide = row("acme/tools", "d", &[], ArtifactState::Installed);
+        wide.source = RowSource::Alias {
+            alias: "wide".to_string(),
+            locator: "ghcr.io/acme".to_string(),
+        };
+        let mut narrow = row("acme/tools", "d", &[], ArtifactState::Installed);
+        narrow.source = RowSource::Alias {
+            alias: "narrow".to_string(),
+            locator: "ghcr.io/acme".to_string(),
+        };
+        assert_ne!(wide.source, narrow.source, "two distinct browse sources");
+        s.set_rows(vec![
+            wide,
+            narrow,
+            row("acme/other", "d", &[], ArtifactState::Installed),
+        ]);
+
+        assert!(s.mark_outdated_if_installed("acme/tools"), "at least one row flipped");
+
+        let views: Vec<&TuiRow> = s.rows.iter().filter(|r| r.repo == "acme/tools").collect();
+        assert_eq!(views.len(), 2, "both browse views survive the sort");
+        for view in views {
+            assert_eq!(
+                view.state,
+                ArtifactState::Outdated,
+                "the {:?} view must flip too",
+                view.source
+            );
+        }
+
+        // A different repo is untouched, and the tally sees both flipped rows.
+        assert_eq!(
+            s.rows.iter().find(|r| r.repo == "acme/other").unwrap().state,
+            ArtifactState::Installed
+        );
+        assert_eq!(s.outdated_count(), 2, "the tally counts both flipped views");
     }
 
     #[test]

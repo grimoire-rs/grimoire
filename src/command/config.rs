@@ -1451,8 +1451,21 @@ fn run_registry_set(
     exclude: &[String],
     clear_exclude: bool,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    // Unlike `add`, neither locator flag is the "leave it alone" case; clap's
-    // `conflicts_with` rejects both at once, so only three shapes reach here.
+    // Unlike `add`, neither locator flag is the "leave it alone" case, so
+    // `(None, None)` is the no-locator-edit shape and `_` is where it lands.
+    // That `(Some, Some)` never lands there too is **not** a property of this
+    // function: it comes from one place outside it — `conflicts_with = "oci"`
+    // on `RegistryCommand::Set`'s `index` arg — enforced only on the single
+    // production call site, the `RegistryCommand::Set` arm of `run`. Every
+    // unit test below, and any future non-clap caller, bypasses clap entirely;
+    // there `(Some, Some)` would fall into `_`, silently discard both locators
+    // and still exit 0. Fail loudly in test builds; keep the quiet
+    // fall-through in release rather than panicking on a user.
+    debug_assert!(
+        !(oci.is_some() && index.is_some()),
+        "run_registry_set was given both --oci and --index; clap's conflicts_with makes that \
+         unreachable from the CLI, so a caller bypassed it and both locators would be dropped"
+    );
     let locator = match (oci, index) {
         (Some(u), None) => Some((u, false)),
         (None, Some(i)) => Some((i, true)),
