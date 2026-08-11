@@ -411,6 +411,114 @@ def test_index_and_registry_sources_combine(
 
 
 # ---------------------------------------------------------------------------
+# Browse filters — dual-candidate matching (S-001 … S-004)
+# ---------------------------------------------------------------------------
+#
+# Every browse-filter pattern is tested against TWO strings: the bare
+# repository path (``acme/tools``) and the fully-qualified reference
+# (``ghcr.io/acme/tools``). A hit on either counts, so a bare pattern is
+# host-agnostic and a host-qualified pattern selects one host.
+#
+# These live here rather than beside the other filter scenarios in
+# ``test_registries.py`` for one reason: they need rows on TWO registry hosts,
+# and the session's single OCI registry container cannot serve them. An index
+# is a phone book of pointers — its ``ref`` values name hosts that need not
+# exist — so the ``http_index`` fixture is the only rig in the tree that can
+# express the case at all. The filter itself is source-kind-blind (C-008), so
+# nothing about these scenarios is index-specific.
+
+
+_TWO_HOST_PACKAGES = [
+    _package("tools", "skill", "ghcr.io/acme/tools", "Tools on ghcr"),
+    _package("tools", "skill", "quay.io/acme/tools", "Tools on quay"),
+]
+
+
+def _filtered_index_config(
+    project_dir: Path,
+    locator: str,
+    include: tuple[str, ...] = (),
+    exclude: tuple[str, ...] = (),
+) -> None:
+    """`_index_config` plus a browse filter on the same single entry."""
+    lines = [
+        "[[registries]]",
+        'alias = "hub"',
+        f'index = "{locator}"',
+    ]
+    for key, patterns in (("include", include), ("exclude", exclude)):
+        if patterns:
+            lines.append(f"{key} = [" + ", ".join(f'"{p}"' for p in patterns) + "]")
+    lines += ["default = true", "", "[skills]", "", "[rules]", ""]
+    (project_dir / "grimoire.toml").write_text("\n".join(lines))
+
+
+@pytest.mark.parametrize(
+    ("include", "exclude", "expected"),
+    [
+        pytest.param(
+            ("acme/tools",),
+            (),
+            {"ghcr.io/acme/tools", "quay.io/acme/tools"},
+            id="S-001-bare-pattern-is-host-agnostic",
+        ),
+        pytest.param(
+            ("ghcr.io/acme/tools",),
+            (),
+            {"ghcr.io/acme/tools"},
+            id="S-002-host-qualified-include-selects-one-host",
+        ),
+        pytest.param(
+            ("acme/tools",),
+            ("quay.io/acme/tools",),
+            {"ghcr.io/acme/tools"},
+            id="S-003-host-qualified-exclude-carves-out-one-host",
+        ),
+        pytest.param(
+            (),
+            ("quay.io/**",),
+            {"ghcr.io/acme/tools"},
+            id="S-004-whole-host-excluded",
+        ),
+    ],
+)
+def test_browse_filter_addresses_either_candidate(
+    grim_at,
+    project_dir: Path,
+    http_index,
+    include: tuple[str, ...],
+    exclude: tuple[str, ...],
+    expected: set[str],
+) -> None:
+    """`grim search` shows exactly the rows the two candidates admit.
+
+    All four cases run against one index serving the same repository path on
+    two hosts, so the expectations are directly comparable:
+
+    - **S-001** a bare `acme/tools` hits both rows through the bare candidate
+      — the regression half, and the reason a pattern survives a host move.
+    - **S-002** `ghcr.io/acme/tools` hits one row through the qualified
+      candidate. The superseded single-candidate rule matched **neither**
+      row with this pattern and browsed empty.
+    - **S-003** the discriminating case: the include hits both rows bare, the
+      exclude removes one qualified. A naive `matches(bare) || matches(fq)`
+      shows both rows here, because the bare-candidate verdict alone is
+      "include hit and no exclude hit".
+    - **S-004** a whole host excluded, no include list.
+
+    Each case asserts the full visible set, so a filter that silently admits
+    everything fails as loudly as one that admits nothing. Exit stays 0
+    throughout — a filter is never an error.
+    """
+    root, base = http_index
+    _write_all_json(root, _TWO_HOST_PACKAGES)
+    _filtered_index_config(project_dir, base, include=include, exclude=exclude)
+
+    rows = _search_rows(grim_at(project_dir))
+    assert {r.get("repo", "") for r in rows} == expected
+
+
+# ---------------------------------------------------------------------------
 # Config surface + validation
 # ---------------------------------------------------------------------------
 

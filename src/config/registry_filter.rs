@@ -6,9 +6,17 @@
 //! given `[[registries]]` source. Never touches resolution, locking, or
 //! install — a direct reference to an excluded package still resolves.
 //!
-//! Precedence (plan C-004, ADR D2): a row is shown iff (the include list is
-//! empty, or the candidate matches at least one include pattern) AND the
-//! candidate matches no exclude pattern. This is the Artifactory model, not
+//! Every pattern is tested against **two** candidate strings: the bare
+//! repository path (`acme/tools`) and the fully-qualified reference
+//! (`ghcr.io/acme/tools`). A hit on either counts, so a bare pattern
+//! matches on every host and a host-qualified pattern matches on that host
+//! only; the entry's own `oci`/`index` locator is never part of either.
+//!
+//! Precedence (design C-002, ADR D2): a row is shown iff (the include list
+//! is empty, or **either** candidate matches at least one include pattern)
+//! AND **neither** candidate matches any exclude pattern. Exclude-wins is
+//! applied once, to the combined per-list verdicts — not as two
+//! whole-filter verdicts OR-ed together. This is the Artifactory model, not
 //! Cargo's mutually-exclusive `include`/`exclude` and not gitignore's
 //! ordered last-match-wins.
 //!
@@ -43,7 +51,7 @@
 //! qualifier `project_config.rs`'s own cross-module seams (e.g.
 //! `validate_registries`) already use in this single binary crate.
 
-use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{Candidate, Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 /// The characters that mark a pattern as already-authored glob syntax
 /// (plan C-003). A pattern containing none of them is wildcard-free.
@@ -432,20 +440,59 @@ impl RegistryFilter {
         })
     }
 
-    /// Whether `candidate` passes the filter (plan C-004): `true` iff
-    /// (the authored include list was empty, or `candidate` matches at
-    /// least one include pattern) AND `candidate` matches no exclude
-    /// pattern. Exclude wins on overlap. Order-independent within either
+    /// Whether the catalog row identified by `registry` + `repository`
+    /// passes the filter (design C-002).
+    ///
+    /// Every pattern is tested against **two** candidate strings — the bare
+    /// repository path and [`qualified_candidate`]'s
+    /// `{registry}/{repository}` — and a hit on either counts:
+    ///
+    /// ```text
+    /// bare        = repository
+    /// fq          = qualified_candidate(registry, repository)
+    /// include_hit = include_is_empty || include ~ bare || include ~ fq
+    /// exclude_hit = exclude ~ bare || exclude ~ fq
+    /// visible     = include_hit && !exclude_hit
+    /// ```
+    ///
+    /// Exclude-wins is applied **once**, to the combined per-list verdicts —
+    /// never as two whole-filter verdicts OR-ed together, which would let
+    /// `include = ["acme/tools"]` with `exclude = ["quay.io/acme/tools"]`
+    /// admit the `quay.io` row (design C-003). Order-independent within either
     /// list.
-    pub(crate) fn matches(&self, candidate: &str) -> bool {
-        // Built once and shared: `GlobSet::is_match` builds a `Candidate`
-        // unconditionally, *before* its own empty short-circuit, so the
-        // two-call form prepares it twice for every catalog row. globset's
-        // docs name `is_match_candidate` the amortization path for exactly
-        // this.
-        let candidate = globset::Candidate::new(candidate);
-        (self.include_is_empty || self.include.is_match_candidate(&candidate))
-            && !self.exclude.is_match_candidate(&candidate)
+    ///
+    /// Argument order is pinned (design C-004): `(registry, repository)`, the same
+    /// order as `CatalogEntry`'s fields and as its `repo()` format. **A
+    /// swapped call compiles.**
+    pub(crate) fn matches(&self, registry: &str, repository: &str) -> bool {
+        // The unfiltered filter admits every row, so nothing below it can
+        // change the verdict: an empty include skips its check outright and
+        // an empty `GlobSet` matches nothing. Everything the rest of this
+        // function does for such a filter is discarded work — measured at
+        // 71.7 ns and 2 allocations per row, against 0.0 ns and 0 here.
+        // It is the dominant shape in the field: `--registry` and both
+        // legacy fallbacks construct `RegistryFilter::default()`, and this
+        // module has never shipped in a release, so every existing user's
+        // config is in exactly this state.
+        if self.include_is_empty && self.exclude.is_empty() {
+            return true;
+        }
+
+        // Implementation note carried forward from the single-candidate
+        // form: `GlobSet::is_match` builds a `Candidate` unconditionally,
+        // *before* its own empty short-circuit, so the naive form prepares
+        // one per call. Build one `globset::Candidate` per string and call
+        // `is_match_candidate` four times — two evaluations of each of the
+        // two already-compiled sets. No new `GlobSet`, no merged set.
+        let qualified = qualified_candidate(registry, repository);
+        let bare = Candidate::new(repository);
+        let fq = Candidate::new(&qualified);
+
+        let include_hit =
+            self.include_is_empty || self.include.is_match_candidate(&bare) || self.include.is_match_candidate(&fq);
+        let exclude_hit = self.exclude.is_match_candidate(&bare) || self.exclude.is_match_candidate(&fq);
+
+        include_hit && !exclude_hit
     }
 
     /// The verbatim authored `include` patterns, in declaration order —
@@ -461,40 +508,84 @@ impl RegistryFilter {
     }
 }
 
-/// The match candidate for one catalog row: **the repository path**, with the
-/// registry host and nothing else removed.
+/// The **qualified** match candidate for one catalog row (design C-001) — one of the
+/// two strings [`RegistryFilter::matches`] tests every pattern against; the
+/// other is the bare repository path.
 ///
 /// ```text
-/// candidate = repository        // "ghcr.io/acme/platform/foo" -> "acme/platform/foo"
+/// qualified_candidate("ghcr.io", "acme/tools") -> "ghcr.io/acme/tools"
+/// qualified_candidate("",        "acme/tools") -> "acme/tools"
 /// ```
 ///
-/// One rule for both source kinds. The entry's own `oci`/`index` locator is
-/// deliberately NOT an input, which is the whole point:
+/// Exactly two clauses, in that order: a non-empty `registry` prefixes, an
+/// empty one returns `repository` unchanged. The carve-out is load-bearing —
+/// **no candidate may ever begin with `/`**, which would match no authored
+/// pattern and fail silently.
+///
+/// **The premise this rests on (design C-031): `CatalogEntry.registry` carries
+/// no `/`** — it is a bare host, and `repository` carries the entire namespaced
+/// path. **The guarantor for an `oci` source is `registry_resolve`'s
+/// `trim_locator`**, applied at every
+/// `ResolvedRegistry` construction site, with `load_catalog` passing `reg.url`
+/// straight through. It is *not* `split_host_namespace`: that function's
+/// fall-through arm returns the string **whole** when the namespace half is
+/// empty, which its own pin states outright
+/// (`split_host_namespace("ghcr.io/") == ("ghcr.io/", None)`). For an index
+/// source the guarantor is `IndexPackage::into_entry`, which splits on the
+/// first `/` and rejects an empty registry. That is what makes a bare pattern
+/// host-agnostic and what keeps an `oci` entry and an `index` entry agreeing
+/// on the same row; drop the trim and every authored bare pattern silently
+/// re-aims with no diagnostic.
+///
+/// One rule for both source kinds: `matches` has no access to
+/// `ResolvedRegistry.kind` and must not gain any (design C-008). The entry's own
+/// `oci`/`index` locator is deliberately NOT an input, which is the whole
+/// point:
 ///
 /// - Editing a locator can no longer re-aim the patterns written against it.
 ///   Under the old locator-relative rule, moving `oci = "ghcr.io/acme"` to
 ///   `oci = "ghcr.io"` silently turned `include = ["platform/**"]` into a
 ///   filter matching nothing — a valid config, exit 0, empty catalog.
 /// - A case difference between the locator and the row's registry can no
-///   longer make the strip quietly not fire, disabling an entry's filter (an
-///   exclude-only entry then failed OPEN, with no diagnostic).
-/// - An `oci` and an `index` entry now agree, so one pattern means one thing
-///   wherever it is written — the goal ADR D3 stated and locator-relativity
-///   only approximated, since `platform/**` meant different rows on
-///   `ghcr.io/acme` than on `ghcr.io`.
+///   longer make a strip quietly not fire, disabling an entry's filter (an
+///   exclude-only entry then failed OPEN, with no diagnostic). **That is true
+///   of the deleted strip, and it is not the whole story: the qualified
+///   candidate introduces a NEW case sensitivity, on the host itself.**
+///   `oci = "GHCR.io/acme"` keeps its casing into `CatalogEntry.registry`
+///   (`trim_locator` never case-folds — the stored url is identity), so the
+///   qualified candidate is `GHCR.io/acme/tools` and `compile_pattern` leaves
+///   `case_insensitive` at `false`. `include = ["ghcr.io/**"]` then admits
+///   nothing (the C-019 diagnostic fires, exit 0) and
+///   `exclude = ["QUAY.IO/**"]` hides nothing, **silently**. Documented and
+///   accepted this round, not fixed — design **S-023**, routed to the owner.
+/// - An `oci` and an `index` entry agree, so one pattern means one thing
+///   wherever it is written. A bare pattern is host-agnostic; a
+///   host-qualified pattern selects one host.
 ///
-/// Accepted cost: an index whose rows span two registry HOSTS cannot tell them
-/// apart — `ghcr.io/acme/tools` and `quay.io/acme/tools` are both
-/// `acme/tools`. Confined to that case: a filter is only ever applied to rows
-/// from its own source (`catalog_service`), so two `[[registries]]` entries
-/// never contend, whatever they point at.
+/// `CatalogEntry::repo()` has **no** such carve-out — it is an unconditional
+/// `format!("{registry}/{repository}")` feeding `grim search` JSON and the
+/// index catalog key, both frozen. The two therefore agree byte-for-byte on
+/// every entry with a non-empty registry — which is every entry a catalog
+/// build produces — and only there. Do not "fix" the divergence in either
+/// direction.
 ///
 /// This does **not** equal `tree::display_split`'s second element, which
 /// strips the longest locator across the whole configured set. The tree is a
-/// display; this is a path matcher. They agreed only conditionally before, so
-/// dropping the pretence removes a caveat rather than a guarantee.
-pub(crate) fn browse_candidate(repository: &str) -> String {
-    repository.to_string()
+/// display; this is a path matcher.
+pub(crate) fn qualified_candidate(registry: &str, repository: &str) -> String {
+    if registry.is_empty() {
+        return repository.to_string();
+    }
+    // Exact capacity, not `format!`: `format!("{registry}/{repository}")`
+    // sizes its buffer from the 1-byte `"/"` literal, undershoots, and
+    // reallocs — measured at 2.00 allocations per row against the base
+    // shape's 1.00, in all six filter shapes, and recovering 31–51 % of the
+    // whole per-row cost this change added.
+    let mut candidate = String::with_capacity(registry.len() + 1 + repository.len());
+    candidate.push_str(registry);
+    candidate.push('/');
+    candidate.push_str(repository);
+    candidate
 }
 
 #[cfg(test)]
@@ -886,41 +977,51 @@ mod tests {
     }
 
     // ── C-004: `RegistryFilter` ──────────────────────────────────────
+    //
+    // These pre-date dual-candidate matching and are about include/exclude
+    // precedence, not about the host — but they pass `"ghcr.io"` rather than
+    // `""` because an empty registry makes `qualified_candidate` return
+    // `repository`, so `bare == fq` and all four `is_match_candidate` calls
+    // evaluate two identical strings: the assertions could not tell the new
+    // rule from the old one. Every pattern below is `acme/…`, which
+    // `literal_separator(true)` forbids matching a `ghcr.io/`-prefixed
+    // candidate, so the verdicts are unchanged. `""` survives only where it
+    // is the subject (`qualified_candidate_returns_an_empty_registry_row_unchanged_c001`).
 
     #[test]
     fn registry_filter_both_empty_matches_everything() {
         let filter = RegistryFilter::new(&[], &[]).expect("empty lists always compile");
-        assert!(filter.matches("anything"));
-        assert!(filter.matches("acme/platform/foo"));
+        assert!(filter.matches("ghcr.io", "anything"));
+        assert!(filter.matches("ghcr.io", "acme/platform/foo"));
     }
 
     #[test]
     fn registry_filter_include_only() {
         let filter = RegistryFilter::new(&["acme/platform".to_string()], &[]).expect("compiles");
-        assert!(filter.matches("acme/platform"));
-        assert!(filter.matches("acme/platform/foo"));
-        assert!(!filter.matches("acme/other"));
+        assert!(filter.matches("ghcr.io", "acme/platform"));
+        assert!(filter.matches("ghcr.io", "acme/platform/foo"));
+        assert!(!filter.matches("ghcr.io", "acme/other"));
     }
 
     #[test]
     fn registry_filter_exclude_only() {
         let filter = RegistryFilter::new(&[], &["acme/internal/**".to_string()]).expect("compiles");
-        assert!(!filter.matches("acme/internal/foo"));
-        assert!(filter.matches("acme/other"));
+        assert!(!filter.matches("ghcr.io", "acme/internal/foo"));
+        assert!(filter.matches("ghcr.io", "acme/other"));
         // An exclude-only filter never synthesizes an include allow-list,
         // and `acme/internal/**` (verbatim, already wildcarded — never
         // auto-expanded) does not match the bare name itself.
-        assert!(filter.matches("acme/internal"));
+        assert!(filter.matches("ghcr.io", "acme/internal"));
     }
 
     #[test]
     fn registry_filter_exclude_wins_on_overlap() {
         let filter = RegistryFilter::new(&["acme/platform".to_string()], &["acme/platform/legacy".to_string()])
             .expect("compiles");
-        assert!(filter.matches("acme/platform"));
-        assert!(filter.matches("acme/platform/foo"));
+        assert!(filter.matches("ghcr.io", "acme/platform"));
+        assert!(filter.matches("ghcr.io", "acme/platform/foo"));
         assert!(
-            !filter.matches("acme/platform/legacy/thing"),
+            !filter.matches("ghcr.io", "acme/platform/legacy/thing"),
             "exclude must win where include and exclude both match"
         );
     }
@@ -934,40 +1035,231 @@ mod tests {
             &["acme/platform/foo/**".to_string()],
         )
         .expect("compiles");
-        assert!(filter.matches("acme/platform/foo"));
-        assert!(!filter.matches("acme/platform/foo/bar"));
+        assert!(filter.matches("ghcr.io", "acme/platform/foo"));
+        assert!(!filter.matches("ghcr.io", "acme/platform/foo/bar"));
     }
 
     #[test]
     fn registry_filter_matches_is_order_independent() {
-        // Plan C-004: the same verdict regardless of declared order within
-        // either list. This chain has shipped an order-dependent
+        // Plan C-004 / design C-006: the same verdict regardless of declared order
+        // within either list. This chain has shipped an order-dependent
         // correctness bug before (ripgrep#1079, root-caused to
         // aho-corasick 0.6.10); grim's lockfile carries aho-corasick 1.1.4,
         // so this pins a property rather than guarding a live defect.
+        //
+        // Design C-006: the loop runs over `(registry, repository)` PAIRS, at least
+        // one per host, so both candidates are exercised on both orderings —
+        // an order dependence reachable only through the qualified candidate
+        // would otherwise be invisible here.
         let forward = RegistryFilter::new(
-            &["acme/platform".to_string(), "acme/tools".to_string()],
-            &["acme/platform/legacy".to_string(), "acme/tools/old".to_string()],
+            &["acme/platform".to_string(), "quay.io/acme/tools".to_string()],
+            &["acme/platform/legacy".to_string(), "ghcr.io/acme/tools/old".to_string()],
         )
         .expect("compiles");
         let reversed = RegistryFilter::new(
-            &["acme/tools".to_string(), "acme/platform".to_string()],
-            &["acme/tools/old".to_string(), "acme/platform/legacy".to_string()],
+            &["quay.io/acme/tools".to_string(), "acme/platform".to_string()],
+            &["ghcr.io/acme/tools/old".to_string(), "acme/platform/legacy".to_string()],
         )
         .expect("compiles");
-        for candidate in [
-            "acme/platform",
-            "acme/platform/legacy/x",
-            "acme/tools",
-            "acme/tools/old/x",
-            "acme/other",
+        for (registry, repository) in [
+            ("ghcr.io", "acme/platform"),
+            ("ghcr.io", "acme/platform/legacy/x"),
+            ("ghcr.io", "acme/tools"),
+            ("ghcr.io", "acme/tools/old/x"),
+            ("ghcr.io", "acme/other"),
+            ("quay.io", "acme/platform"),
+            ("quay.io", "acme/tools"),
+            ("quay.io", "acme/tools/old/x"),
+            ("quay.io", "acme/other"),
         ] {
             assert_eq!(
-                forward.matches(candidate),
-                reversed.matches(candidate),
-                "verdict for {candidate} must not depend on declared order"
+                forward.matches(registry, repository),
+                reversed.matches(registry, repository),
+                "verdict for {registry}/{repository} must not depend on declared order"
             );
         }
+    }
+
+    // **From here to the end of the module, an UNQUALIFIED `C-0NN` / `S-0NN`
+    // id — in a comment, a section header or a test-name suffix — indexes
+    // `.agents/specs/design_registry_filter_candidate.md`.** Anything spelled
+    // `plan C-0NN` / `Plan S-0NN` indexes
+    // `.agents/plans/plan_registry_browse_filters.md`, which is what every id
+    // above this line means. The two numbering spaces overlap in range and
+    // both are cited in this file, so `..._s010` / `..._s011` below are the
+    // design record's S-010 / S-011, not the plan's.
+
+    // ── design C-002 / C-003 / C-004 / C-005: dual-candidate matching ───────
+
+    #[test]
+    fn matches_pins_its_argument_order_c004() {
+        // **One half of a two-part guard; the other half is elsewhere and
+        // neither is redundant** (design C-004, corrected). This test calls
+        // `matches` itself, so it structurally cannot observe how production
+        // calls it — it kills a swap *inside* `matches`
+        // (`qualified_candidate(repository, registry)`). What kills a
+        // transposed *call site* (`matches(&e.repository, &e.registry)`,
+        // which COMPILES) is the three host-qualified C-009 browse tests in
+        // `catalog::catalog_service`. Before this pass both mutations
+        // survived the entire suite; do not let a later simplification
+        // collapse either half.
+        //
+        // A browse-level test over *wildcard-free* patterns cannot
+        // discriminate, which is why the C-009 half has to be
+        // host-qualified: `expand_pattern` appends `{,/**}` to a
+        // wildcard-free pattern, so under the transposition
+        // `acme/platform{,/**}` still matches the transposed qualified
+        // candidate `acme/platform/ghcr.io` and the whole expected vector of
+        // `a_pattern_is_written_against_the_repository_path_not_the_locator`
+        // survives, in order.
+        //
+        // The explicit `**` is therefore LOAD-BEARING, not decoration.
+        // `"ghcr.io/**"` already carries glob syntax, so `expand_pattern`
+        // passes it through verbatim and it gets no downward expansion —
+        // which is what makes the second assertion a statement about
+        // ARGUMENT ORDER rather than about candidate content. Do not
+        // "simplify" it to a bare `"ghcr.io"`: that expands to
+        // `ghcr.io{,/**}`, which matches the transposed call's bare
+        // candidate outright, and the pair below stops describing one
+        // coherent rule.
+        let filter = RegistryFilter::new(&["ghcr.io/**".to_string()], &[]).expect("compiles");
+        assert!(
+            filter.matches("ghcr.io", "acme/tools"),
+            "(registry, repository) is the pinned order — the same order as CatalogEntry's fields"
+        );
+        assert!(
+            !filter.matches("acme/tools", "ghcr.io"),
+            "a transposed call must NOT match: this half kills a swap inside `matches`; the C-009 browse tests kill a transposed call site"
+        );
+    }
+
+    #[test]
+    fn exclude_beats_include_across_candidates_c003() {
+        // Design C-003, the discriminating case: exclude-wins is applied ONCE to the
+        // combined per-list verdicts, never as two whole-filter verdicts
+        // OR-ed together. Verified against globset 0.4.20 with grim's pinned
+        // constructor: include ~ bare = true, include ~ fq = false,
+        // exclude ~ bare = false, exclude ~ fq = true. A naive
+        // `matches(bare) || matches(fq)` returns TRUE for the first row,
+        // because the bare-candidate verdict on its own is
+        // "include hit && no exclude hit".
+        let filter =
+            RegistryFilter::new(&["acme/tools".to_string()], &["quay.io/acme/tools".to_string()]).expect("compiles");
+        assert!(
+            !filter.matches("quay.io", "acme/tools"),
+            "the exclude hits via the qualified candidate, so the row is HIDDEN"
+        );
+        assert!(
+            filter.matches("ghcr.io", "acme/tools"),
+            "and the exclude is host-scoped, so every other host's row stays VISIBLE"
+        );
+    }
+
+    #[test]
+    fn precedence_both_lists_empty_admits_every_row_c005() {
+        // Design C-005 row 1. Asserted with a non-empty registry as well as the
+        // empty one, because `include_is_empty` short-circuits before either
+        // candidate is built and that is the branch `--registry` relies on
+        // (design C-030 / ADR D9).
+        let filter = RegistryFilter::new(&[], &[]).expect("empty lists always compile");
+        assert!(filter.matches("ghcr.io", "acme/tools"));
+        assert!(filter.matches("quay.io", "anything/at-all"));
+        assert!(filter.matches("", "acme/platform/foo"));
+    }
+
+    #[test]
+    fn precedence_include_only_admits_a_hit_on_either_candidate_c005() {
+        // Design C-005 row 2: visible iff some include pattern hits `bare` OR `fq`.
+        let bare = RegistryFilter::new(&["acme/tools".to_string()], &[]).expect("compiles");
+        assert!(bare.matches("ghcr.io", "acme/tools"), "hit via the bare candidate");
+        assert!(!bare.matches("ghcr.io", "other/thing"), "no hit on either candidate");
+
+        let qualified = RegistryFilter::new(&["quay.io/**".to_string()], &[]).expect("compiles");
+        assert!(
+            qualified.matches("quay.io", "acme/tools"),
+            "hit via the qualified candidate"
+        );
+        assert!(!qualified.matches("ghcr.io", "acme/tools"), "and only on that host");
+    }
+
+    #[test]
+    fn precedence_exclude_only_hides_a_hit_on_either_candidate_c005() {
+        // Design C-005 row 3: visible iff NO exclude pattern hits either candidate.
+        // The empty include list must stay empty — implemented as *skipping*
+        // the include check, never as a synthetic `**` (ADR D2), which the
+        // plan C-019 diagnostic gates on.
+        let filter = RegistryFilter::new(&[], &["quay.io/**".to_string()]).expect("compiles");
+        assert!(filter.matches("ghcr.io", "acme/tools"), "everything except");
+        assert!(!filter.matches("quay.io", "acme/tools"), "the excluded host");
+        assert!(
+            filter.include_patterns().is_empty(),
+            "an exclude-only filter must never synthesize an include allow-list"
+        );
+    }
+
+    #[test]
+    fn precedence_both_lists_need_an_include_hit_and_no_exclude_hit_c005() {
+        // Design C-005 row 4, all four corners of the conjunction.
+        let filter = RegistryFilter::new(&["acme/**".to_string()], &["**/legacy/**".to_string()]).expect("compiles");
+        assert!(filter.matches("ghcr.io", "acme/tools"), "include hit, no exclude hit");
+        assert!(
+            !filter.matches("ghcr.io", "acme/legacy/thing"),
+            "include hit, exclude hit — exclude wins"
+        );
+        assert!(!filter.matches("ghcr.io", "other/thing"), "no include hit");
+        assert!(
+            !filter.matches("ghcr.io", "other/legacy/thing"),
+            "no include hit and an exclude hit"
+        );
+    }
+
+    #[test]
+    fn a_repository_named_like_a_host_is_admitted_and_removable_s010() {
+        // Design S-010, the accepted false-positive caveat AND its remedy. A
+        // repository literally named `ghcr.io/foo` hosted on quay.io is
+        // admitted by `include = ["ghcr.io/**"]` through its BARE candidate —
+        // the cost of not adding a host-detection heuristic.
+        let include_only = RegistryFilter::new(&["ghcr.io/**".to_string()], &[]).expect("compiles");
+        assert!(
+            include_only.matches("quay.io", "ghcr.io/foo"),
+            "the caveat: the bare candidate spells a host"
+        );
+
+        // The remedy removes exactly that row and no other: the exclude hits
+        // via the qualified candidate `quay.io/ghcr.io/foo`, and the genuine
+        // ghcr.io row's bare candidate (`foo`) does not begin with `quay.io/`.
+        let remedied =
+            RegistryFilter::new(&["ghcr.io/**".to_string()], &["quay.io/ghcr.io/foo".to_string()]).expect("compiles");
+        assert!(!remedied.matches("quay.io", "ghcr.io/foo"), "exactly that row");
+        assert!(remedied.matches("ghcr.io", "foo"), "and no other");
+    }
+
+    #[test]
+    fn a_port_qualified_host_cannot_false_positive_s011() {
+        // Design S-011: `localhost:5000/**` is reachable through the qualified
+        // candidate only, so unlike S-010's `ghcr.io/**` it has no
+        // false-positive surface at all — the OCI `<name>` grammar forbids
+        // `:`, so no repository path can spell a port-bearing host.
+        let filter = RegistryFilter::new(&["localhost:5000/**".to_string()], &[]).expect("compiles");
+        assert!(filter.matches("localhost:5000", "acme/tools"), "the qualified hit");
+        for repository in ["acme/tools", "localhost/5000/acme/tools", "acme/localhost-5000/tools"] {
+            assert!(
+                !filter.matches("ghcr.io", repository),
+                "no grammar-valid repository path hits this pattern off-host; {repository:?} did"
+            );
+        }
+
+        // **Where the guarantee actually lives, stated so it is not
+        // over-read.** It is the input grammar's, not the matcher's: `matches`
+        // does not validate its arguments, so a hand-built row carrying an
+        // ILLEGAL `:` in the repository path *would* hit through the bare
+        // candidate. Nothing can produce one — `Identifier::parse` and both
+        // catalog constructors reject it upstream — which is exactly why
+        // design S-011 is a caveat about reachability rather than a guard.
+        assert!(
+            filter.matches("ghcr.io", "localhost:5000/acme/tools"),
+            "pinned deliberately: the matcher is grammar-blind, and design S-011 rests on the grammar"
+        );
     }
 
     #[test]
@@ -1003,27 +1295,63 @@ mod tests {
         assert_eq!(filter.exclude_patterns(), ["acme/platform/legacy".to_string()]);
     }
 
-    // ── C-005: candidate derivation ──────────────────────────────────
+    // ── design C-001: candidate derivation ───────────────────────────
 
     #[test]
-    fn browse_candidate_is_the_repository_path_whatever_the_source() {
-        // The rule, and the fact that it is ONE rule: an `oci` entry at any
-        // depth and an `index` entry all yield the same candidate for the
-        // same row, because the entry's own locator is not an input.
-        assert_eq!(browse_candidate("acme/platform/foo"), "acme/platform/foo");
-        assert_eq!(browse_candidate("acme/foo"), "acme/foo");
+    fn qualified_candidate_prefixes_a_non_empty_registry_c001() {
+        // Design C-001 clause 1. One rule for both source kinds: an `oci` entry at
+        // any depth and an `index` entry yield the same pair of candidates
+        // for the same row, because the entry's own locator is not an input
+        // to either — only the row's own `(registry, repository)` is.
+        assert_eq!(qualified_candidate("ghcr.io", "acme/tools"), "ghcr.io/acme/tools");
+        assert_eq!(
+            qualified_candidate("ghcr.io", "acme/platform/foo"),
+            "ghcr.io/acme/platform/foo"
+        );
     }
 
     #[test]
-    fn browse_candidate_never_carries_the_registry_host() {
-        // The host is what an index's rows differ in, and the one thing this
-        // rule gives up. Pinned so a future "just prepend the registry for
-        // index rows" cannot reintroduce the oci/index asymmetry unnoticed.
-        for repository in ["acme/platform/foo", "michael-herwig/arcana/hex"] {
-            let candidate = browse_candidate(repository);
+    fn qualified_candidate_returns_an_empty_registry_row_unchanged_c001() {
+        // Design C-001 clause 2, and the reason it exists: **no candidate may ever
+        // begin with `/`.** A leading-slash candidate matches no authored
+        // pattern and fails silently — a valid config, exit 0, empty catalog.
+        for repository in ["acme/tools", "acme/platform/foo", "michael-herwig/arcana/hex"] {
+            let candidate = qualified_candidate("", repository);
+            assert_eq!(candidate, repository, "an empty registry prefixes nothing");
             assert!(
-                !candidate.contains("ghcr.io") && !candidate.contains('.'),
-                "the candidate must be a bare repository path; got {candidate:?}"
+                !candidate.starts_with('/'),
+                "the carve-out is what keeps this true; got {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_qualified_candidate_carries_the_host_and_the_bare_one_does_not_c007() {
+        // Design C-007, rewritten rather than recompiled. Its predecessor
+        // asserted `!candidate.contains('.')` — the property this change
+        // DELETES for the qualified candidate, and keeps for the bare one.
+        //
+        // **Only the qualified half is asserted here.** The bare candidate is
+        // `repository` verbatim, with no production function between the row
+        // and the matcher, so "the bare candidate carries no registry host"
+        // can only ever restate this loop's own literals — an assertion no
+        // mutation can fail. The bare half is covered behaviourally by
+        // `precedence_include_only_admits_a_hit_on_either_candidate_c005`,
+        // whose `quay.io/**` pattern does not match the `ghcr.io` row: that
+        // verdict is false the moment the bare candidate starts carrying a
+        // host.
+        for (registry, repository) in [
+            ("ghcr.io", "acme/platform/foo"),
+            ("quay.io", "michael-herwig/arcana/hex"),
+        ] {
+            let qualified = qualified_candidate(registry, repository);
+            assert!(
+                qualified.starts_with(&format!("{registry}/")),
+                "the qualified candidate carries it, first segment first; got {qualified:?}"
+            );
+            assert!(
+                qualified.ends_with(repository),
+                "and nothing else about the row changes; got {qualified:?}"
             );
         }
     }
@@ -1033,9 +1361,10 @@ mod tests {
         // The footgun this rule exists to remove: under locator-relativity,
         // moving `oci = "ghcr.io/acme"` to `oci = "ghcr.io"` re-pointed every
         // pattern in the entry, so `include = ["acme/platform/**"]` silently
-        // matched nothing — valid config, exit 0, empty catalog. The locator
-        // is no longer an input, so there is nothing left to re-aim.
+        // matched nothing — valid config, exit 0, empty catalog. Neither
+        // candidate takes the locator as an input, so there is nothing left
+        // to re-aim: the verdict is a function of the ROW alone.
         let filter = RegistryFilter::new(&["acme/platform/**".to_string()], &[]).expect("the pattern must compile");
-        assert!(filter.matches(&browse_candidate("acme/platform/foo")));
+        assert!(filter.matches("ghcr.io", "acme/platform/foo"));
     }
 }

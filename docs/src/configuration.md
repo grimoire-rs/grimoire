@@ -488,7 +488,7 @@ When a pattern does miss, the signal is a warning naming the source and the
 counts:
 
 ```text
-registry 'acme': filter admitted 0 of 148 repositories; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters
+registry 'acme': filter admitted 0 of 148 repositories; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters
 ```
 
 grim emits it once per affected source per browse, for **one shape only**: a

@@ -140,6 +140,127 @@ pub struct ResolvedRegistry {
     pub filter: RegistryFilter,
 }
 
+impl ResolvedRegistry {
+    /// This entry's injective root identity (C-023) — what names its root in
+    /// the TUI tree.
+    ///
+    /// A one-line delegation to [`row_source_of`], the single source of truth
+    /// it shares with `CatalogGroup::key`, so the two cannot drift. Returns
+    /// only `Alias` or `Locator`: `Local` and `Unattributed` exist for
+    /// `TuiRow.source` and are unreachable from a configured entry.
+    #[allow(
+        dead_code,
+        reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
+    )]
+    pub(crate) fn key(&self) -> RowSource {
+        row_source_of(self.alias.as_deref(), &self.url)
+    }
+}
+
+/// Which browse source a row is attributed to — the injective root identity
+/// two entries at one locator need (C-022).
+///
+/// **Injective on `(alias, locator)` by construction**, in both directions:
+///
+/// - *Across variants* — `Alias { .. }`, `Locator("acme.example")` and
+///   `Local` are distinct values, so no `PartialEq`, `Ord` or `Hash`
+///   comparison can merge an alias with another entry's locator or with the
+///   `Local` sentinel.
+/// - *Within `Alias`* — it carries the whole dedup pair, so two entries that
+///   survive [`resolve_registries`] differ in at least one component and
+///   therefore in the value.
+///
+/// Nothing validates either collision away: rejecting an alias that equals
+/// another entry's locator would narrow an input that parses on a released
+/// build (Principle 9).
+///
+/// `PartialOrd`/`Ord` are derived for container convenience only. No consumer
+/// sorts a `RowSource` today, and the derived order follows variant
+/// declaration order — `Local < Alias < Locator < Unattributed` — which is
+/// **arbitrary and must not be relied on**. It is not `registry_order`'s
+/// precedence, and a `BTreeMap<RowSource, _>` keyed on it would silently
+/// group every aliased entry ahead of every unaliased one.
+///
+/// "Its locator" is [`ResolvedRegistry::url`] exactly as stored —
+/// [`trim_locator`]-trimmed at construction, never case- or slash-folded. It
+/// is deliberately *not* [`normalize_locator`]'s form: that is the `seen`
+/// dedup key, a different concept (C-029), and the two must not be unified.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(
+    dead_code,
+    reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
+)]
+pub(crate) enum RowSource {
+    /// The synthetic local / dev-record group. Not a configured entry.
+    Local,
+    /// A configured entry that declared an alias. Carries the locator too:
+    /// one alias may be declared at two locators across scopes (S-022b), and
+    /// both survive [`resolve_registries`]' `(normalize_locator, alias)`
+    /// dedup — so the alias alone does not identify the entry.
+    Alias { alias: String, locator: String },
+    /// A configured entry that declared no alias, identified by its locator.
+    Locator(String),
+    /// No source attribution — the row re-attributes by longest configured prefix.
+    Unattributed,
+}
+
+#[allow(
+    dead_code,
+    reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
+)]
+impl RowSource {
+    /// Render into the tree's existing `String`-keyed space (`Node` keys,
+    /// `registry_labels`, `registry_order` all stay `String`, so no tree
+    /// refactor). The tags keep the rendering injective too, which is what
+    /// those maps need:
+    ///
+    /// | Variant | Rendering |
+    /// |---|---|
+    /// | `Local` | `"Local"` — the literal, unchanged |
+    /// | `Alias { alias, locator }` | `"alias:{alias}/{locator}"` |
+    /// | `Locator(l)` | `"locator:{l}"` |
+    /// | `Unattributed` | `""` — never reaches the tree |
+    ///
+    /// **`/` is a sound separator, not a guess:**
+    /// [`crate::config::project_config::validate_registries`] rejects an
+    /// alias containing `/`, so the first `/` after the `alias:` tag is
+    /// unambiguously the boundary — the alias half stays recoverable, and no
+    /// `(alias, locator)` pair can spell another pair's rendering.
+    ///
+    /// **A tagged key must never be displayed** — that is a requirement on
+    /// the consumer, not a property of this function. `TuiState::registry_label`
+    /// must strip the tag on a lookup miss (E-10.1): an `alias:` key splits at
+    /// the **first** `/` — never the last, since a locator contains `/` and an
+    /// alias cannot — and the miss path rebuilds `"{alias} ({locator})"`,
+    /// byte-identical to what `registry_labels` produces on a hit. A `locator:`
+    /// key strips its tag and returns the locator unchanged.
+    pub(crate) fn root_key(&self) -> String {
+        match self {
+            Self::Local => "Local".to_string(),
+            Self::Alias { alias, locator } => format!("alias:{alias}/{locator}"),
+            Self::Locator(locator) => format!("locator:{locator}"),
+            Self::Unattributed => String::new(),
+        }
+    }
+}
+
+/// The single constructor both `key()` producers delegate to (C-022) — an
+/// [`RowSource::Alias`] carrying both halves when an alias was declared, a
+/// [`RowSource::Locator`] otherwise.
+///
+/// **Precondition:** `Some("")` is unreachable from a parsed config —
+/// [`crate::config::project_config::validate_registries`] rejects an empty or
+/// untrimmed alias at load — so there is no branch for it here.
+pub(crate) fn row_source_of(alias: Option<&str>, locator: &str) -> RowSource {
+    match alias {
+        Some(alias) => RowSource::Alias {
+            alias: alias.to_string(),
+            locator: locator.to_string(),
+        },
+        None => RowSource::Locator(locator.to_string()),
+    }
+}
+
 /// Build the ordered, deduped registry browse set.
 ///
 /// Precedence:
@@ -625,6 +746,110 @@ mod tests {
     }
 
     #[test]
+    fn one_alias_at_two_locators_is_two_sources_c029() {
+        // C-029, the symmetric half of the test above: the `seen` key is
+        // `(normalize_locator(locator), alias)`, and dropping the LOCATOR
+        // half is caught by exactly one test in the whole tree — in
+        // `command::release`. `config::registry_resolve`'s own 39 tests all
+        // pass without it, which is precisely the coverage gap this closes.
+        //
+        // Its TUI-level sibling is S-022b: today's `source_key(Some("acme"),
+        // url)` returns `"acme"` for both of these, merging two roots.
+        let set = resolve_registries(
+            &[],
+            &[rc(Some("acme"), "ghcr.io/acme", false)],
+            None,
+            &[rc(Some("acme"), "quay.io/acme", false)],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(set.len(), 2, "one alias at two locators is two entries: {set:?}");
+        assert_eq!(
+            set.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(),
+            ["ghcr.io/acme", "quay.io/acme"],
+            "project first, then global"
+        );
+    }
+
+    // ── C-022: `RowSource`, the injective root identity ─────────────────────
+
+    #[test]
+    fn a_row_source_alias_never_collides_with_another_entrys_locator_c022() {
+        // The reproduced defect (handover WP-2): `source_key` returned the
+        // alias when present and the locator otherwise, so nothing stopped
+        // one entry's alias equalling another entry's locator. Both entries'
+        // rows merged under one root labelled with whichever wrote into the
+        // `BTreeMap` last — exit 0, no warning. The tags are what close it,
+        // and nothing validates the collision away: rejecting such an alias
+        // would narrow an input that parses on a released build (Principle 9).
+        assert_ne!(
+            row_source_of(Some("acme.example"), "x").root_key(),
+            row_source_of(None, "acme.example").root_key(),
+            "an alias and a locator that spell the same string are two roots"
+        );
+        assert_ne!(
+            row_source_of(Some("acme.example"), "x"),
+            row_source_of(None, "acme.example"),
+            "injective at the type level too, not only in the rendering"
+        );
+    }
+
+    #[test]
+    fn a_row_source_alias_never_collides_with_the_local_sentinel_c022() {
+        // `alias = "Local"` parses on `v0.12.1` and must keep parsing, so the
+        // synthetic local group's reserved key has to be unreachable from a
+        // configured entry by construction rather than by validation.
+        assert_ne!(
+            row_source_of(Some("Local"), "x").root_key(),
+            RowSource::Local.root_key(),
+            "the reserved sentinel must stay unreachable from a configured alias"
+        );
+        assert_eq!(RowSource::Local.root_key(), "Local", "the literal is unchanged");
+    }
+
+    #[test]
+    fn root_key_renders_each_variant_verbatim_c022() {
+        // The rendering is a format `src/config/` owns and `src/tui/` reads
+        // back (C-022's ownership statement), so the tag spellings and the
+        // separator are a contract, not an implementation detail — and the
+        // injectivity assertions above cannot see them: `alias:{alias}:{loc}`
+        // is just as injective as `alias:{alias}/{loc}` and leaves the whole
+        // suite green. What breaks under that swap is WP-C's, one merge later:
+        // `registry_label`'s miss path splits an `alias:` key at the **first
+        // `/`** (E-10.3), which is exact only because `validate_registries`
+        // rejects a `/` in an alias and no other separator has that guarantee.
+        // Pinned here, at the producer, so the encoding cannot drift out from
+        // under the consumer that has not landed yet.
+        assert_eq!(RowSource::Local.root_key(), "Local");
+        assert_eq!(
+            row_source_of(Some("acme"), "ghcr.io/acme").root_key(),
+            "alias:acme/ghcr.io/acme"
+        );
+        assert_eq!(row_source_of(None, "ghcr.io/acme").root_key(), "locator:ghcr.io/acme");
+        assert_eq!(RowSource::Unattributed.root_key(), "", "E-3: total, and empty");
+    }
+
+    #[test]
+    fn one_alias_at_two_locators_is_two_row_sources_s022b() {
+        // **S-022b at the type level — the assertion the pre-amendment
+        // contract could not pass.** `Alias(String)` carried the alias alone,
+        // so both of these rendered `"alias:acme"`: one merged root, the same
+        // failure mode as the alias-vs-locator collision reached through the
+        // other component of the dedup key. `resolve_registries` admits both
+        // entries (C-029 above), so this state is reachable from a config
+        // that loads.
+        let project = row_source_of(Some("acme"), "ghcr.io/acme");
+        let global = row_source_of(Some("acme"), "quay.io/acme");
+        assert_ne!(project, global, "one alias at two locators is two identities");
+        assert_ne!(
+            project.root_key(),
+            global.root_key(),
+            "and two renderings — the `String`-keyed tree maps see only these"
+        );
+    }
+
+    #[test]
     fn one_file_may_declare_the_same_locator_twice() {
         // Two views of one source: a wide entry beside a narrow one over the
         // same index. Dedup would drop the second whole — alias, filter and
@@ -735,6 +960,40 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_host_locator_reaches_the_catalog_without_a_trailing_slash_c031() {
+        // **design C-031's guarantor, exercised on the real path.**
+        // `CatalogEntry.registry` must carry no `/`, and what enforces that is
+        // `trim_locator` — NOT `Catalog::build`'s
+        // `split_host_namespace(url).0`, whose fall-through arm returns the
+        // string whole when the namespace half is empty
+        // (`split_host_namespace("ghcr.io/") == ("ghcr.io/", None)`, pinned in
+        // `catalog::registry_catalog`). `load_catalog` passes `reg.url`
+        // straight through, so a surviving trailing slash lands in every
+        // entry's `registry` field and silently re-aims every authored bare
+        // pattern, with no diagnostic.
+        //
+        // Its own test rather than a case inside
+        // `every_construction_site_stores_the_locator_without_trailing_slashes`:
+        // that test's first assertion uses `ghcr.io/acme/`, whose namespace
+        // half is non-empty, so the split absorbs the slash either way and the
+        // assertion would mask this one. Only a **bare host** reaches the
+        // fall-through arm.
+        let set = resolve_registries(
+            &[],
+            &[rc(Some("acme"), "ghcr.io/", true)],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert_eq!(
+            set[0].url, "ghcr.io",
+            "a bare-host locator must reach the catalog builder already trimmed"
+        );
+    }
+
+    #[test]
     fn every_construction_site_stores_the_locator_without_trailing_slashes() {
         // W-10. `oci = "ghcr.io/acme/"` passes validation, and `url` is the
         // string every consumer compares against: the browse candidate, the
@@ -755,6 +1014,7 @@ mod tests {
             None,
         );
         assert_eq!(declared[0].url, "ghcr.io/acme", "declared [[registries]] entry");
+
         // Alias substitution concatenates on the stored url, so an untrimmed
         // one produced a double-slash reference rather than a wrong-but-valid
         // one — the same defect, in the resolution path instead of display.
@@ -1032,8 +1292,11 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].filter.include_patterns(), ["acme/*"]);
         assert_eq!(set[0].filter.exclude_patterns(), ["acme/internal"]);
-        assert!(set[0].filter.matches("acme/tools"));
-        assert!(!set[0].filter.matches("acme/internal"), "exclude must win over include");
+        assert!(set[0].filter.matches("ghcr.io", "acme/tools"));
+        assert!(
+            !set[0].filter.matches("ghcr.io", "acme/internal"),
+            "exclude must win over include"
+        );
     }
 
     #[test]
@@ -1074,7 +1337,7 @@ mod tests {
         assert_eq!(set.len(), 1, "a bad pattern must not drop the registry");
         assert_eq!(set[0].url, "registry.acme");
         assert_eq!(set[0].filter, RegistryFilter::default());
-        assert!(set[0].filter.matches("anything/at-all"));
+        assert!(set[0].filter.matches("ghcr.io", "anything/at-all"));
     }
 
     #[test]

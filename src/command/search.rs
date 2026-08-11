@@ -586,9 +586,9 @@ mod tests {
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].filter.include_patterns(), ["platform/**"]);
         assert_eq!(registries[0].filter.exclude_patterns(), ["platform/legacy/**"]);
-        assert!(registries[0].filter.matches("platform/foo"));
-        assert!(!registries[0].filter.matches("platform/legacy/foo"));
-        assert!(!registries[0].filter.matches("tools/foo"));
+        assert!(registries[0].filter.matches("ghcr.io", "platform/foo"));
+        assert!(!registries[0].filter.matches("ghcr.io", "platform/legacy/foo"));
+        assert!(!registries[0].filter.matches("ghcr.io", "tools/foo"));
     }
 
     #[test]

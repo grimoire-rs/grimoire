@@ -1776,24 +1776,27 @@ mod tests {
         );
     }
 
-    // ── C-005: the browse candidate vs. the displayed path ───────────────────
+    // ── design C-001: the browse candidates vs. the displayed path ───────────
 
-    // Plan C-005 / ADR D3, superseded: the candidate is now the row's
-    // repository path, full stop, with the declaring entry's locator no
-    // longer an input. The tree still attributes a row to the LONGEST
-    // configured locator, so the two derivations are related but not equal,
-    // and this pins exactly where they part company — a reader writing a
-    // pattern from what the TUI shows needs to know which one they are
-    // looking at.
+    // Plan C-005 / ADR D3, superseded by design C-001: there are now TWO
+    // candidates — the bare repository path and the fully-qualified
+    // `{registry}/{repository}` — and the declaring entry's locator is an
+    // input to neither. The tree still attributes a row to the LONGEST
+    // configured locator, so the three derivations are related but pairwise
+    // unequal, and this pins exactly where they part company — a reader
+    // writing a pattern from what the TUI shows needs to know which one they
+    // are looking at.
     #[test]
-    fn browse_candidate_is_the_repository_path_however_the_tree_displays_it() {
-        use crate::config::registry_filter::browse_candidate;
+    fn both_candidates_are_functions_of_the_row_however_the_tree_displays_it() {
+        use crate::config::registry_filter::qualified_candidate;
 
         let configured = ["ghcr.io", "ghcr.io/acme", "https://index.example"];
 
-        // A row under the deeper locator: the tree strips `ghcr.io/acme`, the
-        // filter strips only the host. The pattern is written `acme/tools/**`
-        // whichever entry declares it — that sameness is the point.
+        // A row under the deeper locator: the tree strips `ghcr.io/acme`; the
+        // filter strips nothing, testing the pattern against the bare path
+        // `acme/tools/foo` and the qualified `ghcr.io/acme/tools/foo`. The
+        // pattern is written `acme/tools/**` whichever entry declares it —
+        // that sameness is the point.
         let row = row2("ghcr.io", "acme/tools/foo", "skill", ArtifactState::Installed);
         let (root, displayed) = display_split(&row, &configured);
         assert_eq!(
@@ -1801,32 +1804,46 @@ mod tests {
             "display attributes to the longest configured prefix"
         );
         assert_eq!(displayed, "tools/foo");
-        assert_eq!(browse_candidate(&row.repository), "acme/tools/foo");
+        // Three derivations, three answers, from one row: the tree strips the
+        // longest configured locator, the bare candidate strips the host, and
+        // the qualified candidate strips nothing.
+        assert_eq!(row.repository, "acme/tools/foo", "the bare candidate");
+        assert_eq!(
+            qualified_candidate(&row.registry, &row.repository),
+            "ghcr.io/acme/tools/foo",
+            "the qualified candidate"
+        );
 
         // An index-sourced row: same rule, same shape of answer. Under the old
         // locator-relative derivation this row was the fully-qualified ref
-        // while the oci row above was not — the asymmetry this replaced.
+        // while the oci row above was not — the asymmetry this replaced. Its
+        // own `source` (the index locator) is an input to NEITHER candidate.
         let indexed = index_row("https://index.example", "ghcr.io", "acme/foo", "skill");
-        assert_eq!(browse_candidate(&indexed.repository), "acme/foo");
+        assert_eq!(indexed.repository, "acme/foo");
+        assert_eq!(
+            qualified_candidate(&indexed.registry, &indexed.repository),
+            "ghcr.io/acme/foo"
+        );
     }
 
     // The candidate does not depend on the browse set, and that non-locality
-    // guarantee is the one property carried over from C-005 unchanged: adding
+    // guarantee is the one property carried over from plan C-005 unchanged: adding
     // or removing an unrelated `[[registries]]` entry can never silently
     // re-point a filter somebody already wrote.
     #[test]
-    fn browse_candidate_ignores_which_other_sources_are_configured() {
-        use crate::config::registry_filter::browse_candidate;
+    fn qualified_candidate_ignores_which_other_sources_are_configured() {
+        use crate::config::registry_filter::qualified_candidate;
 
         let row = row2("ghcr.io", "acme/tools/foo", "skill", ArtifactState::Installed);
         let narrow = display_split(&row, &["ghcr.io"]).1;
         let wide = display_split(&row, &["ghcr.io", "ghcr.io/acme"]).1;
         assert_ne!(narrow, wide, "the DISPLAY does move with the configured set");
         assert_eq!(
-            browse_candidate(&row.repository),
-            "acme/tools/foo",
-            "the filter candidate does not"
+            qualified_candidate(&row.registry, &row.repository),
+            "ghcr.io/acme/tools/foo",
+            "neither filter candidate does — both are functions of the row alone"
         );
+        assert_eq!(row.repository, "acme/tools/foo");
     }
 
     // ── C-017 / S-004: a source whose filter admits nothing keeps its root ───

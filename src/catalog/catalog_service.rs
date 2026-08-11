@@ -37,8 +37,7 @@ use std::sync::Arc;
 use crate::catalog::registry_catalog::{Catalog, OciMeta};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
-use crate::config::registry_filter::browse_candidate;
-use crate::config::registry_resolve::SourceKind;
+use crate::config::registry_resolve::{RowSource, SourceKind, row_source_of};
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
@@ -135,13 +134,15 @@ impl CatalogRow {
 /// One registry's slice of the result set — the TUI tree's root node.
 #[derive(Debug, Clone)]
 pub struct CatalogGroup {
-    /// The registry host (and optional namespace).
+    /// This entry's **locator**, byte-identical to the
+    /// [`ResolvedRegistry::url`] it was built from — a registry host with an
+    /// optional namespace for an `oci` source, but the index url
+    /// (`https://index.example`) for an index one. Not a bare host, and not
+    /// `CatalogEntry.registry`: a single index serves rows from many hosts.
+    /// [`Self::key`] reads it as the locator, which is what makes the root
+    /// identity injective across scopes.
     pub registry: String,
     /// The configured alias for this registry, if any.
-    #[allow(
-        dead_code,
-        reason = "captured for a future alias display; no TUI/search consumer yet"
-    )]
     pub alias: Option<String>,
     /// Whether this registry's browse window hit the repository cap.
     pub truncated: bool,
@@ -176,6 +177,24 @@ pub struct CatalogGroup {
     pub rows_before_filter: usize,
     /// The matching rows, already filtered and badged, sorted by repository.
     pub rows: Vec<CatalogRow>,
+}
+
+impl CatalogGroup {
+    /// This group's injective root identity (design C-023) — what names its root in
+    /// the TUI tree, and the key two views of one locator differ in.
+    ///
+    /// A one-line delegation to [`crate::config::registry_resolve::row_source_of`], the single source of truth
+    /// it shares with [`crate::config::ResolvedRegistry::key`], so the two
+    /// cannot drift. Returns only `Alias` or `Locator`: `Local` and
+    /// `Unattributed` exist for `TuiRow.source` and are unreachable from a
+    /// configured entry.
+    #[allow(
+        dead_code,
+        reason = "E-11: RowSource's only production consumers land in WP-C (C-024/C-025/C-026/C-028, src/tui/app.rs). Test-only use does not satisfy dead-code analysis in the bin target. WP-C deletes this attribute — see its brief's hard gate"
+    )]
+    pub(crate) fn key(&self) -> RowSource {
+        row_source_of(self.alias.as_deref(), &self.registry)
+    }
 }
 
 /// The full, registry-grouped result of a catalog browse/search.
@@ -338,7 +357,7 @@ pub async fn load_catalog(
                     // future scope cannot compile without deciding.
                     .filter(|e| match scope {
                         CatalogScope::Complete => true,
-                        CatalogScope::Browse => reg.filter.matches(&browse_candidate(&e.repository)),
+                        CatalogScope::Browse => reg.filter.matches(&e.registry, &e.repository),
                     })
                     .map(|e| CatalogRow {
                         kind: e.kind.clone(),
@@ -402,27 +421,35 @@ pub async fn load_catalog(
     Ok(CatalogResults { groups })
 }
 
-/// The cause and remedy appended to the C-019 diagnostic: both mis-aimed
-/// shapes have the same root cause (the match candidate is relative to the
-/// declaring entry's own locator, plan C-005) and the same fix, and the
-/// counts alone name neither. Its own literal rather than a reference to
-/// [`crate::catalog::registry_catalog::REGISTRY_COMPAT_DOCS_URL`] — a
-/// different subject, a different anchor, and the two must be free to move
+/// The cause and remedy appended to the plan C-019 diagnostic: the counts alone
+/// name neither, and the rule a pattern must be read against is not evident
+/// from a repository listing. Re-derived for dual-candidate matching (design C-011):
+/// every pattern is tested against **both** the bare repository path and the
+/// fully-qualified `{registry}/{repository}` reference, and anchors at whichever
+/// candidate's first segment it addresses — so a bare pattern is host-agnostic
+/// and a host-qualified one selects one host. Its own literal rather than a
+/// reference to [`crate::catalog::registry_catalog::REGISTRY_COMPAT_DOCS_URL`]
+/// — a different subject, a different anchor, and the two must be free to move
 /// apart.
-const BROWSE_FILTER_REMEDY: &str = "; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters";
+const BROWSE_FILTER_REMEDY: &str = "; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters";
 
 /// The plan C-019 zero-match diagnostic for one browsed source, or `None`
 /// when the condition does not hold. Emitted once per affected source per
 /// load, never per row.
 ///
-/// **Why this is required, not a nicety.** The match candidate is
-/// source-relative (plan C-005), so editing a source's `oci` / `index` url —
-/// or leaving a trailing slash on it, which validation accepts unchanged —
-/// changes what every pattern in that entry means, and the patterns then
-/// silently match nothing. The 0/0 tree root (C-017) makes that *visible*;
-/// this line supplies the reason. Warning only: a filter that matches
-/// nothing is legal and the exit code stays 0 (S-017), consistent with the
-/// fail-open stance (C-008).
+/// **Why this is required, not a nicety.** An `include` list that addresses
+/// neither candidate — a typo, the wrong host, or the wrong namespace depth —
+/// is a perfectly valid config that silently shows nothing: exit 0, empty
+/// catalog, no other trace. The 0/0 tree root (plan C-017) makes that *visible*;
+/// this line supplies the reason and names the rule the patterns are read
+/// against, which a repository listing never reveals. Warning only: a filter
+/// that matches nothing is legal and the exit code stays 0 (plan S-017),
+/// consistent with the fail-open stance (plan C-008).
+///
+/// What it is **no longer** about is a locator edit re-aiming the entry's
+/// patterns: neither candidate takes the declaring entry's own `oci` / `index`
+/// url as an input (design C-001), so that failure mode is gone rather than merely
+/// diagnosed.
 ///
 /// **One shape only: a non-empty `include` list admitted nothing**
 /// (`admitted 0 of N`).
@@ -448,13 +475,6 @@ const BROWSE_FILTER_REMEDY: &str = "; patterns match the repository path with no
 /// - a group that was **already empty** before the filter is an offline or
 ///   failed registry — a different condition, already reported;
 /// - a **partial** result proves the include list points somewhere real.
-///
-/// The dropped signal is recoverable precisely, if it is ever wanted: probe
-/// whether the exclude patterns match the **fully-qualified** `registry/repo`
-/// form when they matched nothing source-relative. That is proof the pattern
-/// was written against the displayed ref (the real mistake) and is never true
-/// of a correct-but-inert exclude. It needs an exclude-only matcher on
-/// `RegistryFilter`, which does not exist today.
 ///
 /// **The message names the filter, not the include list** (owner decision,
 /// 2026-08-09). With `include = ["acme/**"]` and `exclude = ["acme/**"]`
@@ -623,7 +643,7 @@ mod tests {
     /// `Identifier::parse` split the lock and install-state key on — so a
     /// namespaced source url (`ghcr.io/acme`) is a *prefix of the joined ref*,
     /// never the stored `registry` field. That is exactly the shape
-    /// `browse_candidate` (plan C-005) has to handle.
+    /// `qualified_candidate` (design C-001) has to handle.
     const FIXTURE_REPOS: &[(&str, &str)] = &[
         ("ghcr.io", "acme/platform"),
         ("ghcr.io", "acme/platform/foo"),
@@ -632,10 +652,29 @@ mod tests {
         ("ghcr.io", "other/thing"),
     ];
 
+    /// One repository path served by **two hosts** — the shape a package
+    /// index produces and a single `_catalog` walk cannot (design C-009). Keyed
+    /// bare, the second tuple silently overwrote the first, so until
+    /// [`seed_catalog`] was re-keyed no fixture in the tree could express it.
+    ///
+    /// The two rows interleave in qualified order (`ghcr.io/…` before
+    /// `quay.io/…`) where a bare-keyed map held one entry, so assertions over
+    /// this fixture are on **sets or the qualified order**, never "the first
+    /// row".
+    const TWO_HOST_REPOS: &[(&str, &str)] = &[("ghcr.io", "acme/tools"), ("quay.io", "acme/tools")];
+
     /// Seed a **fresh** catalog cache for `url` so an offline `load_catalog`
     /// serves it verbatim: `Catalog::coordinate`'s offline branch returns
     /// `Serve` before any lock or network work. Written as JSON rather than
     /// through `Catalog::save` because `Catalog`'s entry map is private.
+    ///
+    /// Keyed on `{registry}/{repository}` (design C-009), mirroring the index build
+    /// at `registry_catalog.rs:641` (`entries` keyed by `e.repo()`). The bare
+    /// `repository` key collided for two tuples differing only in registry.
+    /// Safe unconditionally: `Catalog::entries()` is `self.entries.values()`
+    /// and nothing downstream reads the key. It also cannot reorder an
+    /// existing single-host fixture — prepending the *same* `{registry}/`
+    /// prefix to every key preserves lexicographic order exactly.
     fn seed_catalog(paths: &GrimPaths, url: &str, repos: &[(&str, &str)], truncated: bool) {
         let path = paths.catalog_file_for(url);
         std::fs::create_dir_all(path.parent().expect("cache file has a parent")).unwrap();
@@ -643,7 +682,7 @@ mod tests {
             .iter()
             .map(|(registry, repository)| {
                 (
-                    (*repository).to_string(),
+                    format!("{registry}/{repository}"),
                     serde_json::json!({
                         "registry": registry,
                         "repository": repository,
@@ -675,6 +714,32 @@ mod tests {
             filter: crate::config::registry_filter::RegistryFilter::new(&to_vec(include), &to_vec(exclude))
                 .expect("fixture patterns compile"),
         }
+    }
+
+    /// [`source`], but resolved as a package index (`SourceKind::IndexHttp`).
+    ///
+    /// The only difference `load_catalog` sees is which coordinated loader it
+    /// calls; both take the same offline `Serve` branch off the same cache
+    /// file, so a seeded fixture is served identically. That is what makes
+    /// design C-008's "no per-kind branch" assertion decidable at this seam — the
+    /// matcher itself cannot see `kind` at all.
+    fn index_source(url: &str, alias: Option<&str>, include: &[&str], exclude: &[&str]) -> ResolvedRegistry {
+        ResolvedRegistry {
+            kind: crate::config::registry_resolve::SourceKind::IndexHttp,
+            ..source(url, alias, include, exclude)
+        }
+    }
+
+    /// Seed a cache and read it back as a real [`Catalog`] of
+    /// [`crate::catalog::registry_catalog::CatalogEntry`] values — the type
+    /// design C-001's `repo()` agreement and design C-031's bare-host invariant are stated
+    /// about, rather than the `(registry, repository)` tuples they are seeded
+    /// from.
+    fn seeded_catalog(paths: &GrimPaths, url: &str, repos: &[(&str, &str)]) -> Catalog {
+        seed_catalog(paths, url, repos, false);
+        Catalog::load(&paths.catalog_file_for(url), url)
+            .expect("the seeded cache parses")
+            .expect("the seeded cache is keyed on the url it was written for")
     }
 
     /// Browse the seeded caches **offline** so no network is reachable:
@@ -794,11 +859,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_pattern_is_written_against_the_repository_path_not_the_locator() {
-        // The candidate is the row's repository path, so with
+        // The bare candidate is the row's repository path, so with
         // `oci = "ghcr.io/acme"` the pattern is `acme/platform` — the same
-        // string it would be on any other entry serving that row. Swapping
-        // `browse_candidate`'s argument for the registry yields "ghcr.io",
-        // which matches nothing: this test goes red.
+        // string it would be on any other entry serving that row.
+        //
+        // This test no longer guards argument ORDER, and must not be cited as
+        // if it did. Transposing `matches`'s two arguments here yields the
+        // pair ("acme/platform", "ghcr.io"), whose qualified candidate is
+        // "acme/platform/ghcr.io" — and `expand_pattern` appends `{,/**}` to
+        // the wildcard-free `acme/platform`, so that still matches and the
+        // whole expected vector below survives, in order. No browse-level
+        // test over *wildcard-free* patterns can discriminate, because the
+        // transposed qualified candidate still begins with the repository
+        // path.
+        //
+        // The guard is two-part and neither half is redundant (design C-004,
+        // corrected). `matches_pins_its_argument_order_c004` kills a swap
+        // *inside* `matches`, using `"ghcr.io/**"` — explicit wildcard, so no
+        // downward expansion — but it calls `matches` itself and structurally
+        // cannot observe how production calls it. What kills a transposed
+        // *call site* is the three **host-qualified** C-009 browse tests
+        // below, which is why they are host-qualified rather than bare.
         let tmp = tempfile::tempdir().unwrap();
         let paths = GrimPaths::new(tmp.path().to_path_buf());
         seed_catalog(&paths, "ghcr.io/acme", FIXTURE_REPOS, false);
@@ -993,9 +1074,312 @@ mod tests {
         assert_eq!(browse.len(), FIXTURE_REPOS.len());
     }
 
+    // **From here to the `C-019` section below, an UNQUALIFIED `C-0NN` /
+    // `S-0NN` id — comments and test-name suffixes alike — indexes
+    // `.agents/specs/design_registry_filter_candidate.md`.** Anything spelled
+    // `plan C-0NN` / `Plan S-0NN` indexes
+    // `.agents/plans/plan_registry_browse_filters.md`, which is what every id
+    // elsewhere in this file means. The two numbering spaces overlap in range.
+
+    // ── design C-009 / C-031 / C-008 / C-030 / C-023: dual-candidate matching ──
+
+    #[tokio::test]
+    async fn a_bare_pattern_admits_every_host_c009_s001() {
+        // S-001, the regression half of the dual-candidate rule: a pattern
+        // carrying no host is tested against the BARE candidate, which is the
+        // same string on every host, so both rows survive. This is the case
+        // the superseded single-candidate rule also passed — it is here so
+        // the two host-qualified cases below cannot be read as the whole
+        // behaviour.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let repos = browse_seeded(
+            tmp.path(),
+            &[index_source("https://index.example", Some("hub"), &["acme/tools"], &[])],
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            repos,
+            vec!["ghcr.io/acme/tools".to_string(), "quay.io/acme/tools".to_string()],
+            "a bare pattern is host-agnostic: both hosts' rows survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_qualified_include_selects_one_host_c009_s002() {
+        // S-002: the capability the single-candidate rule could not express
+        // at all — with only the bare candidate, `ghcr.io/acme/tools` matched
+        // NEITHER row and the browse went empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let repos = browse_seeded(
+            tmp.path(),
+            &[index_source(
+                "https://index.example",
+                Some("hub"),
+                &["ghcr.io/acme/tools"],
+                &[],
+            )],
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            repos,
+            vec!["ghcr.io/acme/tools".to_string()],
+            "a host-qualified pattern hits via the QUALIFIED candidate, on that host only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_qualified_exclude_carves_out_one_host_c009_s004() {
+        // S-004: a whole host excluded, with no include list — the exclude
+        // list is likewise tested against both candidates, and only the
+        // qualified one can carry `quay.io/`.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let repos = browse_seeded(
+            tmp.path(),
+            &[index_source("https://index.example", Some("hub"), &[], &["quay.io/**"])],
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            repos,
+            vec!["ghcr.io/acme/tools".to_string()],
+            "every quay.io row disappears; every other host's remains"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_qualified_exclude_beats_a_bare_include_c009_s003() {
+        // S-003 / C-003 at the seam: `include = ["acme/tools"]` hits both rows
+        // through the bare candidate, and `exclude = ["quay.io/acme/tools"]`
+        // then removes exactly one through the qualified one. Exclude-wins is
+        // applied ONCE to the combined per-list verdicts — the naive
+        // `matches(bare) || matches(fq)` shows both rows here, because the
+        // bare-candidate verdict alone is `include hit && no exclude hit`.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let repos = browse_seeded(
+            tmp.path(),
+            &[index_source(
+                "https://index.example",
+                Some("hub"),
+                &["acme/tools"],
+                &["quay.io/acme/tools"],
+            )],
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            repos,
+            vec!["ghcr.io/acme/tools".to_string()],
+            "the host-scoped exclude removes one host and keeps the other"
+        );
+    }
+
+    #[test]
+    fn every_catalog_entry_registry_is_a_bare_host_c031() {
+        // Design C-031 (E-8): the unstated premise the whole dual-candidate
+        // rule rests on. `registry` is a bare host and `repository` carries
+        // the entire namespaced path — that is what makes S-005 (`oci` ≡
+        // `index`), S-006 (a locator edit cannot re-aim a pattern) and "a bare
+        // pattern is host-agnostic" true.
+        //
+        // **The guarantor is `registry_resolve`'s `trim_locator`, applied at
+        // every `ResolvedRegistry` construction site, with `load_catalog`
+        // passing `reg.url` straight through — NOT `split_host_namespace`,**
+        // whose fall-through arm returns the string whole when the namespace
+        // half is empty (`split_host_namespace("ghcr.io/") == ("ghcr.io/",
+        // None)`, pinned in `registry_catalog`). The `index` half has its own
+        // guard: `IndexPackage::into_entry` splits on the first `/` and
+        // rejects an empty registry.
+        //
+        // **This loop is a fixture-set assertion and cannot go red on that
+        // regression**: `seed_catalog` writes `registry` as a JSON literal and
+        // `seeded_catalog` reads it back through `Catalog::load`, so no
+        // constructor runs. It pins the fixtures the dual-candidate tests
+        // above are read against. The guarantor itself is exercised by
+        // `config::registry_resolve::every_construction_site_stores_the_locator_without_trailing_slashes`,
+        // whose bare-host case is the one that goes red if the trim is dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        for (url, repos) in [("ghcr.io", FIXTURE_REPOS), ("https://index.example", TWO_HOST_REPOS)] {
+            for entry in seeded_catalog(&paths, url, repos).entries() {
+                assert!(
+                    !entry.registry.contains('/'),
+                    "the registry field must be a bare host; got {:?} for {:?}",
+                    entry.registry,
+                    entry.repository
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_qualified_candidate_equals_repo_on_every_catalog_entry_c001() {
+        // C-001's third clause: `qualified_candidate` and `CatalogEntry::repo()`
+        // agree byte-for-byte on every entry with a non-empty registry —
+        // which, per C-031 above, is every entry a catalog build produces.
+        // They part company only on the empty-registry carve-out, which
+        // `repo()` does not have and must not gain (it feeds `grim search`
+        // JSON and the index catalog key, both frozen).
+        use crate::config::registry_filter::qualified_candidate;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        for (url, repos) in [("ghcr.io", FIXTURE_REPOS), ("https://index.example", TWO_HOST_REPOS)] {
+            for entry in seeded_catalog(&paths, url, repos).entries() {
+                assert!(
+                    !entry.registry.is_empty(),
+                    "the fixture must exercise the agreeing case"
+                );
+                assert_eq!(
+                    qualified_candidate(&entry.registry, &entry.repository),
+                    entry.repo(),
+                    "the qualified candidate is the fully-qualified reference"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_candidate_rule_for_both_source_kinds_c008_s005() {
+        // C-008 / S-005: there is exactly ONE candidate rule and `matches`
+        // has no access to `ResolvedRegistry.kind` — so the assertion cannot
+        // live at the matcher and is made here, at the seam that does know
+        // the kind. The identical rows behind a `SourceKind::Registry` source
+        // and a `SourceKind::IndexHttp` source, under the identical filter,
+        // must admit the identical set. (There is no `SourceKind::Oci`; the
+        // three variants are `Registry`, `IndexHttp`, `IndexGit`.)
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", TWO_HOST_REPOS, false);
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[
+                source("ghcr.io", Some("oci"), &["acme/tools"], &[]),
+                index_source("https://index.example", Some("idx"), &["acme/tools"], &[]),
+            ],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            group_repos(&results, 0),
+            group_repos(&results, 1),
+            "one pattern, one rule, whatever the source kind"
+        );
+        assert_eq!(
+            group_repos(&results, 0),
+            vec!["ghcr.io/acme/tools".to_string(), "quay.io/acme/tools".to_string()],
+            "and the shared answer is the one the bare candidate gives"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_scope_is_never_filtered_c030_s008() {
+        // C-030 / ADR D5+D6, S-008: `CatalogScope::Complete` returns `true`
+        // unconditionally, so `grim status --check` still sees every declared
+        // artifact's `deprecated`/`replaced_by` however narrow the browse
+        // filter is. Both scopes are asserted from ONE filtered fixture: the
+        // `Browse` leg is what makes the `Complete` leg mean something —
+        // mutating the match arm to `CatalogScope::Complete => reg.filter
+        // .matches(…)` collapses `complete` onto `browse` and turns this red,
+        // which `unfiltered_source_browses_identically_under_both_scopes`
+        // (an unfiltered fixture) structurally cannot catch.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
+        let narrow = [source("ghcr.io", Some("acme"), &["acme/platform"], &[])];
+        let browse = browse_seeded(tmp.path(), &narrow, CatalogScope::Browse).await;
+        let complete = browse_seeded(tmp.path(), &narrow, CatalogScope::Complete).await;
+        assert_eq!(browse.len(), 3, "the filter narrows the browse: {browse:?}");
+        assert_eq!(
+            complete.len(),
+            FIXTURE_REPOS.len(),
+            "Complete hides nothing, ever: {complete:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_group_and_the_entry_that_drove_it_share_one_row_source_c023() {
+        // C-023: both `key()` methods delegate to the same `row_source_of`,
+        // so a group and the `ResolvedRegistry` it was built from cannot
+        // disagree about which root names them. Two entries at ONE locator —
+        // one aliased, one not — because that is the configuration whose
+        // identities `1ed73aa` exists to keep apart.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
+        seed_catalog(&paths, "https://index.example", TWO_HOST_REPOS, false);
+        let registries = [
+            source("ghcr.io", Some("acme"), &[], &[]),
+            source("ghcr.io", None, &[], &[]),
+            // An index source, where `url != host`: its rows are served from
+            // `ghcr.io` and `quay.io`, and `CatalogGroup.registry` must stay
+            // the index LOCATOR. Without this case every fixture here has
+            // `url == host`, so "correcting" the field toward a bare host
+            // would leave the test green while merging this root into the
+            // `ghcr.io` ones.
+            index_source("https://index.example", Some("idx"), &[], &[]),
+        ];
+        let (results, _) = browse_capturing(tmp.path(), &registries, "", CatalogScope::Browse).await;
+        for (index, reg) in registries.iter().enumerate() {
+            assert_eq!(
+                results.groups[index].key(),
+                reg.key(),
+                "group {index} must key exactly as the entry that drove it"
+            );
+        }
+        assert_ne!(
+            results.groups[0].key(),
+            results.groups[1].key(),
+            "an aliased entry and an unaliased one at one locator are two roots"
+        );
+        assert_eq!(
+            results.groups[2].registry, "https://index.example",
+            "an index group's `registry` is its locator, not the host its rows carry"
+        );
+        assert!(
+            results.groups[2].rows.iter().any(|row| row.registry == "quay.io"),
+            "the fixture must actually serve a row whose host differs from the locator"
+        );
+    }
+
+    #[test]
+    fn the_browse_filter_remedy_is_verbatim_in_the_published_docs_c011() {
+        // Design C-011: the only mechanical gate available on the remedy sentence.
+        // Six surfaces carry it; the two `docs/src` pages are the two a
+        // string-equality test can hold, and they are the two a reader is
+        // pointed at by the anchor the sentence itself carries. The other
+        // four (the producer's test-local copies, the catalog skill, the
+        // agent-facing rule) are caught by the suite going red and by the
+        // catalog drift review respectively.
+        for page in [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/configuration.md"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/commands.md"),
+        ] {
+            let md = std::fs::read_to_string(page).expect("the documentation page is readable");
+            assert!(
+                md.contains(BROWSE_FILTER_REMEDY),
+                "{page} must quote BROWSE_FILTER_REMEDY verbatim; it currently does not carry:\n{BROWSE_FILTER_REMEDY}"
+            );
+        }
+    }
+
     #[test]
     fn filter_never_reaches_reference_resolution_s006() {
-        // Plan S-006 / ADR D3: a direct reference to an excluded package still
+        // Plan S-006 / ADR D3 — the suffix on this test's name indexes the
+        // PLAN, not the design record, whose restatement of the same property
+        // is S-009 (deliberately not renumbered: the name shipped). A direct
+        // reference to an excluded package still
         // resolves — the filter is a browse narrowing applied here in
         // `load_catalog` and nowhere else. `resolve_reference` is the single
         // intersection between the resolved registry set and the resolve path,
@@ -1013,7 +1397,7 @@ mod tests {
     /// than travelling into them. `zero_match_warning_names_the_source_and_
     /// the_counts_c019` pins the whole sentence as one literal; the rest of
     /// this section composes with this to stay about their own subject.
-    const ANCHOR: &str = "; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters";
+    const ANCHOR: &str = "; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters";
 
     #[tokio::test]
     async fn browse_emits_the_zero_match_warning_on_the_unqueried_browse_c019() {
@@ -1092,19 +1476,18 @@ mod tests {
 
     #[test]
     fn zero_match_warning_names_the_source_and_the_counts_c019() {
-        // Plan C-019 pins this wording exactly — it is the only signal that a
-        // source's `oci`/`index` url was edited (or carries a trailing slash)
-        // out from under its patterns. Distinct from the compile-failure warn
-        // in `resolve_registries`.
+        // Plan C-019 pins this wording exactly — it is the only signal that an
+        // `include` list addresses neither candidate. Distinct from the
+        // compile-failure warn in `resolve_registries`.
         //
         // H-3(a): the counts alone name neither the cause nor a remedy, so the
-        // sentence carries the locator-relativity clause and the anchor its
+        // sentence carries the dual-candidate clause (design C-011) and the anchor its
         // sibling warn already carries (`search.rs`' `_catalog` hint).
         let reg = source("ghcr.io", Some("acme"), &["platform/**"], &[]);
         assert_eq!(
             zero_match_warning(&reg, &SearchQuery::parse(""), 148, 0).as_deref(),
             Some(
-                "registry 'acme': filter admitted 0 of 148 repositories; patterns match the repository path with no registry host, and anchor at its first segment — see https://grimoire.rs/configuration.html#browse-filters"
+                "registry 'acme': filter admitted 0 of 148 repositories; patterns match either the repository path or the fully-qualified reference, and anchor at the candidate's first segment — see https://grimoire.rs/configuration.html#browse-filters"
             )
         );
     }
@@ -1142,7 +1525,7 @@ mod tests {
         // point the user at the wrong knob (owner decision, 2026-08-09).
         let reg = source("ghcr.io", Some("acme"), &["acme/**"], &["acme/**"]);
         assert!(
-            !reg.filter.matches("acme/platform") && !reg.filter.include_patterns().is_empty(),
+            !reg.filter.matches("ghcr.io", "acme/platform") && !reg.filter.include_patterns().is_empty(),
             "fixture must have a non-empty include list whose hits the exclude list removes"
         );
         assert_eq!(
@@ -1154,8 +1537,11 @@ mod tests {
     #[test]
     fn zero_match_warning_never_fires_for_an_exclude_that_removed_nothing_h3() {
         // **Inverts W12 deliberately.** W12 made `admitted N of N` warn, to
-        // catch an `exclude` copied off a visible row (`acme/**` against a
-        // `ghcr.io/acme` source, whose candidates are source-relative, C-005).
+        // catch an `exclude` copied off a visible row — `acme/**` against a
+        // `ghcr.io/acme` source, which under the superseded locator-relative
+        // rule addressed nothing. Under dual-candidate matching (design C-001)
+        // that pattern is no longer mis-aimed at all: it hits the row's bare
+        // candidate `acme/platform`, on that source and on every other.
         // The counts cannot tell that apart from a correct exclude with
         // nothing to match yet, and the second is a permanent state of a
         // correct config, so the trigger fired on every browse forever for
@@ -1167,9 +1553,10 @@ mod tests {
         let broken_by_trailing_slash = source("ghcr.io/acme/", Some("acme"), &[], &["platform/**"]);
         assert_eq!(zero_match_warning(&broken_by_trailing_slash, &browse, 3, 3), None);
 
-        // The case that forced it: `archive/**` is source-relative, correctly
-        // written, and matches nothing only because no `archive/*` repository
-        // exists yet. Byte-identical inputs to the mis-aimed fixture above —
+        // The case that forced it: `archive/**` addresses the row's bare
+        // candidate, is correctly written, and matches nothing only because no
+        // `archive/*` repository exists yet. Byte-identical inputs to the
+        // fixture above —
         // which is the whole argument for dropping the trigger.
         let correct_but_inert = source("ghcr.io/acme", Some("acme"), &[], &["archive/**"]);
         assert_eq!(zero_match_warning(&correct_but_inert, &browse, 5, 5), None);
