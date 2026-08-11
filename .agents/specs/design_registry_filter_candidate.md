@@ -555,6 +555,31 @@ change. The proper form is the mirror test the handover asks for: seed with
 both lists, edit each *other* field in turn, assert `include` is unchanged
 each time.
 
+> **Row 1's literal spelling stops compiling once the clear branch lands
+> (2026-08-11, WP-B fix pass).** `if !include.is_empty() {` → `{` leaves a
+> dangling `} else if clear_include {`, which is a **syntax error**. The
+> semantic equivalent is collapsing the whole `if`/`else if` to the
+> unconditional replacement arm, and that is what must be run:
+>
+> ```
+> registry_set_preserves_the_filter_lists_when_editing_any_other_field
+>   → FAILED. 0 passed; 1 failed
+> ```
+>
+> Recorded because anyone re-deriving row 1 verbatim gets a compile error and
+> may misread it as "the mutant is already dead". It **is** dead — but by
+> type-checking, and only in that literal spelling. The assertion is what
+> kills the semantic form.
+
+**Two further mutation families this package must keep killing** (WP-B fix
+pass, all measured):
+
+- **The plain-cell grammar (E-12 §4).** Substring assertions let **4 of 5**
+  grammar mutants survive, including the one that prints pattern *text*
+  instead of a count. One `assert_eq!` on the whole cell kills all five.
+- **The three `escape_debug` sites** (`key`, `value`, the summarised
+  locator). Dropping any one is caught.
+
 ### C-021 — The write-report `fields` array
 
 **Decided (owner, review round 2), no longer a recommendation.**
@@ -1520,6 +1545,124 @@ Recorded so a later reviewer who re-derives the mutation does not file it as
 an uncovered path, and so nobody "fixes" it by duplicating the dispatch arm
 into a unit test that would only re-assert clap's own wiring. The same shape
 applies to `*default`, which shipped with the identical exposure.
+
+> **Amended twice, 2026-08-11. Read the second amendment — the first was
+> wrong.**
+>
+> *First (WP-B Review-Fix, quality perspective):* "not actionable" was too
+> strong; a third remedy exists that is neither a test nor a refactor —
+> separate the three `bool`s with the slices:
+>
+> ```
+> … make_default: bool, include: &[String], clear_include: bool,
+>   exclude: &[String], clear_exclude: bool
+> ```
+>
+> It was justified with the claim that **no two `bool`s adjacent ⇒ every
+> pairwise transposition becomes a type error**, closing the exposure at
+> compile time.
+>
+> *Second (WP-B fix pass, measured):* **that justification is false.**
+> Adjacency is not what makes a transposition a type error — the argument
+> *types at the two positions* are, and `clear_include`/`clear_exclude` are
+> both `bool` at positions 7 and 9 either way. The builder ran E-14's exact
+> mutation against the reordered signature:
+>
+> ```
+> swap *clear_include / *clear_exclude in the run dispatch arm
+>   → COMPILES (exposure still open)
+>   → still caught only by the 5 acceptance tests, exactly as E-14 recorded
+> ```
+>
+> **What the reorder genuinely buys**, also measured:
+>
+> | Order | Adjacent pairs | Adjacent transposition |
+> |---|---|---|
+> | old (`include, exclude, clear_include, clear_exclude`) | slice·slice, bool·bool | **compiles silently** |
+> | new (`include, clear_include, exclude, clear_exclude`) | slice·bool, slice·bool | **type error** — rustc emits `help: swap these arguments` |
+>
+> So the accurate claim is "**every *adjacent* transposition becomes a type
+> error**" — strictly more caught than before, at zero cost. **Keep the
+> reorder for that weaker reason.** E-14's original "guarded only at the
+> acceptance layer" verdict for the same-typed non-adjacent pair was **never
+> superseded and remains true**. `*default`'s identical pre-existing exposure
+> stays out of scope (Two Hats — released signature).
+
+### E-15 — three rulings from WP-C's Stub phase
+
+**1. C-022 consequence 2 is WP-C's Implement, and the fold is live in *two*
+places.** The contract requires removing the `registry_order` fold from the
+attribution set and correcting `TreeBuildOptions.registry_order`'s doc, which
+still says "a root key *is* its locator whenever the entry declared no alias"
+(`tree.rs:41-51`) — false under tagging. WP-C's stub found the fold at
+**`tree.rs:~489` and `render.rs:766-769`**
+(`state.registry_locators.iter().chain(state.registry_order.iter())`), not
+one site.
+
+Under tagging the fold is **inert rather than wrong** — no reference begins
+with `alias:`/`locator:`, so nothing fails. That is precisely why it would be
+missed, and why it gets done now: an inert fold plus a doc asserting the
+superseded rule is how the next reader concludes the order vector is still
+attribution input. Both sites are in WP-C's files.
+
+**2. E-10.2 does not reach `registry_order` / `elision_registry`, and the
+stub's substitute is accepted.** E-10.2 said WP-C's tests must assert on the
+rendered label, never the raw key — which presupposes a label path.
+`RegistryHealth` has one (`registry_label`); `registry_order` and
+`elision_registry` do **not**, because the tree's node key *is* the root key
+and there is nothing else to assert.
+
+For those, deriving the expected value from `root_key()` (rather than
+hardcoding `"locator:ghcr.io/acme"`) satisfies the intent: it pins
+**behaviour** and leaves the encoding free to move at its one seam, which is
+what E-10.2 exists to protect. Hardcoding the tagged spelling in a consumer
+test is what stays forbidden.
+
+**3. `event.rs` and `update_check.rs` join WP-C's cell.** C-028 and the stub
+brief both said they "survive mechanically" — **wrong**. A literal
+`source: None` cannot survive `TuiRow.source` becoming a non-`Option` enum;
+they need a mechanical *edit*, not zero edits. The builder was right to make
+the substitution and right to flag it.
+
+Both are `src/tui/**`, no other package touches them, and the plan's Scope
+cell already reads "Registry identity in the TUI". The cell now says
+`src/tui/**` outright. Every change there is `None → RowSource::Unattributed`
+plus a test-module import — no semantics.
+
+### E-16 — two rulings from WP-C's Specify phase
+
+**1. E-15.2 extends to the four pre-existing `aggregate_registry_health`
+tests. Ratified.** `..._names_offline_truncated_and_filtered_sources_h5`,
+`..._names_a_source_an_exclude_only_filter_emptied_ha`,
+`..._never_blames_a_filter_it_cannot_prove_h5` and
+`..._names_a_filter_emptied_source_served_from_cache_w2` all assert the raw
+locator spelling of `RegistryHealth`, so C-024 turns them red. E-10.2's
+"assert the rendered label" is the wrong instrument here for a measurable
+reason: **their fixtures are unaliased**, so the rendered label is the bare
+locator under *both* keyings, and a label assertion would pass whether or not
+C-024 landed — silently deleting the guard at four of its six sites. Deriving
+from `key().root_key()` keeps them discriminating; mutations 3a/3b/3c confirm
+it, killing 4, 2 and 6 tests respectively.
+
+The rule stands where it bites: **hardcoding a tagged spelling in a consumer
+test stays forbidden.** Derivation is the substitute wherever no label path
+exists *or* where the fixture cannot distinguish the two keyings.
+
+**2. E-15.1's fold removal is an Implement obligation with no
+Specify-reachable assertion.** Deleting the fold at `tree.rs:~489` and
+`render.rs:766-769` breaks four existing tests —
+`two_namespaced_registries_no_duplicate_roots`,
+`bare_host_row_attributes_to_configured_namespaced_registry`,
+`overlapping_same_host_registries_attribute_to_most_specific`,
+`index_and_registry_rows_attribute_independently` — which pass bare locators
+through `registry_order` with `registry_locators: Vec::new()`. Implement must
+move those fixtures onto `registry_locators` in the same change.
+
+No test pins this, and none can: the fold's **presence** is unobservable (no
+reference can begin `alias:`/`locator:`), only its removal is. E-15.1 already
+called it inert-rather-than-wrong; this records that the inertness is exactly
+what puts it beyond a red-first gate. It is verified by the four tests going
+green again on corrected fixtures, not by a new assertion.
 
 ### E-4 — `config` exports no constructor for `Local` / `Unattributed`
 

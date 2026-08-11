@@ -6,14 +6,18 @@
 - **Parent plan:** meta-plan_promotion_1_0 (resume after `Step: finalized`)
 - **Active phase:** 1 — Execution (waves 1–3)
 - **Step:** `/hex-execute → Review-Fix Loop`
-- **Last update:** 2026-08-11 (after 244743b: **WP-A merged**. Stub →
-  Verify-Architecture → Specify → Implement → a six-perspective Review-Fix
-  round, converged with zero Block. Its post-stub architect pass found a real
-  Block in the design record itself — `RowSource::Alias` discarded the
-  locator, so S-022b merged two tree roots — fixed by re-stub before WP-C
-  could consume the type. Two contracts added during execution (C-031, C-032)
-  and fourteen edge cases resolved as E-1…E-14. WP-B is in its own
-  five-perspective review round)
+- **Last update:** 2026-08-11 (wave 1 complete: **WP-A merged** (`244743b`),
+  **WP-B merged** (`bd8c6b5`), full `task --force verify` green after each —
+  989 acceptance tests. Both ran Stub → Verify-Architecture → Specify →
+  Implement → a Review-Fix round, converging with zero Block. WP-A's post-stub
+  architect pass found a real Block in the design record itself —
+  `RowSource::Alias` discarded the locator, so S-022b merged two tree roots —
+  fixed by re-stub before WP-C could consume the type. WP-B's fix pass refuted
+  two findings with measurements: `value_cell`'s byte/char reading was already
+  correct, and E-14's supersession rested on a false premise (only *adjacent*
+  transpositions become type errors) — the reorder is kept for the weaker
+  reason. Two contracts added during execution (C-031, C-032) and fifteen edge
+  cases resolved as E-1…E-15. WP-C is in Specify)
 - **State:** executing
 - **Tier:** high
 - **Next:** `/hex-execute .agents/plans/plan_registry_filter_fixes.md`
@@ -105,8 +109,8 @@ S-019 … S-022b (identity) — full text in the design spec.
 | WP | Scope | Expected files | Size | Wave | Depends on | Review | Status |
 |---|---|---|---|---|---|---|---|
 | **WP-A** | The dual-candidate matcher, every call site, and the identity **type**. **C-001…C-011, C-022, C-023, C-027, C-029, C-030; S-001…S-011.** Includes the two-host fixture (C-009, land first within the WP), `RowSource` + `row_source_of` + both `key()` methods (C-022/C-023), and the `CatalogGroup.alias` lint removal (C-027) — so cluster C never touches these files. | `src/config/registry_filter.rs`, `src/catalog/catalog_service.rs`, `src/config/registry_resolve.rs`, `src/command/search.rs`, `src/tui/tree.rs`, `test/tests/test_index_source.py`, plus C-011's two verbatim copies at `docs/src/configuration.md:491` and `docs/src/commands.md:743` (E-13 — the parity test cannot pass across a wave boundary) | L | 1 | — | panel | **merged** (`bdd32f6`, merge `244743b`) |
-| **WP-B** | `--clear-include`/`--clear-exclude`, the surviving-mutant Block, and the `fields` write-report array. **C-013…C-021; S-012…S-018.** Touches no string that states cluster A's rule — the `--help` text moved to WP-D — so this WP is genuinely wave-1-independent. | `src/command/config.rs`, `src/api/config_report.rs`, `src/api.rs` (the three new type re-exports only — E-9) | M | 1 | — | panel | pending |
-| **WP-C** | Registry identity in the TUI: adopt `RowSource` as `TuiRow.source`, the health-line regression, `c019_filter_emptied`, the producer pin, the collision fix. **C-024, C-025, C-026, C-028; S-019…S-022b.** | `src/tui/app.rs`, `src/tui/state.rs`, `src/tui/render.rs`, `src/tui/tree.rs`, `src/tui/detail.rs` | M | 2 | WP-A | panel | pending |
+| **WP-B** | `--clear-include`/`--clear-exclude`, the surviving-mutant Block, and the `fields` write-report array. **C-013…C-021; S-012…S-018.** Touches no string that states cluster A's rule — the `--help` text moved to WP-D — so this WP is genuinely wave-1-independent. | `src/command/config.rs`, `src/api/config_report.rs`, `src/api.rs` (the three new type re-exports only — E-9) | M | 1 | — | panel | **merged** (`bd8c6b5`, merge `8095988`) |
+| **WP-C** | Registry identity in the TUI: adopt `RowSource` as `TuiRow.source`, the health-line regression, `c019_filter_emptied`, the producer pin, the collision fix. **C-024, C-025, C-026, C-028; S-019…S-022b.** | `src/tui/**` — chiefly `app.rs`, `state.rs`, `render.rs`, `tree.rs`, `detail.rs`, plus the mechanical `TuiRow.source` fixture updates in `event.rs` and `update_check.rs` (E-15). Also deletes WP-A's four `#[allow(dead_code)]` in `src/config/registry_resolve.rs` and `src/catalog/catalog_service.rs` — the one declared cross-package exception (E-11) | M | 2 | WP-A | panel | pending |
 | **WP-D** | Records and published surfaces, written from the landed code. **C-012** — its first-paragraph obligation on every restatement surface, **including the live `--help` text at `src/command/config.rs:104-116`** — plus **C-032** (the three surfaces this change invalidates: the `json-interface.md` write-report shape, the two clear flags in `commands.md`, and `registry set` in the catalog reference), the rule files and the ADR/plan amendments. Carries no S-ID: every scenario is pinned by the WP that implements it, and this WP changes no behaviour. | `src/command/config.rs` (the `--include`/`--exclude` doc comments and their pinning test only), `src/config/declaration.rs`, `src/command/config_keys.rs`, `docs/src/configuration.md`, `docs/src/commands.md`, `docs/src/json-interface.md` (E-9), `catalog/skills/grim-usage/references/registries.md`, `test/tests/test_registries.py` (the `_ns_rel` docstring only — C-032), `.claude/rules/arch-principles.md`, `.claude/rules/subsystem-cli-commands.md`, `.agents/adr/adr_registry_browse_filters.md`, `.agents/plans/plan_registry_browse_filters.md`, `.agents/adr/adr_registry_default_dedup.md` | M | 3 | WP-A, WP-B, WP-C | panel | pending |
 
 **ID coverage.** C-001…C-032 and S-001…S-022 (plus S-022b) each appear in
