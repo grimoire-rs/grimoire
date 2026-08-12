@@ -323,7 +323,12 @@ pub struct RenderModel {
     /// that fits the current terminal width, degrading down to `? help`
     /// on a very narrow terminal. Pure data — the width fit is mechanical.
     pub hint_tiers: Vec<String>,
-    /// The one-line glyph legend (what each status symbol means).
+    /// The one-line glyph legend (what each status symbol means), as plain
+    /// text. Derived from [`legend_line`] — the very line [`draw`] paints,
+    /// truncation hint included — because its only job is to be measured by
+    /// `draw`'s width gate. A restated literal here silently fell behind
+    /// `legend_entries` (it measured six glyphs against seven plus the
+    /// deprecation span) and the legend rendered clipped.
     pub legend: String,
     /// A short, unobtrusive hint shown when the browse window was truncated
     /// at the cap (the row list / search may be incomplete); empty when the
@@ -947,8 +952,11 @@ pub fn frame(state: &TuiState) -> RenderModel {
         status,
         hint,
         hint_tiers,
-        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed   † deprecated"
-            .to_string(),
+        legend: legend_line(&truncation_hint)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect(),
         truncation_hint,
         detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
@@ -1248,6 +1256,8 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     let avail = legend_chunk.width as usize;
     let hint = fit_hint(&model.hint_tiers, avail);
     let hint_w = hint.chars().count() as u16;
+    // `model.legend` is the plain text of the very line rendered below, so the
+    // fit decision measures what is actually painted.
     let legend_w = model.legend.chars().count();
     if legend_w + 2 + hint.chars().count() <= avail {
         let legend_row = Layout::default()
@@ -2368,6 +2378,57 @@ mod tests {
         assert!(
             with_hint.spans.last().unwrap().content.contains("(list truncated)"),
             "the trailing span carries the hint text"
+        );
+    }
+
+    #[test]
+    fn legend_width_gate_matches_what_legend_line_actually_renders() {
+        // Regression (C-012): `draw()` decides whether the glyph legend fits
+        // beside the key hint by measuring `model.legend.chars().count()` —
+        // but `model.legend` is a hardcoded string set in `frame()`, while the
+        // line actually painted is `legend_line(...)`, built from
+        // `legend_entries()` (now seven states, including `Pending`) plus a
+        // literal `† deprecated` span. The hardcoded string is narrower than
+        // what is drawn, so the gate can believe the legend fits when it does
+        // not, and the real line gets clipped — silently dropping the
+        // `Pending` explanation it exists to carry.
+        // `legend_line_appends_truncation_hint_only_when_present` (above)
+        // exercises `legend_line` itself but never touches the gate.
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        let model = frame(&s);
+
+        // Same measurement the gate uses (`draw()`'s `legend_w`).
+        let gate_width = model.legend.chars().count();
+        // Same content the gate is supposed to be measuring: what
+        // `legend_line` actually renders on screen, no truncation hint.
+        let rendered_width: usize = legend_line("").spans.iter().map(|s| s.content.chars().count()).sum();
+
+        assert_eq!(
+            gate_width, rendered_width,
+            "the width gate must measure the same string `legend_line` renders, not a stale hardcoded one \
+             (model.legend = {:?})",
+            model.legend
+        );
+
+        // The hint is part of the painted line, so it is part of what the gate
+        // must measure. Without this case, deriving `legend` from
+        // `legend_line("")` while `draw` keeps painting
+        // `legend_line(&model.truncation_hint)` passes — under-measuring by the
+        // hint's width, which is the same clipping bug one branch over.
+        s.truncated = true;
+        let truncated = frame(&s);
+        assert!(!truncated.truncation_hint.is_empty(), "precondition: a hint is set");
+        let rendered_truncated: usize = legend_line(&truncated.truncation_hint)
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert_eq!(
+            truncated.legend.chars().count(),
+            rendered_truncated,
+            "the gate must also cover the truncation hint the same line carries"
         );
     }
 

@@ -5601,6 +5601,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn perform_refuses_a_hand_edited_artifact_and_preserves_the_edit() {
+        // Regression (B5 / S-005): `perform` and its `perform_local*` siblings
+        // used to compute `is_update || force`, so ANY action reached through
+        // the "update" path force-overwrote a hand-edited materialized file
+        // regardless of the user's actual answer to the Overwrite dialog. All
+        // 93 pre-existing tests in this module call `perform` with
+        // `force = false` over freshly-installed, untampered fixtures — they
+        // never exercise a drifted file, so reverting the fix keeps every one
+        // of them green. The byte assertion below is the point: a refusal
+        // alone does not prove the user's edit survived, only that grim said
+        // no.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        // A plain skill install (not a bundle) — `registry_with_bundle`
+        // publishes the member skill "demo" standalone too.
+        let mut row = installed_row("localhost:5050/grimoire/skills/demo");
+        row.latest_tag = "1.0.0".to_string();
+        row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &row, None, &SilentProgress, false)
+            .await
+            .expect("skill install succeeds");
+
+        let materialized = workspace.join(".claude/skills/demo/SKILL.md");
+        assert!(materialized.is_file(), "the skill must materialize");
+
+        // Hand-edit the materialized file so its content hash drifts from the
+        // recorded one — the state a locally-modified row is in when the
+        // user presses `u`.
+        std::fs::write(&materialized, b"hand edited\n").unwrap();
+
+        // Re-run `perform` on the now-installed row (the shape a `u`-triggered
+        // update takes) with `force = false`, as if the Overwrite dialog has
+        // not yet been answered.
+        row.state = ArtifactState::Installed;
+        let summary = perform(&ctx, &row, None, &SilentProgress, false)
+            .await
+            .expect("a refusal is Ok(..) with forceable_refusal set, not Err(..)");
+
+        assert!(
+            summary.forceable_refusal.is_some(),
+            "a locally-modified artifact must refuse re-materialization without --force: {summary:?}"
+        );
+        assert_eq!(
+            std::fs::read(&materialized).unwrap(),
+            b"hand edited\n",
+            "a declined force-retry must not overwrite the user's edit"
+        );
+    }
+
+    #[tokio::test]
     async fn perform_uninstall_removes_bundle_members_and_declaration() {
         // The full inverse: deleting an installed bundle row removes the
         // member files + records, drops the `[bundles]` declaration, and
@@ -5755,6 +5808,80 @@ mod tests {
         );
         assert_eq!(lock.skills.len(), 1, "the member is expanded into the lock");
         assert_eq!(lock.skills[0].name, "demo");
+
+        // B5's second call site (`perform_local_declared`'s `force` argument):
+        // the same install → hand-edit → re-run shape the registry twin uses.
+        // Every assertion above stays green with that argument reverted to
+        // `is_update || force`; only the two below fail.
+        let materialized = workspace.join(".claude/skills/demo/SKILL.md");
+        std::fs::write(&materialized, b"hand edited\n").unwrap();
+
+        let summary = perform_local(&ctx, &row, &SilentProgress, false)
+            .await
+            .expect("a refusal is Ok(..) with forceable_refusal set, not Err(..)");
+        assert!(
+            summary.forceable_refusal.is_some(),
+            "a locally-modified member must refuse re-materialization without --force: {summary:?}"
+        );
+        assert_eq!(
+            std::fs::read(&materialized).unwrap(),
+            b"hand edited\n",
+            "a declined force-retry must not overwrite the user's edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn perform_local_refuses_a_hand_edited_dev_record_and_preserves_the_edit() {
+        use crate::config::path_source::PathSource;
+        use crate::lock::locked_source::LockedSource;
+
+        // B5's third call site (`perform_local_dev`'s `force` argument). A dev
+        // record re-materializes through its own `install_and_persist` call, so
+        // the two sibling tests say nothing about it.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        std::fs::create_dir_all(workspace.join("devskill")).unwrap();
+        std::fs::write(
+            workspace.join("devskill/SKILL.md"),
+            "---\nname: devskill\ndescription: d\n---\n# Body\n",
+        )
+        .unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        // Seed the record the way `grim install <path>` does: undeclared, so
+        // `perform_local` routes it to the Dev path. The hash passed here is
+        // never read — `perform_local_dev` re-packs the source for a fresh one.
+        let source = LockedSource::Path {
+            path: PathSource::parse("./devskill").unwrap(),
+            hash: crate::oci::Digest::Sha256(sha('a')),
+        };
+        perform_local_dev(&ctx, ArtifactKind::Skill, "devskill", &source, &SilentProgress, false)
+            .await
+            .expect("the dev record materializes");
+
+        let materialized = workspace.join(".claude/skills/devskill/SKILL.md");
+        assert!(materialized.is_file(), "the dev skill must materialize");
+        std::fs::write(&materialized, b"hand edited\n").unwrap();
+
+        // Re-run the way `u` does — through `perform_local`, which dispatches an
+        // undeclared dev record into `perform_local_dev`.
+        let mut row = installed_row("devskill");
+        row.repo = "devskill".to_string();
+        row.source = RowSource::Local;
+        let summary = perform_local(&ctx, &row, &SilentProgress, false)
+            .await
+            .expect("a refusal is Ok(..) with forceable_refusal set, not Err(..)");
+
+        assert!(
+            summary.forceable_refusal.is_some(),
+            "a locally-modified dev record must refuse re-materialization without --force: {summary:?}"
+        );
+        assert_eq!(
+            std::fs::read(&materialized).unwrap(),
+            b"hand edited\n",
+            "a declined force-retry must not overwrite the user's edit"
+        );
     }
 
     #[tokio::test]
