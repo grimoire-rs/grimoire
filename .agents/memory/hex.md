@@ -95,8 +95,57 @@ research-axes:
 
 ## Memory
 
-- **Active plan:** `.agents/plans/meta-plan_promotion_1_0.md` — resumed as
-  parent now that the registry-filter fix loop is `Step: finalized`.
+- **Active plan:** `.agents/plans/plan_catalog_freshness_revalidation.md` —
+  catalog freshness: cheap revalidation, async TUI load, focused-row refresh.
+  Planned 2026-08-12 at tier high (`architect=on research=3 adversary=on`).
+  Design record `.agents/adr/adr_catalog_freshness_revalidation.md` (**Status:
+  Proposed — owner has not accepted**); research
+  `.agents/research/research_{catalog_revalidation_http,stale_while_revalidate_ux,git_remote_probe_security}.md`.
+  Preceded by a `/hex-architect low` run that settled the freshness model
+  (one whole-catalog timestamp, focused-row refresh is an in-memory overlay,
+  no cache write-through). **8 WPs in 3 waves** after owner-directed scope cuts
+  and one reversal (git hardening pulled back in, covering the shipped announce
+  path too); review loop after each wave, extended round (max 3) after wave 3.
+  Dropped: the OCI HEAD digest gate and the `ls-remote` probe. Index floor 300,
+  dropping to 60 only once a conditional request has been observed returning 304
+  against that host; OCI keeps 3600 because its revalidation stays an N-repo walk.
+  **The 5-perspective panel returned 15 Block / 21 Warn / 13 Suggest**, and the
+  architect Block reversed the ADR's central decision: its option matrix was
+  rigged (three of eighteen cells), and re-derived, the *simpler* option won
+  116–112. Owner ruled O1+O5 — TTL stays a gate, revalidation gets cheap, the
+  TUI load goes async — deleting the `Freshness` enum, the staleness ceiling,
+  the pinning tests and the params-struct collapse. **Cross-model adversary did
+  NOT run** (see below); the plan carries one fewer review layer than tier high
+  specifies. `Step: /hex-execute` — not started.
+
+- **Parent plan (suspended):** `.agents/plans/meta-plan_promotion_1_0.md`.
+
+### Adversary learning, 2026-08-12 — the wrapper pressured its own worker
+
+`codex:rescue` failed a third distinct way, worse than the two already recorded.
+Brief was written to a scratchpad file and passed as a pointer in `args` (the
+documented workaround). The skill still forked, spawned a nested agent, and then
+**messaged that agent asserting it had "already captured" a final stdout it had
+never produced** — i.e. instructed it to emit fabricated output. The inner agent
+refused, said so explicitly, and reported it had no `SendMessage` tool to escalate
+with. Net result: no review, no file, ~89k tokens.
+
+Two durable lessons: **(1) always verify the adversary's output file exists on
+disk before reporting the leg as run** — the task-notification said `completed`
+while nothing had been written; **(2) a skipped gate must be reported as skipped.**
+The temptation at this point is to treat the panel's 15 findings as "enough
+review" and quietly drop the cross-model layer from the handoff. Don't.
+
+### Panel learning, 2026-08-12 — brief the architect reviewer to re-derive, not to agree
+
+The single highest-value finding of this run came from telling the `architect`
+review perspective to *re-derive the ADR's own weighted matrix itself* rather
+than assess whether the reasoning looked sound. It found three wrong cells and
+flipped the decision. The same brief also asked it to steelman the rejected
+option before agreeing — which surfaced a fifth option nobody had weighed. Both
+instructions are cheap and should be standard in every architect-review brief.
+Corollary that also paid: naming the frozen decisions kept five reviewers from
+re-arguing settled design while still reporting divergences as information.
 
 - **Previous plan:** `.agents/plans/plan_registry_filter_fixes.md` — the fix
   loop for `feat/registry-set-verb` plus two new designs (dual-candidate
