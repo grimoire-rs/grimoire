@@ -102,14 +102,52 @@ def test_status_reports_modified(
 def test_update_also_refuses_modified_without_force(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    """`update` runs the same integrity gate as `install`.
+
+    Regression: `update` used to pass a hard-coded `force = true` into the
+    installer, so a locally modified artifact was overwritten silently —
+    exit 0, no warning, no report field — while `install` refused the same
+    bytes with 65. Destroying a hand edit is the one thing `--force` exists
+    to gate, and update's own prune/reap passes already honour it.
+    """
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
     installed.write_text("hand edited\n")
-    # `update` re-materializes with force semantics for changed digests,
-    # but here the digest is unchanged and the file is locally modified —
-    # the rolling-release contract overwrites it. Assert it succeeds and
-    # restores canonical content (force is implied by update).
-    result = runner.run("update", check=False)
-    assert result.returncode == 0, result.stderr
+
+    refused = runner.run("update", check=False)
+    assert refused.returncode == 65, (
+        f"modified artifact must refuse update with 65, got "
+        f"{refused.returncode}; {refused.stderr}"
+    )
+    assert installed.read_text() == "hand edited\n", (
+        "a refused update must not overwrite the user's edit"
+    )
+
+    forced = runner.run("update", "--force", check=False)
+    assert forced.returncode == 0, forced.stderr
     assert installed.read_text().endswith("# canonical\n")
+
+
+def test_update_refusal_names_the_artifact_on_stderr(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The refused artifact is named, not just counted by the exit code.
+
+    `update` inspects only `Err` outcomes; a `Refused` one is `Ok(..)`, so
+    without explicit handling the refusal falls through as exit 0 with the
+    artifact silently unmaterialized. The refusal travels the same route as
+    `install`'s: an `IntegrityMismatch` carrying the artifact reference. The
+    report itself is discarded on the failing path (see `install::finish`),
+    so stderr is the whole signal.
+    """
+    runner, installed = _install_rule(
+        grim_at, project_dir, registry, unique_repo
+    )
+    installed.write_text("hand edited\n")
+
+    result = runner.run("update", check=False)
+    assert result.returncode == 65, result.stderr
+    assert "rust-style" in result.stderr, (
+        f"the refusal must name the artifact; got {result.stderr}"
+    )

@@ -1227,7 +1227,33 @@ fn integrity_gate(
         if present {
             let actual = out.current_hash(roots, Containment::AllowRelocatedAncestor)?;
             if actual != out.content_hash {
-                if !force {
+                // Refuse only when this pass would actually OVERWRITE the
+                // drifted file. Two kinds of drifted output are never written
+                // over, and each already has a mechanism that preserves it:
+                //
+                // - **A client outside the target set.** On a pin change
+                //   [`preserved_recorded_clients`] carries it forward verbatim;
+                //   without one it is simply not materialized. Its fate belongs
+                //   to `grim update`'s `reap_dropped_clients`, which preserves
+                //   it and reports `kept_modified_clients` unless `--force`.
+                // - **An output the layout moved away from.** The pass writes
+                //   the NEW path; [`reap_moved_outputs`] guard 4 preserves the
+                //   edited old copy and warns (ADR A7-a — no `--force`
+                //   override, deletion is the unrecoverable direction).
+                //
+                // Refusing over either would block the user behind a `--force`
+                // that then *deletes* the very edit the refusal was protecting.
+                //
+                // An unparsable / legacy client string stays conservative and
+                // still refuses: unknown scope is not evidence of being out of
+                // scope.
+                let would_overwrite = match out.client.parse::<crate::install::client_target::ClientTarget>() {
+                    Ok(client) => {
+                        target.clients().contains(&client) && output_at_current_layout(out, client, rec, target, roots)
+                    }
+                    Err(_) => true,
+                };
+                if !force && would_overwrite {
                     return Ok(Some(InstallOutcome::Refused {
                         recorded: out.content_hash.clone(),
                         actual,
@@ -4269,6 +4295,87 @@ mod tests {
             clients,
             vec!["claude"],
             "record reconciles to the resolvable client only (unresolvable copilot dropped)"
+        );
+    }
+
+    /// A drifted output is refused only when this pass would overwrite it.
+    ///
+    /// Targeted client ⇒ the pass writes that exact path ⇒ refuse (this is
+    /// the gate doing its job). Untargeted client ⇒ nothing is written there;
+    /// `preserved_recorded_clients` / `reap_dropped_clients` own that file, so
+    /// refusing would strand the user behind a `--force` that *deletes* the
+    /// edit the refusal was protecting.
+    #[tokio::test]
+    async fn integrity_gate_refuses_a_drifted_output_only_when_it_would_overwrite_it() {
+        async fn gate_outcome(drifted_client: ClientTarget) -> InstallOutcome {
+            let dir = tempfile::tempdir().unwrap();
+            let blob = rule_tar("rust-style", b"# rust\n");
+            let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+            let access = arc(BlobMock { blob: blob.clone() });
+            let m = DefaultMaterializer;
+            let roots = roots(dir.path());
+            let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+            // Both candidates anchor at Workspace, so the root always resolves
+            // and the tolerant `AnchorRootAbsent` arm never masks the result.
+            let relative = match drifted_client {
+                ClientTarget::Claude => ".claude/rules/rust-style.md",
+                _ => ".github/instructions/rust-style.instructions.md",
+            };
+            let on_disk = dir.path().join(relative);
+            std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+            std::fs::write(&on_disk, "hand edited\n").unwrap();
+
+            let prior_pin = PinnedIdentifier::try_from(
+                Identifier::new_registry("rust-style", "localhost:5000")
+                    .clone_with_digest(Digest::Sha256("a".repeat(64))),
+            )
+            .unwrap();
+            state.record(InstallRecord {
+                kind: ArtifactKind::Rule,
+                name: "rust-style".to_string(),
+                source: crate::lock::locked_source::LockedSource::Registry(prior_pin),
+                dev: false,
+                outputs: vec![ClientOutput {
+                    client: drifted_client.to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: relative.to_string(),
+                    },
+                    // Deliberately not the hash of "hand edited\n" ⇒ drift.
+                    content_hash: Digest::Sha256("b".repeat(64)),
+                    support_dir: None,
+                    entry: None,
+                    adopted: false,
+                }],
+            });
+
+            // Claude is the only targeted client in both runs.
+            let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+            let mut r = install_all(
+                &lock,
+                &access,
+                &m,
+                &target,
+                &mut state,
+                &roots,
+                std::path::Path::new("."),
+                false,
+            )
+            .await;
+            r.remove(0).result.expect("the gate must not hard-fail")
+        }
+
+        assert!(
+            matches!(gate_outcome(ClientTarget::Claude).await, InstallOutcome::Refused { .. }),
+            "a targeted client's drifted output is about to be overwritten — refuse it"
+        );
+        assert!(
+            !matches!(
+                gate_outcome(ClientTarget::Copilot).await,
+                InstallOutcome::Refused { .. }
+            ),
+            "an untargeted client's drifted output is never written over — the reaper owns it"
         );
     }
 

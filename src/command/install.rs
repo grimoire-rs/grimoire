@@ -21,6 +21,7 @@ use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
+use crate::oci::ArtifactRef;
 
 use super::scope_resolution::{self, ResolvedScope};
 
@@ -376,27 +377,9 @@ pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallR
             Ok(InstallOutcome::Updated) => InstallStatus::Updated,
             Ok(InstallOutcome::AlreadyInstalled) => InstallStatus::Unchanged,
             Ok(InstallOutcome::Skipped(_)) => InstallStatus::Skipped,
-            Ok(InstallOutcome::Refused { recorded, actual }) => {
+            Ok(outcome @ (InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. })) => {
                 if first_error.is_none() {
-                    let r = reference.clone();
-                    first_error = Some(crate::error::Error::from(
-                        crate::install::install_error::InstallError::with_reference(
-                            r,
-                            crate::install::install_error::InstallErrorKind::IntegrityMismatch { recorded, actual },
-                        ),
-                    ));
-                }
-                InstallStatus::Refused
-            }
-            Ok(InstallOutcome::RefusedUntracked { client, path }) => {
-                if first_error.is_none() {
-                    let r = reference.clone();
-                    first_error = Some(crate::error::Error::from(
-                        crate::install::install_error::InstallError::with_reference(
-                            r,
-                            crate::install::install_error::InstallErrorKind::UntrackedDestination { client, path },
-                        ),
-                    ));
+                    first_error = refusal_error(reference.clone(), outcome);
                 }
                 InstallStatus::Refused
             }
@@ -420,6 +403,26 @@ pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallR
         return Err(err.into());
     }
     Ok((report, ExitCode::Success))
+}
+
+/// Build the integrity error for a refusing [`InstallOutcome`], or `None`
+/// for any outcome that is not a refusal.
+///
+/// Shared by [`finish`] and `grim update`: both run the same integrity gate
+/// and must produce the same error — and therefore the same exit code (65)
+/// and the same artifact-naming message — for the same on-disk situation.
+/// `update` used to be unable to reach here at all (it forced
+/// unconditionally); keeping one constructor is what stops the two commands
+/// from drifting apart again.
+pub(crate) fn refusal_error(reference: ArtifactRef, outcome: InstallOutcome) -> Option<crate::error::Error> {
+    use crate::install::install_error::{InstallError, InstallErrorKind};
+
+    let kind = match outcome {
+        InstallOutcome::Refused { recorded, actual } => InstallErrorKind::IntegrityMismatch { recorded, actual },
+        InstallOutcome::RefusedUntracked { client, path } => InstallErrorKind::UntrackedDestination { client, path },
+        _ => return None,
+    };
+    Some(crate::error::Error::from(InstallError::with_reference(reference, kind)))
 }
 
 #[cfg(test)]

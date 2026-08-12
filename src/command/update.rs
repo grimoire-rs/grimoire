@@ -6,9 +6,17 @@
 //! With no names, the whole declared set is re-resolved (`resolve_lock`);
 //! with names, only those are re-resolved (`resolve_lock_partial`, which
 //! enforces the stale-lock guard ⇒ exit 65). The new lock is written, then
-//! `install_all(force)` re-materializes any artifact whose digest changed
-//! (rolling release). Each row reports the old/new digest and whether the
-//! pin changed.
+//! `install_all(args.force)` re-materializes any artifact whose digest
+//! changed (rolling release). Each row reports the old/new digest and
+//! whether the pin changed.
+//!
+//! `update` runs the **same** local-modification integrity gate as `grim
+//! install`: a new pin overwrites machine-managed content with no flag, but
+//! an artifact whose on-disk bytes drifted from the recorded hash is refused
+//! (exit 65) until `--force`. Both of update's destructive reconciliation
+//! passes — `prune_orphans` and `reap_dropped_clients` — gate on the same
+//! flag, so one `--force` governs every way this command can destroy
+//! hand-edited work.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,7 +49,9 @@ pub struct UpdateArgs {
     /// Specific artifact names to update; empty ⇒ update everything.
     pub names: Vec<String>,
 
-    /// Overwrite a locally modified artifact instead of refusing it.
+    /// Overwrite a locally modified artifact instead of refusing it, and
+    /// delete a locally modified orphan or dropped-client output instead of
+    /// preserving it.
     #[arg(long)]
     pub force: bool,
 
@@ -58,7 +68,9 @@ pub struct UpdateArgs {
 /// # Errors
 ///
 /// Lock/resolve failures (78/79/80/69/75), partial stale-lock (65), or
-/// integrity/I-O failures propagate via the typed chain.
+/// integrity/I-O failures propagate via the typed chain. A locally modified
+/// artifact refuses with an integrity mismatch (65) unless `--force`, the
+/// same gate and exit code `grim install` applies.
 pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -116,10 +128,20 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
-    // Re-materialize with force so a changed digest (rolling release)
-    // overwrites the prior machine-managed content; `--force` is implied
-    // by `update` (the Phase-4 rolling-release contract). A user edit is
-    // overwritten — `status` still surfaces it as `modified` beforehand.
+    // Re-materialize through the SAME integrity gate `grim install` runs:
+    // `args.force`, never a hard-coded `true`.
+    //
+    // A changed digest (rolling release) still overwrites prior
+    // machine-managed content without any flag — the gate only refuses when
+    // the on-disk bytes drifted from what was RECORDED, which is a hand edit,
+    // not a new pin. What `--force` now governs is exactly that hand edit.
+    //
+    // This used to pass `true` unconditionally, so a locally modified artifact
+    // was overwritten silently (exit 0, no warning, no report row) while
+    // `grim install` refused the identical bytes with 65 — and update's own
+    // prune/reap passes below already honoured `--force` for the same
+    // "do not destroy hand-edited work" reason. One command, two opposite
+    // answers about one file.
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -140,7 +162,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &mut state,
         &scope.roots,
         scope.config_dir(),
-        true,
+        args.force,
         InstallIntent::Declared,
         progress.as_ref(),
     )
@@ -273,13 +295,23 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     }
 
     // Build the report before surfacing any error so it reflects the new
-    // lock; then propagate the first hard install error if there was one.
-    // (`update` forces re-materialization, so there are no `Refused`
-    // outcomes — a hard error is a fetch/IO/integrity failure.)
+    // lock; then propagate the first install failure if there was one.
+    //
+    // A refusal is `Ok(InstallOutcome::Refused { .. })`, NOT `Err` — so
+    // inspecting only the `Err` arm would let a locally-modified artifact
+    // pass as exit 0 while it was silently left unmaterialized, which is a
+    // worse failure than the unconditional overwrite this replaced. Route it
+    // through `install`'s own error constructor so both commands answer the
+    // same on-disk situation with the same error, message and exit code (65).
     let report = build_report(&new_lock, previous.as_ref(), &pruned, &reaped);
     for o in outcomes {
-        if let Err(e) = o.result {
-            return Err(e.into());
+        match o.result {
+            Err(e) => return Err(e.into()),
+            Ok(outcome) => {
+                if let Some(e) = super::install::refusal_error(o.reference, outcome) {
+                    return Err(e.into());
+                }
+            }
         }
     }
 
