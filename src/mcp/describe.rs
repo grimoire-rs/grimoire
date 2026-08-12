@@ -27,7 +27,14 @@ pub async fn describe(ctx: &Context, args: &DescribeToolArgs) -> anyhow::Result<
         args.scope.config.as_deref(),
         args.scope.workspace.as_deref(),
     )?;
-    let access = crate::command::access_seam(ctx)?;
+    // Same three scope arguments as the browse set above: the transport
+    // exception list and the browse set are two answers about one scope.
+    let access = crate::command::access_seam_scoped(
+        ctx,
+        args.scope.global(),
+        args.scope.config.as_deref(),
+        args.scope.workspace.as_deref(),
+    )?;
     crate::fetch::describe_artifact(&scope, &access, &args.reference).await
 }
 

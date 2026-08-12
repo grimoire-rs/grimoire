@@ -77,7 +77,14 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         args.scope.config.as_deref(),
         args.scope.workspace.as_deref(),
     )?;
-    let access = crate::command::access_seam(ctx)?;
+    // Same three scope arguments as the browse set above: the transport
+    // exception list and the browse set are two answers about one scope.
+    let access = crate::command::access_seam_scoped(
+        ctx,
+        args.scope.global(),
+        args.scope.config.as_deref(),
+        args.scope.workspace.as_deref(),
+    )?;
     let fetched = fetch_artifact(&scope, &access, &args.reference, Some(INSTALL_LAYER_SIZE_LIMIT)).await?;
     // A description companion never materializes files; render only ever
     // fetches a real, installable kind.

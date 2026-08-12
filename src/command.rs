@@ -569,9 +569,36 @@ pub fn access_seam(ctx: &crate::context::Context) -> anyhow::Result<std::sync::A
     map_access_io(ctx, ctx.access(plain_http))
 }
 
+/// [`access_seam`] for a caller that resolved its own scope rather than
+/// inheriting the launch scope — the MCP tools, whose scope is a per-call
+/// parameter trio (`adr_mcp_percall_scope_fetch_render.md`).
+///
+/// The arguments are the same three `resolve_fetch_scope` takes, and both
+/// must be called with the same values: the browse set and the transport
+/// exception list are two answers about **one** scope, and resolving them
+/// from different scopes is how a project's `insecure` opt-in ends up
+/// downgrading a call scoped to a different project.
+///
+/// # Errors
+///
+/// A `$GRIM_HOME` layout I/O failure (exit 74), as [`access_seam`].
+pub fn access_seam_scoped(
+    ctx: &crate::context::Context,
+    global: bool,
+    config: Option<&std::path::Path>,
+    workspace: Option<&std::path::Path>,
+) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
+    let plain_http = crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure_hosts(
+        ctx, global, config, workspace,
+    ));
+    map_access_io(ctx, ctx.access(plain_http))
+}
+
 /// The complete plain-HTTP exception list for this invocation: the implicit
 /// loopback forms, every `GRIM_INSECURE_REGISTRIES` entry, and the locator
-/// host of every resolved `[[registries]]` entry that set `insecure = true`.
+/// host of every **declared** `[[registries]]` entry that set
+/// `insecure = true` — see [`declared_insecure_hosts`] for why "declared"
+/// and not "resolved" is the load-bearing word.
 ///
 /// This is where config re-enters a decision `Context` cannot make on its
 /// own — it holds env reads only, by design. The two consumers are
@@ -579,26 +606,75 @@ pub fn access_seam(ctx: &crate::context::Context) -> anyhow::Result<std::sync::A
 /// both take the finished list rather than re-deriving it, so the scheme
 /// decision stays single-sourced.
 ///
+/// Memoized on the context for the launch scope: the answer cannot change
+/// within one invocation, and computing it costs a `GlobalConfig::load`
+/// that compiles every browse-filter glob. A caller with its **own** scope
+/// (the MCP tools) must use [`access_seam_scoped`], which skips the memo.
+///
 /// **Infallible.** A command that browses outside a project, or against an
 /// unreadable global config, must not fail *here* — it has its own error
 /// path for that, reached moments later. An unresolvable scope contributes
 /// nothing and leaves the env-var and loopback halves intact, which is
 /// exactly the behaviour that shipped before the config field existed.
 pub fn plain_http_hosts(ctx: &crate::context::Context) -> Vec<String> {
-    let scope = scope_resolution::resolve(ctx, ctx.global(), ctx.config()).ok();
-    let registries = match &scope {
-        Some(scope) => registries_for_scope(ctx, scope),
-        None => registries_global_fallback(ctx),
-    }
-    .unwrap_or_default();
-    let declared: Vec<String> = registries
+    ctx.plain_http_memo()
+        .get_or_init(|| {
+            crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure_hosts(
+                ctx,
+                ctx.global(),
+                ctx.config(),
+                None,
+            ))
+        })
+        .clone()
+}
+
+/// The locator hosts of every `[[registries]]` entry that **declared**
+/// `insecure = true`, across the project and global tiers of one scope.
+///
+/// Read straight off the declared [`crate::config::declaration::RegistryConfig`]
+/// entries, deliberately **not** off [`crate::config::resolve_registries`].
+/// That resolver answers a different question — *which registries do I
+/// browse, in what order* — and to answer it correctly it collapses to the
+/// `--registry` forced set, dedups a shadowed alias across scopes, and
+/// elects a primary. Every one of those is right for a browse set and wrong
+/// for a transport allowlist, which is a plain union that nothing narrows:
+/// `--registry ghcr.io` must not silently re-arm TLS against an unrelated
+/// host the config declared plain-HTTP, and an entry hidden by a
+/// same-alias entry in the other scope is still a host the user opted in.
+///
+/// An `index` entry contributes nothing — an index locator carries its own
+/// `http(s)://` scheme, so the flag is rejected on one at config load.
+///
+/// **Infallible.** A command that browses outside a project, or against an
+/// unreadable global config, must not fail *here* — it has its own error
+/// path for that, reached moments later. An unresolvable scope contributes
+/// nothing and leaves the env-var and loopback halves intact, which is
+/// exactly the behaviour that shipped before the config field existed.
+fn declared_insecure_hosts(
+    ctx: &crate::context::Context,
+    global: bool,
+    config: Option<&std::path::Path>,
+    workspace: Option<&std::path::Path>,
+) -> Vec<String> {
+    let scope = scope_resolution::resolve_in(ctx, global, config, workspace).ok();
+    let project = scope.as_ref().map(|s| s.registries.as_slice()).unwrap_or_default();
+    let scope_kind = scope
+        .as_ref()
+        .map_or(crate::config::scope::ConfigScope::Project, |s| s.scope);
+    let global_entries = global_config_tiers(ctx, scope_kind)
+        .map(|(registries, _)| registries)
+        .unwrap_or_default();
+
+    project
         .iter()
-        .filter(|r| r.insecure)
+        .chain(global_entries.iter())
+        .filter(|rc| rc.insecure)
+        .filter_map(|rc| rc.oci.as_deref())
         // The locator host without its namespace, and *with* its port —
         // `HttpsExcept` matches the exact `host[:port]` a request carries.
-        .map(|r| crate::oci::access::registry_client::registry_host(&r.url).to_string())
-        .collect();
-    crate::oci::access::registry_client::plain_http_hosts_with(&declared)
+        .map(|locator| crate::oci::access::registry_client::registry_host(locator).to_string())
+        .collect()
 }
 
 fn map_access_io(
@@ -1233,5 +1309,119 @@ mod tests {
         );
         let hosts = plain_http_hosts(&ctx);
         assert!(!hosts.iter().any(|h| h.contains("index.example")), "got: {hosts:?}");
+    }
+
+    /// The regression this whole seam was rebuilt for.
+    ///
+    /// `--registry` collapses the *browse set* to synthesized entries that
+    /// carry no config fields — correct for browsing, catastrophic for
+    /// transport. While the exception list was derived from
+    /// `resolve_registries`, any `--registry` value (even one naming an
+    /// unrelated registry) emptied the config half of the list for the whole
+    /// invocation, so a declared plain-HTTP host had TLS attempted against
+    /// it and every network command failed at exit 69.
+    ///
+    /// The list is a union that nothing narrows. Both cases below returned
+    /// the bare implicit set before the fix.
+    #[test]
+    fn registry_flag_never_shrinks_the_plain_http_set() {
+        let body = "[skills]\n\n[rules]\n\n[[registries]]\nalias = \"local\"\n\
+                    oci = \"registry.internal:5050/grimoire\"\ninsecure = true\n";
+        for flag in [
+            // Pinning the very host that opted in.
+            "registry.internal:5050/grimoire",
+            // Pinning something else entirely — still must not disarm it.
+            "ghcr.io/acme",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let config_path = tmp.path().join("grimoire.toml");
+            std::fs::write(&config_path, body).unwrap();
+            let grim_home = tmp.path().join("grim-home");
+            std::fs::create_dir_all(&grim_home).unwrap();
+            let ctx = Context::hermetic_scoped(grim_home, false, Some(config_path))
+                .with_registry_flags(vec![flag.to_string()]);
+            assert!(
+                plain_http_hosts(&ctx).contains(&"registry.internal:5050".to_string()),
+                "--registry {flag} must not disarm a config-declared plain-HTTP host"
+            );
+        }
+    }
+
+    /// `access_seam` must hand the resolved list to the client, not compute
+    /// and discard it.
+    ///
+    /// Mutation testing found this unobservable: reverting `access_seam` to
+    /// the pre-feature global list left all 2648 unit tests and 1003 running
+    /// acceptance tests green, because every assertion targeted the list
+    /// *builder*.
+    #[test]
+    fn access_seam_hands_the_declared_hosts_to_the_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_project_config(
+            &tmp,
+            "[skills]\n\n[rules]\n\n[[registries]]\nalias = \"local\"\n\
+             oci = \"registry.internal:5050/grimoire\"\ninsecure = true\n",
+        );
+        access_seam(&ctx).expect("the seam builds against a temp $GRIM_HOME");
+        let seen = ctx.plain_http_seen();
+        assert_eq!(seen.len(), 1, "exactly one client build; got {seen:?}");
+        assert!(
+            seen[0].contains(&"registry.internal:5050".to_string()),
+            "the declared host must reach the OCI client, not just the builder; got: {seen:?}"
+        );
+    }
+
+    /// The MCP tools resolve their scope per tool call, so their transport
+    /// must follow *that* scope — not the scope the server was launched in.
+    ///
+    /// Before the fix the browse set came from the call's `workspace`/
+    /// `config` arguments while the exception list came from the server's
+    /// own cwd, so one project's `insecure` downgraded a call scoped to
+    /// another project, and that other project's own opt-in was inert.
+    #[test]
+    fn a_scoped_resolve_reads_the_scope_it_was_given_not_the_launch_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = |host: &str| {
+            format!("[skills]\n\n[rules]\n\n[[registries]]\nalias = \"local\"\noci = \"{host}\"\ninsecure = true\n")
+        };
+        let launch = tmp.path().join("launch");
+        let other = tmp.path().join("other");
+        for (dir, host) in [(&launch, "launch.internal:5050"), (&other, "other.internal:5051")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("grimoire.toml"), entry(host)).unwrap();
+        }
+        let grim_home = tmp.path().join("grim-home");
+        std::fs::create_dir_all(&grim_home).unwrap();
+        let ctx = Context::hermetic_scoped(grim_home, false, Some(launch.join("grimoire.toml")));
+
+        // The launch scope answers for the unscoped seam…
+        assert!(plain_http_hosts(&ctx).contains(&"launch.internal:5050".to_string()));
+
+        // …and a call naming another project answers for that one, only.
+        let scoped = declared_insecure_hosts(&ctx, false, Some(&other.join("grimoire.toml")), None);
+        assert_eq!(
+            scoped,
+            vec!["other.internal:5051".to_string()],
+            "a per-call scope must not inherit the launch scope's opt-in, nor lose its own"
+        );
+    }
+
+    /// The infallibility guarantee, on the branch that can actually fail.
+    ///
+    /// The absent-config case does not reach it — an absent global config is
+    /// `Ok`. A *malformed* one is the error branch, and a `?` or `.expect()`
+    /// here would turn it into a hard failure of every command that touches
+    /// the network, including ones pointed elsewhere with `--config`.
+    #[test]
+    fn plain_http_hosts_degrades_when_the_global_config_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), MALFORMED_GLOBAL_CONFIG).unwrap();
+        let missing = tmp.path().join("nowhere").join("grimoire.toml");
+        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing));
+        assert_eq!(
+            plain_http_hosts(&ctx),
+            crate::oci::access::registry_client::plain_http_hosts(),
+            "an unreadable global config must contribute nothing, not fail here"
+        );
     }
 }

@@ -48,11 +48,32 @@ pub struct Context {
     global: bool,
     /// The `--config` flag: an explicit project config path.
     config: Option<PathBuf>,
+    /// Per-invocation memo for the launch-scope plain-HTTP exception list.
+    ///
+    /// Not config on the context — a cache of one already-computed answer.
+    /// Resolving it costs a `GlobalConfig::load`, which compiles every
+    /// browse-filter glob; ~20 command sites build the OCI seam, and
+    /// `publish` builds one per manifest entry, so recomputing it per call
+    /// re-pays that compile N times for an answer that cannot change within
+    /// one invocation. Filled by `command::plain_http_hosts`, which is the
+    /// only writer. A **scoped** resolve (the MCP per-call scope) bypasses
+    /// this deliberately — its answer is not the launch scope's.
+    plain_http: std::sync::OnceLock<Vec<String>>,
     /// Test-only injected `OciAccess` override.  When `Some`, `access()`
     /// returns this instead of constructing a real `CachedAccess`.  Only
     /// compiled in test builds (`#[cfg(test)]`).
     #[cfg(test)]
     test_access: Option<Arc<dyn OciAccess>>,
+    /// Test-only record of every plain-HTTP exception list handed to
+    /// [`Self::access`].
+    ///
+    /// Without it the wiring is unobservable: a mutation making
+    /// `command::access_seam` compute the list and then discard it — the
+    /// feature's central behaviour removed — left the entire unit suite
+    /// green, because every test asserted on the *list builder* and none on
+    /// what the client was actually built with.
+    #[cfg(test)]
+    plain_http_seen: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl std::fmt::Debug for Context {
@@ -80,8 +101,13 @@ impl Clone for Context {
             progress: self.progress,
             global: self.global,
             config: self.config.clone(),
+            // A fresh memo: a clone may be re-scoped by its new owner, and a
+            // stale plain-HTTP list is the one thing that must never ride along.
+            plain_http: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_access: self.test_access.clone(),
+            #[cfg(test)]
+            plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -103,8 +129,11 @@ impl Context {
             progress: options.progress,
             global: options.global,
             config: options.config.clone(),
+            plain_http: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_access: None,
+            #[cfg(test)]
+            plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -165,6 +194,16 @@ impl Context {
         self.config.as_deref()
     }
 
+    /// The per-invocation memo backing [`crate::command::plain_http_hosts`].
+    ///
+    /// Exposed rather than filled here because computing the value needs the
+    /// config layer, which `Context` deliberately does not reach into (env
+    /// reads only — see the type docs). `command` owns the computation and
+    /// this owns the lifetime.
+    pub fn plain_http_memo(&self) -> &std::sync::OnceLock<Vec<String>> {
+        &self.plain_http
+    }
+
     /// The resolved cache-routing mode for this invocation: `Offline` when
     /// the invocation is offline, otherwise the always-fresh `Online`
     /// default. See [`AccessMode`].
@@ -202,6 +241,11 @@ impl Context {
     /// created. Callers route it through the install-tier `TargetIo` error
     /// so it classifies as an I/O exit code, not the generic fall-through.
     pub fn access(&self, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
+        #[cfg(test)]
+        self.plain_http_seen
+            .lock()
+            .expect("plain-HTTP record mutex poisoned by a panicking test")
+            .push(plain_http.clone());
         #[cfg(test)]
         if let Some(ref injected) = self.test_access {
             return Ok(Arc::clone(injected));
@@ -243,7 +287,9 @@ impl Context {
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
+            plain_http: std::sync::OnceLock::new(),
             test_access: None,
+            plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -256,6 +302,24 @@ impl Context {
             config,
             ..Self::hermetic(grim_home)
         }
+    }
+
+    /// Set the `--registry` flag values on a hermetic context, so a test can
+    /// assert what the flag does (and, for the transport exception list,
+    /// what it must *not* do) without mutating the process environment.
+    pub fn with_registry_flags(mut self, flags: Vec<String>) -> Self {
+        self.registry_flag = flags;
+        self
+    }
+
+    /// Every plain-HTTP exception list [`Self::access`] was handed, in call
+    /// order. The observable that makes the config→transport wiring
+    /// testable — see the field docs.
+    pub fn plain_http_seen(&self) -> Vec<Vec<String>> {
+        self.plain_http_seen
+            .lock()
+            .expect("plain-HTTP record mutex poisoned by a panicking test")
+            .clone()
     }
 
     /// Test-only constructor that injects a custom [`OciAccess`] override.
@@ -277,7 +341,9 @@ impl Context {
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
+            plain_http: std::sync::OnceLock::new(),
             test_access: Some(Arc::new(access)),
+            plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -297,7 +363,9 @@ impl Context {
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
+            plain_http: std::sync::OnceLock::new(),
             test_access: Some(Arc::new(access)),
+            plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
