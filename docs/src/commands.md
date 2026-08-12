@@ -351,12 +351,19 @@ forceable refusals are marked with
 `anchor-escape` is not, so a consumer must key on that field rather than on
 the shared exit code 65.
 
-The declared name is a unique key per kind: re-running `add` with a
-`(kind, name)` pair that is already declared under a *different* reference
-refuses (exit 64) instead of silently replacing it, and names the existing
-reference in the error. Pass `--name` to bind the new reference under a
-different name. Re-declaring the exact same reference stays a no-op
+Re-running `add` on a binding that already exists **re-pins** it, as long as
+the reference names the same repository: `grim add acme/code-review:2` after
+`grim add acme/code-review:1` switches the declaration, the lock, and the
+installed files to version 2. Pinning a floating tag to a digest (or back)
+works the same way. Re-declaring the exact same reference stays a no-op
 overwrite.
+
+The declared name is still a unique key per kind, so a *different repository*
+— another registry host, another repository path, or a [local path
+source](#add-path) where a registry reference was declared — refuses
+(exit 64) instead of silently taking over the binding, and names the existing
+reference in the error. Pass `--name` to bind that reference under a different
+name.
 
 A skill, rule, or agent binding name becomes the install directory or
 file name, so it must satisfy the [artifact name

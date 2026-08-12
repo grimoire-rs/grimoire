@@ -147,6 +147,57 @@ def test_add_same_name_conflicting_reference_refuses(
     assert "vendor-b" not in cfg
 
 
+def test_add_repins_declared_artifact_to_new_tag(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`add <repo>:<newtag>` on an already-declared binding re-pins it.
+
+    The conflict guard protects a binding from a *different repository*, not
+    from a version switch on the artifact the caller already owns. The
+    version must land on disk, not just in the config and lock — the whole
+    point of the operation is that the client sees the new content.
+    """
+    repo = f"{unique_repo}/code-review"
+    v1 = make_artifact(
+        repo,
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR v1\n"},
+        tag="1.0.0",
+    )
+    v2 = make_artifact(
+        repo,
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR v2\n"},
+        tag="2.0.0",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    first = runner.json("add", v1.fq)
+    installed = project_dir / ".claude/skills/code-review/SKILL.md"
+    assert "# CR v1" in installed.read_text()
+
+    # The re-pin: same repository, different tag. Previously exit 64.
+    second = runner.json("add", v2.fq)
+    assert second["status"] == "added"
+    assert second["pinned"] != first["pinned"], (
+        "a re-pin must resolve to the new version's digest"
+    )
+
+    # One binding, now pointing at the new tag.
+    cfg = (project_dir / "grimoire.toml").read_text()
+    assert "2.0.0" in cfg
+    assert "1.0.0" not in cfg
+    bindings = [line for line in cfg.splitlines() if line.startswith("code-review = ")]
+    assert len(bindings) == 1, f"re-pin must not add a second binding: {cfg}"
+
+    # The materialized file carries the new content — config and lock
+    # assertions alone would not prove the client sees the switch.
+    assert "# CR v2" in installed.read_text()
+    cr = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
+    assert cr["state"] == "installed"
+
+
 def test_add_same_name_same_reference_is_idempotent(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

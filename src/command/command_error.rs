@@ -44,11 +44,15 @@ pub enum CommandError {
     KindInferenceFailed { reference: String },
 
     /// `add` declared a `(kind, name)` that already exists in the config
-    /// bound to a *different* identifier. The declared name is a true
-    /// per-scope-unique key, so a silent overwrite would clobber the
-    /// existing binding without the caller's awareness. Re-declaring the
-    /// *same* identifier never reaches this variant — that path stays the
-    /// pre-existing idempotent overwrite (exit 0). Exit 64: the same
+    /// bound to a *different repository* — another `registry/repository`,
+    /// or a path source where a registry reference was requested (and the
+    /// reverse). The declared name is a true per-scope-unique key, so a
+    /// silent overwrite would hand one publisher's binding to another
+    /// artifact without the caller's awareness. A same-repository tag or
+    /// digest change never reaches this variant: that is a deliberate
+    /// re-pin of the artifact the caller already declared, and stays the
+    /// idempotent overwrite (exit 0), as does re-declaring the identical
+    /// reference. Exit 64: the same
     /// "conflicting invocation, fix and retry" contract as
     /// [`crate::config::config_error::ConfigErrorKind::ConfigAlreadyExists`].
     #[error(

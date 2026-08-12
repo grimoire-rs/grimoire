@@ -208,17 +208,19 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     }
 
     // At 1.0 a declared name is a true per-scope-unique key: declaring
-    // `(kind, name)` against a *different* identifier than what is already
-    // declared must refuse loudly rather than silently clobber it.
-    // Re-declaring the *same* identifier stays the pre-existing idempotent
-    // overwrite. The check runs on the local clone before any write, so a
+    // `(kind, name)` against a *different repository* than what is already
+    // declared must refuse loudly rather than silently clobber it. A
+    // same-repository tag or digest change is the opposite case — a
+    // deliberate re-pin of the artifact the caller already owns — and
+    // overwrites idempotently, as does re-declaring the identical
+    // reference. The check runs on the local clone before any write, so a
     // refusal leaves the on-disk config and lock untouched.
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
     reject_dev_install_collision(&scope, kind, &name)?;
 
     let mut set = scope.set.clone();
     if let Some(existing) = declare(&mut set, kind, name.clone(), id.clone())
-        && existing.identifier() != Some(&id)
+        && !same_repository(&existing, &id)
     {
         return Err(anyhow::Error::from(crate::error::Error::from(
             CommandError::DeclareConflict {
@@ -502,8 +504,11 @@ async fn add_path_source(
     };
     let declared = crate::config::declaration::DeclaredSource::Path(source);
 
-    // Same-name conflict guard as the registry path: re-declaring the
-    // identical source is idempotent, anything else refuses loudly.
+    // Same-name conflict guard, on full-source equality rather than the
+    // registry path's repository comparison: a path pins by content hash and
+    // carries no tag, so there is no "same source, new version" to admit
+    // here. Re-declaring the identical path is idempotent, anything else
+    // refuses loudly.
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
     reject_dev_install_collision(scope, kind, &name)?;
 
@@ -711,6 +716,21 @@ pub(crate) fn declare(
     };
     set.invalidate_declaration_hash_cache();
     previous
+}
+
+/// True when `existing` declares the same `registry/repository` as
+/// `requested` — a re-pin to a different tag or digest, not a name
+/// collision.
+///
+/// The declare-conflict guard's job is to stop one publisher's binding from
+/// being taken over by a *different* artifact; a version switch on the
+/// artifact the caller already declared is not that. A path-sourced
+/// `existing` never matches: paths pin by content hash and have no tag
+/// keyspace, so a registry reference cannot be the same source.
+fn same_repository(existing: &crate::config::declaration::DeclaredSource, requested: &Identifier) -> bool {
+    existing
+        .identifier()
+        .is_some_and(|e| e.registry_repository() == requested.registry_repository())
 }
 
 /// Re-lock after declaring `(kind, name)`: a bundle always full-resolves
@@ -1098,6 +1118,64 @@ mod tests {
             set.skills.get("code-review"),
             Some(&crate::config::declaration::DeclaredSource::Registry(second))
         );
+    }
+
+    /// A registry declaration of `reference`, as `declare` would have left it.
+    fn declared(reference: &str) -> crate::config::declaration::DeclaredSource {
+        crate::config::declaration::DeclaredSource::Registry(Identifier::parse(reference).unwrap())
+    }
+
+    #[test]
+    fn same_repository_accepts_a_tag_change_on_one_repository() {
+        // The re-pin case: the binding keeps pointing at the artifact the
+        // caller already owns, at a different version.
+        let existing = declared("ghcr.io/acme/code-review:latest");
+        let requested = Identifier::parse("ghcr.io/acme/code-review:0.9.0").unwrap();
+        assert!(same_repository(&existing, &requested));
+    }
+
+    #[test]
+    fn same_repository_accepts_pinning_a_tag_to_a_digest() {
+        // Same artifact, pinned harder — and the reverse direction too.
+        let tag = declared("ghcr.io/acme/code-review:latest");
+        let digest = Identifier::parse(
+            "ghcr.io/acme/code-review@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        assert!(same_repository(&tag, &digest));
+
+        let existing_digest = crate::config::declaration::DeclaredSource::Registry(digest);
+        let requested_tag = Identifier::parse("ghcr.io/acme/code-review:latest").unwrap();
+        assert!(same_repository(&existing_digest, &requested_tag));
+    }
+
+    #[test]
+    fn same_repository_refuses_a_different_repository_path() {
+        // The scenario the guard exists for: another publisher claiming a
+        // binding name that is already taken.
+        let existing = declared("ghcr.io/acme/code-review:stable");
+        let requested = Identifier::parse("ghcr.io/other/code-review:stable").unwrap();
+        assert!(!same_repository(&existing, &requested));
+    }
+
+    #[test]
+    fn same_repository_refuses_a_different_registry_host() {
+        // Identical repository path, different registry — a different
+        // artifact, however similar the name looks.
+        let existing = declared("ghcr.io/acme/code-review:stable");
+        let requested = Identifier::parse("quay.io/acme/code-review:stable").unwrap();
+        assert!(!same_repository(&existing, &requested));
+    }
+
+    #[test]
+    fn same_repository_refuses_a_path_sourced_declaration() {
+        // A path source pins by content hash and has no tag keyspace, so a
+        // registry reference can never be "the same artifact" as one.
+        let existing = crate::config::declaration::DeclaredSource::Path(
+            crate::config::path_source::PathSource::parse("./local/code-review").unwrap(),
+        );
+        let requested = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
+        assert!(!same_repository(&existing, &requested));
     }
 
     #[test]

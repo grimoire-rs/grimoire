@@ -67,11 +67,13 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   artifact's kind metadata set at release time (the `com.grimoire.kind`
   annotation; legacy `artifactType` on older artifacts). If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
-- `--name` defaults to the reference's last path segment. A name that is
-  already declared for that kind under a *different* reference refuses
-  (exit 64) instead of silently replacing it — pass `--name` to bind the
-  new reference under another name. Re-adding the same reference is a
-  no-op. A renamed skill installs under the binding name with its
+- `--name` defaults to the reference's last path segment. Re-adding a
+  declared name from the *same* repository at another tag or digest
+  re-pins it — config, lock and installed files all move to the new
+  version; re-adding the identical reference is a no-op. A name already
+  declared for that kind under a *different repository* refuses (exit 64)
+  instead of silently replacing it — pass `--name` to bind the new
+  reference under another name. A renamed skill installs under the binding name with its
   `SKILL.md` frontmatter `name` rewritten to match (no client-level name
   collision); a renamed multi-file rule may break the index's relative
   links (grim warns). Skill/rule/agent binding names must be 1–64 chars —
