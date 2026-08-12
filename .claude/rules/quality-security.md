@@ -68,7 +68,10 @@ Recurring attack surfaces in Grimoire codebase. Use as STRIDE scoping checklist 
 ### Registry Authentication
 - Auth chain: `GRIM_AUTH_<REGISTRY>_*` env vars → Docker credentials (`~/.docker/config.json`)
 - Credentials never logged or in error messages
-- `GRIM_INSECURE_REGISTRIES` (HTTP-only) only for localhost/test registries
+- Plain HTTP (`GRIM_INSECURE_REGISTRIES`, or `insecure = true` on a
+  `[[registries]]` entry) only for localhost/in-cluster/test registries. The
+  config-file form travels with a committed `grimoire.toml` — it downgrades
+  transport for every collaborator, not just the author
 
 ### Registry Communication
 - TLS verification for all registry connections (except insecure registries)

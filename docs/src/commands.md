@@ -174,15 +174,25 @@ flags are inert on an alias that already exists, since `add` rejects a
 duplicate with exit `64`.
 
 `registry set` edits an existing entry **in place**. It takes the same
-`--oci` / `--index` / `--include` / `--exclude` / `--default` flags as `add`,
-and applies only the ones given: an omitted flag leaves that field exactly as
-it was. A repeatable list flag replaces that whole list, so this is how a
+`--oci` / `--index` / `--include` / `--exclude` / `--default` / `--insecure`
+flags as `add`, and applies only the ones given: an omitted flag leaves that
+field exactly as it was. A repeatable list flag replaces that whole list, so this is how a
 browse filter grows past one pattern after the entry exists. `--oci` and
 `--index` swap the entry's kind, clearing the other side. `--default` sets
 the flag and clears every other entry's, like `registry use`; it cannot
 *unset* one, since the default has to live somewhere — move it by naming
 another entry. An alias that does not exist exits `64`, as does a `set`
 naming no field at all.
+
+`--insecure` contacts the registry over plain HTTP instead of HTTPS — for a
+local or in-cluster registry without TLS. Unlike `--default` it is
+revocable in place, with the `--no-insecure` half of the pair; `set` also
+accepts `--insecure` alone, and omitting both leaves the current setting.
+It applies to `--oci` entries only: pairing it with `--index` exits `65`,
+since an index locator already carries its own scheme. Full semantics,
+including how it combines with `GRIM_INSECURE_REGISTRIES` and what a
+committed `grimoire.toml` implies for collaborators:
+[Plain-HTTP registries](./configuration.md#plain-http-registries).
 
 `--clear-include` and `--clear-exclude` are the two flags `add` does not
 have. A list flag given zero times means "leave this field alone", so
@@ -216,7 +226,7 @@ the *first* one wins, so re-creating an entry could silently move the default.
 
 `registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (locator-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
 
-`registry fields` lists the 5 addressable per-registry field names (`oci`, `index`, `default`, `include`, `exclude`) with their type, title, and description — the same static metadata the `registry.<alias>.<field>` dotted-key table above documents, in machine-readable form. It reads no config and resolves no scope: unlike every other `config` subcommand it works in a directory with no `grimoire.toml`, and with no `--global`/`--config` flag needed. New fields are **appended** to that list, never inserted, so a consumer indexing the rows positionally keeps working.
+`registry fields` lists the 6 addressable per-registry field names (`oci`, `index`, `default`, `include`, `exclude`, `insecure`) with their type, title, and description — the same static metadata the `registry.<alias>.<field>` dotted-key table above documents, in machine-readable form. It reads no config and resolves no scope: unlike every other `config` subcommand it works in a directory with no `grimoire.toml`, and with no `--global`/`--config` flag needed. New fields are **appended** to that list, never inserted, so a consumer indexing the rows positionally keeps working.
 
 ### JSON output {#config-json}
 
@@ -229,11 +239,11 @@ shapes are:
 | `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…","dry_run":bool,"fields":[]}` — `dry_run` is `true` only for `set --dry-run`; every other write verb always reports `false`. `fields` is always present and always `[]` on these five verbs |
-| `registry set` | the same object, with `fields` carrying one row per field the call wrote: `{"field":"oci"\|"index"\|"default"\|"include"\|"exclude","action":"set","value":…}` or `{"field":"…","action":"cleared"}` (no `value` key on a cleared row). Rows follow `RegistryField::ALL` order — `oci, index, default, include, exclude` — so two calls touching the same fields emit byte-identical arrays. `value` is the locator the call **named** with `--oci`/`--index`, and `null` when neither flag was given — it echoes the flag, never a comparison against the stored entry |
+| `registry set` | the same object, with `fields` carrying one row per field the call wrote: `{"field":"oci"\|"index"\|"default"\|"include"\|"exclude"\|"insecure","action":"set","value":…}` or `{"field":"…","action":"cleared"}` (no `value` key on a cleared row). Rows follow `RegistryField::ALL` order — `oci, index, default, include, exclude, insecure` — so two calls touching the same fields emit byte-identical arrays. `--no-insecure` is a `set` to `false`, never a `cleared`. `value` is the locator the call **named** with `--oci`/`--index`, and `null` when neither flag was given — it echoes the flag, never a comparison against the stored entry |
 | `list` | `{"items": [...]}` of `{"key":"…","value":string or null,"set":bool,"type":"…","title":"…","description":"…","default":string or null,"values":[…] or null,"constraints":{"item_pattern":"…","item_width":integer} or null}` |
-| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
-| `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool}` |
-| `registry fields` | `{"items": [...]}` of `{"key":"…","type":"…","title":"…","description":"…"}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`), not a dotted key; no `value`/`set`/`default` (meaningless for a field pattern) |
+| `registry list` | `{"items": [...]}` of `{"alias":string or null,"oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool,"insecure":bool}` |
+| `registry show` | `{"alias":"…","oci":string or null,"index":string or null,"include":[…],"exclude":[…],"default":bool,"insecure":bool}` |
+| `registry fields` | `{"items": [...]}` of `{"key":"…","type":"…","title":"…","description":"…"}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), not a dotted key; no `value`/`set`/`default` (meaningless for a field pattern) |
 
 `list` rows carry all nine fields whether or not `--all` was passed — the flag only widens the row set, never the row shape. `value` is `null` only for an unset row (surfaced only under `--all`); `set` is `value != null`. `type` is one of `string`, `boolean`, `integer`, `enum`, `string-list`, `string-set`; `values` is non-null for `enum` and `string-set` keys (the allowed value set), `null` otherwise. `title` and `description` are fixed per-key metadata, not derived from the current value; `default` is the runtime default in CLI string form, or `null` when the key has no fixed default. `constraints` is non-null only for a list key whose items carry a shape rule beyond closed-set membership — today just `options.tui.tree_separators` — and is advisory: `item_pattern` is necessary but not sufficient (it cannot express the paired `item_width` rule), so `grim`'s own validation stays authoritative even when a value matches the pattern; see [the JSON interface](./json-interface.md#shapes-items) for the full honesty contract.
 
@@ -244,7 +254,8 @@ Registry rows always carry both locator keys — exactly one of `oci` /
 absent key. The plain `registry list` / `registry show` tables report the
 filter as a `Filters` cell carrying **counts** (`2 include, 1 exclude`, or
 `—` when unfiltered); the patterns themselves are read from `--format json`,
-which has no width to lose.
+which has no width to lose. `insecure` is likewise always present, `false`
+on an entry that never opted in, and has its own plain-table column.
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set`. The `scope` field is `project` or `global`.
 
@@ -690,7 +701,7 @@ fine or is simply absent — `lock_exists` alone answers "is it there", not
 "can grim use it". The exit code stays `0` either way; `context` reports
 the state, it does not fail on it.
 `registries` entries are `{alias, url, kind, default, authenticated, include,
-exclude}` with `kind` either `registry` or `index`. `include` and `exclude`
+exclude, insecure}` with `kind` either `registry` or `index`. `include` and `exclude`
 are the source's authored
 [browse-filter](./configuration.md#browse-filters) patterns in declaration
 order — always-present arrays, `[]` on an unfiltered entry, and `[]` for
@@ -703,7 +714,14 @@ for both lists while `grimoire.toml` still shows the patterns. The plain
 table appends the same information to the registry row as
 **counts** — `acme ghcr.io/acme (registry, default, 2 include, 1 exclude)` —
 and omits both clauses entirely when the entry is unfiltered, so an
-unfiltered row reads exactly as it always has. `authenticated` is a boolean: `true`
+unfiltered row reads exactly as it always has. `insecure` is the entry's
+authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in,
+always present and `false` by default; the plain row gains a `, insecure`
+clause only when it is set. It reports the **authored field**, not the
+effective transport: a host reached over HTTP through the implicit loopback
+set or `GRIM_INSECURE_REGISTRIES` still reports `false`, so this key and
+`grim config get registry.<alias>.insecure` always agree.
+`authenticated` is a boolean: `true`
 when a credential for this registry's **host** is present in the
 docker-compatible credential store (`~/.docker/config.json`, or
 `$DOCKER_CONFIG/config.json`) — an `auths` or `credHelpers` entry for the

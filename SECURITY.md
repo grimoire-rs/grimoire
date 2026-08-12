@@ -80,7 +80,12 @@ These are the boundaries where a report is a genuine security issue:
   messages, reports, JSON output, or any file grim writes; or being sent to a
   host other than the registry they belong to.
 - **Transport downgrade.** Any path that reaches a registry over plain HTTP
-  without the host being explicitly listed in `GRIM_INSECURE_REGISTRIES`.
+  without the host being explicitly opted in — either listed in
+  `GRIM_INSECURE_REGISTRIES` or declared `insecure = true` on its own
+  `[[registries]]` entry. Both are deliberate user opt-ins and are not
+  themselves vulnerabilities; that a committed `grimoire.toml` carries the
+  config-file opt-in to everyone who clones the project is documented
+  behaviour, not a finding.
 - **Digest bypass.** Content installed without its digest being checked, or a
   mismatch that does not abort.
 - **Config corruption.** grim writing a client's MCP or rule configuration in a

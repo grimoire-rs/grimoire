@@ -201,7 +201,7 @@ applies as the single-registry fallback when no `[[registries]]` array is
 declared.
 
 Each entry declares **exactly one** source locator (`oci` or `index`)
-plus two optional fields:
+plus optional fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -211,6 +211,7 @@ plus two optional fields:
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
 | `include` | no | Array of glob patterns narrowing what this source **shows** when browsed. Unset (or `[]`) shows every repository. See [Browse filters](#browse-filters). |
 | `exclude` | no | Array of glob patterns hiding matching repositories from this source's browse. Combines with `include` and wins wherever both match. Unset (or `[]`) hides nothing. See [Browse filters](#browse-filters). |
+| `insecure` | no | Contact this registry over plain HTTP instead of HTTPS. Unset (the default) uses HTTPS. `oci` entries only — setting it on an `index` entry is a parse error (exit 78), since an index locator already carries its own scheme. See [Plain-HTTP registries](#plain-http-registries). |
 
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
@@ -661,6 +662,56 @@ Short references with no alias and no explicit registry still expand
 against the primary (or only) registry, unchanged from the single-registry
 behavior.
 
+### Plain-HTTP registries {#plain-http-registries}
+
+grim contacts every registry over HTTPS, with two exceptions: the loopback
+forms `localhost` and `127.0.0.1` (bare and on port `5000`) are always
+plain HTTP, and any host explicitly opted in.
+
+Opt a declared registry in with `insecure`:
+
+```toml
+[[registries]]
+alias = "local"
+oci = "localhost:5050/grimoire"
+insecure = true
+```
+
+or from the CLI:
+
+```sh
+grim config registry add local --oci localhost:5050/grimoire --insecure
+grim config registry set local --insecure      # turn it on for an existing entry
+grim config registry set local --no-insecure   # and back off
+```
+
+The host is matched **exactly, including its port** — `localhost:5050` and
+`localhost` are different hosts. The opt-in applies to every reference to
+that host for the rest of the invocation, not only to packages browsed
+through this entry, and `grim login` pings it over plain HTTP too.
+
+`GRIM_INSECURE_REGISTRIES` still works and is the way to reach a host no
+`[[registries]]` entry declares — a `--registry` browse, a `grim login`
+against an undeclared host, a one-off `grim fetch`. The two **add up**:
+nothing takes a host back out of the plain-HTTP set, so there is no
+config-versus-environment conflict to resolve.
+
+> **A committed `grimoire.toml` downgrades transport for everyone who
+> clones it.** The environment variable is per-user and per-shell;
+> `insecure` in the config is not. Credentials and artifact bytes for that
+> host travel in cleartext for every collaborator and every CI job that
+> runs in the project. Use it for a registry that is genuinely local or
+> in-cluster, and check the box knowingly.
+
+`grim context --format json` reports each entry's `insecure` field, so a
+UI can show which sources are HTTP. It echoes the authored value only —
+a host reached over HTTP through the loopback default or the environment
+variable still reports `false`.
+
+`insecure` applies to `oci` entries only. An `index` locator is a URL that
+already spells its own scheme, so setting the field there is a parse error
+(exit 78 at load, 65 from `grim config set`).
+
 ### Registry compatibility {#registry-compatibility}
 
 `grim search` and the TUI browse a registry's catalog through the
@@ -825,7 +876,7 @@ applies.
 | `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
-| `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
+| `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for a host no `[[registries]]` entry declares. Adds to the [`insecure`](#plain-http-registries) field rather than overriding it. | unset |
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for [`grim publish --announce`](./package-index.md#announcing) — always wins over CI-provided tokens. Sent as an API header only, never logged. | unset |
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
 | `CLAUDE_CONFIG_DIR` | Claude Code config-dir override (vendor variable, honored read-only). Global-scope installs follow it: it replaces `~/.claude` for skills, rules, and agents, and relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`. Also drives global-scope client detection. | unset |

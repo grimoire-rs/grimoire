@@ -46,7 +46,7 @@ Environment variables that matter here (full table:
 | `GRIM_HOME` | Data root: cache, catalog, global config (default `~/.grimoire`) |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references |
 | `GRIM_OFFLINE` | Same as `--offline` |
-| `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries (local/in-cluster) |
+| `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries, for a host no `[[registries]]` entry declares — adds to the `insecure` field, never overrides it |
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
 
 Separately, grim honors each **client's own** directory-override variable
@@ -84,6 +84,7 @@ parse-time alias for `oci`):
 | `default` | no | Marks the primary registry for short-id expansion; first entry is primary when none set it |
 | `include` | no | Glob patterns narrowing what this source **shows** when browsed; unset or `[]` shows everything — see [Browse Filters](#browse-filters) |
 | `exclude` | no | Glob patterns hiding matching repositories from this source's browse; combines with `include` and wins where both match |
+| `insecure` | no | Contact this registry over plain HTTP instead of HTTPS — see [Plain HTTP](#plain-http); `oci` entries only |
 
 ```toml
 [[registries]]
@@ -179,6 +180,37 @@ Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
 alike. `grim publish --announce` is the write side: it publishes
 pointers into an index repository rather than reading them — see
 [references/publish.md](publish.md#announce).
+
+### Plain HTTP {#plain-http}
+
+grim uses HTTPS for every registry except the loopback forms `localhost` and
+`127.0.0.1` (bare and on port `5000`), which are always plain HTTP. Opt any
+other host in per entry:
+
+```toml
+[[registries]]
+alias = "local"
+oci = "localhost:5050/grimoire"
+insecure = true
+```
+
+The host is matched **exactly, including its port** — `localhost:5050` and
+`localhost` are different hosts — and the opt-in covers every reference to
+that host for the invocation, `grim login`'s verification ping included.
+`GRIM_INSECURE_REGISTRIES` still reaches a host no entry declares (a
+`--registry` browse, a one-off `grim fetch`); the two **add up**, so there
+is no config-versus-environment conflict.
+
+Two things to say out loud when recommending it. `grimoire.toml` is
+normally committed, so the downgrade applies to every collaborator and CI
+job — unlike the environment variable, which is per-shell. And it is `oci`
+entries only: pairing it with `index` is an error (`65` from `grim config`,
+`78` at load), because an index locator already spells its own scheme.
+
+`grim context --format json` reports each entry's `insecure`, so a UI can
+show which sources are HTTP. It echoes the authored field, not the effective
+transport — a host reached over HTTP through the loopback default or the
+environment variable still reports `false`.
 
 ## Browse Filters {#browse-filters}
 
@@ -378,7 +410,7 @@ route is `action: "unset"` with `fields: []`.
 
 `registry set`'s write report carries an always-present `fields` array — one
 element per field the call wrote, in the frozen `oci, index, default,
-include, exclude` order, each `{"field":…,"action":"set","value":…}` or
+include, exclude, insecure` order, each `{"field":…,"action":"set","value":…}` or
 `{"field":…,"action":"cleared"}` (a cleared element has no `value` key).
 Every other write verb reports `fields: []`. It describes the write, not a
 diff: a field named with the value it already held still emits its element,
@@ -451,17 +483,19 @@ lock on every change.
   grim config registry show acme                      # one entry's fields
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
-  grim config registry fields                         # per-field metadata (oci/index/default/include/exclude) — works with no config at all
+  grim config registry set local --insecure            # plain HTTP for this entry; --no-insecure turns it back off
+  grim config registry fields                         # per-field metadata (oci/index/default/include/exclude/insecure) — works with no config at all
   ```
 
   `registry set` edits an **existing** entry, applying only the flags it is
   given and keeping the entry's position; `add` refuses an alias that
   already exists (`64`). It takes `add`'s `--oci` / `--index` /
-  `--include` / `--exclude` / `--default` plus `--clear-include` /
-  `--clear-exclude`, which `add` does not have. `--oci` and `--index` swap
-  the entry's kind, clearing the other side. `--default` sets the flag and
-  clears every other entry's; it cannot *unset* one — move the default by
-  naming another entry.
+  `--include` / `--exclude` / `--default` / `--insecure` plus
+  `--clear-include` / `--clear-exclude` / `--no-insecure`, which `add` does
+  not have. `--oci` and `--index` swap the entry's kind, clearing the other
+  side. `--default` sets the flag and clears every other entry's; it cannot
+  *unset* one — move the default by naming another entry. `--insecure`
+  **can** be turned back off, with `--no-insecure`.
 
   `registry use` is the correct way to change the default registry.
 
