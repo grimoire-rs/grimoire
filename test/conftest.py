@@ -158,8 +158,12 @@ def _resolve_registry_host() -> None:
     1. ``GRIM_TEST_REGISTRY_HOST`` already set → honour it, skip detection
        (also handles the xdist-worker case where the controller already set
        the variable before the worker process was spawned).
-    2. ``localhost:5000`` unreachable → start ``grim-acceptance-registry``
-       there and use it (the normal CI path).
+    2. ``localhost:5000`` unreachable → start a throwaway
+       ``grim-acceptance-registry-<port>`` on a dynamic **non-5000** port and
+       use it (the normal CI path).  The port is deliberately not 5000:
+       that host is in grim's built-in plain-HTTP allowlist, which makes a
+       config-declared ``insecure = true`` indistinguishable from the
+       loopback default and forces every test of it to skip.
     3. ``localhost:5000`` reachable with ≤ ``_CATALOG_REPO_LIMIT`` repos →
        use it as-is (our own previous container or a freshly started CI
        registry).
@@ -173,13 +177,26 @@ def _resolve_registry_host() -> None:
         return
 
     default_host = "localhost:5000"
-    default_port = 5000
 
-    # Case 2: nothing on port 5000 — start the dedicated container there.
+    # Case 2: nothing on port 5000 — start a dedicated container on a
+    # *dynamic* port. This is the normal CI path, and the port matters:
+    # `localhost:5000` is in grim's built-in plain-HTTP allowlist, so a rig
+    # on it cannot tell "grim reached the registry because the config
+    # declared it insecure" from "grim reached it because the loopback
+    # default let it through". Every test needing that distinction skipped
+    # itself on the default port, which meant the plain-HTTP opt-in — the
+    # whole `insecure = true` feature — was never once exercised in CI.
+    #
+    # A dynamic port also exercises `GrimRunner`'s `GRIM_INSECURE_REGISTRIES`
+    # branch, dormant while the rig sat on the built-in allowlist.
     if not _host_reachable(default_host):
-        ok = _start_registry_container(default_port, _REGISTRY_CONTAINER)
-        if ok and _wait_registry_ready(default_host):
-            os.environ["GRIM_TEST_REGISTRY_HOST"] = default_host
+        fresh_port = _free_port()
+        fresh_host = f"localhost:{fresh_port}"
+        fresh_name = f"{_REGISTRY_CONTAINER}-{fresh_port}"
+        ok = _start_registry_container(fresh_port, fresh_name)
+        if ok and _wait_registry_ready(fresh_host):
+            os.environ["GRIM_TEST_REGISTRY_HOST"] = fresh_host
+            os.environ["_GRIM_FRESH_REGISTRY_NAME"] = fresh_name
         # If startup failed, leave env unset; `_require_registry` aborts.
         return
 

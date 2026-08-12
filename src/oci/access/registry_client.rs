@@ -766,7 +766,17 @@ mod tests {
     /// property that keeps an untouched config's behaviour unchanged.
     #[test]
     fn plain_http_hosts_with_dedups_and_is_identity_on_empty() {
-        assert_eq!(plain_http_hosts_with(&[]), plain_http_hosts());
+        // Spelled out, not `== plain_http_hosts()`: that comparison is
+        // `x == x` (the no-arg form *is* this one with an empty slice) and
+        // passes for every implementation, including one that ignores the
+        // implicit set entirely.
+        assert_eq!(
+            plain_http_hosts_with(&[]),
+            ["localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"]
+                .map(String::from)
+                .to_vec(),
+            "the implicit loopback set is what an untouched config resolves to"
+        );
         let hosts = plain_http_hosts_with(&["localhost:5000".to_string(), "localhost:5000".to_string()]);
         assert_eq!(
             hosts.iter().filter(|h| *h == "localhost:5000").count(),

@@ -31,6 +31,8 @@ from __future__ import annotations
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_artifact, write_config
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
@@ -1959,8 +1961,6 @@ def test_insecure_alone_reaches_a_plain_http_registry(
     Requires a non-default port, which the conftest picks whenever
     ``localhost:5000`` is unusable.
     """
-    import pytest
-
     builtin = {"localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"}
     if registry in builtin:
         pytest.skip(
@@ -1997,4 +1997,14 @@ def test_insecure_alone_reaches_a_plain_http_registry(
     out = runner.json("add", "corp/http-skill:v1")
     assert out.get("status") == "added", (
         f"insecure = true alone must carry the request; got: {out!r}"
+    )
+
+    # `--registry` narrows the browse set; it must not narrow which hosts may
+    # be reached over plain HTTP.  While the transport allowlist was derived
+    # from the browse-set resolver, any `--registry` value silently disarmed
+    # the opt-in and every network command failed against a plain-HTTP port.
+    runner.run("remove", "skill", "http-skill")
+    pinned = runner.json("add", f"{ns}/http-skill:v1", "--registry", REGISTRY_HOST)
+    assert pinned.get("status") == "added", (
+        f"--registry must not disarm a config-declared plain-HTTP host; got: {pinned!r}"
     )

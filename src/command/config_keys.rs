@@ -294,10 +294,10 @@ impl RegistryField {
             value_type: ValueType::Bool { default: false },
             title: "Plain-HTTP transport",
             description: "Controls whether this registry is contacted over plain HTTP instead of HTTPS. \
-                           Disabled by default; the loopback forms `localhost` and `127.0.0.1` (bare and on \
-                           port 5000) are always reached over plain HTTP. Adds this entry's host to the same \
-                           plain-HTTP set as the `GRIM_INSECURE_REGISTRIES` environment variable, which still \
-                           covers hosts no entry declares.",
+                           Disabled by default; enabling it in a committed `grimoire.toml` downgrades \
+                           transport for every collaborator who clones the project. Adds up with the \
+                           `GRIM_INSECURE_REGISTRIES` environment variable, which still covers hosts no \
+                           entry declares.",
             constraints: None,
         };
         match self {
@@ -428,29 +428,31 @@ mod tests {
         // - `registry set`'s write-report `fields` array is emitted in `ALL`
         //   order too (design C-021), so two invocations touching the same
         //   fields produce byte-identical arrays. That froze indices 3 and 4
-        //   as well, which is why the prefix below is `..5` rather than the
-        //   `..3` this test originally guarded.
+        //   as well, which is why the prefix grew from the `..3` this test
+        //   originally guarded. `insecure` shipped at index 5 and is frozen
+        //   by the same `fields`-order argument, so the prefix is `..6`.
         //
         // **It stays a PREFIX slice, never `&RegistryField::ALL` whole.** A
-        // sixth variant makes `ALL` a `[RegistryField; 6]`, and arrays only
+        // seventh variant makes `ALL` a `[RegistryField; 7]`, and arrays only
         // implement `PartialEq` at equal lengths — comparing the whole array
-        // against a 5-element literal is `can't compare [T; 6] with [T; 5]`,
+        // against a 6-element literal is `can't compare [T; 7] with [T; 6]`,
         // a COMPILE error on the one change this discipline explicitly
         // allows. Slicing keeps an append green and an insert or reorder red,
         // which is the whole point.
         //
-        // Inserting a variant anywhere within the first five moves a row on
+        // Inserting a variant anywhere within the first six moves a row on
         // one surface or both (Principle 9). The length assertion below and
         // the key-vector assertion in `api::config_report` both survive an
         // accidental insert — only this one fails.
         assert_eq!(
-            &RegistryField::ALL[..5],
+            &RegistryField::ALL[..6],
             &[
                 RegistryField::Oci,
                 RegistryField::Index,
                 RegistryField::Default,
                 RegistryField::Include,
                 RegistryField::Exclude,
+                RegistryField::Insecure,
             ],
             "append to RegistryField::ALL, never insert — items[2] must stay `default`, \
              and `registry set`'s `fields` order must stay byte-stable"
