@@ -720,7 +720,11 @@ always present and `false` by default; the plain row gains a `, insecure`
 clause only when it is set. It reports the **authored field**, not the
 effective transport: a host reached over HTTP through the implicit loopback
 set or `GRIM_INSECURE_REGISTRIES` still reports `false`, so this key and
-`grim config get registry.<alias>.insecure` always agree.
+`grim config get registry.<alias>.insecure` always agree — except under
+`--registry`, which replaces the browse set with synthesized entries that
+carry no authored fields, so every row reports `false` there. That is a
+statement about the browse set, not about transport: `--registry` never
+narrows which hosts are reachable over plain HTTP.
 `authenticated` is a boolean: `true`
 when a credential for this registry's **host** is present in the
 docker-compatible credential store (`~/.docker/config.json`, or

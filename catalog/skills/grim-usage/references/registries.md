@@ -197,9 +197,15 @@ insecure = true
 The host is matched **exactly, including its port** — `localhost:5050` and
 `localhost` are different hosts — and the opt-in covers every reference to
 that host for the invocation, `grim login`'s verification ping included.
+`--registry` narrows what is *browsed*, never what may be reached over
+plain HTTP, so it never disarms the opt-in.
 `GRIM_INSECURE_REGISTRIES` still reaches a host no entry declares (a
-`--registry` browse, a one-off `grim fetch`); the two **add up**, so there
-is no config-versus-environment conflict.
+`grim login` against an undeclared host, a one-off `grim fetch`); the two
+**add up**, so there is no config-versus-environment conflict.
+
+It does not widen where a credential may go: a registry reached over HTTPS
+must keep the credential on HTTPS, so a `Bearer realm="http://…"` challenge
+from it is refused regardless of what any entry declared.
 
 Two things to say out loud when recommending it. `grimoire.toml` is
 normally committed, so the downgrade applies to every collaborator and CI

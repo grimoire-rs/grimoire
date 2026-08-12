@@ -690,6 +690,22 @@ The host is matched **exactly, including its port** — `localhost:5050` and
 that host for the rest of the invocation, not only to packages browsed
 through this entry, and `grim login` pings it over plain HTTP too.
 
+`--registry` does not disarm it. That flag narrows which registries are
+*browsed*; it never narrows which hosts may be reached over plain HTTP, so
+`grim fetch --registry localhost:5050/grimoire …` works exactly as it does
+without the flag. One consequence is worth knowing: `grim context` under
+`--registry` reports `insecure: false` for every entry, because the flag
+replaces the browse set with synthesized entries that carry no authored
+config fields at all. That is a report about the browse set, not about
+transport.
+
+What the opt-in does **not** do is widen where a credential may be sent.
+`grim login` against a declared host pings it over plain HTTP, but a
+registry reached over **HTTPS** must keep the credential on HTTPS: if it
+answers with a `Bearer realm="http://…"` challenge, grim refuses and stores
+nothing, no matter which hosts any entry declared insecure. The realm host
+is chosen by the registry, not by you.
+
 `GRIM_INSECURE_REGISTRIES` still works and is the way to reach a host no
 `[[registries]]` entry declares — a `--registry` browse, a `grim login`
 against an undeclared host, a one-off `grim fetch`. The two **add up**:
@@ -706,7 +722,9 @@ config-versus-environment conflict to resolve.
 `grim context --format json` reports each entry's `insecure` field, so a
 UI can show which sources are HTTP. It echoes the authored value only —
 a host reached over HTTP through the loopback default or the environment
-variable still reports `false`.
+variable still reports `false`, as does every entry under `--registry`
+(see above). Outside `--registry` it always agrees with
+`grim config get registry.<alias>.insecure`.
 
 `insecure` applies to `oci` entries only. An `index` locator is a URL that
 already spells its own scheme, so setting the field there is a parse error

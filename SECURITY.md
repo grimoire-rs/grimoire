@@ -85,7 +85,10 @@ These are the boundaries where a report is a genuine security issue:
   `[[registries]]` entry. Both are deliberate user opt-ins and are not
   themselves vulnerabilities; that a committed `grimoire.toml` carries the
   config-file opt-in to everyone who clones the project is documented
-  behaviour, not a finding.
+  behaviour, not a finding. The opt-in covers **transport to that host
+  only**: it must never widen where a credential may be sent, so a registry
+  reached over HTTPS answering with a plaintext `Bearer` realm is a finding
+  regardless of which hosts are opted in.
 - **Digest bypass.** Content installed without its digest being checked, or a
   mismatch that does not abort.
 - **Config corruption.** grim writing a client's MCP or rule configuration in a

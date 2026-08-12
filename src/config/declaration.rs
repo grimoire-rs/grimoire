@@ -325,11 +325,14 @@ pub struct RegistryConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
     /// Controls whether this registry is contacted over plain HTTP instead
-    /// of HTTPS. Disabled by default; the loopback forms `localhost` and
-    /// `127.0.0.1` (bare and on port 5000) are always reached over plain
-    /// HTTP. Adds this entry's host to the same plain-HTTP set as the
-    /// `GRIM_INSECURE_REGISTRIES` environment variable, which still covers
-    /// hosts no entry declares.
+    /// of HTTPS. Disabled by default; enabling it in a committed
+    /// `grimoire.toml` downgrades transport for every collaborator who clones
+    /// the project. Adds up with the `GRIM_INSECURE_REGISTRIES` environment
+    /// variable, which still covers hosts no entry declares.
+    ///
+    /// The loopback forms `localhost` and `127.0.0.1` (bare and on port
+    /// 5000) are always reached over plain HTTP, whether or not any entry
+    /// declares them.
     ///
     /// Rejected on an `index` entry — an index locator already carries its
     /// own `http(s)://` scheme, so the flag would say nothing.
@@ -338,8 +341,15 @@ pub struct RegistryConfig {
     /// port*, matched exactly: `localhost:5050` and `localhost` are
     /// different hosts. Enabling it downgrades transport for every
     /// reference to that host in this invocation, not only for packages
-    /// browsed through this entry. `grimoire.toml` is normally committed,
-    /// so the downgrade applies to everyone who clones the project.
+    /// browsed through this entry. `--registry` does not change that: it
+    /// narrows which registries are *browsed*, never which hosts are
+    /// reachable over plain HTTP.
+    ///
+    /// It does **not** widen where a credential may be sent. `grim login`
+    /// pings a declared host over plain HTTP, but a registry reached over
+    /// HTTPS must keep the credential on HTTPS — a `Bearer` realm naming an
+    /// `http://` endpoint is refused there no matter which hosts are
+    /// declared insecure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub insecure: bool,
 }
