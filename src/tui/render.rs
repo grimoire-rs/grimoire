@@ -1400,17 +1400,19 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
 /// `truncation_hint` is appended as a quiet trailing span so a capped
 /// browse window is flagged without crowding the title-row status.
 fn legend_line(truncation_hint: &str) -> Line<'static> {
-    let pairs = [
-        ("✓ installed", ColorKey::Installed),
-        ("  ◆ via-bundle", ColorKey::ViaBundle),
-        ("  ↑ outdated", ColorKey::Outdated),
-        ("  ✱ modified", ColorKey::Modified),
-        ("  ✘ integrity-missing", ColorKey::IntegrityMissing),
-        ("  · not-installed", ColorKey::NotInstalled),
-    ];
-    let mut spans: Vec<Span<'static>> = pairs
+    // Built from [`legend_entries`] through [`status_view`], never restated:
+    // this list was previously hand-written and silently fell behind, missing
+    // `pending` entirely once that state shipped — a user met a `+` glyph the
+    // legend directly beneath it did not explain. Deriving it means a new
+    // state cannot be added without appearing here.
+    let mut spans: Vec<Span<'static>> = legend_entries()
         .into_iter()
-        .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
+        .enumerate()
+        .map(|(i, (state, _))| {
+            let (glyph, label, key) = status_view(state);
+            let sep = if i == 0 { "" } else { "  " };
+            Span::styled(format!("{sep}{glyph} {label}"), Style::default().fg(color_for(key)))
+        })
         .collect();
     // Deprecation is orthogonal to install status (no `ColorKey`); append it
     // as a literal yellow span so the trailing `†` indicator is explained.
@@ -1983,6 +1985,23 @@ mod tests {
         }
     }
 
+    /// The status-bar legend and the `?` overlay legend must explain the same
+    /// set — they are two views of one list, and the status-bar one had
+    /// already drifted (no `pending`) before it was derived.
+    #[test]
+    fn the_status_bar_legend_explains_every_status_too() {
+        let line = legend_line("");
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        for (state, _) in legend_entries() {
+            let (glyph, label, _) = status_view(state);
+            assert!(
+                text.contains(glyph) && text.contains(label),
+                "status-bar legend must explain {state} ({glyph} {label}); got: {text}"
+            );
+        }
+        assert!(text.contains("† deprecated"), "the deprecation marker stays explained");
+    }
+
     /// The legend must render the SAME glyph and label the row renders.
     /// Restating them by hand is how a legend silently starts lying.
     #[test]
@@ -2324,16 +2343,28 @@ mod tests {
 
     #[test]
     fn legend_line_appends_truncation_hint_only_when_present() {
-        // No hint ⇒ six status glyph spans plus the deprecation span.
+        // No hint ⇒ one span per status glyph plus the deprecation span.
+        // Counted from `legend_entries` rather than hardcoded: a hardcoded
+        // count is a tripwire that fires on every new state without saying
+        // anything about the behaviour under test.
+        let glyphs = legend_entries().len();
         let base = legend_line("");
-        assert_eq!(base.spans.len(), 7, "six status glyphs + deprecation, no trailing hint");
+        assert_eq!(
+            base.spans.len(),
+            glyphs + 1,
+            "one span per status glyph + deprecation, no trailing hint"
+        );
         assert!(
             base.spans.iter().any(|s| s.content.contains("† deprecated")),
             "the legend explains the deprecation indicator"
         );
         // A non-empty hint adds one trailing span carrying the hint text.
         let with_hint = legend_line("(list truncated)");
-        assert_eq!(with_hint.spans.len(), 8, "glyphs + deprecation + the truncation span");
+        assert_eq!(
+            with_hint.spans.len(),
+            glyphs + 2,
+            "glyphs + deprecation + the truncation span"
+        );
         assert!(
             with_hint.spans.last().unwrap().content.contains("(list truncated)"),
             "the trailing span carries the hint text"
