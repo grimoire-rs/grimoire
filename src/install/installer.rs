@@ -676,18 +676,7 @@ async fn install_one<M: ArtifactMaterializer>(
             // Would-be output: render into a staging preview and hash it.
             let preview_root = staging.path().join(format!("preview-{client}"));
             std::fs::create_dir_all(&preview_root).map_err(|e| target_io(&preview_root, e))?;
-            // Install destinations are always `<root>/…/<name[.md]>`; a
-            // missing final component would be a `path_for` bug.
-            let Some(dest_name) = dest.file_name() else {
-                return Err(
-                    InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
-                        "install destination '{}' has no final path component",
-                        dest.display()
-                    )))
-                    .into(),
-                );
-            };
-            let preview_dest = preview_root.join(dest_name);
+            let preview_dest = preview_root.join(dest_file_name(&dest)?);
             client
                 .materialize(crate::install::client_target::MaterializeRequest {
                     kind,
@@ -730,12 +719,27 @@ async fn install_one<M: ArtifactMaterializer>(
     // Small association list (dest → footprint hash); `materialize_set` holds at
     // most one entry per vendor, so a linear scan beats a map's overhead.
     let mut materialized: Vec<(PathBuf, Digest)> = Vec::new();
-    // The client whose destructive swap is in flight, if any. `remove_path`
-    // below deletes the old copy before the new one is written, so on a
-    // failure this one client's destination is grim's own wreckage and its
-    // recorded hash describes bytes that no longer exist. Set when the swap
-    // begins, cleared once the fresh output is recorded.
-    let mut in_flight: Option<(crate::install::client_target::ClientTarget, PathBuf, Option<PathBuf>)> = None;
+    // The client whose destructive *publish* is in flight, if any. The new
+    // footprint is staged into a sibling temp dir first (C-009), so this is
+    // set only once staging succeeded and the `remove_path` + `rename` pair
+    // below has begun — the one span in which a failure can leave grim's own
+    // wreckage at the destination and make its recorded hash name bytes that
+    // are gone. Cleared once the fresh output is recorded. A failure while
+    // staging leaves the destination untouched and must NOT set it.
+    //
+    // Two support paths, and they are not interchangeable: `support_dest` is
+    // `Some` only when THIS version ships a support dir and gives the recorded
+    // shape, while `cleanup` is the location `<parent>/<name>` a support dir
+    // occupies either way and is what the footprint must hash — the untracked
+    // gate's `existing_support` reads that path, so a recovery hash keyed on
+    // anything else would mismatch on the retry.
+    type InFlight = (
+        crate::install::client_target::ClientTarget,
+        PathBuf,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    );
+    let mut in_flight: Option<InFlight> = None;
     // Closure, not a bare loop: a hard failure on one client must not throw
     // away the clients that already replaced their destinations. Their files
     // are on disk, so the record has to describe them before the error
@@ -777,13 +781,70 @@ async fn install_one<M: ArtifactMaterializer>(
             let support_dest = staged_support.as_ref().and(cleanup.clone());
 
             // Reuse a sibling pool client's footprint hash when this exact dest was
-            // already materialized this pass; otherwise do the copy + fsync + hash.
+            // already materialized this pass; otherwise do the stage + swap + hash.
             let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
                 hash.clone()
             } else {
-                in_flight = Some((*client, dest.clone(), support_dest.clone()));
+                // C-009 / S-007: render the whole footprint into a sibling temp
+                // dir FIRST, and only publish it once it is complete. Rendering
+                // is the part that fails (an unparseable index, a bad vendor
+                // metadata literal), and it now fails with the destination still
+                // holding its old content — where the previous remove-then-render
+                // ordering destroyed the old output and left nothing, or a
+                // half-copied tree, in its place.
+                //
+                // The temp dir is a SIBLING of the destination, not one under
+                // `$TMPDIR` like the canonical staging dir above: `rename(2)`
+                // cannot cross a filesystem. `store/atomic_write.rs` is not
+                // reusable here either — it persists a single in-memory buffer,
+                // and these destinations are directory trees from a multi-file
+                // render.
+                //
+                // Residual window, deliberately left: publishing is `remove_path`
+                // + `rename`, twice for a rule (index, then support dir), so a
+                // crash *between* those syscalls can still strand the footprint.
+                // Closing it needs `renameat2(RENAME_EXCHANGE)`, which is
+                // Linux-only. Every in-process failure the materializer can
+                // return is covered, and the partial-pass branch below repairs
+                // what the syscall window can leave.
+                let parent = dest
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+                let swap = tempfile::Builder::new()
+                    .prefix(".grim-swap-")
+                    .tempdir_in(parent)
+                    .map_err(|e| target_io(parent, e))?;
+                // The staged tree mirrors the destination's own layout — the
+                // index under the dest's file name, and for a rule the support
+                // dir beside it under the binding name, which is exactly where
+                // `materialize_rule` puts it. So one rename per footprint root
+                // publishes the whole thing.
+                let swap_dest = swap.path().join(dest_file_name(&dest)?);
+                let swap_support = support_dest.as_ref().map(|_| swap.path().join(&artifact.name));
+                client
+                    .materialize(crate::install::client_target::MaterializeRequest {
+                        kind,
+                        name: &artifact.name,
+                        artifact_root: &canonical,
+                        dest: &swap_dest,
+                        scope: target.scope(),
+                        pinned: &pinned_str,
+                        support_dir: staged_support.as_deref(),
+                    })
+                    .map_err(crate::error::Error::from)?;
+                fsync_tree(&swap_dest).map_err(|e| target_io(&swap_dest, e))?;
+                if let Some(ss) = &swap_support {
+                    fsync_tree(ss).map_err(|e| target_io(ss, e))?;
+                }
+
+                // Publish. Everything from here down is destructive.
+                in_flight = Some((*client, dest.clone(), support_dest.clone(), cleanup.clone()));
                 // `|| is_symlink()`: `exists()` is false for a DANGLING link, and
-                // without this the materialize below would write through it.
+                // `rename(2)` onto one would either replace it (file source) or
+                // fail `ENOTDIR` (directory source) depending on the kind — so the
+                // link is unlinked explicitly, and `--force` can always clear it.
                 // `remove_path` unlinks the link itself, never its target. Pairs
                 // with the dangling-leaf refusal in the untracked gate above — the
                 // two must stay together, or `--force` re-emits that same refusal
@@ -791,42 +852,29 @@ async fn install_one<M: ArtifactMaterializer>(
                 if dest.exists() || dest.is_symlink() {
                     remove_path(&dest).map_err(|e| target_io(&dest, e))?;
                 }
-                // Same `|| is_symlink()` reason one level down: `mkdir(2)` does
-                // NOT follow a dangling link, so leaving it makes the support
-                // dir's `create_dir_all` fail `EEXIST` forever — and gating the
-                // removal on `exists()` alone means `--force` cannot clear it
-                // either, which is the non-terminating dialog above.
-                if let Some(sd) = &cleanup
-                    && (sd.exists() || sd.is_symlink())
-                {
-                    remove_path(sd).map_err(|e| target_io(sd, e))?;
+                std::fs::rename(&swap_dest, &dest).map_err(|e| target_io(&dest, e))?;
+                // Same `|| is_symlink()` reason one level down, and the same
+                // `--force`-must-be-able-to-clear-it property: `rename(2)` onto a
+                // dangling link with a directory source fails `ENOTDIR` forever,
+                // and gating the removal on `exists()` alone means `--force`
+                // cannot clear it either — the non-terminating dialog above. The
+                // removal is unconditional on `cleanup` (not on `swap_support`)
+                // so a version that DROPPED its support dir still reaps the stale one.
+                if let Some(sd) = &cleanup {
+                    if sd.exists() || sd.is_symlink() {
+                        remove_path(sd).map_err(|e| target_io(sd, e))?;
+                    }
+                    if let Some(ss) = &swap_support {
+                        std::fs::rename(ss, sd).map_err(|e| target_io(sd, e))?;
+                    }
                 }
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
-                }
-                client
-                    .materialize(crate::install::client_target::MaterializeRequest {
-                        kind,
-                        name: &artifact.name,
-                        artifact_root: &canonical,
-                        dest: &dest,
-                        scope: target.scope(),
-                        pinned: &pinned_str,
-                        support_dir: staged_support.as_deref(),
-                    })
-                    .map_err(crate::error::Error::from)?;
-                fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
-                if let Some(sd) = &support_dest {
-                    fsync_tree(sd).map_err(|e| target_io(sd, e))?;
-                }
+                // fsync the directory the renames published into, so the swap
+                // itself survives a crash — the staged content was already
+                // fsynced above.
                 #[cfg(unix)]
-                if let Some(parent) = dest.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::File::open(parent)
-                        .and_then(|f| f.sync_all())
-                        .map_err(|e| target_io(parent, e))?;
-                }
+                std::fs::File::open(parent)
+                    .and_then(|f| f.sync_all())
+                    .map_err(|e| target_io(parent, e))?;
                 let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
                 materialized.push((dest.clone(), hash.clone()));
                 hash
@@ -875,37 +923,56 @@ async fn install_one<M: ArtifactMaterializer>(
     // is indistinguishable from "not reached yet".
     if let Err(error) = materialize_result {
         let mut outputs = client_records;
-        // The in-flight client lost its old copy to `remove_path` before the
-        // failure, so its prior hash names bytes that are gone. Record the
-        // footprint that IS there — the retry then reads an intact (if
-        // wrong-version) output and re-materializes it, instead of reading
-        // grim's own wreckage as a local edit and refusing until `--force`.
-        // Nothing but grim has touched that path since the untracked gate
-        // vetted it a few lines above, so adopting it resets no user's drift
-        // baseline. An unanchorable destination is left out of the record
+        // Since C-009 the new footprint is staged before it is published, so
+        // the *common* failure — anything the materializer returns — leaves the
+        // destination untouched at its old content. `in_flight` is `None` there
+        // and nothing needs repairing: `record_partial_pass` carries the prior
+        // output forward, and it still describes the bytes that are on disk.
+        //
+        // `in_flight` is `Some` for a failure anywhere in the publish span:
+        // a `rename` that failed after the old copy was already unlinked, or a
+        // rule whose index was published and whose support dir then was not.
+        // Those leave grim's own wreckage, and the prior hash names bytes that
+        // are gone. (The span's first syscall, `remove_path(&dest)`, can also
+        // fail with the destination still intact — the re-hash is then a
+        // harmless no-op that re-records what the prior record already said.)
+        // Record the footprint that IS there — the retry then
+        // reads an intact (if wrong-version, or half-swapped) output and
+        // re-materializes it, instead of reading grim's own wreckage as a local
+        // edit and refusing until `--force`. Nothing but grim has touched that
+        // path since the untracked gate vetted it, so adopting it resets no
+        // user's drift baseline. A destination the failed `rename` left absent
+        // hashes to nothing and drops out here — correct, because the untracked
+        // gate already treats a missing output as tracked and re-materializes
+        // it. An unanchorable destination is likewise left out of the record
         // entirely, exactly as the success path would have left it.
         //
         // **Only when a prior record exists.** That record is what makes this
         // recoverable: it carries the OLD pin, so the retry's integrity gate
         // sees `rec.source != source`, falls through, and re-materializes. On
         // a FIRST install there is no old pin to fall back to, so the wreckage
-        // would be recorded at the NEW pin — intact, fully covering, matching
-        // the lock — and the retry would answer `AlreadyInstalled` over a
-        // destination grim never finished writing. Recording nothing for it
-        // leaves the half-written dest untracked, which is the forceable
-        // refusal the untracked gate exists to produce.
+        // would be recorded at the NEW pin and match the lock — and a rule
+        // whose index published before its support-dir rename failed hashes
+        // exactly like a legitimately support-less one, so the retry would
+        // answer `AlreadyInstalled` over a footprint grim never finished
+        // publishing. Recording nothing for it leaves that dest untracked,
+        // which is the forceable refusal the untracked gate exists to produce.
         if recorded.is_some()
-            && let Some((client, dest, support)) = in_flight
+            && let Some((client, dest, support, cleanup)) = in_flight
             && let Ok(anchored) =
                 crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, kind, roots)
         {
             let anchored_support = support.as_deref().and_then(|sd| {
                 crate::install::path_anchor::AnchoredPath::from_target(sd, target.scope(), client, kind, roots).ok()
             });
-            // A support dir that fails to anchor drops out of the hash too,
-            // so the recorded footprint and the recorded shape agree.
-            let hashed_support = anchored_support.as_ref().and(support.as_deref());
-            if let Ok(content_hash) = footprint_hash(&dest, hashed_support) {
+            // Hash `cleanup`, not `support_dest`: the untracked gate's
+            // `existing_support` is that path, and the two diverge when a
+            // version that DROPPED its support dir failed to remove the stale
+            // one — recording an index-only hash there would make the retry
+            // fold the surviving dir in, mismatch, and refuse (65) over grim's
+            // own wreckage. The recorded `support_dir` shape still comes from
+            // `support_dest`, so a version with no support dir records none.
+            if let Ok(content_hash) = footprint_hash(&dest, cleanup.as_deref()) {
                 outputs.push(ClientOutput {
                     client: client.to_string(),
                     target: anchored,
@@ -1276,9 +1343,13 @@ fn integrity_gate(
     // declines (the expected-output set is empty), the record is not "already
     // installed"; falling through lets the install report `Skipped` and keeps a
     // later supported install from being masked.
-    // `grim status` derives its `outputs_pending` from the same seam, so a
-    // row promising "nothing to install" cannot disagree with what an install
-    // then does.
+    // `grim status` derives its `outputs_pending` from the same seam, so
+    // neither asker invents pending work the other would not do. **File
+    // presence is not part of the question either asks** — the seam answers
+    // "which destinations does this layout produce that the record does not
+    // cover", nothing about what is on disk. A deleted output is caught by
+    // `all_intact` here and by the footprint comparison in `grim status`, so
+    // an empty `outputs_pending` does not promise "nothing to install".
     let covers_targets = !expected_clients(rec.kind, target).is_empty()
         && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots).is_empty();
     if all_intact && covers_targets && rec.source.eq_content(source) {
@@ -2408,6 +2479,23 @@ fn locate_canonical(
     }
 }
 
+/// The final component of an install destination, which both the untracked
+/// gate's preview and the stage-then-swap re-root under a temp dir.
+///
+/// # Errors
+///
+/// [`InstallErrorKind::MaterializeFailed`] when the destination has none.
+/// Install destinations are always `<root>/…/<name[.md]>`, so that is a
+/// `path_for` bug rather than anything a user can provoke.
+fn dest_file_name(dest: &std::path::Path) -> Result<&std::ffi::OsStr, InstallError> {
+    dest.file_name().ok_or_else(|| {
+        InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+            "install destination '{}' has no final path component",
+            dest.display()
+        )))
+    })
+}
+
 /// Remove `path` whether it is a file or a directory.
 fn remove_path(path: &std::path::Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
@@ -3214,6 +3302,138 @@ mod tests {
         .await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_force_install_leaves_the_rule_footprint_intact() {
+        // C-009 / S-007. The force path removes the old output BEFORE the new
+        // one is written — `:791-793` for the index, `:799-803` for the support
+        // dir — so a failure in that window loses both.
+        //
+        // Injection: no fault-injection harness exists, and adding a
+        // production seam here would BE the fix. Instead the second install
+        // ships a rule whose canonical index carries a tab-indented YAML
+        // block, so `materialize_rule`'s `RuleFrontmatter::parse_doc`
+        // (`client_target.rs:439`) fails at the YAML scanner — after both
+        // `remove_path` calls, before a single destination byte is written.
+        // `--force` is what makes the window reachable: it skips the untracked
+        // gate's preview materialize (`:686`), which would otherwise have
+        // surfaced the same failure BEFORE the removes.
+        let dir = tempfile::tempdir().unwrap();
+        let good = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        let lock = lock_of(vec![locked_rule("my-rule", &good)]);
+        let access = arc(BlobMock { blob: good.clone() });
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), false).await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let index = dir.path().join(".claude/rules/my-rule.md");
+        let support = dir.path().join(".claude/rules/my-rule/examples.md");
+        assert_eq!(std::fs::read(&index).unwrap(), b"# index\n");
+        assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
+
+        // A distinct blob ⇒ a distinct pin, so the integrity gate falls
+        // through to a real re-materialize instead of `AlreadyInstalled`.
+        let broken = multi_rule_tar(
+            "my-rule",
+            b"---\npaths:\n\t- \"**/*.rs\"\n---\n# index v2\n",
+            &[("examples.md", b"# ex v2\n")],
+        );
+        let lock2 = lock_of(vec![locked_rule("my-rule", &broken)]);
+        let access2 = arc(BlobMock { blob: broken.clone() });
+        let forced = install_all(&lock2, &access2, &m, &target, &mut state, &roots, Path::new("."), true).await;
+        assert!(
+            forced[0].result.is_err(),
+            "the unparseable index must fail materialize, or this test proves nothing: {:?}",
+            forced[0].result
+        );
+
+        // C-009: the destination holds the OLD content or the NEW one, never
+        // nothing. The new bytes are unreachable here — rendering them is what
+        // failed — so "intact" means the old ones survived.
+        assert_eq!(
+            std::fs::read(&index).ok().as_deref(),
+            Some(b"# index\n".as_slice()),
+            "S-007: the rule index must still hold its old content after an interrupted force install \
+             (installer.rs:791-793)"
+        );
+        assert_eq!(
+            std::fs::read(&support).ok().as_deref(),
+            Some(b"# ex\n".as_slice()),
+            "S-007: the support dir must still hold its old content after an interrupted force install \
+             (installer.rs:799-803)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_force_install_leaves_no_partial_skill_tree() {
+        // C-009 / S-007's *partial* half, which the rule test above cannot
+        // reach: `materialize_skill` copies the whole tree FIRST
+        // (`client_target.rs:383`) and only then renders `SKILL.md`. A vendor
+        // render error therefore fails with the destination already replaced
+        // by a half-installed tree — canonical bytes where the rendered index
+        // belongs, plus a file the old version never had.
+        //
+        // Injection: `claude.disable-model-invocation` is a known Bool field
+        // (`vendor_claude.rs:31`), so a non-boolean literal is a hard
+        // `RenderError::InvalidValue` (`render.rs:176`). Data only — no
+        // production seam invented.
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = skill_tar("s", b"---\nname: s\ndescription: d\n---\n# v1\n");
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+
+        let lock = lock_of_skills(vec![locked_skill("s", &v1)]);
+        let access = arc(BlobMock { blob: v1.clone() });
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, Path::new("."), false).await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let doc = dir.path().join(".claude/skills/s/SKILL.md");
+        let stray = dir.path().join(".claude/skills/s/extra.md");
+        assert_eq!(
+            std::fs::read(&doc).unwrap(),
+            b"---\nname: s\ndescription: d\n---\n# v1\n"
+        );
+
+        // Two-file v2 whose index cannot render for Claude.
+        let mut b = tar::Builder::new(Vec::new());
+        let mut push = |path: &str, body: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, path, body).unwrap();
+        };
+        push(
+            "s/SKILL.md",
+            b"---\nname: s\ndescription: d\nmetadata:\n  claude.disable-model-invocation: maybe\n---\n# v2\n",
+        );
+        push("s/extra.md", b"# extra\n");
+        let v2 = b.into_inner().unwrap();
+
+        let lock2 = lock_of_skills(vec![locked_skill("s", &v2)]);
+        let access2 = arc(BlobMock { blob: v2.clone() });
+        let forced = install_all(&lock2, &access2, &m, &target, &mut state, &roots, Path::new("."), true).await;
+        assert!(
+            forced[0].result.is_err(),
+            "the bad metadata literal must fail the render, or this test proves nothing: {:?}",
+            forced[0].result
+        );
+
+        assert_eq!(
+            std::fs::read(&doc).ok().as_deref(),
+            Some(b"---\nname: s\ndescription: d\n---\n# v1\n".as_slice()),
+            "S-007: the skill index must hold the old content or the new one — never the unrendered \
+             half-written v2 (installer.rs:791-793)"
+        );
+        assert!(
+            !stray.exists(),
+            "S-007: a file only the failed version ships must not survive in the destination"
+        );
     }
 
     #[tokio::test]
