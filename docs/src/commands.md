@@ -1179,7 +1179,7 @@ like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
 | `z` | Fold the whole tree: if anything is collapsed, expand everything; otherwise collapse back to the configured [`expand_levels`][options-tui] depth. Tree mode only. |
 | `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle); on a leaf entry, open the detail pane as usual. |
 | `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
-| `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on not-yet-installed or integrity-missing leaves, `u`/`d` act on installed ones (including outdated, modified, or integrity-missing). Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
+| `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on `not installed`, `pending` and `integrity-missing` leaves; `u`/`d` act on `installed`, `via bundle`, `outdated`, `modified`, `pending` and `integrity-missing` ones. `pending` is in both sets: the artifact is installed, so update and uninstall apply, *and* an install still has outputs to write for it. Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
 
 Each group row shows a rollup glyph reflecting the worst install state of
 its descendants — `↑` when any descendant is outdated, `✱` when any is
@@ -1268,6 +1268,25 @@ declares the entry in the active scope's `grimoire.toml` and relocks it (like
 moved past the installed digest flips the row to `outdated` right after the
 install completes.
 
+**The Overwrite dialog** is what those seams' integrity gate looks like from
+the TUI. `i` and `u` both refuse an artifact whose bytes drifted from the hash
+grim recorded — `u` included, [since 0.13.0](./upgrading.md#update-integrity) —
+and rather than reporting a dead end, a refusal opens a modal offering the
+forced retry. Answering it is what supplies `--force`; nothing about the key
+you pressed does. Only a **single-artifact** action offers it: one answer
+cannot speak for several artifacts, so a batch leaves its refusals in the
+aggregate status line instead. An already-forced retry that refuses again does
+not re-open the dialog, so there is no confirm loop to get stuck in.
+
+**The `+ pending` badge** marks an artifact that is installed but does not yet
+cover every client it should. It is materialization drift, the same thing
+[`grim status`](#status) reports as `outputs_pending`: a client was added to
+the set, or a release moved a destination, so `grim install` has a file to
+write that the install record does not account for. The row is not broken and
+nothing is out of date — pressing `i` writes the missing outputs and clears the
+badge. `u` and `d` work on a pending row too; it is the one state both action
+sets share. Press `?` for the full status legend.
+
 The `↑ outdated` badge tracks the reference the row is **declared** with —
 the same one [`grim update`](#update) re-resolves — so pressing `u` on a
 badged row always has something to do. A row declared at an exact version
@@ -1276,11 +1295,21 @@ the version column is where a newer release shows up for those.
 
 A bundle row works the same way at the bundle level. Install declares it
 under `[bundles]`, expands it into its members (like
-`grim add --kind bundle`), and materializes exactly those members; the row's
-state aggregates the member states. Delete removes the member files and
-records, evicts the members from the lock, and undeclares the bundle. A
-member shared with another still-declared bundle is spared: its files stay
-on disk and its lock entry only loses the deleted bundle's provenance.
+`grim add --kind bundle`), and materializes exactly those members. Delete
+removes the member files and records, evicts the members from the lock, and
+undeclares the bundle. A member shared with another still-declared bundle is
+spared: its files stay on disk and its lock entry only loses the deleted
+bundle's provenance.
+
+The row's own state folds in the health of its members. Declaration is the
+gate — a bundle absent from `[bundles]` reads `not installed` whatever its
+members look like — but past it the row shows the **worst** member state, at
+the same precedence the tree rollup uses: `integrity-missing` over `modified`
+over `outdated` over `pending` over `installed`. A member that was never
+materialized folds in as `pending`, not `not installed`, so no member can drag
+the row back across the line declaration owns. That is what makes the bundle
+actionable as a unit: a flat `installed` would hide the damage *and* refuse
+`i`, leaving nothing to press.
 
 ```sh
 grim tui --registry ghcr.io/acme

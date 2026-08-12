@@ -6,8 +6,8 @@ the first command after an upgrade, and what to do about it.
 
 Nothing here is a breaking change. Grimoire is [stabilizing toward
 1.0][stability] and evolution is additive-only — but "additive" is a statement
-about contracts, not about what you *see*, and three of these are visible
-enough to look like bugs if you meet them cold.
+about contracts, not about what you *see*, and every one of these is visible
+enough to look like a bug if you meet it cold.
 
 ## Adding a client changes what autodetect targets {#autodetect}
 
@@ -141,6 +141,32 @@ shipped in 0.10.0.
 the file. No exit code was added or repurposed; this narrows one path back to
 the documented behaviour.
 
+## grim update no longer overwrites an edit you made {#update-integrity}
+
+[`grim install`][install] has always refused to overwrite an artifact whose
+bytes drifted from the hash grim recorded when it wrote them. [`grim
+update`][update] did not: it passed force to the installer unconditionally, so
+a roll-forward silently replaced a file you had edited in place. Since 0.13.0
+both commands go through the same gate.
+
+**What you will see.** An update over a locally-modified artifact exits **65**
+and leaves the file untouched. The rest of the pass still reconciles — one
+refused artifact does not abandon the others — and the report is still printed,
+because this is a refusal, not an error document. Under `--format json` the
+refused row carries `refused: true`; the field is always present and `false` on
+every other row, which is how a consumer tells this exit 65 from any other.
+`action` keeps reporting the lock diff: the pin *did* roll forward, only the
+materialization was refused. In [`grim tui`][tui], `u` on such a row opens the
+Overwrite dialog instead of failing.
+
+A changed pin still re-materializes with no force at all. The gate compares
+against the **recorded** hash, so rolling a floating tag forward over an
+untouched file is unaffected — the rolling-release path is exactly as it was.
+
+**What to do.** Re-run with `--force` to overwrite your edit, or answer the
+TUI's Overwrite dialog. To keep the edit instead, stop tracking the artifact:
+[`grim remove`][remove] undeclares it and leaves the file on disk.
+
 ## A broken global config now fails more commands the same way {#global-config-strict}
 
 An unreadable or invalid `$GRIM_HOME/grimoire.toml` used to fail cleanly
@@ -227,6 +253,9 @@ explicitly; nothing else recovers it, and that is deliberate.
 [unstable]: ./stability.md#unstable
 [status]: ./commands.md#status
 [install]: ./commands.md#install
+[update]: ./commands.md#update
+[remove]: ./commands.md#remove
+[tui]: ./commands.md#tui
 [vendor-metadata]: ./vendor-metadata.md#projection-semantics
 [no-clobber]: ./json-interface.md#error-reason
 [multi-registry]: ./configuration.md#multiple-registries

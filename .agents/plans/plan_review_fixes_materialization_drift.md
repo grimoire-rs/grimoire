@@ -274,14 +274,14 @@ content or the new, never a partial tree.
 
 | WP | Scope (C-/S- IDs) | Expected files | Size | Wave | Depends on | Review | Status |
 |---|---|---|---|---|---|---|---|
-| **WP-A** | B1+B2+H2+H9 — C-001, C-002, C-003, C-004, C-015; S-001, S-002 | `src/install/expected_outputs.rs`, `src/api/status_report.rs`, `docs/src/json-interface.md` (`:89`, `:452-453`), `docs/src/stability.md` (`:152-159`), `docs/src/commands.md` (`:615-638`), `catalog/skills/grim-usage/references/consume.md`, `.claude/rules/subsystem-cli-commands.md` | M | 1 | — | panel | active |
-| **WP-B** | B6+H6 — C-005, C-006; S-003, S-004 | `src/command/update.rs` (`:296-318`), `test/tests/test_integrity.py` (extend `:102-132`). **Out of bounds: `src/command/install.rs`, `src/install/install_error.rs`** — wrap update-specific context at `update.rs:311` per `quality-rust-errors.md`'s library/CLI boundary; do **not** parameterize the shared `IntegrityMismatch` message, which would mutate `grim install`'s shipped refusal text | M | 1 | — | panel | active |
+| **WP-A** | B1+B2+H2+H9 — C-001, C-002, C-003, C-004, C-015; S-001, S-002 | `src/install/expected_outputs.rs`, `src/api/status_report.rs`, `docs/src/json-interface.md` (`:89`, `:452-453`), `docs/src/stability.md` (`:152-159`), `docs/src/commands.md` (`:615-638`), `catalog/skills/grim-usage/references/consume.md`, `.claude/rules/subsystem-cli-commands.md` | M | 1 | — | panel | merged |
+| **WP-B** | B6+H6 — C-005, C-006; S-003, S-004 | `src/command/update.rs` (`:296-318`), `test/tests/test_integrity.py` (extend `:102-132`). **Out of bounds: `src/command/install.rs`, `src/install/install_error.rs`** — wrap update-specific context at `update.rs:311` per `quality-rust-errors.md`'s library/CLI boundary; do **not** parameterize the shared `IntegrityMismatch` message, which would mutate `grim install`'s shipped refusal text | M | 1 | — | panel | merged |
 | **WP-C** | B3+B4+B7 **+ B1's `CHANGELOG.md:38` site** — C-007, C-008, C-003 (partial) | `CHANGELOG.md` (`:12`, `:21`, **`:38`**), `docs/src/stability.md` (`:188-199`), `catalog/skills/grim-usage/references/troubleshooting.md` | S | 1 | — | light | merged |
 | **WP-D** | H10 — C-009; S-007 | `src/install/installer.rs` (`:791-793` artifact swap, `:799-803` support-dir remove, `:868-909` recovery branch, `:733-738`/`:784` `in_flight`) | M | 1 | — | panel | merged |
 | **WP-E** | H1 — C-010; S-006 | `src/context.rs` (`:22-25`, `:67-85`, `:291-329`) | S | 1 | — | panel | merged |
-| **WP-F** | B5+H5 — C-012; S-005 | `src/tui/app.rs` (new test on `test_ctx` `:5505`, driven as `:5536` does), `src/tui/render.rs` (`:950`, `:1244-1268`) | S | 1 | — | **panel** (carries a Block whose only deliverable is one test) | active |
+| **WP-F** | B5+H5 — C-012; S-005 | `src/tui/app.rs` (new test on `test_ctx` `:5505`, driven as `:5536` does), `src/tui/render.rs` (`:950`, `:1244-1268`) | S | 1 | — | **panel** (carries a Block whose only deliverable is one test) | merged |
 | **WP-G** | H7+H8 **+ B1's `status_badge.rs:38` site** — C-011, C-003 (partial); S-008 | `src/install/status_badge.rs` (`:8`, `:38`, `:58`), `test/tests/test_search.py` | S | 1 | — | light | merged |
-| **WP-H** | H3+H4 — C-013, C-014 | `docs/src/upgrading.md`, `docs/src/commands.md` (`:1106-1281`) | S | 2 | WP-A, WP-B, WP-C | light | pending |
+| **WP-H** | H3+H4 — C-013, C-014 | `docs/src/upgrading.md`, `docs/src/commands.md` (`:1106-1281`) | S | 2 | WP-A, WP-B, WP-C | light | merged |
 
 ```mermaid
 graph TD
