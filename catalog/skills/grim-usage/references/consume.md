@@ -173,6 +173,19 @@ grim update
 grim update code-review rust-style
 ```
 
+Update runs the **same integrity gate as install**. A new pin overwrites
+grim-managed content with no flag — that is the whole point of a rolling
+update — but an artifact whose bytes you edited yourself is refused with
+exit 65 until you pass `--force`:
+
+```sh
+grim update           # exit 65: "installed artifact was modified locally"
+grim update --force   # overwrite my edit deliberately
+```
+
+One flag therefore governs every way update can destroy hand-edited work:
+this overwrite, the prune below, and the client reap below that.
+
 Update is also the only command that **prunes**: an artifact that
 dropped out of the lock (most often a bundle member the bundle stopped
 including) is deleted and reported as `removed` — unless you edited it
@@ -218,7 +231,22 @@ computed locally, no network. Left unset (autodetect), both stay `[]` on
 every item instead of diffing against live client detection.
 `clients_missing` also skips a configured client whose vendor cannot host
 that kind at that scope (Codex declines rules, for one), since no output
-was ever going to be recorded for it. A third
+was ever going to be recorded for it.
+
+`outputs_pending` answers a different question: **what would `grim install`
+write right now that the record does not already cover?** Same
+`{client, path}` shape, `[]` when an install would write nothing new. Three
+things fill it, all real install work — a client that gained support since
+the last install (you installed another AI client, or configured one), a
+recorded output whose file was deleted, and a render-layout move (reported
+at the new path). This is *materialization drift*: the artifact is intact at
+its locked pin, so `state` correctly reads `installed` while an install
+still has files to write, and no other field can see it. Unlike
+`clients_missing` it is reported under autodetect too, because it asks what
+an install would do rather than what you configured. Fix it with
+`grim install` — not `grim update`, which would also roll your pins forward.
+
+A third
 array, `clients_unresolved`, names every active client whose recorded
 output could not be resolved at all — the anchor root is gone, or the
 containment guard refused the path — so that client is silently absent

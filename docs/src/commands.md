@@ -536,6 +536,19 @@ grim update
 grim update code-review rust-style
 ```
 
+`update` runs the **same local-modification integrity gate as
+[`grim install`](#install)**. A new pin overwrites machine-managed content
+with no flag — that is the rolling-release contract and it is unchanged — but
+an artifact whose on-disk bytes drifted from the recorded hash is **refused**
+with exit `65` until you pass `--force`. One flag therefore governs every way
+this command can destroy hand-edited work: the overwrite above, the prune
+below, and the client reap below that.
+
+> **Changed in 0.13.0.** `update` previously forced the overwrite
+> unconditionally, so a hand-edited artifact was replaced silently at exit `0`
+> while `grim install` refused the identical bytes. If you relied on that,
+> add `--force`.
+
 Because update reconciles the workspace to the freshly-resolved lock, it also
 **prunes** artifacts that have dropped out of the lock — most often a
 [bundle](./concepts.md#bundles) member that the bundle stopped including. A
@@ -599,6 +612,31 @@ detection disagrees with what was recorded, which is not real config drift.
 that artifact's kind at that scope — a Codex rule, say — since the install
 was never going to record an output for it.
 
+A separate array, `outputs_pending`, answers a different question: **what
+would `grim install` write right now that the record does not already account
+for?** Same `{client, path}` shape as `outputs`, `[]` when an install would
+write nothing new. Three things put an entry in it, and all three are real
+install work:
+
+- a **client that gained support since the last install** — you installed
+  another AI client, or added one to `[options].clients`, and nothing was ever
+  recorded for it;
+- a **recorded output whose file is gone**, deleted out from under grim;
+- a **render-layout move**, reported at the new path.
+
+This is *materialization drift*, and it is the one kind of drift no other
+field could see: the artifact is byte-intact at the locked pin, so `state`
+correctly reads `installed` while an install still has files to write. Unlike
+`clients_missing` it is reported under autodetect too — it asks what an
+install would do, not what you configured — and it is derived from the very
+seam the installer uses to decide whether a pass is a no-op, so it cannot
+promise "nothing to do" over an install that then writes three files.
+
+Remediation is **[`grim install`](#install)**, which clears it. Not
+[`grim update`](#update): that would also re-resolve floating tags and roll
+your pins forward, which is a version change, not a repair. `outputs_pending`
+never affects `state` and never affects the exit code.
+
 A third array, `clients_unresolved`, names every active client whose recorded
 output path could not be resolved at all — an anchor root absent on this
 machine, or a recorded path refused by the containment guard. Those clients
@@ -617,6 +655,9 @@ reports a bare `missing` with no explanation. The artifact's `state` stays
       "state": "installed",
       "outputs": [
         { "client": "claude", "path": "/repo/.claude/skills/code-review" }
+      ],
+      "outputs_pending": [
+        { "client": "cursor", "path": "/repo/.cursor/skills/code-review" }
       ],
       "clients_missing": [],
       "clients_extra": [],

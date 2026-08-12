@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING** — `grim update` now runs the same local-modification integrity
+  gate as `grim install`: a locally modified artifact is refused with exit
+  `65` instead of being overwritten silently. Pass `--force` for the previous
+  behaviour. A changed pin still overwrites machine-managed content with no
+  flag, so ordinary rolling updates are unaffected. Previously `update` forced
+  unconditionally, destroying hand-edited work with no warning and no report
+  field, while `install` refused the identical bytes — and while update's own
+  prune and client-reap passes already gated the same destruction behind
+  `--force`.
+- The integrity gate now refuses only outputs a pass would actually
+  **overwrite**. A drifted output belonging to a client outside the target
+  set, or one stranded at a path a render-layout move left behind, is left to
+  the reaper that already preserves it rather than blocking the command.
+
+### Added
+
+- `grim status --format json` items carry `outputs_pending`: the
+  `{client, path}` outputs `grim install` would write right now that the
+  install record does not already account for — materialization drift from a
+  client installed after the fact, an output deleted out from under grim, or
+  an unmigrated layout move. Reported under autodetect too, never moves
+  `state`, never affects the exit code. Remediation is `grim install`.
+- The TUI and `grim search` gain a matching `pending` badge, ranked directly
+  above `installed` so a row with a louder problem keeps reporting it.
+
+### Performance
+
+- The OCI access seam is reused within an invocation instead of rebuilt per
+  call, so the registry bearer token `oci-client` caches on the client
+  survives. `grim mcp` previously paid a full token handshake on every tool
+  call.
+
 ## [0.12.1] - 2026-08-02
 
 ### Added

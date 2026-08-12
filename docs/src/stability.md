@@ -149,6 +149,15 @@ installed artifact. `outputs` is itself covered by the [additive-field
 policy](#frozen-additive-fields) above, so code that reads it survives an
 upgrade even as the paths inside it change.
 
+The same entry carries `outputs_pending` — the outputs an install *would*
+write that the record does not yet cover, in the same `{client, path}`
+shape. It is the supported way to detect **materialization drift**: a
+client installed after the fact, an output deleted out from under grim, or
+a layout move not yet migrated. It is derived from the same seam the
+installer uses to decide whether a pass is a no-op, so it cannot disagree
+with what `grim install` then does. Remediation is `grim install`; it never
+moves `state` and never affects the exit code.
+
 ## The compatibility promise {#promise}
 
 Vendor layout moving is not, by itself, a compatibility break — provided
@@ -175,6 +184,19 @@ detection rather than the user's config.)
 The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout
 stability (`.agents/adr/adr_render_layout_stability.md`).
+
+### One deliberate break, in 0.13.0 {#promise-update-integrity}
+
+`grim update` over a **locally modified** artifact now exits `65` instead of
+overwriting it; `--force` restores the previous behaviour. This is a
+behaviour change on a shipped exit-0 path and it is recorded here rather
+than waived: what it replaced was a defect, not a contract. `update` passed
+a hard-coded force into the installer, so it destroyed hand-edited work
+silently — no warning, no report field — while `grim install` refused the
+identical bytes with `65`, and while update's own prune and client-reap
+passes already gated the same class of destruction behind `--force`. One
+command gave two opposite answers about one file, and only the silent one
+lost data. Code depending on the old behaviour was depending on the bug.
 
 ## Known limitations {#limitations}
 

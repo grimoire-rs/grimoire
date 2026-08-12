@@ -325,12 +325,45 @@ cat .github/instructions/rust-style.instructions.md
 
 ### 4. Integrity protection
 
+`install` and `update` run the **same** gate — that is the point of this
+scenario. Before 0.13.0 `update` forced unconditionally and silently ate the
+edit, so check both:
+
 ```sh
 echo "tampered" >> .claude/skills/hello-world/SKILL.md
 grim status                       # hello-world -> 'modified'
 grim install                      # refused (exit 65) — local edit protected
+grim update                       # ALSO refused (exit 65), same error
+tail -1 .claude/skills/hello-world/SKILL.md   # still "tampered"
 grim install --force              # overwrite the local edit
 ```
+
+`grim update --force` overwrites it just the same. What must never happen
+again: a plain `grim update` exiting 0 with the edit gone.
+
+### 4a. Materialization drift (`outputs_pending`)
+
+The drift no other field can see: the artifact is byte-intact at its locked
+pin, but a client that appeared *after* the install has nothing recorded, so
+an install still has files to write.
+
+```sh
+# in test/manual/project, with hello-world installed into .claude only:
+grim status --format json | jq '.items[] | select(.name=="hello-world")
+  | {state, outputs_pending}'          # state installed, outputs_pending []
+
+mkdir -p .cursor                        # "install" a second client
+grim status --format json | jq '.items[] | select(.name=="hello-world")
+  | {state, outputs_pending}'          # state STILL installed; pending names cursor
+grim tui                                # the row badge reads '+ pending'
+
+grim install                            # the remedy (NOT update)
+grim status --format json | jq '.items[] | select(.name=="hello-world")
+  | .outputs_pending'                  # back to []
+```
+
+Check the promise holds both ways: whatever `outputs_pending` named must be
+on disk after `grim install`, and the field must be `[]` again.
 
 ### 5. Rolling release / outdated / update
 
