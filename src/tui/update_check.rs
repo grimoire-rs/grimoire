@@ -29,7 +29,7 @@ use tokio::task::JoinSet;
 
 use super::state::{ArtifactState, TuiRow};
 use crate::catalog::registry_catalog::Catalog;
-use crate::catalog::update_availability::{outdated_from_resolve, resolve_latest_digest};
+use crate::catalog::update_availability::{outdated_from_resolve, resolve_declared_digest};
 use crate::oci::access::OciAccess;
 use crate::oci::{Digest, Identifier};
 
@@ -100,10 +100,12 @@ pub enum CheckMsg {
 pub struct RowCheck {
     /// The row's `registry/repository` reference — the result key.
     pub repo: String,
-    /// The `registry/repository` identifier to re-check. Any tag on it is
-    /// ignored: the check lists the repo's tags fresh and picks the current
-    /// representative tag itself (issue #21), so a stale cached catalog tag
-    /// cannot hide a newer release.
+    /// The **declared** identifier to re-check — the reference the config (or
+    /// the bundle that provides this row) spells out, tag and all, which is
+    /// exactly what `grim update` re-resolves. Never the bare
+    /// `registry/repository`: resolving that answers "does the repo carry
+    /// anything newer?", and would badge a `:0.12.0` pin `↑ outdated` forever
+    /// once `0.13.0` shipped.
     pub id: Identifier,
     /// The digest the active scope's lock pinned this artifact to.
     pub locked_digest: Digest,
@@ -282,11 +284,10 @@ impl UpdateChecker {
     /// Spawn one bounded per-row check for each item in `checks`, skipping
     /// any whose `(repo, generation)` already has a check in flight. Each task
     /// acquires a [`Semaphore`] permit first (so at most
-    /// [`ROW_CHECK_CONCURRENCY`] run at once), re-discovers the registry's
-    /// current latest-tag digest fresh via [`resolve_latest_digest`] (a
-    /// read-only-fresh `list_tags` + [`Operation::Query`] resolve that never
-    /// writes a tag pointer — issue #21), reports the pure
-    /// [`outdated_from_resolve`] decision stamped with the current
+    /// [`ROW_CHECK_CONCURRENCY`] run at once), re-resolves the row's declared
+    /// reference fresh via [`resolve_declared_digest`] (a read-only
+    /// `Operation::Query` resolve that never writes a tag pointer), reports
+    /// the pure [`outdated_from_resolve`] decision stamped with the current
     /// [`Self::generation`], and clears its own in-flight slot once the send
     /// attempt resolves.
     ///
@@ -337,7 +338,7 @@ impl UpdateChecker {
                     Ok(p) => p,
                     Err(_) => return,
                 };
-                let msg = match resolve_latest_digest(&*access, &check.id).await {
+                let msg = match resolve_declared_digest(&*access, &check.id).await {
                     Ok(resolved) => {
                         if outdated_from_resolve(&check.locked_digest, resolved.as_ref()) {
                             CheckMsg::RowOutdated {
@@ -775,14 +776,13 @@ mod tests {
         }
     }
 
-    // ── issue #21: fresh tag discovery (not the cached catalog tag) ───────
+    // ── the check follows the DECLARED tag, not the repository head ───────
 
-    /// A registry whose repository carries only immutable semver tags (no
-    /// moving `latest`): `1.0.0` resolves to the old digest, `2.0.0` to the
-    /// newer one. A tagless / `latest` lookup falls through to the old digest
-    /// so it models a registry that does NOT publish a moving pointer. Mirrors
-    /// a real semver-only registry where a new release lands as a brand-new
-    /// higher tag the cached catalog has not yet seen.
+    /// A repository carrying two immutable semver tags plus a moving `latest`:
+    /// `2.0.0` and `latest` resolve to the new digest, everything else (incl.
+    /// `1.0.0`) to the old one. Models the shape that made the bug visible —
+    /// a release lands as a brand-new higher tag while an installed row is
+    /// declared at a lower, still-valid one.
     struct VersionedAccess {
         old: Digest,
         new: Digest,
@@ -800,10 +800,10 @@ mod tests {
     #[async_trait::async_trait]
     impl OciAccess for VersionedAccess {
         async fn resolve_digest(&self, id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
-            // Only the new highest tag resolves to the new digest; the old tag
-            // (and any tagless/`latest` probe) resolves to the locked baseline.
-            let d = match id.tag() {
-                Some("2.0.0") => self.new.clone(),
+            // The repository head and the moving pointer carry the new digest;
+            // the older immutable tag still resolves to the locked baseline.
+            let d = match id.tag_or_latest() {
+                "2.0.0" | "latest" => self.new.clone(),
                 _ => self.old.clone(),
             };
             Ok(Some(d))
@@ -838,21 +838,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outdated_detected_via_fresh_tag_discovery_not_cached_tag() {
-        // Regression for issue #21 ("update not shown"). The installed row was
-        // pinned at 1.0.0; the registry now also carries 2.0.0. The cached
-        // catalog row still names the OLD highest tag (1.0.0) — and on a
-        // registry without a moving `latest`, resolving that fixed tag can
-        // never reveal the new release. The background per-row check must
-        // therefore DISCOVER the registry's current latest tag fresh
-        // (list_tags + pick_latest_tag) and compare ITS digest to the lock
-        // pin, so the row flips to outdated at launch with no manual refresh.
+    async fn declared_moving_tag_that_advanced_flips_the_row_outdated() {
+        // Issue #21 ("update not shown"): a row declared at a moving pointer
+        // whose target advanced past the lock pin must flip to `↑ outdated`
+        // at launch, with no manual refresh — the check resolves the declared
+        // reference LIVE, so a stale cached catalog row cannot suppress it.
         let access = VersionedAccess::new();
         let dyn_access: Arc<dyn OciAccess> = access.clone();
         let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
 
-        // The check carries the STALE catalog tag (1.0.0) and the locked
-        // (old) digest — exactly what `build_row_check` produced before the fix.
+        let check = RowCheck {
+            repo: "localhost:5000/acme/code-review".to_string(),
+            id: Identifier::new_registry("acme/code-review", "localhost:5000").clone_with_tag("latest"),
+            locked_digest: Algorithm::Sha256.hash(b"v1"),
+        };
+        checker.spawn_row_checks(vec![check]);
+        let msg = rx.recv().await.expect("one result");
+        assert!(
+            matches!(msg, CheckMsg::RowOutdated { .. }),
+            "a declared tag that moved past the lock pin must flip the row to outdated, got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn higher_tag_outside_the_declared_reference_leaves_the_row_up_to_date() {
+        // Regression: the badge must answer "would `grim update` move this
+        // pin?". A row declared at the immutable `1.0.0` stays exactly there
+        // no matter how many higher tags the repository grows, so a `2.0.0`
+        // release must NOT badge it `↑ outdated` — pressing `u` on such a row
+        // is a no-op. The earlier revision discovered the repository's highest
+        // tag itself and reported this row as outdated forever.
+        let access = VersionedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+
         let check = RowCheck {
             repo: "localhost:5000/acme/code-review".to_string(),
             id: Identifier::new_registry("acme/code-review", "localhost:5000").clone_with_tag("1.0.0"),
@@ -861,8 +880,8 @@ mod tests {
         checker.spawn_row_checks(vec![check]);
         let msg = rx.recv().await.expect("one result");
         assert!(
-            matches!(msg, CheckMsg::RowOutdated { .. }),
-            "a newer registry release must flip the row to outdated via fresh tag discovery, got {msg:?}"
+            matches!(msg, CheckMsg::RowUpToDate { .. }),
+            "a higher tag the declaration does not point at is not an available update, got {msg:?}"
         );
     }
 }

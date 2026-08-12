@@ -658,7 +658,7 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state, _config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
         load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
@@ -667,7 +667,7 @@ fn schedule_row_checks_forced(
         .rows
         .iter()
         .filter(|r| eligible_for_recheck(r))
-        .filter_map(|r| build_row_check(&lock, r))
+        .filter_map(|r| build_row_check(&config, &lock, r))
         .collect();
     if checks.is_empty() {
         return;
@@ -676,11 +676,11 @@ fn schedule_row_checks_forced(
     checker.mark_scheduled(now);
 }
 
-/// Build the [`RowCheck`] for one eligible row: pair its tagless
-/// `registry/repository` identifier with the digest the scope's lock pinned it
-/// to. `None` when the row carries no lock entry (then "newer tag" has no
-/// baseline) or its repo is malformed.
-fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
+/// Build the [`RowCheck`] for one eligible row: pair the reference the row was
+/// **declared** with against the digest the scope's lock pinned it to. `None`
+/// when the row carries no lock entry (then "newer tag" has no baseline), no
+/// declared reference, or its repo is malformed.
+fn build_row_check(config: &DesiredSet, lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     // A2 / D-BACKGROUND: use the authoritative `registry` + `repository` fields
     // directly so namespaced registries like "ghcr.io/acme" are matched exactly,
     // without re-splitting `repo` on the first '/' (which would give just "ghcr.io").
@@ -694,17 +694,49 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
             .pinned()
             .is_some_and(|p| p.registry() == registry && p.repository() == repository)
     })?;
-    // Issue #21: carry the tagless `registry/repository` identifier, not the
-    // cached catalog tag. The background check re-discovers the registry's
-    // current latest tag fresh (see `update_check::resolve_latest_digest`), so a
-    // newer release surfaces even when the cached catalog row is stale or the
-    // registry carries only immutable semver tags (no moving `latest`).
-    let id = Identifier::new_registry(repository, registry);
     Some(RowCheck {
         repo: row.repo.clone(),
-        id,
+        id: declared_identifier(config, lock, registry, repository)?,
         locked_digest: locked.source.pinned()?.digest(),
     })
+}
+
+/// The reference this repository was declared with — what `grim update` would
+/// re-resolve, and therefore the only reference whose movement makes the `↑`
+/// badge actionable.
+///
+/// Two sources, in precedence order: a direct `[skills]`/`[rules]`/`[agents]`/
+/// `[mcp]` declaration wins (a name may be both declared *and* provided by a
+/// bundle, and the direct declaration is what the resolver honours), otherwise
+/// the floating member id a declared bundle baked into the lock. `None` for a
+/// repository neither declares — nothing to re-resolve.
+///
+/// Deliberately **not** the tagless `registry/repository`: an earlier revision
+/// carried that and let the background check discover the repo's globally
+/// highest tag, which flipped every row declared below the repository head to
+/// `↑ outdated` while `grim update` left it exactly where it was. The declared
+/// tag is also immune to the stale-cached-catalog-tag problem (issue #21) that
+/// motivated the discovery in the first place — the config is not the cache.
+fn declared_identifier(
+    config: &DesiredSet,
+    lock: &GrimoireLock,
+    registry: &str,
+    repository: &str,
+) -> Option<Identifier> {
+    let matches = |id: &Identifier| id.registry() == registry && id.repository() == repository;
+    let direct = [&config.skills, &config.rules, &config.agents, &config.mcp]
+        .into_iter()
+        .flat_map(|table| table.values())
+        .filter_map(|source| source.identifier())
+        .find(|id| matches(id));
+    if let Some(id) = direct {
+        return Some(id.clone());
+    }
+    lock.bundles
+        .iter()
+        .flat_map(|bundle| bundle.members.iter())
+        .filter_map(|member| Identifier::parse(&member.id).ok())
+        .find(matches)
 }
 
 /// Spawn immediate per-row re-checks for the rows a batch just installed
@@ -718,12 +750,12 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state, _config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
         load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
-    let checks = post_batch_checks(&lock, &state.rows, rows);
+    let checks = post_batch_checks(&config, &lock, &state.rows, rows);
     if !checks.is_empty() {
         checker.spawn_row_checks(checks);
     }
@@ -732,12 +764,12 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
 /// The pure post-batch selection: the [`RowCheck`]s for exactly the
 /// acted-on row indices that are eligible (installed/outdated) and carry a
 /// lock pin. Out-of-range indices and ineligible rows are skipped.
-fn post_batch_checks(lock: &GrimoireLock, rows: &[TuiRow], indices: &[usize]) -> Vec<RowCheck> {
+fn post_batch_checks(config: &DesiredSet, lock: &GrimoireLock, rows: &[TuiRow], indices: &[usize]) -> Vec<RowCheck> {
     indices
         .iter()
         .filter_map(|&i| rows.get(i))
         .filter(|r| eligible_for_recheck(r))
-        .filter_map(|r| build_row_check(lock, r))
+        .filter_map(|r| build_row_check(config, lock, r))
         .collect()
 }
 
@@ -3736,6 +3768,24 @@ mod tests {
         )
     }
 
+    /// A `[skills]` declaration set from `(binding name, registry, repository,
+    /// tag)` tuples — the source `build_row_check` reads the re-check tag from.
+    /// Built through `new_registry` rather than `Identifier::parse` so the
+    /// single-segment test registries (`"r"`) the other fixtures use stay
+    /// expressible.
+    fn declared_skills(entries: &[(&str, &str, &str, &str)]) -> DesiredSet {
+        let mut set = DesiredSet::default();
+        for (name, registry, repository, tag) in entries {
+            set.skills.insert(
+                (*name).to_string(),
+                crate::config::declaration::DeclaredSource::Registry(
+                    Identifier::new_registry(*repository, *registry).clone_with_tag(*tag),
+                ),
+            );
+        }
+        set
+    }
+
     fn lock_fixture(
         skills: Vec<crate::lock::locked_artifact::LockedArtifact>,
         rules: Vec<crate::lock::locked_artifact::LockedArtifact>,
@@ -3768,7 +3818,8 @@ mod tests {
         not_installed.state = ArtifactState::NotInstalled;
         let rows = vec![installed_row("r/a"), not_installed, installed_row("r/unlocked")];
 
-        let checks = post_batch_checks(&lock, &rows, &[0, 1, 2, 99]);
+        let config = declared_skills(&[("a", "r", "a", "1.0.0"), ("b", "r", "b", "1.0.0")]);
+        let checks = post_batch_checks(&config, &lock, &rows, &[0, 1, 2, 99]);
 
         assert_eq!(checks.len(), 1, "only the installed + locked row is rechecked");
         assert_eq!(checks[0].repo, "r/a");
@@ -3815,12 +3866,18 @@ mod tests {
         };
         let rows = vec![row];
 
-        let checks = post_batch_checks(&lock, &rows, &[0]);
+        let config = declared_skills(&[("demo", "ghcr.io/acme", "skills/demo", "1.0.0")]);
+        let checks = post_batch_checks(&config, &lock, &rows, &[0]);
 
         assert_eq!(
             checks.len(),
             1,
             "D-BACKGROUND: namespaced registry row must produce a RowCheck"
+        );
+        assert_eq!(
+            checks[0].id.registry(),
+            "ghcr.io/acme",
+            "the namespaced registry must survive into the re-check identifier"
         );
         assert_eq!(
             checks[0].repo, "ghcr.io/acme/skills/demo",
@@ -4070,7 +4127,8 @@ mod tests {
         let lock = lock_fixture(vec![path_entry, registry_entry], Vec::new());
 
         let rows = vec![installed_row("r/a")];
-        let checks = post_batch_checks(&lock, &rows, &[0]);
+        let config = declared_skills(&[("a", "r", "a", "1.0.0")]);
+        let checks = post_batch_checks(&config, &lock, &rows, &[0]);
 
         assert_eq!(
             checks.len(),
@@ -4082,6 +4140,110 @@ mod tests {
             crate::oci::Digest::Sha256(sha('1')),
             "a path-sourced lock entry (source.pinned() == None) must never contaminate a registry row's badge match"
         );
+    }
+
+    // ── the re-check identifier is the DECLARED reference ─────────────────────
+    //
+    // The `↑` badge drives `u` (update), which re-resolves the reference the
+    // config declares — so the background re-check must resolve exactly that
+    // reference. An earlier revision carried the bare `registry/repository`
+    // and let the checker discover the repository's highest tag, which badged
+    // every row declared below the repository head `↑ outdated` forever while
+    // `u` was a no-op on it.
+
+    /// `registry/repository` for the bundle-member fixtures. A real host so
+    /// the member id round-trips through `Identifier::parse` the way a lock
+    /// written by the resolver does.
+    const MEMBER_REPO: &str = "ghcr.io/acme/a";
+
+    /// A lock where `ghcr.io/acme/a` is pinned and provided by a declared
+    /// bundle whose cached member list floats it at `:0` — no direct
+    /// declaration anywhere.
+    fn bundle_member_lock() -> GrimoireLock {
+        let pinned_member =
+            Identifier::new_registry("acme/a", "ghcr.io").clone_with_digest(crate::oci::Digest::Sha256(sha('1')));
+        let mut lock = lock_fixture(
+            vec![crate::lock::locked_artifact::LockedArtifact::direct(
+                "a".to_string(),
+                ArtifactKind::Skill,
+                crate::oci::PinnedIdentifier::try_from(pinned_member).unwrap(),
+            )],
+            Vec::new(),
+        );
+        lock.bundles = vec![crate::lock::locked_bundle::LockedBundle {
+            name: "stack".to_string(),
+            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
+                repo: "ghcr.io/acme/bundles/stack".to_string(),
+                tag: "latest".to_string(),
+                pinned: crate::oci::PinnedIdentifier::try_from(
+                    Identifier::new_registry("acme/bundles/stack", "ghcr.io")
+                        .clone_with_digest(crate::oci::Digest::Sha256(sha('7'))),
+                )
+                .unwrap(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "a".to_string(),
+                id: "ghcr.io/acme/a:0".to_string(),
+            }],
+        }];
+        lock
+    }
+
+    #[test]
+    fn build_row_check_carries_the_declared_tag() {
+        let lock = lock_fixture(vec![locked("a", ArtifactKind::Skill, '1')], Vec::new());
+        let config = declared_skills(&[("a", "r", "a", "0.12.0")]);
+
+        let check = build_row_check(&config, &lock, &installed_row("r/a")).expect("a declared, locked row");
+
+        assert_eq!(
+            check.id.tag(),
+            Some("0.12.0"),
+            "the re-check must resolve the declared tag, not the repository head"
+        );
+        assert_eq!(check.id.registry(), "r");
+        assert_eq!(check.id.repository(), "a");
+    }
+
+    #[test]
+    fn build_row_check_falls_back_to_the_bundle_member_reference() {
+        // A bundle member has no declaration of its own; the floating id the
+        // bundle baked into the lock is what its next expansion re-resolves,
+        // so that is the reference to re-check. Without it the row would lose
+        // its `↑` badge entirely.
+        let lock = bundle_member_lock();
+
+        let check = build_row_check(&DesiredSet::default(), &lock, &installed_row(MEMBER_REPO))
+            .expect("a bundle-provided, locked row");
+
+        assert_eq!(
+            check.id.tag(),
+            Some("0"),
+            "a bundle member re-checks the floating member id the bundle baked"
+        );
+    }
+
+    #[test]
+    fn build_row_check_prefers_the_direct_declaration_over_a_bundle_member() {
+        // A name may be both directly declared and provided by a bundle; the
+        // resolver honours the direct declaration, so the badge must too.
+        let lock = bundle_member_lock();
+        let config = declared_skills(&[("a", "ghcr.io", "acme/a", "0.12.0")]);
+
+        let check = build_row_check(&config, &lock, &installed_row(MEMBER_REPO)).expect("a declared, locked row");
+
+        assert_eq!(check.id.tag(), Some("0.12.0"));
+    }
+
+    #[test]
+    fn build_row_check_skips_a_row_nothing_declares() {
+        // Neither a declaration nor a bundle member names this repository, so
+        // there is no reference `grim update` would re-resolve — nothing to
+        // check, rather than a fabricated tagless probe.
+        let lock = lock_fixture(vec![locked("a", ArtifactKind::Skill, '1')], Vec::new());
+
+        assert!(build_row_check(&DesiredSet::default(), &lock, &installed_row("r/a")).is_none());
     }
 
     // ── TUI Local group: action dispatch ──────────────────────────────────────

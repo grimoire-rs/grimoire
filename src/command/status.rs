@@ -38,7 +38,7 @@ use tokio::task::JoinSet;
 
 use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::{StatusEntry, StatusOutput, StatusReport};
-use crate::catalog::update_availability::{outdated_from_resolve, resolve_latest_digest};
+use crate::catalog::update_availability::{outdated_from_resolve, resolve_declared_digest};
 use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
@@ -64,12 +64,12 @@ const UPDATE_CHECK_CONCURRENCY: usize = 8;
 
 /// One directly-declared, registry-locked artifact scheduled for a fresh
 /// update-availability re-resolution: where to write the result back
-/// (`index` into the entries vec), the tagless `registry/repository`
-/// identifier to re-resolve, and the lock pin the fresh digest is compared
-/// against.
+/// (`index` into the entries vec), the **declared** identifier to re-resolve
+/// — verbatim from `grimoire.toml`, tag and all — and the lock pin the fresh
+/// digest is compared against.
 struct UpdateCheck {
     index: usize,
-    base: Identifier,
+    declared: Identifier,
     locked: Digest,
 }
 
@@ -260,12 +260,16 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         // for a fresh update re-resolution (issue #43): path/dev rows carry no
         // pin, and a bundle member updates via its bundle rather than its own
         // tag (built in the bundle-member loop below, never here). Schedule the
-        // tagless `registry/repository` identifier + the lock pin as the
-        // comparison baseline — the entry's index is its position in `entries`.
-        if let Some(p) = pinned.as_ref() {
+        // **declared** identifier — the reference `grim update` would
+        // re-resolve, tag and all — against the lock pin as the comparison
+        // baseline; the entry's index is its position in `entries`. A tagless
+        // `registry/repository` here would answer a different question ("does
+        // the repo carry anything newer?") and report an update a `:0.12.0`
+        // pin can never take.
+        if let (Some(p), Some(declared)) = (pinned.as_ref(), decl.source.identifier()) {
             update_checks.push(UpdateCheck {
                 index: entries.len(),
-                base: Identifier::new_registry(p.repository(), p.registry()),
+                declared: declared.clone(),
                 locked: p.digest(),
             });
         }
@@ -401,10 +405,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 tracing::warn!("`--check` catalog load failed; deprecation/replacement fields stay null: {e:#}");
             }
         }
-        // Fresh per-artifact update-availability re-resolution — independent of
-        // the catalog load above (issue #21: the cached catalog tag can hide a
-        // newer semver release). A failed re-resolve leaves that row's
-        // `update_available` null; every other row's stays null too.
+        // Fresh per-artifact update-availability re-resolution of each row's
+        // declared reference — independent of the catalog load above (issue
+        // #21: the cached catalog tag can hide a newer release). A failed
+        // re-resolve leaves that row's `update_available` null; every other
+        // row's stays null too.
         for (index, avail) in resolve_update_availability(&access, update_checks).await {
             entries[index].update_available = avail;
         }
@@ -442,12 +447,11 @@ fn apply_catalog_check(entries: &mut [StatusEntry], rows: &[CatalogRow]) {
     }
 }
 
-/// Re-resolve every scheduled artifact's current registry latest-tag digest
-/// fresh (issue #21's `list_tags` + representative-tag resolve) with bounded
-/// concurrency, mapping each to its `update_available`. Mirrors the TUI's
-/// per-row background sweep ([`crate::tui::update_check`]): a
+/// Re-resolve every scheduled artifact's **declared** reference fresh with
+/// bounded concurrency, mapping each to its `update_available`. Mirrors the
+/// TUI's per-row background sweep ([`crate::tui::update_check`]): a
 /// [`Semaphore`]-bounded [`JoinSet`], the same
-/// [`resolve_latest_digest`]/[`outdated_from_resolve`] seam, the lock pin as
+/// [`resolve_declared_digest`]/[`outdated_from_resolve`] seam, the lock pin as
 /// the comparison baseline. Returns `(index, update_available)` pairs — the
 /// caller writes each back into `entries[index]`; collecting into a `Vec`
 /// after every task joins makes the merge deterministic regardless of task
@@ -470,7 +474,7 @@ async fn resolve_update_availability(
                 Ok(p) => p,
                 Err(_) => return (check.index, None),
             };
-            let resolved = resolve_latest_digest(&*access, &check.base).await;
+            let resolved = resolve_declared_digest(&*access, &check.declared).await;
             (check.index, update_available_from_resolve(&check.locked, resolved))
         });
     }
@@ -971,20 +975,19 @@ mod tests {
     }
 
     /// The bounded-concurrency merge keys each result back by its `entries`
-    /// index and is order-independent: a row whose registry carries a newer
-    /// representative tag maps to `Some(true)`, a row pinned at its sole tag
-    /// maps to `Some(false)`.
+    /// index and is order-independent: a row whose declared tag now resolves
+    /// to a different digest maps to `Some(true)`, a row whose declared tag
+    /// still resolves to its lock pin maps to `Some(false)`.
     #[tokio::test]
     async fn resolve_update_availability_merges_by_index() {
         use crate::oci::access::memory_registry::MemoryRegistry;
 
         let reg = MemoryRegistry::new();
-        // repo a: locked at 1.0.0, registry now also carries a higher 2.0.0.
+        // repo a: declared `:latest`, which has since moved past the lock pin.
         let a = Identifier::new_registry("ns/a", "localhost:5000");
         let a1 = Algorithm::Sha256.hash(b"a-1.0.0");
         let a2 = Algorithm::Sha256.hash(b"a-2.0.0");
-        reg.put_tag(&a, "1.0.0", &a1).await.unwrap();
-        reg.put_tag(&a, "2.0.0", &a2).await.unwrap();
+        reg.put_tag(&a, "latest", &a2).await.unwrap();
         // repo b: locked at its sole tag ⇒ up to date.
         let b = Identifier::new_registry("ns/b", "localhost:5000");
         let b1 = Algorithm::Sha256.hash(b"b-1.0.0");
@@ -995,18 +998,86 @@ mod tests {
         let checks = vec![
             UpdateCheck {
                 index: 5,
-                base: a,
+                declared: a.clone_with_tag("latest"),
                 locked: a1,
             },
             UpdateCheck {
                 index: 2,
-                base: b,
+                declared: b.clone_with_tag("1.0.0"),
                 locked: b1,
             },
         ];
         let mut got = resolve_update_availability(&access, checks).await;
         got.sort_by_key(|(i, _)| *i);
         assert_eq!(got, vec![(2, Some(false)), (5, Some(true))]);
+    }
+
+    /// Regression: `update_available` answers "would `grim update` move this
+    /// pin?", so it re-resolves the **declared** reference — never the
+    /// repository's globally highest tag.
+    ///
+    /// An earlier revision listed the repo's tags and resolved the highest
+    /// one, so a declaration narrower than the repository head reported an
+    /// update `grim update` would not apply: a `:0.12.0` pin (and a `:0.12`
+    /// float, and a digest pin) sat permanently at `update_available: true`
+    /// once `0.13.0` shipped. Each declaration shape below is locked at the
+    /// digest its own reference resolves to, so every row must report
+    /// `Some(false)` even though `0.13.0` is present in the same repository.
+    #[tokio::test]
+    async fn update_availability_ignores_higher_tags_outside_the_declared_reference() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let reg = MemoryRegistry::new();
+        let repo = Identifier::new_registry("ns/grim", "localhost:5000");
+        let v12 = Algorithm::Sha256.hash(b"grim-0.12.0");
+        let v13 = Algorithm::Sha256.hash(b"grim-0.13.0");
+        reg.put_tag(&repo, "0.12.0", &v12).await.unwrap();
+        // The advisory `0.12` float and the repository head both exist; only
+        // the head is newer than what `0.12`/`0.12.0` point at.
+        reg.put_tag(&repo, "0.12", &v12).await.unwrap();
+        reg.put_tag(&repo, "0.13.0", &v13).await.unwrap();
+        reg.put_tag(&repo, "latest", &v13).await.unwrap();
+
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let checks = vec![
+            // Exact-version pin.
+            UpdateCheck {
+                index: 0,
+                declared: repo.clone_with_tag("0.12.0"),
+                locked: v12.clone(),
+            },
+            // Advisory float that has not moved.
+            UpdateCheck {
+                index: 1,
+                declared: repo.clone_with_tag("0.12"),
+                locked: v12.clone(),
+            },
+            // Digest pin — frozen by construction, never updatable.
+            UpdateCheck {
+                index: 2,
+                declared: repo.clone_with_digest(v12.clone()),
+                locked: v12.clone(),
+            },
+        ];
+        let mut got = resolve_update_availability(&access, checks).await;
+        got.sort_by_key(|(i, _)| *i);
+        assert_eq!(
+            got,
+            vec![(0, Some(false)), (1, Some(false)), (2, Some(false))],
+            "a newer tag outside the declared reference is not an available update"
+        );
+
+        // Control: the row that declares the moving pointer *does* see it.
+        let moved = resolve_update_availability(
+            &access,
+            vec![UpdateCheck {
+                index: 0,
+                declared: repo.clone_with_tag("latest"),
+                locked: v12,
+            }],
+        )
+        .await;
+        assert_eq!(moved, vec![(0, Some(true))]);
     }
 
     fn locked(byte: char) -> LockedArtifact {

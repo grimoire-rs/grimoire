@@ -10,48 +10,55 @@
 //! it — no TUI types, no background-task machinery. [`super::super::tui`]'s
 //! `UpdateChecker` consumes this seam; it still owns the concurrency bound,
 //! the results channel, and the in-flight bookkeeping around it.
+//!
+//! **The question is "would `grim update` move this pin?", not "does the
+//! repository carry a higher version?"** Those two differ the moment a
+//! declaration is narrower than the repository — a `:0.12` float or a
+//! `:0.12.0`/digest pin — and only the first is actionable: `↑ outdated`
+//! and `update_available` drive the user to `grim update`, which re-resolves
+//! the **declared** reference and nothing else. So the check resolves that
+//! declared reference, not the repository's globally highest tag.
 
-use crate::catalog::registry_catalog::pick_latest_tag;
 use crate::oci::access::error::AccessError;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::{Digest, Identifier};
 
 /// The pure registry-aware "outdated" decision.
 ///
-/// `true` ⇒ the registry resolved the floating tag to a digest that differs
-/// from the locked pin ⇒ a newer version is available. A resolve of `None`
-/// (the tag vanished, or offline returned nothing) is **not** "outdated":
-/// absence is never treated as a newer pin, so the icon never lies on a
-/// transient miss.
+/// `true` ⇒ the registry resolved the declared reference to a digest that
+/// differs from the locked pin ⇒ a newer version is available. A resolve of
+/// `None` (the tag vanished, or offline returned nothing) is **not**
+/// "outdated": absence is never treated as a newer pin, so the icon never
+/// lies on a transient miss.
 pub fn outdated_from_resolve(locked: &Digest, resolved: Option<&Digest>) -> bool {
     matches!(resolved, Some(d) if d != locked)
 }
 
-/// Discover the registry's current representative-tag digest for `base` (a
-/// `registry/repository` identifier; any tag already on it is ignored),
-/// independent of any cached catalog tag.
+/// Resolve the artifact's **declared** reference — `registry/repository:tag`
+/// exactly as `grimoire.toml` spells it (or the member id a bundle baked) —
+/// to the digest it points at right now.
 ///
-/// Issue #21 ("update not shown"): the cached catalog row's `latest_tag` is
-/// captured at build time and served from a cache with a freshness window. On
-/// a registry that carries only immutable semver tags (no moving `latest`),
-/// resolving that captured tag can never reveal a newer release — the new
-/// version lands as a brand-new higher tag the stale catalog has not seen. So
-/// the background check re-discovers the latest tag *fresh*: list the repo's
-/// tags, pick the same representative tag the catalog build would
-/// ([`pick_latest_tag`] — prefer `latest`, else the highest semver), and
-/// resolve it. `Ok(None)` when the repo has no tags or no resolvable
-/// representative; absence is never treated as a newer pin (the icon never
-/// lies on a transient miss). This costs one extra round-trip (`list_tags`)
-/// per eligible row over resolving a fixed tag — paid only for
-/// installed/outdated rows, not the whole catalog.
-pub async fn resolve_latest_digest(access: &dyn OciAccess, base: &Identifier) -> Result<Option<Digest>, AccessError> {
-    let Some(tags) = access.list_tags(base).await? else {
-        return Ok(None);
-    };
-    let Some(tag) = pick_latest_tag(&tags) else {
-        return Ok(None);
-    };
-    access.resolve_digest(&base.clone_with_tag(tag), Operation::Query).await
+/// This is deliberately the same single `resolve_digest` the resolver runs
+/// under `grim update` (`resolve::resolver::retry_chain`), so the two can
+/// never disagree about whether an update exists. [`Operation::Query`] keeps
+/// it a read-only probe — no tag pointer is written through to the cache.
+///
+/// `Ok(None)` when the declared tag does not exist (a vanished tag, or an
+/// offline miss); absence is never treated as a newer pin, so the icon never
+/// lies on a transient miss.
+///
+/// **Never re-discover the repository's latest tag here.** An earlier
+/// revision listed the repo's tags and resolved the highest one, which made
+/// every row whose declaration pins or floats *below* the repository head
+/// report an update that `grim update` would not apply — a `:0.12.0` pin sat
+/// permanently at `↑ outdated` once `0.13.0` shipped. Freshness against a
+/// stale cached catalog tag (issue #21) is preserved regardless: the tag
+/// comes from the declaration, which the cache never touches.
+pub async fn resolve_declared_digest(
+    access: &dyn OciAccess,
+    declared: &Identifier,
+) -> Result<Option<Digest>, AccessError> {
+    access.resolve_digest(declared, Operation::Query).await
 }
 
 #[cfg(test)]

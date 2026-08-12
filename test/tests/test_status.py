@@ -352,11 +352,12 @@ def test_status_check_reports_update_available(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """`--check` re-resolves each directly-declared, registry-locked row's
-    current latest tag fresh (issue #43/#21) and reports `update_available`:
-    `true` when the registry now carries a newer digest than the lock pin,
-    and `null` for a path-sourced row (no registry pin)."""
+    **declared** reference fresh (issue #43/#21) and reports
+    `update_available`: `true` when that reference now points at a different
+    digest than the lock pin, and `null` for a path-sourced row (no registry
+    pin)."""
     repo = f"{unique_repo}/s"
-    v1 = make_artifact(repo, "skill", {"s/SKILL.md": "v1\n"}, tag="1.0.0")
+    v1 = make_artifact(repo, "skill", {"s/SKILL.md": "v1\n"}, tag="stable")
 
     # A local path-sourced skill carries no registry pin ⇒ never re-resolved.
     local = project_dir / "skills" / "local"
@@ -366,14 +367,15 @@ def test_status_check_reports_update_available(
     )
 
     write_config(
-        project_dir, skills={"s": v1.pinned, "local": "./skills/local"}
+        project_dir,
+        skills={"s": f"{registry}/{repo}:stable", "local": "./skills/local"},
     )
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
     runner.run("install", check=False)
 
-    # The registry now carries a strictly newer release the lock has not seen.
-    v2 = make_artifact(repo, "skill", {"s/SKILL.md": "v2\n"}, tag="2.0.0")
+    # The declared tag itself moves on to a new release.
+    v2 = make_artifact(repo, "skill", {"s/SKILL.md": "v2\n"}, tag="stable")
     assert v1.digest != v2.digest
 
     result = runner.json(
@@ -383,6 +385,43 @@ def test_status_check_reports_update_available(
     rows = {r["name"]: r for r in result["items"]}
     assert rows["s"]["update_available"] is True, rows["s"]
     assert rows["local"]["update_available"] is None, rows["local"]
+
+
+def test_status_check_ignores_releases_outside_the_declared_reference(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression: `update_available` answers "would `grim update` move this
+    pin?", so a release the declared reference does not point at is not an
+    available update.
+
+    An earlier revision re-discovered the repository's highest tag instead of
+    resolving the declared one, which left every narrower declaration — an
+    exact `:1.0.0` version, a digest pin — reporting `true` forever once a
+    higher tag shipped, while `grim update` left the pin exactly where it was.
+    """
+    repo = f"{unique_repo}/s"
+    v1 = make_artifact(repo, "skill", {"s/SKILL.md": "v1\n"}, tag="1.0.0")
+
+    write_config(
+        project_dir,
+        skills={"exact": f"{registry}/{repo}:1.0.0", "frozen": v1.pinned},
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    # A strictly higher release lands in the same repository. Neither
+    # declaration points at it.
+    v2 = make_artifact(repo, "skill", {"s/SKILL.md": "v2\n"}, tag="2.0.0")
+    assert v1.digest != v2.digest
+
+    result = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )
+    assert result["checked"] is True
+    rows = {r["name"]: r for r in result["items"]}
+    assert rows["exact"]["update_available"] is False, rows["exact"]
+    assert rows["frozen"]["update_available"] is False, rows["frozen"]
 
 
 def test_status_check_installed_at_latest_reports_false(

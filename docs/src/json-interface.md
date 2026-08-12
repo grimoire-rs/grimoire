@@ -136,10 +136,13 @@ by `(registry, repository)`:
 
 `update_available` is a **fresh per-artifact re-resolution** (issue #43),
 computed independently of the catalog match above: for each
-directly-declared, registry-locked row, grim re-discovers the registry's
-current representative tag (issue #21's `list_tags` + latest-tag resolve)
-and compares that digest to the lock pin — the same "is a newer version
-available?" decision the TUI's `↑ outdated` badge uses:
+directly-declared, registry-locked row, grim re-resolves the reference the
+config declares — tag and all — and compares that digest to the lock pin.
+It answers *would `grim update` move this pin?*, the same decision the
+TUI's `↑ outdated` badge uses. A release the declared reference does not
+point at is therefore **not** an available update: an exact-version pin, an
+unmoved advisory float, and a digest pin all report `false` while the
+repository carries a strictly higher tag.
 
 | `checked` | Item condition | `update_available` |
 |-----------|-----------------|---------------------|
@@ -147,8 +150,8 @@ available?" decision the TUI's `↑ outdated` badge uses:
 | `true` | no lock pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
 | `true` | bundle-member pin — a member updates via its bundle, not its own tag | `null` |
 | `true` | direct registry pin, re-resolution failed (transport/auth) | `null` |
-| `true` | direct registry pin, re-resolution completed, registry digest **differs** from the lock pin | `true` |
-| `true` | direct registry pin, re-resolution completed, registry digest **matches** the lock pin (or the tag vanished) | `false` |
+| `true` | direct registry pin, re-resolution completed, the declared reference resolves to a digest that **differs** from the lock pin | `true` |
+| `true` | direct registry pin, re-resolution completed, the declared reference resolves to the lock pin (or the tag vanished) | `false` |
 
 **The consumer rule: `checked == false` implies every one of the three
 fields is `null` on every item, full stop — never conditional on the

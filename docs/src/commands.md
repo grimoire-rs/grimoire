@@ -658,17 +658,28 @@ degrades only that registry's rows to `null`; `checked` still reports `true`
 
 `update_available` is populated by a **fresh per-artifact re-resolution**,
 independent of that one catalog lookup: for each directly-declared,
-registry-locked row grim re-discovers the registry's current
-representative tag and compares its digest to the lock pin — the same "is a
-newer version available?" decision the [TUI](#tui)'s `↑ outdated` badge
-uses (so a newer semver release surfaces even when the cached catalog tag
-is stale). It is `true` when the registry's latest digest differs from the
-lock pin, `false` when it matches (or the tag vanished), and `null` for a
-row with no lock pin (declared-bundle, dev-install, [path source](#add-path)),
-a bundle-member row (it updates via its bundle, not its own tag), or an
-artifact whose re-resolution failed — a completed re-resolve never reports
-`null`, and a failed one never lies as `false`. These per-artifact checks
-run with bounded concurrency; `status` still always exits `0`.
+registry-locked row grim re-resolves the reference the config declares —
+tag and all — and compares its digest to the lock pin. It answers *would
+[`grim update`](#update) move this pin?*, the same decision the
+[TUI](#tui)'s `↑ outdated` badge uses. The resolution is always live, so a
+tag that moved surfaces even when the cached catalog row is stale.
+
+Because the declared reference is what gets resolved, a release the
+declaration does not point at is **not** an available update: a
+`skill = "…:0.12.0"` pin, a `…:0.12` float that has not moved, and a
+digest pin all report `false` while the repository carries a higher
+`0.13.0` — `grim update` would leave every one of them exactly where it is.
+Use [`grim search`](#search) or the TUI's version column to see what the
+repository's newest release is.
+
+The field is `true` when the declared reference now resolves to a digest
+that differs from the lock pin, `false` when it matches (or the tag
+vanished), and `null` for a row with no lock pin (declared-bundle,
+dev-install, [path source](#add-path)), a bundle-member row (it updates via
+its bundle, not its own tag), or an artifact whose re-resolution failed — a
+completed re-resolve never reports `null`, and a failed one never lies as
+`false`. These per-artifact checks run with bounded concurrency; `status`
+still always exits `0`.
 
 ```sh
 grim status --check
@@ -1210,9 +1221,15 @@ A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like
 [`grim add`](#add)), then materializes just that artifact (like
 [`grim install`](#install)). Delete is the full inverse via the
-[`grim uninstall`](#uninstall) seam. Installing a version older than the
-registry's latest flips the row to `outdated` right after the install
-completes.
+[`grim uninstall`](#uninstall) seam. Installing from a tag that has since
+moved past the installed digest flips the row to `outdated` right after the
+install completes.
+
+The `↑ outdated` badge tracks the reference the row is **declared** with —
+the same one [`grim update`](#update) re-resolves — so pressing `u` on a
+badged row always has something to do. A row declared at an exact version
+or a digest never badges `↑`, however many higher tags the repository grows;
+the version column is where a newer release shows up for those.
 
 A bundle row works the same way at the bundle level. Install declares it
 under `[bundles]`, expands it into its members (like
