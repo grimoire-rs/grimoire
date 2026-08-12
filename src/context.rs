@@ -19,6 +19,11 @@ use crate::oci::access::{AccessMode, OciAccess};
 use crate::oci::tag_cache::TagCache;
 use crate::store::{BlobStore, GrimPaths};
 
+/// Memoized OCI access seams for one invocation, keyed by the pair that
+/// defines what a client *is*: its routing mode and its plain-HTTP exception
+/// list. See [`Context::clients`].
+type AccessMemo = std::sync::Mutex<std::collections::HashMap<(AccessMode, Vec<String>), Arc<dyn OciAccess>>>;
+
 /// Resolved configuration for a single `grim` invocation.
 ///
 /// Fields are resolved eagerly but cheaply (env reads only). The OCI
@@ -59,6 +64,25 @@ pub struct Context {
     /// only writer. A **scoped** resolve (the MCP per-call scope) bypasses
     /// this deliberately — its answer is not the launch scope's.
     plain_http: std::sync::OnceLock<Vec<String>>,
+    /// Per-invocation memo of built access seams, keyed by the two inputs
+    /// that decide what a client *is*: its routing mode and its plain-HTTP
+    /// exception list.
+    ///
+    /// The point is the registry **bearer token**. `oci-client` caches tokens
+    /// per `(registry, repository, operation)` on the `Client` instance, so
+    /// rebuilding the client throws that cache away and the next request
+    /// re-runs the whole handshake (`GET /v2/` → `401` + challenge → token
+    /// realm → the actual request). For a one-shot CLI run that is invisible;
+    /// for the long-lived `grim mcp` server it meant every tool call paid a
+    /// fresh handshake, because each call built its own client.
+    ///
+    /// Keyed rather than single-slot because the MCP tools resolve their
+    /// scope per call, so the exception list genuinely varies within one
+    /// process — and a client built for one scope's `insecure` opt-in must
+    /// never serve another's (`access_seam_scoped`'s whole point).
+    ///
+    /// Nothing is persisted: the tokens live and die with the process.
+    clients: AccessMemo,
     /// Test-only injected `OciAccess` override.  When `Some`, `access()`
     /// returns this instead of constructing a real `CachedAccess`.  Only
     /// compiled in test builds (`#[cfg(test)]`).
@@ -104,6 +128,10 @@ impl Clone for Context {
             // A fresh memo: a clone may be re-scoped by its new owner, and a
             // stale plain-HTTP list is the one thing that must never ride along.
             plain_http: std::sync::OnceLock::new(),
+            // Likewise fresh: the client memo is keyed on the exception list,
+            // so carrying it would be sound but pointless — a clone is made to
+            // be re-scoped.
+            clients: AccessMemo::default(),
             #[cfg(test)]
             test_access: self.test_access.clone(),
             #[cfg(test)]
@@ -130,6 +158,7 @@ impl Context {
             global: options.global,
             config: options.config.clone(),
             plain_http: std::sync::OnceLock::new(),
+            clients: AccessMemo::default(),
             #[cfg(test)]
             test_access: None,
             #[cfg(test)]
@@ -260,6 +289,29 @@ impl Context {
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created.
     pub fn access_with_mode(&self, mode: AccessMode, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
+        // Reuse an identically-configured seam if this invocation already
+        // built one. The saving is the registry bearer token: `oci-client`
+        // caches it on the `Client`, so a fresh client re-runs the full
+        // handshake on its next request. Immaterial for a one-shot CLI run,
+        // decisive for `grim mcp`, where every tool call used to build its own
+        // client and so paid a fresh handshake per call.
+        //
+        // The key is the full `(mode, plain_http)` pair, never just the mode:
+        // handing a client built for one scope's `insecure` opt-in to another
+        // scope would silently downgrade that scope's transport.
+        let key = (mode, plain_http.clone());
+        // Poison recovery rather than a panic: this is a cache, and the worst
+        // a poisoned memo can cost is a rebuilt client (one extra handshake).
+        // Taking the process down over it would turn a cache into a liability.
+        if let Some(hit) = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(Arc::clone(hit));
+        }
+
         let paths = self.paths();
         paths.ensure_layout()?;
         let cached = CachedAccess::new(
@@ -268,7 +320,12 @@ impl Context {
             BlobStore::new(paths.blobs_dir()),
             mode,
         );
-        Ok(Arc::new(cached))
+        let access: Arc<dyn OciAccess> = Arc::new(cached);
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, Arc::clone(&access));
+        Ok(access)
     }
 }
 
@@ -288,6 +345,7 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            clients: AccessMemo::default(),
             test_access: None,
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
@@ -342,6 +400,7 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            clients: AccessMemo::default(),
             test_access: Some(Arc::new(access)),
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
@@ -364,6 +423,7 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            clients: AccessMemo::default(),
             test_access: Some(Arc::new(access)),
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
@@ -402,6 +462,46 @@ mod tests {
         let ctx = Context::new(&opts());
         assert!(!ctx.offline());
         assert_eq!(ctx.access_mode(), AccessMode::Online);
+    }
+
+    /// Two identically-configured requests share one seam, so the registry
+    /// bearer token `oci-client` caches on the `Client` survives across them.
+    /// Without this, `grim mcp` paid a fresh token handshake on every tool
+    /// call — the whole point of the memo, and unobservable from the outside
+    /// (`Arc::ptr_eq` is the only witness).
+    #[test]
+    fn an_identically_configured_access_seam_is_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let hosts = vec!["registry.internal:5050".to_string()];
+
+        let first = ctx.access_with_mode(AccessMode::Online, hosts.clone()).unwrap();
+        let second = ctx.access_with_mode(AccessMode::Online, hosts.clone()).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "the same seam must be handed back");
+    }
+
+    /// The memo keys on the FULL configuration, never the mode alone. Handing
+    /// a client built for one scope's `insecure` opt-in to a different scope
+    /// would silently downgrade that scope's transport to plain HTTP — the
+    /// exact cross-scope leak `access_seam_scoped` exists to prevent.
+    #[test]
+    fn a_differently_configured_access_seam_is_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+
+        let insecure = ctx
+            .access_with_mode(AccessMode::Online, vec!["registry.internal:5050".to_string()])
+            .unwrap();
+        let other = ctx.access_with_mode(AccessMode::Online, Vec::new()).unwrap();
+        assert!(
+            !Arc::ptr_eq(&insecure, &other),
+            "a different plain-HTTP exception list must build its own client"
+        );
+
+        let offline = ctx
+            .access_with_mode(AccessMode::Offline, vec!["registry.internal:5050".to_string()])
+            .unwrap();
+        assert!(!Arc::ptr_eq(&insecure, &offline), "a different mode must not be reused");
     }
 
     #[test]

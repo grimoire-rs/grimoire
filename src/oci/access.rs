@@ -35,7 +35,7 @@ use error::AccessError;
 /// `Online` always resolves mutable tag pointers fresh from the registry
 /// (the cached pin is a write-through, never a read shortcut), so a
 /// floating tag never serves stale; `Offline` works from the cache alone.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AccessMode {
     /// Default. Resolve tag pointers straight from the source, then
     /// persist the result (tag pointers only when the call is a
