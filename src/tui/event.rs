@@ -452,7 +452,9 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     use crate::tui::state::ArtifactState;
                     // F13: explicit arms — no `_ =>` wildcard over closed enum.
                     match member_state {
-                        ArtifactState::NotInstalled | ArtifactState::IntegrityMissing => {
+                        // `Pending` belongs here, not with "already installed":
+                        // an install genuinely has outputs to write for it.
+                        ArtifactState::NotInstalled | ArtifactState::IntegrityMissing | ArtifactState::Pending => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Install,
                                 repo: repo.clone(),
@@ -495,6 +497,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         | ArtifactState::ViaBundle
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
+                        | ArtifactState::Pending
                         | ArtifactState::IntegrityMissing => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Update,
@@ -532,6 +535,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         | ArtifactState::ViaBundle
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
+                        | ArtifactState::Pending
                         | ArtifactState::IntegrityMissing => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Uninstall,

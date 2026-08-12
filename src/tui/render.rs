@@ -41,6 +41,9 @@ pub enum ColorKey {
     Outdated,
     /// On-disk content drifted from the recorded hash.
     Modified,
+    /// Intact at the locked pin, but an install would still write an output
+    /// the record never covered (materialization drift).
+    Pending,
     /// Recorded but outputs missing/unreadable.
     IntegrityMissing,
 }
@@ -54,6 +57,7 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
         ArtifactState::NotInstalled => ("·", "not-installed", ColorKey::NotInstalled),
         ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
+        ArtifactState::Pending => ("+", "pending", ColorKey::Pending),
         ArtifactState::IntegrityMissing => ("✘", "integrity-missing", ColorKey::IntegrityMissing),
     }
 }
@@ -1557,6 +1561,9 @@ fn color_for(key: ColorKey) -> Color {
         ColorKey::NotInstalled => Color::DarkGray,
         ColorKey::Outdated => Color::Yellow,
         ColorKey::Modified => Color::Red,
+        // Advisory, not a fault: dimmer than the problem colors so a pending
+        // row reads as "there is more to install", not "something is wrong".
+        ColorKey::Pending => Color::Blue,
         ColorKey::IntegrityMissing => Color::Magenta,
     }
 }

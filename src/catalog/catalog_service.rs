@@ -82,6 +82,12 @@ pub struct BadgeContext<'a> {
     /// outputs are reconciled against this so a client removed since install
     /// does not badge the repository as broken.
     pub active: &'a [ClientTarget],
+    /// What `grim install` would target for this scope, when the caller has a
+    /// resolvable one — the input for the `Pending` badge. Deliberately
+    /// separate from [`Self::active`]: that answers "which clients might be
+    /// present", this answers "where would an install write". `None` skips
+    /// the pending check and keeps the four-badge behaviour.
+    pub target: Option<&'a crate::install::target::InstallTarget>,
 }
 
 /// One repository row: catalog metadata plus the derived install badge.
@@ -394,6 +400,7 @@ pub async fn load_catalog(
                             badges.state,
                             badges.roots,
                             badges.active,
+                            badges.target,
                         ),
                     })
                     .collect();
@@ -604,6 +611,7 @@ mod tests {
             state: &state,
             roots: &roots,
             active: &ClientTarget::ALL,
+            target: None,
         };
 
         let registries = vec![
@@ -820,6 +828,7 @@ mod tests {
             state: &state,
             roots: &roots,
             active: &ClientTarget::ALL,
+            target: None,
         };
         let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
 
@@ -1057,6 +1066,7 @@ mod tests {
             state: &state,
             roots: &roots,
             active: &ClientTarget::ALL,
+            target: None,
         };
         let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
         let registries = [source("registry.down", Some("down"), &[], &[])];

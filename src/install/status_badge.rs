@@ -14,6 +14,7 @@
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::path_anchor::{AnchorRoots, Containment};
+use crate::install::target::InstallTarget;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 
@@ -32,6 +33,11 @@ pub enum StatusBadge {
     Outdated,
     /// Installed but the on-disk content drifted from the recorded hash.
     Modified,
+    /// Installed and intact at the locked pin, but an install would still
+    /// write something: a client present that the record never covered, an
+    /// output whose file is gone, or a render-layout move. Materialization
+    /// drift — `grim install` clears it.
+    Pending,
 }
 
 impl std::fmt::Display for StatusBadge {
@@ -41,6 +47,7 @@ impl std::fmt::Display for StatusBadge {
             Self::NotInstalled => "not-installed",
             Self::Outdated => "outdated",
             Self::Modified => "modified",
+            Self::Pending => "pending",
         })
     }
 }
@@ -50,7 +57,22 @@ impl std::fmt::Display for StatusBadge {
 ///
 /// Precedence mirrors `status.rs::derive_state`: no lock/install record ⇒
 /// not-installed; a recorded output that drifted ⇒ modified; the locked
-/// pin ahead of the recorded pin ⇒ outdated; otherwise installed.
+/// pin ahead of the recorded pin ⇒ outdated; an install would still write
+/// something ⇒ pending; otherwise installed.
+///
+/// `Pending` sits **last**, so it only ever replaces what would have been
+/// `Installed`: a row that is modified or outdated has a louder problem, and
+/// the remedy for those (`install --force`, `update`) re-materializes the
+/// pending outputs anyway.
+///
+/// `target` is what `grim install` would resolve for this scope — a
+/// different question from `active`, which is the permissive
+/// "which clients might be present" set used to reconcile *recorded*
+/// outputs. Passing `active` here would ask whether a detectable client has
+/// files, which `adr_vendor_config_and_selection.md` D5 established is not
+/// soundly answerable; `target` asks what an install would do, which is.
+/// `None` skips the pending check entirely (callers without a resolvable
+/// scope keep the pre-existing four-badge behaviour).
 pub fn derive_badge(
     registry: &str,
     repository: &str,
@@ -58,6 +80,7 @@ pub fn derive_badge(
     state: &InstallState,
     roots: &AnchorRoots,
     active: &[ClientTarget],
+    target: Option<&InstallTarget>,
 ) -> StatusBadge {
     let Some(locked) = lock.and_then(|l| find_by_repo(l, registry, repository)) else {
         return StatusBadge::NotInstalled;
@@ -95,10 +118,18 @@ pub fn derive_badge(
             Err(_) => return StatusBadge::NotInstalled,
         }
     }
-    if record.source.eq_content(&locked.source) {
-        StatusBadge::Installed
+    if !record.source.eq_content(&locked.source) {
+        return StatusBadge::Outdated;
+    }
+    // Intact and at the locked pin — the only thing left that an install
+    // would still do is materialize an output the record never covered.
+    let pending = target.is_some_and(|t| {
+        !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots).is_empty()
+    });
+    if pending {
+        StatusBadge::Pending
     } else {
-        StatusBadge::Outdated
+        StatusBadge::Installed
     }
 }
 
@@ -197,13 +228,82 @@ mod tests {
         st
     }
 
+    /// `Pending` replaces `Installed` and nothing else. A row with a louder
+    /// problem keeps reporting it — and the remedy for those re-materializes
+    /// the pending outputs anyway, so promoting `Pending` over them would
+    /// hide the actionable state behind the advisory one.
+    #[test]
+    fn pending_only_ever_replaces_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let target_rel = "x.md";
+        let file = ws.join(target_rel);
+        std::fs::write(&file, b"canonical\n").unwrap();
+        let st = state_with("acme/x", 'a', ws, target_rel);
+        let roots = roots(ws);
+        // The record covers claude only; an install targeting claude AND
+        // copilot would still write copilot's output.
+        let target = InstallTarget::new(
+            ws,
+            crate::config::scope::ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        let badge = |lock_byte: char| {
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lock_with("acme/x", lock_byte)),
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                Some(&target),
+            )
+        };
+
+        assert_eq!(badge('a'), StatusBadge::Pending, "intact + uncovered client ⇒ pending");
+        assert_eq!(badge('b'), StatusBadge::Outdated, "an advanced pin still wins");
+
+        std::fs::write(&file, b"hand edited\n").unwrap();
+        assert_eq!(badge('a'), StatusBadge::Modified, "a local edit still wins");
+    }
+
+    /// Without a target the badge cannot ask the question, and must fall back
+    /// to exactly the four-badge behaviour it had before.
+    #[test]
+    fn no_target_never_yields_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("x.md"), b"canonical\n").unwrap();
+        let st = state_with("acme/x", 'a', ws, "x.md");
+        assert_eq!(
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                Some(&lock_with("acme/x", 'a')),
+                &st,
+                &roots(ws),
+                &[ClientTarget::Claude],
+                None,
+            ),
+            StatusBadge::Installed
+        );
+    }
+
     #[test]
     fn not_installed_without_lock_or_record() {
         let dir = tempfile::tempdir().unwrap();
         let roots = roots(dir.path());
         let st = InstallState::empty(std::path::Path::new("/tmp/s.json"));
         assert_eq!(
-            derive_badge("localhost:5000", "acme/x", None, &st, &roots, &[ClientTarget::Claude]),
+            derive_badge(
+                "localhost:5000",
+                "acme/x",
+                None,
+                &st,
+                &roots,
+                &[ClientTarget::Claude],
+                None
+            ),
             StatusBadge::NotInstalled
         );
         let lk = lock_with("acme/x", 'a');
@@ -214,7 +314,8 @@ mod tests {
                 Some(&lk),
                 &st,
                 &roots,
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::NotInstalled
         );
@@ -238,7 +339,8 @@ mod tests {
                 Some(&lock_with("acme/x", 'a')),
                 &st,
                 &roots,
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::Installed
         );
@@ -250,7 +352,8 @@ mod tests {
                 Some(&lock_with("acme/x", 'b')),
                 &st,
                 &roots,
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::Outdated
         );
@@ -263,7 +366,8 @@ mod tests {
                 Some(&lock_with("acme/x", 'a')),
                 &st,
                 &roots,
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::Modified
         );
@@ -343,7 +447,8 @@ mod tests {
                 Some(&lk),
                 &st,
                 &roots,
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::Installed,
             "an installed agent must badge as Installed, not NotInstalled"
@@ -412,7 +517,8 @@ mod tests {
                 Some(&lk),
                 &st,
                 &roots(ws),
-                &[ClientTarget::Claude]
+                &[ClientTarget::Claude],
+                None,
             ),
             StatusBadge::Installed,
             "an installed MCP server must badge as Installed, not NotInstalled"
@@ -469,6 +575,7 @@ mod tests {
             &st,
             &no_claude_roots,
             &[ClientTarget::Claude],
+            None,
         );
         assert_eq!(
             badge,

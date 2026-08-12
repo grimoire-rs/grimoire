@@ -74,6 +74,8 @@ pub struct Rollup {
     pub modified: usize,
     /// Leaves whose install record cannot be honored.
     pub integrity_missing: usize,
+    /// Leaves an install would still write an output for.
+    pub pending: usize,
 }
 
 impl Rollup {
@@ -86,6 +88,7 @@ impl Rollup {
             // installed (it is present and intact).
             ArtifactState::Installed | ArtifactState::ViaBundle => self.installed += 1,
             ArtifactState::NotInstalled => self.not_installed += 1,
+            ArtifactState::Pending => self.pending += 1,
             ArtifactState::Outdated => self.outdated += 1,
             ArtifactState::Modified => self.modified += 1,
             ArtifactState::IntegrityMissing => self.integrity_missing += 1,
@@ -100,11 +103,17 @@ impl Rollup {
         self.outdated += other.outdated;
         self.modified += other.modified;
         self.integrity_missing += other.integrity_missing;
+        self.pending += other.pending;
     }
 
     /// The single [`ArtifactState`] that best represents the group, by
     /// worst-state precedence: IntegrityMissing > Modified > Outdated >
-    /// NotInstalled > Installed.
+    /// NotInstalled > Pending > Installed.
+    ///
+    /// `Pending` sits directly above `Installed`: it is advisory (an install
+    /// would write more), so it must not mask a group that contains a genuine
+    /// problem, but a group where some leaf has pending work is not fully
+    /// installed either.
     pub fn worst(&self) -> ArtifactState {
         if self.integrity_missing > 0 {
             ArtifactState::IntegrityMissing
@@ -114,6 +123,8 @@ impl Rollup {
             ArtifactState::Outdated
         } else if self.not_installed > 0 || self.total == 0 {
             ArtifactState::NotInstalled
+        } else if self.pending > 0 {
+            ArtifactState::Pending
         } else {
             ArtifactState::Installed
         }
@@ -2060,6 +2071,7 @@ mod tests {
             outdated: 0,
             modified: 0,
             integrity_missing: 0,
+            pending: 0,
         };
         let b = Rollup {
             total: 3,
@@ -2068,6 +2080,7 @@ mod tests {
             outdated: 1,
             modified: 1,
             integrity_missing: 1,
+            pending: 0,
         };
         a.merge(b);
         assert_eq!(a.total, 5);

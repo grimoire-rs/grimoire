@@ -42,6 +42,11 @@ pub enum ArtifactState {
     Outdated,
     /// Recorded, outputs present, but on-disk content drifted.
     Modified,
+    /// Present and intact at the locked pin, but an install would still write
+    /// an output the record never covered — a client that appeared since the
+    /// install, or a render-layout move. `grim install` clears it. Ranks
+    /// BELOW every problem state: it only ever replaces `Installed`.
+    Pending,
     /// An install record exists but one or more client outputs are
     /// missing or unreadable — the integrity record cannot be honored.
     IntegrityMissing,
@@ -50,6 +55,7 @@ pub enum ArtifactState {
 impl std::fmt::Display for ArtifactState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Pending => "pending",
             Self::NotInstalled => "not-installed",
             Self::Installed => "installed",
             Self::ViaBundle => "via-bundle",

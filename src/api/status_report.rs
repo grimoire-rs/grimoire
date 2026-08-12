@@ -99,6 +99,26 @@ pub struct StatusEntry {
     /// Per-client materialized output locations. Empty when the artifact
     /// has no recorded install-state outputs.
     pub outputs: Vec<StatusOutput>,
+    /// Outputs `grim install` would write **right now** that the install
+    /// record does not already account for — materialization drift. Sorted by
+    /// client; `[]` when an install would write nothing new.
+    ///
+    /// Three causes, all of them real work an install would do: a client that
+    /// gained support since the last install (installed after the fact, or
+    /// newly configured), a recorded output whose file was deleted, and a
+    /// render-layout move (reported at the NEW path). A present-but-drifted
+    /// output is **not** here — that is `state: modified`, a different
+    /// problem with a different remedy.
+    ///
+    /// Derived from the same seam the installer's own no-op check uses
+    /// (`crate::install::expected_outputs`), so this cannot promise an
+    /// install has nothing to do while the install then writes files.
+    ///
+    /// Remediation is `grim install` — **not** `grim update`, which
+    /// re-resolves floating tags and rolls the lock forward. `state` is
+    /// unaffected: a byte-intact artifact at the locked pin still reads
+    /// `installed`, and this field never influences the exit code.
+    pub outputs_pending: Vec<StatusOutput>,
     /// Clients the project's config targets but this artifact has no
     /// recorded output for (`desired − recorded`). Sorted; `[]` when there
     /// is no such drift, and always `[]` when `[options].clients` is unset
@@ -208,6 +228,7 @@ mod tests {
             pinned: None,
             state: ArtifactStatus::Missing,
             outputs: Vec::new(),
+            outputs_pending: Vec::new(),
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
             clients_unresolved: Vec::new(),

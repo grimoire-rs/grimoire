@@ -12,6 +12,7 @@
 
 pub mod client_target;
 pub mod content_hash;
+pub mod expected_outputs;
 pub mod install_error;
 pub mod install_state;
 pub mod installer;

@@ -465,10 +465,17 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 // matched bundle snapshot lets a stale-dropped member still derive
                 // via the snapshot. A member also declared standalone shows plain
                 // `installed`, not `via-bundle`.
-                let (direct_repos, snapshot_repos) = load_scope_declaration(&ctx)
-                    .map(|(_, _, set)| {
+                let (direct_repos, snapshot_repos, target) = load_scope_declaration(&ctx)
+                    .map(|(options, _, set)| {
                         let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
-                        (direct_declared_repos(&set), snapshot_declared_repos(&set, cached))
+                        let target =
+                            InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors)
+                                .ok();
+                        (
+                            direct_declared_repos(&set),
+                            snapshot_declared_repos(&set, cached),
+                            target,
+                        )
                     })
                     .unwrap_or_default();
 
@@ -505,6 +512,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                                         &active,
                                         &direct_repos,
                                         &snapshot_repos,
+                                        target.as_ref(),
                                     )
                                 })
                                 .unwrap_or(ArtifactState::NotInstalled);
@@ -658,7 +666,7 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos, _target) =
         load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
@@ -750,7 +758,7 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos) =
+    let (lock, _install_state, config, _declared_bundle_repos, _direct_repos, _snapshot_repos, _target) =
         load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
@@ -885,10 +893,17 @@ fn drain_bundle_member_checks(
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
-                let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
-                    .map(|(_, _, set)| {
+                let (direct_repos, snapshot_repos, target) = load_scope_declaration(ctx)
+                    .map(|(options, _, set)| {
                         let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
-                        (direct_declared_repos(&set), snapshot_declared_repos(&set, cached))
+                        let target =
+                            InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors)
+                                .ok();
+                        (
+                            direct_declared_repos(&set),
+                            snapshot_declared_repos(&set, cached),
+                            target,
+                        )
                     })
                     .unwrap_or_default();
                 // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
@@ -909,6 +924,7 @@ fn drain_bundle_member_checks(
                                     &active,
                                     &direct_repos,
                                     &snapshot_repos,
+                                    target.as_ref(),
                                 )
                             })
                             .unwrap_or(ArtifactState::NotInstalled);
@@ -961,7 +977,7 @@ fn drain_bundle_member_checks(
 /// all the rows — the same registry twice, one at 0/0, sorted to `usize::MAX`
 /// and missing its alias.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
-    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, target) =
         load_scope_for_badges(ctx);
     let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
@@ -972,6 +988,7 @@ fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog
         declared_bundle_repos: &declared_bundle_repos,
         direct_repos: &direct_repos,
         snapshot_repos: &snapshot_repos,
+        target: target.as_ref(),
     };
     let fresh = rows_from_catalog(catalog, &badge);
     state.merge_catalog_rows(fresh);
@@ -1042,7 +1059,8 @@ const TUI_CATALOG_SCOPE: catalog_service::CatalogScope = catalog_service::Catalo
 /// TUI remains usable (offline included). The rows are only replaced on success —
 /// a failed refresh keeps the previously-loaded rows visible.
 async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
-    let (lock, install_state, config, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, config, declared_bundle_repos, direct_repos, snapshot_repos, target) =
+        load_scope_for_badges(ctx);
     let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     // The simpler catalog_service::BadgeContext (4 fields) drives the per-row
     // StatusBadge derivation inside load_catalog itself.
@@ -1051,6 +1069,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
         state: &install_state,
         roots: &ctx.roots,
         active: &active,
+        target: target.as_ref(),
     };
     let paths = GrimPaths::new(grim_home());
     match catalog_service::load_catalog(
@@ -1076,6 +1095,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 declared_bundle_repos: &declared_bundle_repos,
                 direct_repos: &direct_repos,
                 snapshot_repos: &snapshot_repos,
+                target: target.as_ref(),
             };
             let mut rows: Vec<TuiRow> = results
                 .groups
@@ -1322,6 +1342,9 @@ struct BadgeContext<'a> {
     /// (from `effective_set`) — lets a row whose top-level lock entry was dropped
     /// as stale still derive `ViaBundle`/`Installed` from the snapshot.
     snapshot_repos: &'a std::collections::BTreeSet<(ArtifactKind, String)>,
+    /// What `grim install` would target — the `Pending` state's input. `None`
+    /// when no scope resolves, which keeps the pre-existing states.
+    target: Option<&'a InstallTarget>,
 }
 
 /// Project a catalog into TUI rows, deriving each state from the scope's
@@ -1380,6 +1403,7 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
             ctx.active,
             ctx.direct_repos,
             ctx.snapshot_repos,
+            ctx.target,
         )
     }
 }
@@ -1435,6 +1459,7 @@ fn derive_artifact_state(
     roots: &AnchorRoots,
     active: &[ClientTarget],
     snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    target: Option<&InstallTarget>,
 ) -> ArtifactState {
     // A top-level lock entry lets us distinguish Outdated. If it is absent, a
     // CURRENTLY-DECLARED bundle whose snapshot names this artifact still proves
@@ -1491,14 +1516,29 @@ fn derive_artifact_state(
             Err(_) => return ArtifactState::IntegrityMissing,
         }
     }
+    // Intact at the locked pin — the only thing an install would still do is
+    // materialize an output the record never covered. Mirrors
+    // `status_badge::derive_badge`; `None` (no resolvable target) keeps the
+    // pre-existing behaviour.
+    let installed_or_pending = || {
+        let pending = target.is_some_and(|t| {
+            !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots)
+                .is_empty()
+        });
+        if pending {
+            ArtifactState::Pending
+        } else {
+            ArtifactState::Installed
+        }
+    };
     match locked {
         // A top-level lock entry: compare the pinned digest to flag Outdated.
-        Some(locked) if record.source.eq_content(&locked.source) => ArtifactState::Installed,
+        Some(locked) if record.source.eq_content(&locked.source) => installed_or_pending(),
         Some(_) => ArtifactState::Outdated,
         // Snapshot-provided only (no top-level entry): no pinned identifier to
         // compare, so plain Installed — `member_display_state` promotes it to
         // ViaBundle for a member/row not also declared standalone.
-        None => ArtifactState::Installed,
+        None => installed_or_pending(),
     }
 }
 
@@ -1529,7 +1569,7 @@ fn snapshot_declared_repos(
 /// scope's lock + install-state (used after a scope toggle — the catalog
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
-    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+    let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, target) =
         load_scope_for_badges(ctx);
     let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
@@ -1540,6 +1580,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         declared_bundle_repos: &declared_bundle_repos,
         direct_repos: &direct_repos,
         snapshot_repos: &snapshot_repos,
+        target: target.as_ref(),
     };
     // Index the lock's path-sourced entries once (shared across every Local
     // row's re-derivation below) instead of a per-row `iter_artifacts` scan.
@@ -1574,6 +1615,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         &active,
         &direct_repos,
         &snapshot_repos,
+        target.as_ref(),
     );
     // Row states just changed, and the deprecated-hiding filter depends on
     // state: re-run it so an uninstalled-just-now deprecated row drops out of
@@ -1609,6 +1651,7 @@ fn refresh_member_states(
     active: &[ClientTarget],
     direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
     snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    target: Option<&InstallTarget>,
 ) {
     let scope_label = state.scope_label.clone();
     for ((entry_scope, bundle_repo), cache) in state.bundle_members.iter_mut() {
@@ -1634,6 +1677,7 @@ fn refresh_member_states(
                 active,
                 direct_repos,
                 snapshot_repos,
+                target,
             );
         }
     }
@@ -1677,9 +1721,25 @@ fn member_display_state(
     active: &[ClientTarget],
     direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
     snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    target: Option<&InstallTarget>,
 ) -> ArtifactState {
-    let derived = derive_artifact_state(kind, registry, repository, lock, state, roots, active, snapshot_repos);
-    if derived == ArtifactState::Installed && !direct_repos.contains(&(kind, format!("{registry}/{repository}"))) {
+    let derived = derive_artifact_state(
+        kind,
+        registry,
+        repository,
+        lock,
+        state,
+        roots,
+        active,
+        snapshot_repos,
+        target,
+    );
+    // `Pending` is a flavour of present-and-intact, so it takes the ViaBundle
+    // promotion on the same terms — a bundle-provided member with an
+    // uncovered client is still "here only because the bundle provides it".
+    if matches!(derived, ArtifactState::Installed | ArtifactState::Pending)
+        && !direct_repos.contains(&(kind, format!("{registry}/{repository}")))
+    {
         ArtifactState::ViaBundle
     } else {
         derived
@@ -1749,12 +1809,13 @@ fn load_scope_for_badges(
     std::collections::BTreeSet<String>,
     std::collections::BTreeSet<(ArtifactKind, String)>,
     std::collections::BTreeSet<(ArtifactKind, String)>,
+    Option<InstallTarget>,
 ) {
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
     let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
-    let (set, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_declaration(ctx)
-        .map(|(_options, _registries, set)| {
+    let (set, declared_bundle_repos, direct_repos, snapshot_repos, target) = load_scope_declaration(ctx)
+        .map(|(options, _registries, set)| {
             let bundles = set
                 .bundles
                 .values()
@@ -1763,12 +1824,24 @@ fn load_scope_for_badges(
                 .collect();
             let direct = direct_declared_repos(&set);
             let snapshot = snapshot_declared_repos(&set, cached);
+            // What `grim install` would target — the `Pending` badge's input.
+            // Best-effort: an invalid configured client name must not take the
+            // TUI down, it just costs that one badge.
+            let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors).ok();
             // The parsed set is threaded out so `local_rows` can synthesize the
             // "Local" root from path declarations without re-reading the config.
-            (set, bundles, direct, snapshot)
+            (set, bundles, direct, snapshot, target)
         })
         .unwrap_or_default();
-    (lock, state, set, declared_bundle_repos, direct_repos, snapshot_repos)
+    (
+        lock,
+        state,
+        set,
+        declared_bundle_repos,
+        direct_repos,
+        snapshot_repos,
+        target,
+    )
 }
 
 /// Synthesize the TUI rows for the "Local" root group.
@@ -3542,6 +3615,7 @@ mod tests {
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
             snapshot_repos: &snapshot_repos,
+            target: None,
         };
 
         let rows = project_group_rows(&group, &badge);
@@ -4851,6 +4925,7 @@ mod tests {
             declared_bundle_repos: &bundle_repos,
             direct_repos: &repos,
             snapshot_repos: &repos,
+            target: None,
         };
         let wide = aliased_group("wide", "ghcr.io/acme", 1);
         let narrow = aliased_group("narrow", "ghcr.io/acme", 1);
@@ -4887,6 +4962,7 @@ mod tests {
             declared_bundle_repos: &bundle_repos,
             direct_repos: &repos,
             snapshot_repos: &repos,
+            target: None,
         };
         let rows: Vec<TuiRow> = [
             aliased_group("wide", "ghcr.io/acme", 1),
@@ -5039,6 +5115,7 @@ mod tests {
             declared_bundle_repos: &bundle_repos,
             direct_repos: &repos,
             snapshot_repos: &repos,
+            target: None,
         };
         let g = catalog_service::CatalogGroup {
             alias: entry.alias.clone(),
@@ -5432,7 +5509,7 @@ mod tests {
         );
 
         // The bundle row badge derives `installed` from its members.
-        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
             load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
@@ -5442,6 +5519,7 @@ mod tests {
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
             snapshot_repos: &snapshot_repos,
+            target: None,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -5479,7 +5557,7 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert!(lock.skills.is_empty(), "members must be evicted from the lock");
 
-        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
             load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
@@ -5489,6 +5567,7 @@ mod tests {
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
             snapshot_repos: &snapshot_repos,
+            target: None,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -5775,6 +5854,7 @@ mod tests {
             &active,
             &direct_repos,
             &snapshot_repos,
+            None,
         )
     }
 
@@ -5971,7 +6051,7 @@ mod tests {
             .await
             .expect("bundle install succeeds");
 
-        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
             load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
@@ -5981,6 +6061,7 @@ mod tests {
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
             snapshot_repos: &snapshot_repos,
+            target: None,
         };
         assert_eq!(
             derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),
@@ -5995,7 +6076,7 @@ mod tests {
         perform(&ctx, &skill_row, false, None, &SilentProgress, false)
             .await
             .expect("skill install succeeds");
-        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos) =
+        let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
             load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
@@ -6005,6 +6086,7 @@ mod tests {
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
             snapshot_repos: &snapshot_repos,
+            target: None,
         };
         assert_eq!(
             derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),

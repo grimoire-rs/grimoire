@@ -138,17 +138,77 @@ def test_status_item_carries_client_drift_fields(
     rows = result["items"]
     assert set(rows[0].keys()) == {
         "kind", "name", "source", "pinned", "state", "outputs",
+        "outputs_pending",
         "clients_missing", "clients_extra", "clients_unresolved",
         "deprecated", "replaced_by", "update_available",
-    }, f"status item must carry exactly the 12 frozen fields; got: {sorted(rows[0].keys())}"
+    }, f"status item must carry exactly the 13 frozen fields; got: {sorted(rows[0].keys())}"
     assert rows[0]["clients_missing"] == []
     assert rows[0]["clients_extra"] == []
+    # Freshly installed into the only configured client — an install would
+    # write nothing new.
+    assert rows[0]["outputs_pending"] == []
     # A healthy row resolves every output — the key is a report about a
     # failure grim tolerated, not an echo of the client set.
     assert rows[0]["clients_unresolved"] == []
     assert rows[0]["deprecated"] is None
     assert rows[0]["replaced_by"] is None
     assert rows[0]["update_available"] is None
+
+
+def test_status_reports_pending_outputs_for_a_client_added_after_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The materialization-drift case no other field can see.
+
+    A client that appears *after* the install has no install record, so
+    `footprint` has nothing to check and the row stays `installed` — while
+    `grim install` would in fact write new files for it. Under autodetect
+    `clients_missing` is deliberately always `[]`, so before
+    `outputs_pending` this was completely invisible.
+
+    Remediation is `grim install` (not `update`), and running it must clear
+    the field — the two are derived from one seam, so a non-empty
+    `outputs_pending` is a promise that an install has work to do.
+    """
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
+    runner = grim_at(project_dir)
+    # Autodetect (no `options.clients`): only claude is present at install.
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "s")
+    assert row["state"] == "installed"
+    assert row["outputs_pending"] == [], "nothing pending right after install"
+
+    # The user installs a second client. Nothing about the artifact changed.
+    (project_dir / ".cursor").mkdir(exist_ok=True)
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "s")
+    assert row["state"] == "installed", (
+        "the artifact is byte-intact at the locked pin — pending outputs are "
+        "not a modification and must not move `state`"
+    )
+    pending_clients = {o["client"] for o in row["outputs_pending"]}
+    assert "cursor" in pending_clients, (
+        f"a newly-present client is pending work; got {row['outputs_pending']}"
+    )
+    for output in row["outputs_pending"]:
+        assert set(output.keys()) == {"client", "path"}
+    # Autodetect ⇒ the config-drift fields stay silent, by design.
+    assert row["clients_missing"] == []
+
+    # `grim install` is the remedy, and it clears the field.
+    installed = runner.run("install", check=False)
+    assert installed.returncode == 0, installed.stderr
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "s")
+    assert row["outputs_pending"] == [], (
+        f"install must clear what status promised it would write; got "
+        f"{row['outputs_pending']}"
+    )
+    assert "cursor" in {o["client"] for o in row["outputs"]}
 
 
 def test_status_client_drift_narrow_then_widen(

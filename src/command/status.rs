@@ -165,20 +165,28 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // marker dir), not real config drift. So every row's
     // `clients_missing`/`clients_extra` stays empty rather than diffing
     // against live detection (see the `client_drift` call sites below).
+    // The target `grim install` would resolve for this scope right now — the
+    // same `InstallTarget::parse` seam every mutating command uses, so
+    // `outputs_pending` below answers "would install write this?" with
+    // install's own answer rather than a second opinion. Built
+    // unconditionally: unlike `desired_clients`, autodetect is not a reason to
+    // abstain here, because the question is about what install would do, not
+    // about what the user configured.
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+        &scope.options.vendors,
+    ))?;
+
+    // The *explicitly configured* client set, or `None` under autodetect —
+    // a deliberately narrower question than `target` above, and it must stay
+    // narrower: see `client_drift`.
     let desired_clients: Option<Vec<ClientTarget>> = if scope.options.clients.is_empty() {
         None
     } else {
-        Some(
-            super::grim(InstallTarget::parse(
-                &scope.workspace,
-                scope.scope,
-                &[],
-                &scope.options.clients,
-                &scope.options.vendors,
-            ))?
-            .clients()
-            .to_vec(),
-        )
+        Some(target.clients().to_vec())
     };
 
     let mut entries = Vec::new();
@@ -205,6 +213,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned: None,
             state,
             outputs: Vec::new(),
+            // A bundle never installs itself, so an install would never write
+            // anything for this row — its members carry their own rows.
+            outputs_pending: Vec::new(),
             // A bundle never installs itself (no recorded outputs, ever) —
             // comparing an always-empty recorded set against the desired
             // client set would just echo the whole desired set as
@@ -273,6 +284,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 locked: p.digest(),
             });
         }
+        let outputs_pending = pending_outputs_for(record, decl.kind, &decl.name, &target, &scope.roots);
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
@@ -280,6 +292,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned,
             state: entry_state,
             outputs,
+            outputs_pending,
             clients_missing,
             clients_extra,
             clients_unresolved: unresolved_clients(record, &active, &scope.roots),
@@ -301,6 +314,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path} (dev)"),
             None => "(dev)".to_string(),
         };
+        // A dev install is materialized like any other artifact, so a client
+        // it has never covered is genuine pending work — unlike the
+        // config-diff fields below, which a dev row must abstain from.
+        let outputs_pending = pending_outputs_for(Some(record), record.kind, &record.name, &target, &scope.roots);
         entries.push(StatusEntry {
             kind: record.kind,
             name: record.name.clone(),
@@ -308,6 +325,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             pinned: None,
             state: entry_state,
             outputs,
+            outputs_pending,
             // A dev install is deliberately out-of-band from the declared
             // config: it was materialized to whatever `--client` list the
             // one-off `grim install <path>` invocation chose, independent
@@ -348,6 +366,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
                     client_supports_kind(c, member.kind, &scope.workspace, scope.scope)
                 });
+            let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -355,6 +374,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 pinned: member.source.pinned().cloned(),
                 state: st,
                 outputs,
+                outputs_pending,
                 clients_missing,
                 clients_extra,
                 clients_unresolved: unresolved_clients(record, &active, &scope.roots),
@@ -383,6 +403,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             state: &state,
             roots: &scope.roots,
             active: &active,
+            target: Some(&target),
         };
         // `Complete`, never `Browse` (plan C-007, ADR D5): this load exists
         // solely to populate `deprecated` / `replaced_by` on **declared**
@@ -549,6 +570,33 @@ fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots
                     client: out.client.clone(),
                     path,
                 })
+        })
+        .collect()
+}
+
+/// Build the reported `outputs_pending` list for one artifact: what an
+/// install would write right now that the record does not already account
+/// for, as absolute destination paths.
+///
+/// Thin projection over [`crate::install::expected_outputs::pending_outputs`]
+/// — the seam the installer's own no-op check uses — into the report's
+/// `{client, path}` shape. Deliberately NOT filtered through `active`: the
+/// question is what `grim install` would target (`InstallTarget::parse`),
+/// which is a different and answerable question from "which clients are
+/// detectable right now" (see this module's `footprint` doc for why the
+/// latter is not a sound oracle).
+fn pending_outputs_for(
+    record: Option<&InstallRecord>,
+    kind: ArtifactKind,
+    name: &str,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+) -> Vec<StatusOutput> {
+    crate::install::expected_outputs::pending_outputs(record, kind, name, target, roots)
+        .into_iter()
+        .map(|(client, path)| StatusOutput {
+            client: client.to_string(),
+            path,
         })
         .collect()
 }
@@ -859,6 +907,7 @@ mod tests {
             pinned,
             state: ArtifactStatus::Installed,
             outputs: Vec::new(),
+            outputs_pending: Vec::new(),
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
             clients_unresolved: Vec::new(),

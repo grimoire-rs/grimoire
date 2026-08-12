@@ -39,7 +39,7 @@ use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::StatusBadge;
-use crate::install::target::detect_clients_or_all;
+use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 
@@ -112,12 +112,13 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // then browse every configured registry through the shared catalog
     // service (the single seam `search`/`tui`/`mcp` share). A registry given
     // via `--registry` collapses the set to exactly that registry.
-    let (registries, lock, state, roots, active, cfg_show_deprecated) = resolve_scope(ctx, args)?;
+    let (registries, lock, state, roots, active, target, cfg_show_deprecated) = resolve_scope(ctx, args)?;
     let badges = BadgeContext {
         lock: lock.as_ref(),
         state: &state,
         roots: &roots,
         active: &active,
+        target: target.as_ref(),
     };
     let results = super::grim(
         crate::catalog::load_catalog(
@@ -288,16 +289,35 @@ fn deprecated_row_visible(show: bool, deprecated: bool, installed: bool) -> bool
 }
 
 /// What [`resolve_scope`] hands back: the ordered browse set, the badge
-/// inputs (lock, install state, anchor roots, active clients), and the
-/// scope's `show_deprecated` default.
+/// inputs (lock, install state, anchor roots, active clients, and the
+/// install target the `Pending` badge needs), and the scope's
+/// `show_deprecated` default.
 type SearchScope = (
     Vec<crate::config::ResolvedRegistry>,
     Option<GrimoireLock>,
     InstallState,
     AnchorRoots,
     Vec<ClientTarget>,
+    Option<InstallTarget>,
     bool,
 );
+
+/// The target `grim install` would resolve for `scope`, or `None` when it
+/// cannot be resolved (an invalid client name in `[options].clients`).
+///
+/// Best-effort on purpose: badges are advisory, and a browse must not fail on
+/// a config error that only a mutating command needs to enforce. `None` just
+/// costs the `Pending` badge, never the search.
+fn install_target_best_effort(scope: &scope_resolution::ResolvedScope) -> Option<InstallTarget> {
+    InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+        &scope.options.vendors,
+    )
+    .ok()
+}
 
 /// Resolve the registry browse set and best-effort badge inputs for the
 /// search. The registry set spans every configured `[[registries]]` (or the
@@ -326,8 +346,8 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
         // never a `_catalog`-gated registry.
         let registries =
             crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_INDEX, None);
-        let (lock, state, roots, active) = load_badges_best_effort(ctx, args);
-        return Ok((registries, lock, state, roots, active, false));
+        let (lock, state, roots, active, target) = load_badges_best_effort(ctx, args);
+        return Ok((registries, lock, state, roots, active, target, false));
     }
 
     let scope = match scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
@@ -351,6 +371,7 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
                 InstallState::empty(std::path::Path::new("")),
                 roots,
                 ClientTarget::ALL.to_vec(),
+                None,
                 false,
             ));
         }
@@ -366,8 +387,9 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let active = detect_clients_or_all(&scope.workspace, scope.scope);
+    let target = install_target_best_effort(&scope);
     let show_deprecated = scope.options.show_deprecated;
-    Ok((registries, lock, state, scope.roots, active, show_deprecated))
+    Ok((registries, lock, state, scope.roots, active, target, show_deprecated))
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge
@@ -376,7 +398,13 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
 fn load_badges_best_effort(
     ctx: &Context,
     args: &SearchArgs,
-) -> (Option<GrimoireLock>, InstallState, AnchorRoots, Vec<ClientTarget>) {
+) -> (
+    Option<GrimoireLock>,
+    InstallState,
+    AnchorRoots,
+    Vec<ClientTarget>,
+    Option<InstallTarget>,
+) {
     let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
     else {
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
@@ -385,12 +413,14 @@ fn load_badges_best_effort(
             InstallState::empty(std::path::Path::new("")),
             roots,
             ClientTarget::ALL.to_vec(),
+            None,
         );
     };
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let active = detect_clients_or_all(&scope.workspace, scope.scope);
-    (lock, state, scope.roots, active)
+    let target = install_target_best_effort(&scope);
+    (lock, state, scope.roots, active, target)
 }
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
 use super::content_hash::footprint_hash;
+use super::expected_outputs::{expected_clients, output_at_current_layout, pending_outputs};
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
@@ -1275,50 +1276,15 @@ fn integrity_gate(
     // declines (the expected-output set is empty), the record is not "already
     // installed"; falling through lets the install report `Skipped` and keeps a
     // later supported install from being masked.
-    let expected: Vec<crate::install::client_target::ClientTarget> = target
-        .clients()
-        .iter()
-        .copied()
-        .filter(|c| client_supports_kind(*c, rec.kind, target.workspace(), target.scope()))
-        .collect();
-    let covers_targets = !expected.is_empty()
-        && expected.iter().all(|c| {
-            rec.outputs
-                .iter()
-                .any(|out| out.client == c.as_str() && output_at_current_layout(out, *c, rec, target, roots))
-        });
+    // `grim status` derives its `outputs_pending` from the same seam, so a
+    // row promising "nothing to install" cannot disagree with what an install
+    // then does.
+    let covers_targets = !expected_clients(rec.kind, target).is_empty()
+        && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots).is_empty();
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
     Ok(None)
-}
-
-/// Whether a recorded file output still sits at the path the CURRENT
-/// layout produces for its client (structural anchor + relative equality).
-/// A mismatch means the render layout moved since the record was written
-/// (ADR render-layout-stability): the integrity gate must fall through so
-/// the install re-materializes at the new path and [`reap_moved_outputs`]
-/// collects the old one. Entry-typed outputs (MCP config registrations)
-/// are exempt — their location is the vendor config file, not a render
-/// layout. A layout that cannot be computed here (the current-layout
-/// destination fails to anchor — anchor root absent or unanchorable path)
-/// counts as current: on such a host the path does not move, so there is
-/// nothing to migrate.
-fn output_at_current_layout(
-    out: &ClientOutput,
-    client: crate::install::client_target::ClientTarget,
-    rec: &InstallRecord,
-    target: &InstallTarget,
-    roots: &AnchorRoots,
-) -> bool {
-    if out.entry.is_some() {
-        return true;
-    }
-    let dest = target.path_for(client, rec.kind, &rec.name);
-    match crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, rec.kind, roots) {
-        Ok(current) => current == out.target,
-        Err(_) => true,
-    }
 }
 
 /// Layout-migration reaper (ADR render-layout-stability): after a
