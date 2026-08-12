@@ -186,6 +186,18 @@ grim update --force   # overwrite my edit deliberately
 One flag therefore governs every way update can destroy hand-edited work:
 this overwrite, the prune below, and the client reap below that.
 
+A refusal does not abandon the pass. Every other artifact is still
+reconciled, the lock still rolls forward, and the report is still
+printed — this is a refusal, not an error document. Under `--format json`
+the refused row carries `refused: true` (always present, `false`
+everywhere else), which is how you tell this exit 65 from any other
+without scraping stderr; `action` keeps reporting the lock diff, because
+the pin *did* move and only the materialization was refused. The plain
+table has no such column, so on that surface the refusal is named on
+stderr instead. Re-run with `--force` to complete it, or
+[`grim remove`](#removing) the artifact to keep your edit and stop
+tracking it.
+
 Update is also the only command that **prunes**: an artifact that
 dropped out of the lock (most often a bundle member the bundle stopped
 including) is deleted and reported as `removed` — unless you edited it
