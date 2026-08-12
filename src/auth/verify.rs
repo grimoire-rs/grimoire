@@ -48,9 +48,9 @@ pub enum VerifyOutcome {
 /// `plain_http` is the invocation's complete plain-HTTP exception list
 /// (`command::plain_http_hosts`) — the loopback forms, the
 /// `GRIM_INSECURE_REGISTRIES` entries, and every `[[registries]]` entry that
-/// set `insecure = true`. It decides the ping scheme and, downstream, which
-/// `Bearer` realms may be followed without downgrading the credential to
-/// cleartext.
+/// set `insecure = true`. It decides the ping scheme for **this** registry
+/// and nothing else; it deliberately does not widen which `Bearer` realms
+/// may be followed (see [`realm_is_secure`]).
 ///
 /// # Errors
 ///
@@ -100,7 +100,7 @@ pub async fn verify_credential(
             // A malicious registry can answer an HTTPS ping with an
             // `http://` realm to harvest the Basic credential in cleartext.
             // Refuse the downgrade rather than follow it (nothing stored).
-            if !realm_is_secure(&realm, scheme, plain_http) {
+            if !realm_is_secure(&realm, scheme) {
                 return Err(AuthError::VerifyInsecureRealm {
                     registry: registry.to_string(),
                 });
@@ -145,23 +145,29 @@ fn ping_host(registry: &str) -> String {
 /// Whether a `Bearer` realm may be followed without downgrading the
 /// credential to cleartext.
 ///
-/// When the `/v2/` ping used HTTPS, the token endpoint must also be HTTPS
-/// — unless its host is an explicitly-insecure/loopback registry (the same
-/// set that permits a plain-HTTP ping, passed as `plain_http`). A
-/// plain-HTTP ping is already an insecure registry, so any realm is fine.
-/// An unparseable realm is not trusted.
-fn realm_is_secure(realm: &str, ping_scheme: &str, plain_http: &[String]) -> bool {
+/// **A registry reached over HTTPS must keep the credential on HTTPS.** The
+/// realm host is named by the *registry*, not by the user, so it is not a
+/// host the user opted in to — and the answer to that challenge carries the
+/// password itself.
+///
+/// This deliberately does **not** consult the invocation's plain-HTTP set.
+/// That set exists for `oci-client`'s `HttpsExcept`, where a wrong match
+/// costs an unwanted HTTP connection; here it would cost a leaked secret,
+/// and the two are not the same decision. Consulting it let *any*
+/// `insecure = true` entry — declared for some entirely different registry,
+/// and committed to a shared `grimoire.toml` — authorize an HTTPS
+/// registry's challenge to redirect the credential to that host in
+/// cleartext. `Url::host_str()` also drops the port, so a port-less entry
+/// matched the named host on *every* port.
+///
+/// A plain-HTTP ping is a registry the user did declare insecure, so any
+/// realm is fine there — the credential was already going to travel in
+/// cleartext. An unparseable realm is not trusted.
+fn realm_is_secure(realm: &str, ping_scheme: &str) -> bool {
     if ping_scheme != "https" {
         return true;
     }
-    let Ok(url) = reqwest::Url::parse(realm) else {
-        return false;
-    };
-    if url.scheme() == "https" {
-        return true;
-    }
-    url.host_str()
-        .is_some_and(|host| plain_http.contains(&host.to_string()))
+    matches!(reqwest::Url::parse(realm), Ok(url) if url.scheme() == "https")
 }
 
 /// A parsed `WWW-Authenticate` challenge grim knows how to answer.
@@ -254,26 +260,50 @@ fn client() -> Result<reqwest::Client, reqwest::Error> {
 mod tests {
     use super::*;
 
-    /// The plain-HTTP set a default invocation resolves: no config entry
-    /// opted in, so it is the loopback forms plus whatever
-    /// `GRIM_INSECURE_REGISTRIES` names (unset in a test process).
-    fn hosts() -> Vec<String> {
-        crate::oci::access::registry_client::plain_http_hosts()
-    }
-
     #[test]
     fn realm_scheme_guards_against_cleartext_downgrade() {
         // HTTPS ping: an https realm is fine; an http realm to a public
         // host is refused (credential-downgrade attempt).
-        assert!(realm_is_secure("https://auth.example/token", "https", &hosts()));
-        assert!(!realm_is_secure("http://attacker.example/token", "https", &hosts()));
-        // HTTPS ping but an http realm on an explicitly-insecure/loopback
-        // host is allowed (matches the plain-http ping allowance).
-        assert!(realm_is_secure("http://127.0.0.1:5000/token", "https", &hosts()));
+        assert!(realm_is_secure("https://auth.example/token", "https"));
+        assert!(!realm_is_secure("http://attacker.example/token", "https"));
         // Unparseable realm is not trusted under an HTTPS ping.
-        assert!(!realm_is_secure("not a url", "https", &hosts()));
+        assert!(!realm_is_secure("not a url", "https"));
         // Plain-http ping is already an insecure registry — any realm is fine.
-        assert!(realm_is_secure("http://whatever/token", "http", &hosts()));
+        assert!(realm_is_secure("http://whatever/token", "http"));
+    }
+
+    /// Regression: an HTTPS registry's challenge must not be able to
+    /// redirect the credential to a host that some *other* `[[registries]]`
+    /// entry declared `insecure = true`.
+    ///
+    /// This was reachable with real captured bytes: a bare-hostname entry
+    /// (`oci = "registry.corp.internal"`, the shape the field's own docs
+    /// recommend for a TLS-less in-cluster registry) put that host in the
+    /// invocation's plain-HTTP set; `realm_is_secure` compared the realm's
+    /// **port-less** `host_str()` against that set, so a completely
+    /// different HTTPS registry answering with
+    /// `Bearer realm="http://registry.corp.internal:9999/token"` was trusted
+    /// and the Basic credential went out in cleartext.
+    ///
+    /// The guard is now scheme-only under an HTTPS ping, so no entry in any
+    /// config can arm this. Each case below passed before the fix.
+    #[test]
+    fn an_unrelated_insecure_entry_cannot_redirect_the_credential() {
+        for realm in [
+            // The captured exploit: declared bare, challenged with a port.
+            "http://registry.corp.internal:9999/token",
+            // The same host, no port — a port-less list entry matched this too.
+            "http://registry.corp.internal/token",
+            // Loopback: in the implicit set on every invocation, so this was
+            // trusted for *any* HTTPS registry without any config at all.
+            "http://127.0.0.1:5000/token",
+            "http://localhost/token",
+        ] {
+            assert!(
+                !realm_is_secure(realm, "https"),
+                "an HTTPS ping must never follow {realm} — the answer carries the password"
+            );
+        }
     }
 
     #[test]
