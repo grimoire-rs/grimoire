@@ -279,11 +279,17 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
 /// whatever the entry already has.
 ///
 /// The two flags are mutually `overrides_with` at the clap layer, so at
-/// most one is ever set; the match order is a fallback if both arrive true.
+/// most one is ever set. The match order is the fallback if both ever
+/// arrive true, and it resolves to the **secure** side deliberately: for
+/// `--insecure`/`--no-insecure` that is `false` (keep HTTPS). Ordering it
+/// the other way made deleting the clap attribute silently ignore a
+/// trailing `--no-insecure` and leave the entry on plain HTTP — a defect
+/// whose blast radius is transport security, arrived at by a one-line
+/// change in an unrelated file.
 fn flag_pair(on: bool, off: bool) -> Option<bool> {
     match (on, off) {
-        (true, _) => Some(true),
         (_, true) => Some(false),
+        (true, _) => Some(true),
         _ => None,
     }
 }
@@ -1610,18 +1616,33 @@ fn run_registry_set(
         )));
     };
     check_filter_flags(alias, include, exclude)?;
-    // Judged against the kind the entry will have *after* this write, so
-    // `--index … --insecure` in one invocation is refused too. Enabling only:
-    // `--no-insecure` on a mis-authored entry has to stay possible.
-    if insecure == Some(true) {
-        let will_be_index = locator.map_or(existing.index.is_some(), |(_, is_index)| is_index);
-        if will_be_index {
-            return Err(super::config_value(format!(
+    // Judged against the state the entry will have *after* this write —
+    // both the kind and the flag, because either half can arrive from the
+    // flags or be inherited from the entry. `--no-insecure` on a
+    // mis-authored entry has to stay possible, which is exactly why the
+    // *effective* value is what gets tested rather than the flag alone.
+    //
+    // Testing only `insecure == Some(true)` left one route uncovered:
+    // `--index <url>` on an entry that already set `insecure = true` fell
+    // through to `commit_config`'s re-validation and surfaced as the
+    // load-time `ConfigError` (78) naming the file path, where every other
+    // route through this command reports the flag-shaped 65.
+    let will_be_index = locator.map_or(existing.index.is_some(), |(_, is_index)| is_index);
+    if will_be_index && insecure.unwrap_or(existing.insecure) {
+        return Err(super::config_value(if insecure == Some(true) {
+            format!(
                 "--insecure does not apply to registry '{}': it is an index entry, and an index \
                  locator already carries its own http(s):// scheme",
                 alias.escape_debug()
-            )));
-        }
+            )
+        } else {
+            format!(
+                "registry '{}' sets insecure, which does not apply to an index entry: an index \
+                 locator already carries its own http(s):// scheme; pass --no-insecure alongside \
+                 --index to clear it",
+                alias.escape_debug()
+            )
+        }));
     }
 
     let _guard = acquire_config_lock(&scope)?;
@@ -4341,6 +4362,64 @@ mod tests {
         );
     }
 
+    /// Swapping an `oci` entry that already set `insecure = true` over to
+    /// `--index` is the same rejected pairing, arriving without the
+    /// `--insecure` flag — and it must report the same flag-shaped 65.
+    ///
+    /// It used to fall through this command's guard (which only looked at
+    /// the flag) into `commit_config`'s re-validation, surfacing as the
+    /// load-time `ConfigError` (78) that names the config file path instead
+    /// of the flags the user typed. Data safety held; the documented exit
+    /// code did not.
+    #[test]
+    fn registry_set_index_over_an_already_insecure_entry_is_a_data_error() {
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        set_insecure(&ctx, Some(true));
+        let before = std::fs::read_to_string(&config_path).expect("config readable");
+
+        let err = run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.grimoire.rs"),
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .map(|_| ())
+        .expect_err("an index entry must not keep an inherited insecure flag");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            ExitCode::DataError,
+            "the flag-shaped 65, not the load-time 78"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            before,
+            "nothing may be written when the pairing is rejected"
+        );
+
+        // …and the documented escape hatch works in one invocation.
+        run_registry_set(
+            &ctx,
+            "acme",
+            None,
+            Some("https://index.grimoire.rs"),
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            Some(false),
+        )
+        .map(|_| ())
+        .expect("--no-insecure alongside --index must be accepted");
+    }
+
     #[test]
     fn registry_set_insecure_flag_pair_turns_the_field_on_and_back_off() {
         // The one field `--default`'s one-way shape would not serve: an
@@ -4403,7 +4482,12 @@ mod tests {
     fn registry_set_naming_only_insecure_is_not_the_nothing_to_change_error() {
         let (_tmp, _config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        set_insecure(&ctx, Some(true));
+        // Asserted here rather than through `set_insecure`'s `.expect`: the
+        // name promises a specific error does NOT fire, so the outcome
+        // belongs in the body where a reader looking for it will find it.
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false, Some(true))
+            .expect("naming only --insecure must not be the nothing-to-change usage error");
+        assert_eq!(code, ExitCode::Success);
     }
 
     #[test]
@@ -4460,6 +4544,41 @@ mod tests {
         run_registry_set(ctx, "acme", None, None, false, &[], false, &[], false, value)
             .map(|_| ())
             .expect("an insecure-only edit must succeed");
+    }
+
+    /// `--insecure` / `--no-insecure` is last-flag-wins, which is a
+    /// property of the clap `overrides_with` attributes, not of
+    /// [`flag_pair`]. Deleting either attribute turns this red — the same
+    /// guard `registry_set_clear_include_conflicts_with_include` gives the
+    /// filter flags.
+    ///
+    /// It matters more here than ordinary flag hygiene: without the
+    /// attributes both flags arrive `true`, and the pair would resolve to
+    /// whichever side [`flag_pair`] favours regardless of what the user
+    /// typed last.
+    #[test]
+    fn insecure_flag_pair_is_last_flag_wins() {
+        for (args, want) in [
+            (
+                vec!["registry", "set", "acme", "--insecure", "--no-insecure"],
+                Some(false),
+            ),
+            (
+                vec!["registry", "set", "acme", "--no-insecure", "--insecure"],
+                Some(true),
+            ),
+        ] {
+            let ConfigCommand::Registry(registry) = parse(&args).expect("the pair must parse").command else {
+                panic!("expected the registry subcommand");
+            };
+            let RegistryCommand::Set {
+                insecure, no_insecure, ..
+            } = registry.command
+            else {
+                panic!("expected `registry set`");
+            };
+            assert_eq!(flag_pair(insecure, no_insecure), want, "{args:?}");
+        }
     }
 
     #[test]
