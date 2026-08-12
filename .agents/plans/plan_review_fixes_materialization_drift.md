@@ -10,10 +10,11 @@ to branch `feat/materialization-drift-and-freshness`.
 - **Parent plan:** meta-plan_promotion_1_0 (parked, alongside
   `plan_catalog_freshness_revalidation`)
 - **Active phase:** 1 — Execution (waves 1–2)
-- **Step:** /hex-plan → plan-approved
-- **Last update:** 2026-08-12 (authored from the tier-high review of
+- **Step:** /hex-execute → Specify
+- **Last update:** 2026-08-12 (after `606f14a`: chore(agents) — executing;
+  7 wave-1 worktrees cut from that base. Authored from the tier-high review of
   `feat/materialization-drift-and-freshness`; 7 Block + 10 High findings
-  decomposed into 8 WPs across 2 waves)
+  decomposed into 8 WPs across 2 waves.)
 - **Tier:** medium — trimmed (`architect=inline research=skip adversary=off`)
 
 ## Header
@@ -121,8 +122,13 @@ carry the claim — a tree-wide grep, not the review's original list of seven:
 
 The last two are owned by other WPs in the same wave. They are fixed **by the
 WP that already owns the file** — WP-A must not reach into another worktree.
-Every site says "three causes"; the count word must be corrected to "two", not
+Most sites say "three causes"; the count word must be corrected to "two", not
 just the clause deleted.
+
+*Audit note (found at WP-C review):* `CHANGELOG.md:38` is the exception — it
+never carried a literal count word, just a bare three-item list. WP-C satisfied
+C-003 there by **adding** "two causes". A later `three → two` grep over that
+file will therefore show no match; that is correct, not a miss.
 
 **C-004** `docs/src/stability.md:157-158` and `docs/src/commands.md:635` no
 longer claim the drift seam "cannot disagree with what `grim install` then
@@ -147,10 +153,28 @@ change as a contract restoration, citing `main:docs/src/commands.md:472,532,
 "Integrity Gates" list includes a bullet for `grim update` refusing a
 locally-modified artifact, in the shape of the existing bullets.
 
-**C-009** `installer.rs`'s force path writes new content to a temp location and
-swaps it into place only on success. No window exists in which the destination
-is absent or half-written. No `.old` backup is retained; the user's edited
-bytes are still removed — this is atomicity, not preservation.
+**C-009** `installer.rs`'s force path stages new content into a sibling temp
+directory and swaps it into place only on success. No `.old` backup is
+retained; the user's edited bytes are still removed — this is atomicity, not
+preservation.
+
+**Scope of the guarantee, tightened during execution to match what shipped.**
+The original wording ("no window exists in which the destination is absent or
+half-written") overstates it, and this plan will not repeat the defect it
+exists to fix. What holds:
+
+- **Every in-process failure the materializer can return is covered** — this is
+  the actual defect, the one the two tests exercise, and it is fully closed.
+  Before the fix an unparseable render left the destination at `None`.
+- **A residual window remains**: publishing is `remove_path` + `rename`, run
+  twice for a rule (index, then support dir), so a **process crash between
+  those syscalls** can still strand the footprint. Closing it needs
+  `renameat2(RENAME_EXCHANGE)`, which is Linux-only; the partial-pass recovery
+  branch repairs what the window can leave. Documented at `installer.rs:790-796`
+  and carried to the handoff as a deferred finding for the owner.
+
+The staging directory is a **sibling of the destination**, not under `$TMPDIR`,
+so `rename(2)` stays within one filesystem and cannot fail `EXDEV`.
 
 **Three sites, not one.** Fixing only the artifact swap leaves H10 half-done:
 
@@ -193,9 +217,28 @@ Block/High scope. It is deliberately absorbed because H4 rewrites the same
 section and leaving one table wrong inside a section being corrected would be
 perverse — recorded here rather than silently included.
 
-**C-015** `docs/src/json-interface.md:452-453`'s `modified` and
+**C-015** ~~`docs/src/json-interface.md:452-453`'s `modified` and
 `untracked-destination` reason rows name `grim update` among the commands that
-emit them.
+emit them.~~ **Superseded during execution — owner ruling, 2026-08-12.**
+
+H9's premise stopped holding the moment WP-B landed. Those rows describe the
+**error document's** `reason` field, and `emit_error_document` (`main.rs:196`)
+runs only on the `Err` arm — so after WP-B, `grim update`'s refusal path returns
+the report with exit 65 and produces no error document at all. Naming `update`
+there would be a fresh false claim, the exact defect this plan exists to remove.
+
+**C-015 (revised).** `grim update`'s refusal is machine-detectable from its
+report via an **additive** marker — a per-row `refused` field defaulting false,
+or a new `UpdateAction::Refused` literal (Principle 9 permits both: optional
+new fields, added enum literals). `grimoire-vscode` drives grim through the
+JSON interface and must be able to tell an integrity refusal from any other
+exit 65 without scraping stderr. Owned by **WP-B**, documented on update's own
+report row. The `modified` / `untracked-destination` reason rows revert to
+naming only `grim install` / `grim add`.
+
+**C-016** `docs/src/json-interface.md:539-549` says **three** commands ship a
+full report alongside a non-zero exit code — `config get`, `publish`, and now
+`grim update`. Owned by **WP-A**.
 
 ## UX scenarios
 
@@ -231,13 +274,13 @@ content or the new, never a partial tree.
 
 | WP | Scope (C-/S- IDs) | Expected files | Size | Wave | Depends on | Review | Status |
 |---|---|---|---|---|---|---|---|
-| **WP-A** | B1+B2+H2+H9 — C-001, C-002, C-003, C-004, C-015; S-001, S-002 | `src/install/expected_outputs.rs`, `src/api/status_report.rs`, `docs/src/json-interface.md` (`:89`, `:452-453`), `docs/src/stability.md` (`:152-159`), `docs/src/commands.md` (`:615-638`), `catalog/skills/grim-usage/references/consume.md`, `.claude/rules/subsystem-cli-commands.md` | M | 1 | — | panel | pending |
-| **WP-B** | B6+H6 — C-005, C-006; S-003, S-004 | `src/command/update.rs` (`:296-318`), `test/tests/test_integrity.py` (extend `:102-132`). **Out of bounds: `src/command/install.rs`, `src/install/install_error.rs`** — wrap update-specific context at `update.rs:311` per `quality-rust-errors.md`'s library/CLI boundary; do **not** parameterize the shared `IntegrityMismatch` message, which would mutate `grim install`'s shipped refusal text | M | 1 | — | panel | pending |
-| **WP-C** | B3+B4+B7 **+ B1's `CHANGELOG.md:38` site** — C-007, C-008, C-003 (partial) | `CHANGELOG.md` (`:12`, `:21`, **`:38`**), `docs/src/stability.md` (`:188-199`), `catalog/skills/grim-usage/references/troubleshooting.md` | S | 1 | — | light | pending |
-| **WP-D** | H10 — C-009; S-007 | `src/install/installer.rs` (`:791-793` artifact swap, `:799-803` support-dir remove, `:868-909` recovery branch, `:733-738`/`:784` `in_flight`) | M | 1 | — | panel | pending |
-| **WP-E** | H1 — C-010; S-006 | `src/context.rs` (`:22-25`, `:67-85`, `:291-329`) | S | 1 | — | panel | pending |
-| **WP-F** | B5+H5 — C-012; S-005 | `src/tui/app.rs` (new test on `test_ctx` `:5505`, driven as `:5536` does), `src/tui/render.rs` (`:950`, `:1244-1268`) | S | 1 | — | **panel** (carries a Block whose only deliverable is one test) | pending |
-| **WP-G** | H7+H8 **+ B1's `status_badge.rs:38` site** — C-011, C-003 (partial); S-008 | `src/install/status_badge.rs` (`:8`, `:38`, `:58`), `test/tests/test_search.py` | S | 1 | — | light | pending |
+| **WP-A** | B1+B2+H2+H9 — C-001, C-002, C-003, C-004, C-015; S-001, S-002 | `src/install/expected_outputs.rs`, `src/api/status_report.rs`, `docs/src/json-interface.md` (`:89`, `:452-453`), `docs/src/stability.md` (`:152-159`), `docs/src/commands.md` (`:615-638`), `catalog/skills/grim-usage/references/consume.md`, `.claude/rules/subsystem-cli-commands.md` | M | 1 | — | panel | active |
+| **WP-B** | B6+H6 — C-005, C-006; S-003, S-004 | `src/command/update.rs` (`:296-318`), `test/tests/test_integrity.py` (extend `:102-132`). **Out of bounds: `src/command/install.rs`, `src/install/install_error.rs`** — wrap update-specific context at `update.rs:311` per `quality-rust-errors.md`'s library/CLI boundary; do **not** parameterize the shared `IntegrityMismatch` message, which would mutate `grim install`'s shipped refusal text | M | 1 | — | panel | active |
+| **WP-C** | B3+B4+B7 **+ B1's `CHANGELOG.md:38` site** — C-007, C-008, C-003 (partial) | `CHANGELOG.md` (`:12`, `:21`, **`:38`**), `docs/src/stability.md` (`:188-199`), `catalog/skills/grim-usage/references/troubleshooting.md` | S | 1 | — | light | merged |
+| **WP-D** | H10 — C-009; S-007 | `src/install/installer.rs` (`:791-793` artifact swap, `:799-803` support-dir remove, `:868-909` recovery branch, `:733-738`/`:784` `in_flight`) | M | 1 | — | panel | merged |
+| **WP-E** | H1 — C-010; S-006 | `src/context.rs` (`:22-25`, `:67-85`, `:291-329`) | S | 1 | — | panel | merged |
+| **WP-F** | B5+H5 — C-012; S-005 | `src/tui/app.rs` (new test on `test_ctx` `:5505`, driven as `:5536` does), `src/tui/render.rs` (`:950`, `:1244-1268`) | S | 1 | — | **panel** (carries a Block whose only deliverable is one test) | active |
+| **WP-G** | H7+H8 **+ B1's `status_badge.rs:38` site** — C-011, C-003 (partial); S-008 | `src/install/status_badge.rs` (`:8`, `:38`, `:58`), `test/tests/test_search.py` | S | 1 | — | light | merged |
 | **WP-H** | H3+H4 — C-013, C-014 | `docs/src/upgrading.md`, `docs/src/commands.md` (`:1106-1281`) | S | 2 | WP-A, WP-B, WP-C | light | pending |
 
 ```mermaid

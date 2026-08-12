@@ -26,11 +26,17 @@ def test_fresh_partial_install_does_not_report_itself_installed(
 
     OpenCode renders the skill fine (it drops the foreign ``claude.*``
     key); Claude tries to lift it, hits an unconvertible literal, and
-    fails — after copy_tree has already written the canonical tree to
-    Claude's destination. With no prior record to fall back on, recording
-    that half-done destination at the NEW pin makes the retry's integrity
-    gate see an intact, fully-covered record at the locked pin and answer
+    fails. With no prior record to fall back on, recording a half-done
+    destination at the NEW pin would make the retry's integrity gate see
+    an intact, fully-covered record at the locked pin and answer
     `unchanged` — leaving the wrong bytes in place forever, at exit 0.
+
+    Since forced and first installs stage into a sibling temp dir and
+    publish only on success, the failing client now leaves *nothing* at
+    its destination rather than the half-written tree ``copy_tree`` used
+    to leave there. That is the stronger property, so it is what this
+    asserts: the hazard above is structurally unreachable, not merely
+    unreported. The recoverability assertion at the end is unchanged.
     """
     repo = f"{unique_repo}/code-review"
     make_artifact(repo, "skill", {"code-review/SKILL.md": BAD_SKILL}, tag="1.0.0")
@@ -46,8 +52,10 @@ def test_fresh_partial_install_does_not_report_itself_installed(
     first = runner.run("install", check=False)
     assert first.returncode != 0, "the failing client must fail the command"
     claude_index = project_dir / ".claude/skills/code-review/SKILL.md"
-    assert claude_index.exists(), (
-        "this test only means something if the failing client left bytes behind"
+    assert not claude_index.exists(), (
+        "a failed materialize must leave nothing at the destination: the "
+        "footprint is staged in a sibling temp dir and published only on "
+        f"success, yet {claude_index} exists"
     )
 
     retry = runner.run("install", check=False)
