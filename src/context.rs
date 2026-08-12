@@ -21,8 +21,10 @@ use crate::store::{BlobStore, GrimPaths};
 
 /// Memoized OCI access seams for one invocation, keyed by the pair that
 /// defines what a client *is*: its routing mode and its plain-HTTP exception
-/// list. See [`Context::clients`].
-type AccessMemo = std::sync::Mutex<std::collections::HashMap<(AccessMode, Vec<String>), Arc<dyn OciAccess>>>;
+/// list. The [`std::time::Instant`] is the entry's build time, against which
+/// [`Context::ACCESS_MEMO_BOUND`] is checked. See [`Context::clients`].
+type AccessMemo =
+    std::sync::Mutex<std::collections::HashMap<(AccessMode, Vec<String>), (std::time::Instant, Arc<dyn OciAccess>)>>;
 
 /// Resolved configuration for a single `grim` invocation.
 ///
@@ -81,7 +83,12 @@ pub struct Context {
     /// process — and a client built for one scope's `insecure` opt-in must
     /// never serve another's (`access_seam_scoped`'s whole point).
     ///
-    /// Nothing is persisted: the tokens live and die with the process.
+    /// Nothing is persisted: the tokens live and die with the process — and,
+    /// past [`Self::ACCESS_MEMO_BOUND`], sooner. An entry older than that
+    /// bound is rebuilt rather than reused, so a `grim logout` or a rotated
+    /// PAT is honoured within the bound instead of only at the next process
+    /// start. That distinction is invisible to a one-shot CLI run and is the
+    /// whole point for `grim mcp`, whose process outlives many credentials.
     clients: AccessMemo,
     /// Test-only injected `OciAccess` override.  When `Some`, `access()`
     /// returns this instead of constructing a real `CachedAccess`.  Only
@@ -141,6 +148,15 @@ impl Clone for Context {
 }
 
 impl Context {
+    /// How long a memoized access seam may be reused before it is rebuilt.
+    ///
+    /// The seam pins the credential it was built with, so the bound is the
+    /// worst-case staleness of a `grim logout` or a rotated PAT. Five minutes
+    /// sits far above a `grim mcp` tool-call burst (sub-second to seconds), so
+    /// the bearer-token reuse the memo exists for is essentially retained — a
+    /// burst straddling the boundary pays one extra handshake, nothing more.
+    pub const ACCESS_MEMO_BOUND: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
     /// Builds the context from parsed global options and the environment.
     ///
     /// Resolution-affecting CLI flags take precedence over their
@@ -303,11 +319,18 @@ impl Context {
         // Poison recovery rather than a panic: this is a cache, and the worst
         // a poisoned memo can cost is a rebuilt client (one extra handshake).
         // Taking the process down over it would turn a cache into a liability.
-        if let Some(hit) = self
+        //
+        // A hit is only served while it is younger than `ACCESS_MEMO_BOUND`:
+        // the seam pins the credential it was built with, and `grim mcp` runs
+        // long enough for that credential to be revoked or rotated underneath
+        // it. Past the bound the entry falls through and is rebuilt, which
+        // re-reads the credential store.
+        if let Some((built, hit)) = self
             .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&key)
+            && built.elapsed() < Self::ACCESS_MEMO_BOUND
         {
             return Ok(Arc::clone(hit));
         }
@@ -321,10 +344,14 @@ impl Context {
             mode,
         );
         let access: Arc<dyn OciAccess> = Arc::new(cached);
-        self.clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, Arc::clone(&access));
+        let mut memo = self.clients.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Evict every other expired entry too, not just the one being replaced:
+        // a key that is never queried again would otherwise keep its revoked
+        // credential resident in the client's `auth_store` until the process
+        // exits (MCP scoped to workspace A, then only ever to B).
+        memo.retain(|_, (built, _)| built.elapsed() < Self::ACCESS_MEMO_BOUND);
+        memo.insert(key, (std::time::Instant::now(), Arc::clone(&access)));
+        drop(memo);
         Ok(access)
     }
 }
@@ -535,5 +562,60 @@ mod tests {
         assert_eq!(ctx.registry_flags(), &["a.example", "b.example"]);
         assert_eq!(ctx.registry_flag(), Some("a.example"));
         assert_eq!(ctx.default_registry(), Some("a.example"));
+    }
+
+    /// C-010 / S-006 (`.agents/plans/plan_review_fixes_materialization_drift.md`
+    /// § D1): `access_with_mode` must honour the 5-minute memo bound — reuse
+    /// a fresh entry, rebuild one older than the bound. Today there is no age
+    /// check at all (`:306-313`), so the first credential seen for a registry
+    /// is pinned for the life of the process — `grim logout` or a PAT
+    /// rotation is never honoured until `grim mcp` restarts (H1).
+    ///
+    /// Poked directly at `ctx.clients` rather than sleeping 5 minutes in a
+    /// unit test. This is the seam the fix must expose: `AccessMemo`'s value
+    /// changes from `Arc<dyn OciAccess>` to
+    /// `(std::time::Instant, Arc<dyn OciAccess>)`, and `Context` gains an
+    /// associated `ACCESS_MEMO_BOUND: std::time::Duration` naming the D1
+    /// bound so tests (and the doc comment) have one source for it. Until
+    /// that lands, this test does not compile — that is the expected red
+    /// state for a type-level change.
+    #[test]
+    fn a_memo_entry_past_the_d1_bound_is_rebuilt_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let hosts = vec!["registry.internal:5050".to_string()];
+        let key = (AccessMode::Online, hosts.clone());
+
+        // Fresh hit still reuses the seam — the bound must not regress the
+        // existing token-cache-preserving behaviour (the pre-existing
+        // `an_identically_configured_access_seam_is_reused` test above
+        // covers this too, but doesn't exercise the age gate at all).
+        let first = ctx.access_with_mode(AccessMode::Online, hosts.clone()).unwrap();
+        let second = ctx.access_with_mode(AccessMode::Online, hosts.clone()).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "a fresh entry must still be reused");
+
+        // Back-date the memo entry past the D1 bound in place.
+        {
+            let mut clients = ctx.clients.lock().unwrap();
+            let (_age, seam) = clients
+                .get(&key)
+                .cloned()
+                .expect("seam was just inserted by access_with_mode above");
+            // `Instant` is CLOCK_MONOTONIC from boot on Linux, and `Sub` panics
+            // rather than saturating, so on a host up for less than the bound
+            // no `Instant` that old is representable — skip instead of flaking.
+            let Some(stale) =
+                std::time::Instant::now().checked_sub(Context::ACCESS_MEMO_BOUND + std::time::Duration::from_secs(1))
+            else {
+                return;
+            };
+            clients.insert(key.clone(), (stale, seam));
+        }
+
+        let third = ctx.access_with_mode(AccessMode::Online, hosts).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "an entry older than the D1 bound must rebuild, not hand back the stale credential seam"
+        );
     }
 }
