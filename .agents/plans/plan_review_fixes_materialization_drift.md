@@ -10,11 +10,13 @@ to branch `feat/materialization-drift-and-freshness`.
 - **Parent plan:** meta-plan_promotion_1_0 (parked, alongside
   `plan_catalog_freshness_revalidation`)
 - **Active phase:** 1 — Execution (waves 1–2)
-- **Step:** awaiting /hex-review
-- **Last update:** 2026-08-12 (after `a98513d`: all 8 WPs merged, `task verify`
-  green at 1012 passed. Authored from the tier-high review of
-  `feat/materialization-drift-and-freshness`; 7 Block + 10 High findings
-  decomposed into 8 WPs across 2 waves, all now landed on the feature branch.)
+- **Step:** finalized
+- **Last update:** 2026-08-13 (after `4b40fba`: /finalize — branch flattened from
+  26 commits with 7 merges to 19 linear signed commits, tree byte-identical to
+  the reviewed state, `task --force verify` green at 1012 passed. All 8 WPs
+  merged; review round 2 converged with no Block findings. Authored from the
+  tier-high review of `feat/materialization-drift-and-freshness`; 7 Block + 10
+  High findings decomposed into 8 WPs across 2 waves.)
 - **Tier:** medium — trimmed (`architect=inline research=skip adversary=off`)
 
 ## Header

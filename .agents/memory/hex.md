@@ -95,7 +95,7 @@ research-axes:
 
 ## Memory
 
-- **Active plan:** `.agents/plans/plan_review_fixes_materialization_drift.md` —
+- **Landed plan (finalized 2026-08-13):** `.agents/plans/plan_review_fixes_materialization_drift.md` —
   applies the 7 Block + 10 High findings of the tier-high review of
   `feat/materialization-drift-and-freshness`
   (`.agents/review_materialization_drift_and_freshness.md`). Planned 2026-08-12
@@ -110,7 +110,18 @@ research-axes:
   Suggest**, all applied — the sharpest being that B1's claim lives in **nine**
   places not seven (two owned by other WPs), and that C-011 named a comment in
   `api/artifact_status.rs` that does not exist (the stale claims are in
-  `status_badge.rs:8,58`). `Step: /hex-execute` — not started.
+  `status_badge.rs:8,58`). **Executed and finalized:** all 8 WPs merged, review
+  round 2 (3 perspectives) converged with no Block findings, and `/finalize`
+  flattened the branch to 19 linear signed commits with the false
+  `BREAKING CHANGE:` footer struck from `094db20`. `Step: finalized`.
+
+  **Round-2 reviewer subagents did not deliver.** All three (`rev2-spec`,
+  `rev2-claims`, `rev2-safety`) went idle without returning a report, twice
+  each including after an explicit re-request — the same failure the wave-1
+  `review-wp-b-quality` worker showed. The round-2 verification was therefore
+  done by the orchestrator directly (installer staging, memo bound, refusal
+  path, and a tree-wide false-claim sweep). Treat in-process reviewer spawns
+  in this environment as unreliable until diagnosed.
 
   **Cross-model gate skipped in both the review and the plan.** `codex:rescue`
   failed a **fourth** distinct way on 2026-08-12: given the brief as a
