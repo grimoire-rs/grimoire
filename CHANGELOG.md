@@ -39,7 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unmigrated layout move. Reported under autodetect too, never moves
   `state`, never affects the exit code. Remediation is `grim install`.
 - The TUI and `grim search` gain a matching `pending` badge, ranked directly
-  above `installed` so a row with a louder problem keeps reporting it.
+  above `installed` so a row with a louder problem keeps reporting it. `i`
+  installs a pending row (that is the remedy that clears it) and `u`/`d` treat
+  it as installed, since it is.
+- The TUI `?` overlay gains a **Status column legend** explaining every glyph,
+  built from the same projection the rows render so it cannot drift from the
+  screen. The status hint line drops the conventional keys (arrows, `/`,
+  `→/←`, pgup/pgdn) it was spending its widest tier on, leaving room for the
+  bindings nobody guesses.
 
 ### Performance
 

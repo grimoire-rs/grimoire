@@ -873,25 +873,29 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // C5: hint tiers are view-mode-aware.
     //   - `t tree` always appears (always available to toggle).
     //   - `→/← expand/collapse` appears only in tree mode (inert in flat mode).
+    // The hint line advertises what is NOT guessable. Arrow-key movement,
+    // `/` search and `→/←` expand/collapse are conventions a user already
+    // tries unprompted, and spending the widest tier on them pushed the
+    // things nobody guesses (`v`, `o`, `g`, `z`) into tiers that only appear
+    // on a wide terminal. They stay documented in `?`, which now also carries
+    // a Status-column legend.
     let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
         vec![
-            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand/collapse · z fold · / search · ? help · q quit"
-                .to_string(),
-            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · →/← expand · z fold · / search · ? help · q quit".to_string(),
-            "↑↓ move · i/u/d act · v ver · g scope · t tree · →/← expand · z fold · / search · ? help · q quit".to_string(),
-            "↑↓ i/u/d g t →/← z / ? help q".to_string(),
-            "i/u/d v g t / ? q".to_string(),
+            "space mark · i/u/d act · v versions · o open · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "i/u/d act · v ver · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "i/u/d g t z ? help q".to_string(),
+            "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
         ]
     } else {
-        // Flat mode: `→/←` keys are inert — omit from hints to avoid misleading users.
+        // Flat mode: `z` fold is inert — omit it to avoid misleading users.
         vec![
-            "↑↓ move · pgup/pgdn scroll · space mark · i/u/d act · v versions · o open · g scope · t tree · / search · ? help · q quit"
-                .to_string(),
-            "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · t tree · / search · ? help · q quit".to_string(),
-            "↑↓ move · i/u/d act · v ver · g scope · t tree · / search · ? help · q quit".to_string(),
-            "↑↓ i/u/d g t / ? help q".to_string(),
-            "i/u/d v g t / ? q".to_string(),
+            "space mark · i/u/d act · v versions · o open · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · g scope · t tree · ? help · q quit".to_string(),
+            "i/u/d act · v ver · g scope · t tree · ? help · q quit".to_string(),
+            "i/u/d g t ? help q".to_string(),
+            "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
         ]
     };
@@ -1426,33 +1430,55 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 /// Every browse-mode keybinding shown in the `?` help overlay, as
 /// `(keys, description)` rows. A free function so a unit test can assert the
 /// overlay documents every action the event loop handles.
-fn help_entries() -> [(&'static str, &'static str); 18] {
+fn help_entries() -> [(&'static str, &'static str); 10] {
     [
-        ("↑ / ↓", "move the selection (always — detail open or not)"),
-        ("j / k", "scroll the detail pane line by line (no focus needed)"),
-        ("pgup/pgdn", "scroll the detail pane a page (no focus needed)"),
-        ("space", "mark / unmark the row"),
-        ("a / c", "mark all visible / clear marks"),
+        ("↑ / ↓", "move the selection"),
+        ("j / k", "scroll the detail pane — line, or pgup/pgdn by page"),
+        ("space", "mark / unmark — a marks all visible, c clears"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
         ("v", "pick a specific version for the selected row"),
         ("o", "open the selected entry's repository URL"),
-        ("g", "toggle scope: project ⇄ global"),
-        ("t", "toggle tree / flat view"),
-        ("h", "show / hide deprecated artifacts"),
-        ("→ / ←", "expand / collapse selected group (tree mode)"),
-        ("z", "fold: collapse to level / expand all (tree mode)"),
-        ("/", "search; type to filter, enter to commit"),
-        ("enter", "open the detail pane"),
-        ("r", "refresh the catalog from the registry"),
-        ("?", "this help (any key closes)"),
-        ("q / esc", "quit"),
+        ("g / t", "toggle scope project ⇄ global · toggle tree / flat view"),
+        ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
+        ("/ · enter", "search (enter commits) · open the detail pane"),
+        ("h · r · ?", "deprecated on/off · refresh catalog · this help — q quits"),
+    ]
+}
+
+/// What each status glyph in the Status column means, in the order a row is
+/// most likely to reach it. The glyph and label are taken from
+/// [`status_view`] rather than restated, so the legend cannot drift from what
+/// is actually rendered — a legend that disagrees with the screen is worse
+/// than no legend.
+fn legend_entries() -> [(ArtifactState, &'static str); 7] {
+    [
+        (ArtifactState::Installed, "present, intact, at the locked version"),
+        (ArtifactState::NotInstalled, "not installed in this scope"),
+        (
+            ArtifactState::Pending,
+            "installed, but a configured client has no copy yet — `i` writes it",
+        ),
+        (
+            ArtifactState::Outdated,
+            "a newer version is locked than what is on disk",
+        ),
+        (
+            ArtifactState::Modified,
+            "you edited the installed copy; `u` asks before overwriting",
+        ),
+        (ArtifactState::ViaBundle, "present only because a bundle provides it"),
+        (
+            ArtifactState::IntegrityMissing,
+            "recorded as installed, but its files are gone or unreadable",
+        ),
     ]
 }
 
 /// The content lines of the `?` help overlay: a "Keybindings" header, a blank
-/// separator, and one row per [`help_entries`] item. The count must equal
-/// [`crate::tui::state::HELP_BODY_LINES`] (the scroll-clamp source of truth) —
-/// guarded by `tests::help_body_line_count_matches_state`.
+/// separator, one row per [`help_entries`] item, then a "Status column"
+/// legend. The count must equal [`crate::tui::state::HELP_BODY_LINES`] (the
+/// scroll-clamp source of truth) — guarded by
+/// `tests::help_body_line_count_matches_state`.
 fn help_lines() -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
@@ -1468,6 +1494,22 @@ fn help_lines() -> Vec<Line<'static>> {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(d, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Status column",
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (state, meaning) in legend_entries() {
+        let (glyph, label, color) = status_view(state);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {glyph} {label:<17}"),
+                Style::default().fg(color_for(color)).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(meaning, Style::default().fg(Color::White)),
         ]));
     }
     lines
@@ -1900,10 +1942,63 @@ mod tests {
     // added — j/k detail scroll and the tree expand/collapse + view toggle.
     #[test]
     fn help_overlay_documents_detail_scroll_and_tree_keys() {
-        let keys: Vec<&str> = help_entries().iter().map(|(k, _)| *k).collect();
-        assert!(keys.contains(&"j / k"), "detail-scroll j/k must be documented");
-        assert!(keys.contains(&"→ / ←"), "tree expand/collapse must be documented");
-        assert!(keys.contains(&"t"), "view toggle must be documented");
+        // Asserts the binding is DOCUMENTED, not that it occupies a row of its
+        // own: entries merge as the list is condensed to keep the overlay
+        // inside a standard terminal, and an exact key-column match would fail
+        // on a purely cosmetic merge while a genuinely dropped binding slipped
+        // through elsewhere.
+        let text: String = help_entries().iter().map(|(k, d)| format!("{k}\t{d}\n")).collect();
+        for (needle, what) in [
+            ("j / k", "detail-scroll j/k"),
+            ("pgup/pgdn", "detail-scroll by page"),
+            ("→ / ←", "tree expand/collapse"),
+            ("z", "tree fold"),
+            ("t", "view toggle"),
+            ("g", "scope toggle"),
+            ("/", "search"),
+            ("h", "deprecated toggle"),
+            ("r", "catalog refresh"),
+            ("q", "quit"),
+        ] {
+            assert!(text.contains(needle), "{what} must be documented; overlay text: {text}");
+        }
+    }
+
+    /// Every status a row can actually display must appear in the `?` legend.
+    /// A user meeting an unexplained glyph is exactly the failure the legend
+    /// exists to prevent — and `Pending` is the one that prompted it.
+    #[test]
+    fn the_legend_explains_every_status_a_row_can_show() {
+        let explained: Vec<ArtifactState> = legend_entries().iter().map(|(s, _)| *s).collect();
+        for state in [
+            ArtifactState::Installed,
+            ArtifactState::NotInstalled,
+            ArtifactState::Outdated,
+            ArtifactState::Modified,
+            ArtifactState::Pending,
+            ArtifactState::ViaBundle,
+            ArtifactState::IntegrityMissing,
+        ] {
+            assert!(explained.contains(&state), "{state} has no legend entry");
+        }
+    }
+
+    /// The legend must render the SAME glyph and label the row renders.
+    /// Restating them by hand is how a legend silently starts lying.
+    #[test]
+    fn the_legend_uses_the_rendered_glyph_and_label() {
+        let body = help_lines();
+        let text: String = body
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        for (state, _) in legend_entries() {
+            let (glyph, label, _) = status_view(state);
+            assert!(
+                text.contains(glyph) && text.contains(label),
+                "legend must show {state}'s own glyph {glyph:?} and label {label:?}"
+            );
+        }
     }
 
     // The scroll-clamp source of truth (`state::HELP_BODY_LINES`) must match the
@@ -1970,10 +2065,11 @@ mod tests {
         let t = &m.hint_tiers;
         assert!(t.len() >= 2);
         assert_eq!(t.last().unwrap(), "? help");
-        // The scroll hint lives only in the widest tier, so it is the
-        // first thing dropped when the terminal narrows.
-        assert!(t[0].contains("pgup/pgdn scroll"));
-        assert!(!t[1].contains("pgup"));
+        // `o open` lives only in the widest tier, so it is the first thing
+        // dropped when the terminal narrows. (Conventional keys — arrows,
+        // `/`, pgup/pgdn — are not advertised here at all; they live in `?`.)
+        assert!(t[0].contains("o open"));
+        assert!(!t[1].contains("o open"));
         // Wide terminal ⇒ the full (widest) tier.
         assert_eq!(fit_hint(t, 200), t[0]);
         // Zero width ⇒ still the minimum, never empty.
@@ -2802,12 +2898,10 @@ mod tests {
             widest_tree.contains("t tree"),
             "tree: widest tier must contain 't tree'; tier: {widest_tree:?}"
         );
-        // `→/←` expand/collapse must appear in tree mode.
-        assert!(
-            widest_tree.contains("expand"),
-            "tree: widest tier must contain 'expand'; tier: {widest_tree:?}"
-        );
-        // `z` fold must be advertised in tree mode.
+        // `z` fold must be advertised in tree mode. (`→/←` expand/collapse is
+        // deliberately NOT advertised — arrow keys on a tree are a convention
+        // users try unprompted, and the hint line is reserved for what is not
+        // guessable. It stays documented in `?`.)
         assert!(
             widest_tree.contains("z fold"),
             "tree: widest tier must contain 'z fold'; tier: {widest_tree:?}"

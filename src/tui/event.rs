@@ -324,13 +324,24 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
 /// the closed `ArtifactState` enum.
 fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
     match op {
-        BatchOp::Install => matches!(state, ArtifactState::NotInstalled | ArtifactState::IntegrityMissing),
+        // `Pending` is the one state that belongs to BOTH sets: the artifact
+        // is installed (so update/uninstall apply) AND an install still has
+        // outputs to write for it (so install applies). Omitting it from the
+        // install arm made `i` on a pending row answer "already installed"
+        // and do nothing — the one action that would actually have cleared
+        // the badge, refused; omitting it from the other arm made `u`/`d`
+        // answer "not installed" on a row that plainly was.
+        BatchOp::Install => matches!(
+            state,
+            ArtifactState::NotInstalled | ArtifactState::IntegrityMissing | ArtifactState::Pending
+        ),
         BatchOp::Update | BatchOp::Uninstall => matches!(
             state,
             ArtifactState::Installed
                 | ArtifactState::ViaBundle
                 | ArtifactState::Outdated
                 | ArtifactState::Modified
+                | ArtifactState::Pending
                 | ArtifactState::IntegrityMissing
         ),
     }
@@ -699,6 +710,53 @@ mod tests {
     use super::*;
     use crate::config::registry_resolve::RowSource;
     use crate::tui::state::{ArtifactState, TuiRow};
+
+    /// `op_allows` (the row/batch gate) and the single-Member fast-path gates
+    /// in `handle()` must agree on every state. Their doc comments have said
+    /// "keep both in sync" from the start, and nothing enforced it: adding
+    /// `ArtifactState::Pending` to the member gates while missing `op_allows`
+    /// made `i` on a pending row answer "already installed" and do nothing —
+    /// refusing the one action that would have cleared the badge — while
+    /// `u`/`d` answered "not installed" on a row that plainly was.
+    ///
+    /// Enumerates every variant, so a new state cannot be added to one gate
+    /// and forgotten in the other.
+    #[test]
+    fn every_state_is_actionable_by_install_or_by_update_and_uninstall() {
+        for state in [
+            ArtifactState::NotInstalled,
+            ArtifactState::Installed,
+            ArtifactState::ViaBundle,
+            ArtifactState::Outdated,
+            ArtifactState::Modified,
+            ArtifactState::Pending,
+            ArtifactState::IntegrityMissing,
+        ] {
+            let install = op_allows(BatchOp::Install, state);
+            let mutate = op_allows(BatchOp::Update, state);
+            assert_eq!(
+                mutate,
+                op_allows(BatchOp::Uninstall, state),
+                "{state}: update and uninstall must share one allowed set"
+            );
+            assert!(
+                install || mutate,
+                "{state}: no operation accepts this state — every row must have at \
+                 least one action, or the UI is a dead end for it"
+            );
+        }
+
+        // The specific regression: a pending row is BOTH installed enough to
+        // update/uninstall and incomplete enough to install.
+        assert!(
+            op_allows(BatchOp::Install, ArtifactState::Pending),
+            "`i` must act on a pending row — it is the remedy that clears it"
+        );
+        assert!(
+            op_allows(BatchOp::Update, ArtifactState::Pending),
+            "a pending row is installed; `u` must act on it"
+        );
+    }
 
     fn row(repo: &str) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));

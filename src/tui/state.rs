@@ -458,10 +458,12 @@ enum SelectionAnchor {
 }
 
 /// Body line count of the `?` help overlay: the "Keybindings" header, a blank
-/// separator, and one row per keybinding entry. Single source for help-scroll
-/// clamping; the entry text lives in [`super::render::help_entries`] and
+/// separator and one row per keybinding entry, then a blank, the "Status
+/// column" header, another blank and one row per legend entry. Single source
+/// for help-scroll clamping; the entry text lives in
+/// [`super::render::help_entries`] / [`super::render::legend_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
-pub(crate) const HELP_BODY_LINES: u16 = 20;
+pub(crate) const HELP_BODY_LINES: u16 = 22;
 
 /// The bare-state default for `tree_separators`, used only by
 /// [`TuiState::default`] — a state that was never seeded from config (unit
