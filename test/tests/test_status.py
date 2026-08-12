@@ -211,6 +211,47 @@ def test_status_reports_pending_outputs_for_a_client_added_after_install(
     assert "cursor" in {o["client"] for o in row["outputs"]}
 
 
+def test_status_reports_missing_after_output_deleted(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """S-002: a materialized output deleted out from under grim reads
+    `state: missing` — not a pending write. `outputs_pending`'s "deleted
+    file" cause names install-time drift that a fresh install would
+    correct; the record still covers the client (nothing about the
+    recorded layout changed), so `outputs_pending` must stay `[]` and the
+    signal for "the file is gone" is `state`, not this field. Fixture:
+    `test_status_reports_pending_outputs_for_a_client_added_after_install`
+    minus its second-client step."""
+    repo = f"{unique_repo}/s"
+    make_artifact(repo, "skill", {"s/SKILL.md": "v\n"}, tag="stable")
+    write_config(project_dir, skills={"s": f"{registry}/{repo}:stable"})
+    runner = grim_at(project_dir)
+    # Autodetect (no `options.clients`): only claude is present at install.
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "s")
+    assert row["state"] == "installed"
+    assert row["outputs_pending"] == [], "nothing pending right after install"
+
+    # Delete the materialized output out from under grim.
+    output_path = Path(row["outputs"][0]["path"])
+    if output_path.is_dir():
+        shutil.rmtree(output_path)
+    else:
+        output_path.unlink()
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "s")
+    assert row["state"] == "missing", (
+        f"a deleted output must read missing, not pending; got {row['state']}"
+    )
+    assert row["outputs_pending"] == [], (
+        "a deleted output is not a materialization-drift pending write; got "
+        f"{row['outputs_pending']}"
+    )
+
+
 def test_status_client_drift_narrow_then_widen(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

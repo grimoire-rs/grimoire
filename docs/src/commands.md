@@ -615,24 +615,26 @@ was never going to record an output for it.
 A separate array, `outputs_pending`, answers a different question: **what
 would `grim install` write right now that the record does not already account
 for?** Same `{client, path}` shape as `outputs`, `[]` when an install would
-write nothing new. Three things put an entry in it, and all three are real
-install work:
+write nothing new. Two things put an entry in it, and both are real install
+work:
 
 - a **client that gained support since the last install** — you installed
   another AI client, or added one to `[options].clients`, and nothing was ever
   recorded for it;
-- a **recorded output whose file is gone**, deleted out from under grim;
 - a **render-layout move**, reported at the new path.
+
+A recorded output whose file was **deleted** out from under grim is not one of
+them: `outputs_pending` reads the install record, not the filesystem, so that
+entry reads `state: missing` instead.
 
 This is *materialization drift*, and it is the one kind of drift no other
 field could see: the artifact is byte-intact at the locked pin, so `state`
 correctly reads `installed` while an install still has files to write. Unlike
 `clients_missing` it is reported under autodetect too — it asks what an
 install would do, not what you configured — and it is derived from the very
-seam the installer uses to decide whether a pass is a no-op, so it cannot
-promise "nothing to do" over an install that then writes three files.
+seam the installer uses to decide whether a pass is a no-op.
 
-Remediation is **[`grim install`](#install)**, which clears it. Not
+Remediation is **[`grim install`](#install)**. Not
 [`grim update`](#update): that would also re-resolve floating tags and roll
 your pins forward, which is a version change, not a repair. `outputs_pending`
 never affects `state` and never affects the exit code.

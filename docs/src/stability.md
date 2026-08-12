@@ -151,12 +151,13 @@ upgrade even as the paths inside it change.
 
 The same entry carries `outputs_pending` — the outputs an install *would*
 write that the record does not yet cover, in the same `{client, path}`
-shape. It is the supported way to detect **materialization drift**: a
-client installed after the fact, an output deleted out from under grim, or
-a layout move not yet migrated. It is derived from the same seam the
-installer uses to decide whether a pass is a no-op, so it cannot disagree
-with what `grim install` then does. Remediation is `grim install`; it never
-moves `state` and never affects the exit code.
+shape. It is the supported way to detect **materialization drift**, which
+has two causes: a client installed after the fact, or a layout move not yet
+migrated. An output deleted out from under grim is not one of them — that
+entry reads `state: missing` instead. `outputs_pending` is derived from the
+same seam the installer uses to decide whether a pass is a no-op.
+Remediation is `grim install`; `outputs_pending` never moves `state` and
+never affects the exit code.
 
 ## The compatibility promise {#promise}
 

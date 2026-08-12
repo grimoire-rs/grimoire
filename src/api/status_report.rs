@@ -103,16 +103,16 @@ pub struct StatusEntry {
     /// record does not already account for — materialization drift. Sorted by
     /// client; `[]` when an install would write nothing new.
     ///
-    /// Three causes, all of them real work an install would do: a client that
+    /// Two causes, both of them real work an install would do: a client that
     /// gained support since the last install (installed after the fact, or
-    /// newly configured), a recorded output whose file was deleted, and a
-    /// render-layout move (reported at the NEW path). A present-but-drifted
-    /// output is **not** here — that is `state: modified`, a different
-    /// problem with a different remedy.
+    /// newly configured), and a render-layout move (reported at the NEW path).
+    /// A present-but-drifted output is **not** here — that is
+    /// `state: modified`, a different problem with a different remedy — and
+    /// neither is a recorded output whose file was deleted, which surfaces as
+    /// `state: missing`.
     ///
     /// Derived from the same seam the installer's own no-op check uses
-    /// (`crate::install::expected_outputs`), so this cannot promise an
-    /// install has nothing to do while the install then writes files.
+    /// (`crate::install::expected_outputs`).
     ///
     /// Remediation is `grim install` — **not** `grim update`, which
     /// re-resolves floating tags and rolls the lock forward. `state` is

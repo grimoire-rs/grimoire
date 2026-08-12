@@ -6,9 +6,11 @@
 //! One question, two askers. The installer asks it to decide whether a pass
 //! is a no-op ([`crate::install::installer::integrity_gate`]'s
 //! `covers_targets`); `grim status` asks it to report materialization drift
-//! (`outputs_pending`). They must never disagree — a status row promising
-//! `grim install` has nothing to do, over an install that then writes three
-//! files, is worse than no signal at all.
+//! (`outputs_pending`). One seam, so neither asker can invent pending work
+//! the other would not do. It is **not** a claim that a `[]` here means an
+//! install writes nothing: whether a recorded file is still *present* is no
+//! part of the question either asker puts to this module — that belongs to
+//! `status`'s `footprint` and the integrity gate's own `all_intact` check.
 //!
 //! The framing matters. "Did grim install here?" is not answerable from the
 //! filesystem: `detect_clients` is unsound as an oracle in both directions
@@ -45,24 +47,26 @@ pub fn expected_clients(kind: ArtifactKind, target: &InstallTarget) -> Vec<Clien
 }
 
 /// The outputs an install would write **now** that `record` does not already
-/// account for, as `(client, destination)` pairs in [`expected_clients`]
-/// order.
+/// account for, as `(client, destination)` pairs sorted by client name — the
+/// order is a promise of `grim status --format json`, so it is fixed here at
+/// the shared source rather than at any one caller.
 ///
-/// Empty means an install would write nothing new. Non-empty has exactly three
-/// causes, and all three are real work an install would do:
+/// Empty means an install would write nothing new. Non-empty has exactly two
+/// causes, and both are real work an install would do:
 ///
 /// 1. **A client that gained support since the last install** — installed
 ///    after the fact, or newly added to `[options].clients`. Nothing was ever
 ///    recorded for it.
-/// 2. **A recorded output whose file is gone** — deleted out from under grim.
-/// 3. **A render-layout move** — the record sits at a path the current layout
+/// 2. **A render-layout move** — the record sits at a path the current layout
 ///    no longer produces, so the install writes the new path (and
 ///    `reap_moved_outputs` deals with the old one).
 ///
-/// Note what is *not* here: a recorded output that is present but whose bytes
-/// drifted. That is a **modification**, not a pending write, and it is the
-/// integrity gate's business — conflating the two would tell a user with a
-/// hand-edited file that they are missing an install.
+/// Note what is *not* here. A recorded output that is present but whose bytes
+/// drifted is a **modification**, not a pending write, and it is the integrity
+/// gate's business — conflating the two would tell a user with a hand-edited
+/// file that they are missing an install. A recorded output whose file was
+/// *deleted* is likewise absent: nothing here touches the filesystem, and that
+/// state surfaces as `state: missing` instead.
 pub fn pending_outputs(
     record: Option<&InstallRecord>,
     kind: ArtifactKind,
@@ -70,11 +74,13 @@ pub fn pending_outputs(
     target: &InstallTarget,
     roots: &AnchorRoots,
 ) -> Vec<(ClientTarget, PathBuf)> {
-    expected_clients(kind, target)
+    let mut pending: Vec<(ClientTarget, PathBuf)> = expected_clients(kind, target)
         .into_iter()
         .filter(|client| !is_covered(record, *client, target, roots))
         .map(|client| (client, target.path_for(client, kind, name)))
-        .collect()
+        .collect();
+    pending.sort_by_key(|(client, _)| client.as_str());
+    pending
 }
 
 /// Whether `record` already accounts for `client` at the current layout.
@@ -247,5 +253,31 @@ mod tests {
         );
         let pending = pending_outputs(None, ArtifactKind::Rule, "rust-style", &target, &roots(dir.path()));
         assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    /// C-002: `outputs_pending` must be deterministic regardless of
+    /// `target.clients()` input order, so `status --format json` is stable
+    /// across runs. Mirrors `client_drift`'s `BTreeSet` idiom and its
+    /// determinism test `client_drift_output_is_sorted`
+    /// (`command/status.rs:679-698`, `:1191-1204`) — that sibling sorts at
+    /// the `client_drift` seam; this is the sibling seam for materialization
+    /// drift, and the sort belongs here so all four `outputs_pending` call
+    /// sites inherit it.
+    #[test]
+    fn pending_outputs_output_is_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberately NOT alphabetical: codex, claude, opencode.
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode],
+        );
+        let pending = pending_outputs(None, ArtifactKind::Skill, "some-skill", &target, &roots(dir.path()));
+        let clients: Vec<ClientTarget> = pending.iter().map(|(client, _)| *client).collect();
+        assert_eq!(
+            clients,
+            vec![ClientTarget::Claude, ClientTarget::Codex, ClientTarget::OpenCode],
+            "{pending:?}"
+        );
     }
 }

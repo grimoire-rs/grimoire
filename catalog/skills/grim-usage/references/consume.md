@@ -235,11 +235,12 @@ was ever going to be recorded for it.
 
 `outputs_pending` answers a different question: **what would `grim install`
 write right now that the record does not already cover?** Same
-`{client, path}` shape, `[]` when an install would write nothing new. Three
-things fill it, all real install work — a client that gained support since
-the last install (you installed another AI client, or configured one), a
-recorded output whose file was deleted, and a render-layout move (reported
-at the new path). This is *materialization drift*: the artifact is intact at
+`{client, path}` shape, `[]` when an install would write nothing new. Two
+things fill it, both real install work — a client that gained support since
+the last install (you installed another AI client, or configured one), and a
+render-layout move (reported at the new path). A recorded output whose file
+was deleted is not one of them; that entry reads `state: missing`. This is
+*materialization drift*: the artifact is intact at
 its locked pin, so `state` correctly reads `installed` while an install
 still has files to write, and no other field can see it. Unlike
 `clients_missing` it is reported under autodetect too, because it asks what
