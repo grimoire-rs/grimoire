@@ -11,6 +11,17 @@
 default_registry = "localhost:5050"
 clients = ["claude"]
 
+# The rig registry declared as a real entry, so the manual walkthrough
+# exercises `[[registries]]` rather than only the legacy single-default
+# chain. `insecure` is deliberately NOT set here: env.sh exports
+# GRIM_INSECURE_REGISTRIES for :5050, and leaving that as the rig's route
+# keeps this file usable by anyone who cloned it without reading further.
+# To dogfood the config field instead, drop the export and add
+# `insecure = true` below.
+[[registries]]
+alias = "localhost"
+oci = "localhost:5050"
+
 [skills]
 hello-world   = "localhost:5050/grimoire/skills/hello-world:1"
 code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"

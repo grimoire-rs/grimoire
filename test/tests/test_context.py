@@ -344,3 +344,47 @@ def test_context_rejects_uncompilable_filter_patterns(
     assert f"'{pattern}'" in result.stderr, (
         f"the diagnostic must quote the offending pattern; got: {result.stderr!r}"
     )
+
+
+def test_context_reports_the_authored_insecure_flag(
+    grim_at, project_dir: Path
+) -> None:
+    """`registries[].insecure` echoes the authored field, always present.
+
+    It is the value `grim config get registry.<alias>.insecure` reads back,
+    so the two surfaces cannot disagree — deliberately NOT the effective
+    transport, which the implicit loopback set and `GRIM_INSECURE_REGISTRIES`
+    also decide without any entry saying so.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "local"\noci = "localhost:5050/grimoire"\n'
+        "insecure = true\ndefault = true\n\n"
+        f'[[registries]]\nalias = "corp"\noci = "{_OFFLINE_REGISTRY}"\n\n'
+        "[skills]\n\n[rules]\n"
+    )
+    runner = grim_at(project_dir)
+
+    by_alias = {r["alias"]: r for r in runner.json("context")["registries"]}
+    assert by_alias["local"]["insecure"] is True, by_alias
+    assert by_alias["corp"]["insecure"] is False, "the opt-in must not leak"
+
+    plain = runner.plain("context").stdout
+    assert ", insecure" in plain, plain
+    assert plain.count(", insecure") == 1, "only the opting-in row is marked"
+
+
+def test_context_registry_flag_reports_insecure_false(
+    grim_at, project_dir: Path
+) -> None:
+    """`--registry` forces a browse set with no config entry behind it, so
+    there is no authored field to carry — even for a host a `[[registries]]`
+    entry declared insecure."""
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "local"\noci = "localhost:5050/grimoire"\n'
+        "insecure = true\ndefault = true\n\n"
+        "[skills]\n\n[rules]\n"
+    )
+    runner = grim_at(project_dir)
+
+    regs = runner.json("--registry", "localhost:5050/grimoire", "context")["registries"]
+    assert [r["insecure"] for r in regs] == [False], regs

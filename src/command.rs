@@ -1165,4 +1165,73 @@ mod tests {
             "flag.example"
         );
     }
+
+    // ── `plain_http_hosts` — config-declared plain-HTTP opt-in ───────────
+
+    /// A project scope on disk whose `grimoire.toml` is `body`, addressed
+    /// through `--config` so no walk-up escapes the temp dir.
+    fn ctx_with_project_config(tmp: &tempfile::TempDir, body: &str) -> Context {
+        let config_path = tmp.path().join("grimoire.toml");
+        std::fs::write(&config_path, body).unwrap();
+        let grim_home = tmp.path().join("grim-home");
+        std::fs::create_dir_all(&grim_home).unwrap();
+        Context::hermetic_scoped(grim_home, false, Some(config_path))
+    }
+
+    #[test]
+    fn plain_http_hosts_adds_the_declared_locator_host_without_its_namespace() {
+        // The wiring `access_seam` and `grim login` both depend on: the
+        // entry's host reaches the exception list with its PORT and without
+        // its namespace, since `HttpsExcept` matches the exact `host[:port]`.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_project_config(
+            &tmp,
+            "[skills]\n\n[rules]\n\n[[registries]]\nalias = \"local\"\n\
+             oci = \"registry.internal:5050/grimoire\"\ninsecure = true\n\n\
+             [[registries]]\nalias = \"corp\"\noci = \"registry.corp/team\"\n",
+        );
+        let hosts = plain_http_hosts(&ctx);
+        assert!(
+            hosts.contains(&"registry.internal:5050".to_string()),
+            "the namespace must be stripped and the port kept; got: {hosts:?}"
+        );
+        assert!(
+            !hosts.iter().any(|h| h.starts_with("registry.corp")),
+            "an entry that did not opt in must not join the set; got: {hosts:?}"
+        );
+        assert!(
+            hosts.contains(&"localhost".to_string()),
+            "the implicit loopback set survives; got: {hosts:?}"
+        );
+    }
+
+    #[test]
+    fn plain_http_hosts_degrades_to_the_implicit_set_when_no_scope_resolves() {
+        // Browsing outside a project must not fail HERE — the command has its
+        // own error path for that, moments later.
+        let tmp = tempfile::tempdir().unwrap();
+        let grim_home = tmp.path().join("grim-home");
+        std::fs::create_dir_all(&grim_home).unwrap();
+        let missing = tmp.path().join("nowhere").join("grimoire.toml");
+        let ctx = Context::hermetic_scoped(grim_home, false, Some(missing));
+        assert_eq!(
+            plain_http_hosts(&ctx),
+            crate::oci::access::registry_client::plain_http_hosts()
+        );
+    }
+
+    #[test]
+    fn plain_http_hosts_ignores_an_index_entry_that_set_insecure() {
+        // `validate_registries` rejects the pairing, so reaching this needs a
+        // config that never loaded — but the host must not leak into the
+        // exception list on any route.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_project_config(
+            &tmp,
+            "[skills]\n\n[rules]\n\n[[registries]]\n\
+             index = \"https://index.example\"\n",
+        );
+        let hosts = plain_http_hosts(&ctx);
+        assert!(!hosts.iter().any(|h| h.contains("index.example")), "got: {hosts:?}");
+    }
 }

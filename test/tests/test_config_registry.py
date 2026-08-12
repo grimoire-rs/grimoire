@@ -754,7 +754,7 @@ def test_registry_fields_works_without_config(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config registry fields`` lists the 5 addressable per-registry field
+    """``config registry fields`` lists the 6 addressable per-registry field
     names and their metadata, and works in a directory with no
     ``grimoire.toml`` at all — it is static metadata, not a config read.
 
@@ -768,13 +768,13 @@ def test_registry_fields_works_without_config(
     result = runner.json("config", "registry", "fields")
     items = result["items"]
 
-    assert len(items) == 5, (
-        f"registry fields must list exactly the 5 per-registry fields; got: {items!r}"
+    assert len(items) == 6, (
+        f"registry fields must list exactly the 6 per-registry fields; got: {items!r}"
     )
     keys = [i.get("key") for i in items]
-    assert keys == ["oci", "index", "default", "include", "exclude"], (
-        f"fields must be oci, index, default, include, exclude in that order; "
-        f"got: {keys!r}"
+    assert keys == ["oci", "index", "default", "include", "exclude", "insecure"], (
+        f"fields must be oci, index, default, include, exclude, insecure in that "
+        f"order; got: {keys!r}"
     )
     # The browse filters were appended after `default` partly to keep this
     # index stable.
@@ -790,6 +790,9 @@ def test_registry_fields_works_without_config(
         assert by_key[field].get("type") == "string-list", (
             f"'{field}' must be typed as a string list; got: {by_key[field]!r}"
         )
+    assert by_key["insecure"].get("type") == "boolean", (
+        f"'insecure' field's type must be 'boolean'; got: {by_key['insecure']!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1786,4 +1789,212 @@ def test_config_set_carries_an_empty_fields_array(
     assert doc["fields"] == [], (
         f"a released verb must emit an empty fields array, never omit it; "
         f"got: {doc!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `insecure` — plain-HTTP transport as a per-registry field
+# ---------------------------------------------------------------------------
+
+
+def test_registry_add_insecure_round_trips_through_show_and_list(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``registry add --insecure`` writes the field and reports it back.
+
+    The extension's settings panel reads ``show``/``list``, so the flag has
+    to be visible on both, and the written TOML has to carry it — an entry
+    that only *reports* the opt-in would silently keep using HTTPS.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run(
+        "config", "registry", "add", "local",
+        "--oci", "localhost:5050/grimoire",
+        "--insecure",
+    )
+
+    assert runner.json("config", "registry", "show", "local")["insecure"] is True
+    listed = runner.json("config", "registry", "list")["items"]
+    assert [r["insecure"] for r in listed] == [True], f"got: {listed!r}"
+
+    doc = tomllib.loads((project_dir / "grimoire.toml").read_text())
+    assert doc["registries"][0]["insecure"] is True, f"got: {doc!r}"
+
+
+def test_registry_entry_without_the_flag_reports_insecure_false(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """The key is always present, ``false`` by default, and unset entries
+    write no ``insecure`` line at all (additive-safety: an entry authored
+    before the field existed stays byte-identical)."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+
+    assert runner.json("config", "registry", "show", "acme")["insecure"] is False
+    assert "insecure" not in (project_dir / "grimoire.toml").read_text()
+
+
+def test_registry_set_insecure_and_no_insecure_toggle_the_field(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """Unlike ``--default``, the opt-in is revocable in place — a transport
+    downgrade a user turned on has to be turnable off through the same verb
+    the settings panel writes with."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run("config", "registry", "add", "local", "--oci", "localhost:5050/grimoire")
+
+    doc = runner.json("config", "registry", "set", "local", "--insecure")
+    assert doc["fields"] == [{"field": "insecure", "action": "set", "value": True}], (
+        f"got: {doc!r}"
+    )
+    assert runner.json("config", "registry", "show", "local")["insecure"] is True
+
+    doc = runner.json("config", "registry", "set", "local", "--no-insecure")
+    assert doc["fields"] == [{"field": "insecure", "action": "set", "value": False}], (
+        f"--no-insecure is a set to false, never a cleared; got: {doc!r}"
+    )
+    assert runner.json("config", "registry", "show", "local")["insecure"] is False
+
+
+def test_registry_set_without_the_flags_leaves_insecure_alone(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """An unrelated edit must not silently restore HTTPS."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run(
+        "config", "registry", "add", "local",
+        "--oci", "localhost:5050/grimoire",
+        "--insecure",
+    )
+
+    doc = runner.json("config", "registry", "set", "local", "--include", "acme/**")
+    assert [f["field"] for f in doc["fields"]] == ["include"], f"got: {doc!r}"
+    assert runner.json("config", "registry", "show", "local")["insecure"] is True
+
+
+def test_dotted_insecure_key_round_trips_through_get_set_unset(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``registry.<alias>.insecure`` behaves like ``default``: a bool with no
+    unset state, so ``get`` always answers and ``unset`` clears to false."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.run("config", "registry", "add", "local", "--oci", "localhost:5050/grimoire")
+
+    def read() -> str:
+        return runner.plain("config", "get", "registry.local.insecure").stdout.strip()
+
+    assert read() == "false"
+    runner.run("config", "set", "registry.local.insecure", "true")
+    assert read() == "true"
+    runner.run("config", "unset", "registry.local.insecure")
+    assert read() == "false"
+
+
+def test_insecure_on_an_index_entry_is_rejected_everywhere(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """An index locator already carries its own ``http(s)://`` scheme, so the
+    flag could only ever be a silent no-op there.
+
+    Exit 65 at set time (``registry add`` / ``registry set`` / ``config
+    set``), 78 at load time for a hand-written file — the same split the
+    ``oci``/``index`` mutual exclusion already uses.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    r = runner.run(
+        "config", "registry", "add", "hub",
+        "--index", "https://index.grimoire.rs",
+        "--insecure",
+        check=False,
+    )
+    assert r.returncode == 65, f"rc={r.returncode} stderr={r.stderr!r}"
+    assert "insecure" not in (project_dir / "grimoire.toml").read_text()
+
+    runner.run("config", "registry", "add", "hub", "--index", "https://index.grimoire.rs")
+    for args in (
+        ("config", "registry", "set", "hub", "--insecure"),
+        ("config", "set", "registry.hub.insecure", "true"),
+    ):
+        r = runner.run(*args, check=False)
+        assert r.returncode == 65, f"{args!r}: rc={r.returncode} stderr={r.stderr!r}"
+
+    # Turning it back off stays open, so a mis-authored entry is repairable.
+    runner.run("config", "registry", "set", "hub", "--no-insecure")
+
+    # Hand-written file: the same pairing is a config error at load.
+    (project_dir / "grimoire.toml").write_text(
+        '[skills]\n\n[rules]\n\n[[registries]]\n'
+        'index = "https://index.grimoire.rs"\ninsecure = true\n'
+    )
+    r = runner.run("config", "registry", "list", check=False)
+    assert r.returncode == 78, f"rc={r.returncode} stderr={r.stderr!r}"
+
+
+def test_insecure_alone_reaches_a_plain_http_registry(
+    grim_at: object,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """The load-bearing end-to-end proof: with ``GRIM_INSECURE_REGISTRIES``
+    removed from the environment, ``insecure = true`` alone is what makes
+    grim contact the registry over plain HTTP.
+
+    Skipped when the session registry is one of grim's implicit loopback
+    forms — there the env var is not what the request depends on either, so
+    the test could not distinguish a working config field from a broken one.
+    Requires a non-default port, which the conftest picks whenever
+    ``localhost:5000`` is unusable.
+    """
+    import pytest
+
+    builtin = {"localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"}
+    if registry in builtin:
+        pytest.skip(
+            f"{registry} is an implicit plain-HTTP host; run with "
+            f"GRIM_TEST_REGISTRY_HOST=<host:non-5000-port> to exercise this"
+        )
+
+    ns = unique_repo
+    make_artifact(
+        f"{ns}/http-skill",
+        "skill",
+        {"http-skill/SKILL.md": "---\nname: http-skill\ndescription: transport e2e\n---\n# http\n"},
+        tag="v1",
+    )
+
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
+    # The whole point: nothing but the config field may authorize plain HTTP.
+    runner.env.pop("GRIM_INSECURE_REGISTRIES", None)
+
+    runner.run(
+        "config", "registry", "add", "corp",
+        "--oci", f"{REGISTRY_HOST}/{ns}", "--default",
+    )
+
+    # Without the opt-in grim must attempt HTTPS against a plain-HTTP port.
+    failed = runner.run("add", "corp/http-skill:v1", check=False)
+    assert failed.returncode != 0, (
+        f"an https attempt against a plain-http registry must fail; got: {failed!r}"
+    )
+
+    runner.run("config", "registry", "set", "corp", "--insecure")
+    out = runner.json("add", "corp/http-skill:v1")
+    assert out.get("status") == "added", (
+        f"insecure = true alone must carry the request; got: {out!r}"
     )
