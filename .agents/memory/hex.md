@@ -95,7 +95,32 @@ research-axes:
 
 ## Memory
 
-- **Active plan:** `.agents/plans/plan_catalog_freshness_revalidation.md` —
+- **Active plan:** `.agents/plans/plan_review_fixes_materialization_drift.md` —
+  applies the 7 Block + 10 High findings of the tier-high review of
+  `feat/materialization-drift-and-freshness`
+  (`.agents/review_materialization_drift_and_freshness.md`). Planned 2026-08-12
+  at tier medium, trimmed (`architect=inline research=skip adversary=off`) —
+  the analysis was already done by the review, so the research and ADR phases
+  would have restated it. **8 WPs in 2 waves**, critical path WP-A → WP-H,
+  shippable after wave 1. Owner froze all six deferred decisions: B1 deletes the
+  deleted-file claim (no existence probe), B3/B4 are a **contract restoration**
+  not a breaking change (exit 65 kept, both `**BREAKING**` labels struck), H10
+  is an atomic temp-swap with no `.old` retained, `pending` keeps its name.
+  Plan review (1 × `reviewer:spec`, opus) returned **4 Block / 3 Warn / 5
+  Suggest**, all applied — the sharpest being that B1's claim lives in **nine**
+  places not seven (two owned by other WPs), and that C-011 named a comment in
+  `api/artifact_status.rs` that does not exist (the stale claims are in
+  `status_badge.rs:8,58`). `Step: /hex-execute` — not started.
+
+  **Cross-model gate skipped in both the review and the plan.** `codex:rescue`
+  failed a **fourth** distinct way on 2026-08-12: given the brief as a
+  scratchpad-file pointer (the documented workaround), it forked, spawned a
+  nested Codex task, returned `completed`, and never wrote its output file —
+  confirmed absent after a bounded 300 s wait. B1, B6, H1 and the Principle 9
+  inversion have never been challenged by a second model. Consider retiring
+  `codex:rescue` as the configured adversary.
+
+- **Parked plan:** `.agents/plans/plan_catalog_freshness_revalidation.md` —
   catalog freshness: cheap revalidation, async TUI load, focused-row refresh.
   Planned 2026-08-12 at tier high (`architect=on research=3 adversary=on`).
   Design record `.agents/adr/adr_catalog_freshness_revalidation.md` (**Status:
