@@ -4,12 +4,15 @@
 //! The single source of truth for an artifact's install badge.
 //!
 //! `search` and `tui` both annotate a catalog repository with how it
-//! relates to the current scope's lock + install-state. The derivation
-//! logic is the same one `grim status` uses (`status.rs::derive_state`);
-//! this helper factors the lock/install-state comparison so the badge is
-//! computed once, not duplicated. The catalog is keyed by repository path
-//! (no config binding name), so this matches a lock/install record by its
-//! pinned repository rather than by the config key.
+//! relates to the current scope's lock + install-state. The badge overlaps
+//! `grim status`'s ladder (`status.rs::derive_state`) without being the
+//! same one: `Pending` is badge-only and has no `ArtifactStatus`
+//! counterpart, and `derive_state`'s `Stale` has no badge counterpart
+//! either. This helper factors the lock/install-state comparison so the
+//! badge is computed once, not duplicated. The catalog is keyed by
+//! repository path (no config binding name), so this matches a
+//! lock/install record by its pinned repository rather than by the
+//! config key.
 
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
@@ -34,9 +37,11 @@ pub enum StatusBadge {
     /// Installed but the on-disk content drifted from the recorded hash.
     Modified,
     /// Installed and intact at the locked pin, but an install would still
-    /// write something: a client present that the record never covered, an
-    /// output whose file is gone, or a render-layout move. Materialization
-    /// drift — `grim install` clears it.
+    /// write something, for either of two reasons: a client present that the
+    /// record never covered, or a render-layout move. Materialization drift —
+    /// `grim install` clears it. A deleted output is **not** pending: an
+    /// absent file drops the badge to `NotInstalled` (`grim status` reports
+    /// `missing`).
     Pending,
 }
 
@@ -55,10 +60,13 @@ impl std::fmt::Display for StatusBadge {
 /// Derive the badge for the repository `registry/repository` from the
 /// scope's lock and install-state.
 ///
-/// Precedence mirrors `status.rs::derive_state`: no lock/install record ⇒
-/// not-installed; a recorded output that drifted ⇒ modified; the locked
-/// pin ahead of the recorded pin ⇒ outdated; an install would still write
-/// something ⇒ pending; otherwise installed.
+/// Precedence: no lock/install record ⇒ not-installed; a recorded output
+/// that drifted ⇒ modified; the locked pin ahead of the recorded pin ⇒
+/// outdated; an install would still write something ⇒ pending; otherwise
+/// installed. Those rungs order as `status.rs::derive_state` does, but the
+/// two ladders are not interchangeable: `pending` is appended here and has
+/// no `derive_state` counterpart, and `derive_state`'s `Stale` (the lock's
+/// declaration hash no longer matching the config) is not a badge at all.
 ///
 /// `Pending` sits **last**, so it only ever replaces what would have been
 /// `Installed`: a row that is modified or outdated has a louder problem, and

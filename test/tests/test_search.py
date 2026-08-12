@@ -284,6 +284,52 @@ def test_search_status_flips_to_installed_after_install(
     assert match[0]["status"] == "installed", match[0]
 
 
+def test_search_status_reports_pending_for_a_client_added_after_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """S-008: `derive_badge`'s `Pending` arm, reached only through
+    `target.is_some_and(...)` with a non-empty `pending_outputs` — copying
+    `test_search_status_flips_to_installed_after_install` verbatim never
+    leaves `installed`. Trigger is `test_status.py`'s
+    `test_status_reports_pending_outputs_for_a_client_added_after_install`
+    mechanic: autodetect with one client present at install, then a second
+    client directory appears with no re-install. The artifact is
+    byte-intact at its locked pin, so `outdated`/`modified` do not apply —
+    only `pending` describes an install that would still write something.
+    """
+    art = make_artifact(
+        f"{unique_repo}/installable",
+        "skill",
+        {"installable/SKILL.md": "---\nname: installable\n---\n# i\n"},
+        tag="latest",
+    )
+    write_config(project_dir, skills={"installable": art.fq})
+    runner = grim_at(project_dir)
+
+    # Autodetect (no options.clients): only claude is present at install.
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+    match = [r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")]
+    assert match, f"expected the installed repo in results, got {rows}"
+    assert match[0]["status"] == "installed", match[0]
+
+    # A second client appears after install. Nothing about the artifact
+    # changed — no re-lock, no re-install.
+    (project_dir / ".cursor").mkdir(exist_ok=True)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+    match = [r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")]
+    assert match, f"expected the installed repo in results, got {rows}"
+    assert match[0]["status"] == "pending", match[0]
+
+
 def test_search_offline_serves_cached_exit_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
