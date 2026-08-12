@@ -143,6 +143,10 @@ grim never silently overwrites or deletes work you did locally:
 
 - `grim install` **refuses** to overwrite a locally modified artifact;
   re-run with `--force` to overwrite it deliberately.
+- `grim update` re-materializes through that same gate: a locally modified
+  artifact is **refused** with exit 65 instead of being overwritten, and
+  `--force` overwrites it. An unmodified artifact still rolls forward with
+  no flag, so ordinary updates are unaffected.
 - `grim install` also **refuses** to overwrite a destination it has no
   record of (a hand-authored same-named skill dir, rule file, or MCP
   config entry) — `--force` overwrites and records it. Identical

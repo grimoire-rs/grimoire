@@ -185,18 +185,28 @@ The reasoning for keeping render layout out of the 1.0 contract while still
 holding that promise is recorded in the project's ADR on render-layout
 stability (`.agents/adr/adr_render_layout_stability.md`).
 
-### One deliberate break, in 0.13.0 {#promise-update-integrity}
+### The update gate, restored in 0.13.0 {#promise-update-integrity}
 
-`grim update` over a **locally modified** artifact now exits `65` instead of
-overwriting it; `--force` restores the previous behaviour. This is a
-behaviour change on a shipped exit-0 path and it is recorded here rather
-than waived: what it replaced was a defect, not a contract. `update` passed
-a hard-coded force into the installer, so it destroyed hand-edited work
-silently — no warning, no report field — while `grim install` refused the
-identical bytes with `65`, and while update's own prune and client-reap
-passes already gated the same class of destruction behind `--force`. One
-command gave two opposite answers about one file, and only the silent one
-lost data. Code depending on the old behaviour was depending on the bug.
+`grim update` over a **locally modified** artifact exits `65` instead of
+overwriting it, and `--force` overwrites. That is a behaviour change on a
+shipped exit-0 path, so it is called out here for anyone upgrading — but it
+is a restoration, not a break. The promise it now keeps is the one the
+reference had already made.
+
+[`grim update`][update] is documented as sharing `--force` with
+[`grim install`][install], where `--force` "overwrites a locally modified
+artifact instead of refusing it". The update reference invokes that gate by
+name: a locally modified orphan survives prune because that "mirrors the
+install integrity gate, where a locally modified artifact is refused rather
+than overwritten without `--force`."
+
+The code did the opposite. `update` passed a hard-coded force into the
+installer, so it destroyed hand-edited work silently — no warning, no report
+field — while `grim install` refused the identical bytes with `65`, and
+while update's own prune and client-reap passes already gated the same class
+of destruction behind `--force`. One command gave two opposite answers about
+one file, and only the silent one lost data. Code depending on the old
+behaviour was depending on a defect, not on a contract.
 
 ## Known limitations {#limitations}
 
