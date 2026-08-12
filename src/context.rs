@@ -191,17 +191,22 @@ impl Context {
     /// injected via [`Self::with_access`], that instance is returned
     /// directly — no filesystem layout or real registry client is created.
     ///
+    /// `plain_http` is the complete plain-HTTP exception list for this
+    /// invocation. `Context` holds no config (env reads only, see the type
+    /// docs), so the config-derived half is resolved by the caller —
+    /// `command::plain_http_hosts`, reached through `command::access_seam`.
+    ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created. Callers route it through the install-tier `TargetIo` error
     /// so it classifies as an I/O exit code, not the generic fall-through.
-    pub fn access(&self) -> std::io::Result<Arc<dyn OciAccess>> {
+    pub fn access(&self, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
         #[cfg(test)]
         if let Some(ref injected) = self.test_access {
             return Ok(Arc::clone(injected));
         }
-        self.access_with_mode(self.access_mode())
+        self.access_with_mode(self.access_mode(), plain_http)
     }
 
     /// Build the OCI-access seam with an explicit routing `mode`.
@@ -210,11 +215,11 @@ impl Context {
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created.
-    pub fn access_with_mode(&self, mode: AccessMode) -> std::io::Result<Arc<dyn OciAccess>> {
+    pub fn access_with_mode(&self, mode: AccessMode, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
         let paths = self.paths();
         paths.ensure_layout()?;
         let cached = CachedAccess::new(
-            RegistryClient::new(),
+            RegistryClient::with_plain_http_hosts(plain_http),
             TagCache::new(paths.tags_dir()),
             BlobStore::new(paths.blobs_dir()),
             mode,

@@ -608,6 +608,7 @@ mod tests {
 
         let registries = vec![
             ResolvedRegistry {
+                insecure: false,
                 url: "registry.one/ns".to_string(),
                 alias: Some("one".to_string()),
                 is_default: true,
@@ -615,6 +616,7 @@ mod tests {
                 filter: crate::config::registry_filter::RegistryFilter::default(),
             },
             ResolvedRegistry {
+                insecure: false,
                 url: "registry.two".to_string(),
                 alias: None,
                 is_default: false,
@@ -720,6 +722,7 @@ mod tests {
     fn source(url: &str, alias: Option<&str>, include: &[&str], exclude: &[&str]) -> ResolvedRegistry {
         let to_vec = |p: &[&str]| p.iter().map(|s| (*s).to_string()).collect::<Vec<String>>();
         ResolvedRegistry {
+            insecure: false,
             url: url.to_string(),
             alias: alias.map(str::to_string),
             is_default: true,

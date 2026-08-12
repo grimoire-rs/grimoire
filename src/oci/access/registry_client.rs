@@ -62,10 +62,22 @@ impl RegistryClient {
     ///
     /// The hosts named by [`plain_http_hosts`] are contacted over plain
     /// HTTP so a local test registry "just works"; everything else uses
-    /// HTTPS.
+    /// HTTPS. A caller with a resolved config in hand uses
+    /// [`Self::with_plain_http_hosts`] instead, so a `[[registries]]` entry's
+    /// `insecure = true` is honored.
     pub fn new() -> Self {
+        Self::with_plain_http_hosts(plain_http_hosts())
+    }
+
+    /// Construct a client whose plain-HTTP exception list is `hosts`, each
+    /// an exact `host[:port]`.
+    ///
+    /// The list is the *complete* set, not an addition to the implicit
+    /// one — build it with [`plain_http_hosts_with`] so the loopback forms
+    /// and `GRIM_INSECURE_REGISTRIES` are folded in.
+    pub fn with_plain_http_hosts(hosts: Vec<String>) -> Self {
         Self {
-            client: Client::new(registry_config(plain_http_hosts())),
+            client: Client::new(registry_config(hosts)),
         }
     }
 
@@ -109,23 +121,36 @@ impl RegistryClient {
     }
 }
 
-/// The exact `host[:port]` forms grim contacts over plain HTTP: the
-/// conventional loopback forms (`localhost` / `127.0.0.1`, bare and on
-/// `:5000`) plus every `GRIM_INSECURE_REGISTRIES` entry (comma-separated).
+/// The exact `host[:port]` forms grim contacts over plain HTTP with no
+/// config in hand: the conventional loopback forms (`localhost` /
+/// `127.0.0.1`, bare and on `:5000`) plus every `GRIM_INSECURE_REGISTRIES`
+/// entry (comma-separated).
 ///
 /// `oci-client`'s `HttpsExcept` matches by *exact* `host:port`, so a
 /// loopback registry on a non-default port (e.g. the manual rig on
-/// `:5050`) opts in through the env var. Single source of the scheme
-/// decision, shared by [`RegistryClient::new`] and the `grim login`
-/// verification ping ([`crate::auth::verify`]).
+/// `:5050`) opts in through the env var or through a `[[registries]]`
+/// entry's `insecure = true` — the latter reaching here as the `extra`
+/// argument of [`plain_http_hosts_with`], which this is the empty case of.
+/// Single source of the scheme decision, shared by [`RegistryClient::new`]
+/// and the `grim login` verification ping ([`crate::auth::verify`]).
 pub fn plain_http_hosts() -> Vec<String> {
+    plain_http_hosts_with(&[])
+}
+
+/// [`plain_http_hosts`] plus `extra`, the hosts a resolved config opted in
+/// with `insecure = true`.
+///
+/// A **union**, deliberately: no source here can take a host back out of
+/// the set, so there is no "config says secure, env says insecure" conflict
+/// to resolve. Deduped, since a host may be named by more than one source.
+pub fn plain_http_hosts_with(extra: &[String]) -> Vec<String> {
     let mut hosts = vec![
         "localhost".to_string(),
         "localhost:5000".to_string(),
         "127.0.0.1".to_string(),
         "127.0.0.1:5000".to_string(),
     ];
-    for r in insecure_registries() {
+    for r in extra.iter().cloned().chain(insecure_registries()) {
         if !hosts.contains(&r) {
             hosts.push(r);
         }
@@ -722,6 +747,32 @@ mod tests {
         );
         assert!(parse_insecure_registries("").is_empty());
         assert!(parse_insecure_registries("  ,  ").is_empty());
+    }
+
+    /// A config-declared `insecure = true` host joins the implicit loopback
+    /// set rather than replacing it — the union the `[[registries]]` field
+    /// promises. Deduped, since the env var may name the same host.
+    #[test]
+    fn plain_http_hosts_with_unions_config_hosts_onto_the_loopback_set() {
+        let hosts = plain_http_hosts_with(&["registry.internal:5000".to_string()]);
+        for implicit in ["localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"] {
+            assert!(hosts.contains(&implicit.to_string()), "{implicit} must survive");
+        }
+        assert!(hosts.contains(&"registry.internal:5000".to_string()));
+    }
+
+    /// A declared host that is already implicit adds no second entry, and
+    /// the empty case is byte-identical to the no-config default — the
+    /// property that keeps an untouched config's behaviour unchanged.
+    #[test]
+    fn plain_http_hosts_with_dedups_and_is_identity_on_empty() {
+        assert_eq!(plain_http_hosts_with(&[]), plain_http_hosts());
+        let hosts = plain_http_hosts_with(&["localhost:5000".to_string(), "localhost:5000".to_string()]);
+        assert_eq!(
+            hosts.iter().filter(|h| *h == "localhost:5000").count(),
+            1,
+            "a repeat of an implicit host must not grow the list"
+        );
     }
 
     #[test]

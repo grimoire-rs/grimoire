@@ -27,7 +27,7 @@ use secrecy::ExposeSecret as _;
 
 use crate::auth::auth_error::AuthError;
 use crate::auth::credential::Credential;
-use crate::oci::access::registry_client::{plain_http_hosts, registry_host};
+use crate::oci::access::registry_client::registry_host;
 
 /// The successful result of a verification ping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,19 +45,26 @@ pub enum VerifyOutcome {
 /// registry's authentication endpoint — it does **not** prove push or
 /// pull access to any particular repository.
 ///
+/// `plain_http` is the invocation's complete plain-HTTP exception list
+/// (`command::plain_http_hosts`) — the loopback forms, the
+/// `GRIM_INSECURE_REGISTRIES` entries, and every `[[registries]]` entry that
+/// set `insecure = true`. It decides the ping scheme and, downstream, which
+/// `Bearer` realms may be followed without downgrading the credential to
+/// cleartext.
+///
 /// # Errors
 ///
 /// [`AuthError::VerifyRejected`] when the registry refuses the credential
 /// (exit 80); [`AuthError::VerifyUnavailable`] when the registry or its
 /// token endpoint cannot be reached or answers with a server-side failure
 /// such as a 5xx or 429 (exit 69).
-pub async fn verify_credential(registry: &str, cred: &Credential) -> Result<VerifyOutcome, AuthError> {
+pub async fn verify_credential(
+    registry: &str,
+    cred: &Credential,
+    plain_http: &[String],
+) -> Result<VerifyOutcome, AuthError> {
     let host = ping_host(registry);
-    let scheme = if plain_http_hosts().contains(&host) {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = if plain_http.contains(&host) { "http" } else { "https" };
     let client = client().map_err(|e| unavailable(registry, Some(e)))?;
 
     let ping_url = format!("{scheme}://{host}/v2/");
@@ -93,7 +100,7 @@ pub async fn verify_credential(registry: &str, cred: &Credential) -> Result<Veri
             // A malicious registry can answer an HTTPS ping with an
             // `http://` realm to harvest the Basic credential in cleartext.
             // Refuse the downgrade rather than follow it (nothing stored).
-            if !realm_is_secure(&realm, scheme) {
+            if !realm_is_secure(&realm, scheme, plain_http) {
                 return Err(AuthError::VerifyInsecureRealm {
                     registry: registry.to_string(),
                 });
@@ -140,10 +147,10 @@ fn ping_host(registry: &str) -> String {
 ///
 /// When the `/v2/` ping used HTTPS, the token endpoint must also be HTTPS
 /// — unless its host is an explicitly-insecure/loopback registry (the same
-/// set that permits a plain-HTTP ping). A plain-HTTP ping is already an
-/// insecure registry, so any realm is fine. An unparseable realm is not
-/// trusted.
-fn realm_is_secure(realm: &str, ping_scheme: &str) -> bool {
+/// set that permits a plain-HTTP ping, passed as `plain_http`). A
+/// plain-HTTP ping is already an insecure registry, so any realm is fine.
+/// An unparseable realm is not trusted.
+fn realm_is_secure(realm: &str, ping_scheme: &str, plain_http: &[String]) -> bool {
     if ping_scheme != "https" {
         return true;
     }
@@ -154,7 +161,7 @@ fn realm_is_secure(realm: &str, ping_scheme: &str) -> bool {
         return true;
     }
     url.host_str()
-        .is_some_and(|host| plain_http_hosts().contains(&host.to_string()))
+        .is_some_and(|host| plain_http.contains(&host.to_string()))
 }
 
 /// A parsed `WWW-Authenticate` challenge grim knows how to answer.
@@ -247,19 +254,26 @@ fn client() -> Result<reqwest::Client, reqwest::Error> {
 mod tests {
     use super::*;
 
+    /// The plain-HTTP set a default invocation resolves: no config entry
+    /// opted in, so it is the loopback forms plus whatever
+    /// `GRIM_INSECURE_REGISTRIES` names (unset in a test process).
+    fn hosts() -> Vec<String> {
+        crate::oci::access::registry_client::plain_http_hosts()
+    }
+
     #[test]
     fn realm_scheme_guards_against_cleartext_downgrade() {
         // HTTPS ping: an https realm is fine; an http realm to a public
         // host is refused (credential-downgrade attempt).
-        assert!(realm_is_secure("https://auth.example/token", "https"));
-        assert!(!realm_is_secure("http://attacker.example/token", "https"));
+        assert!(realm_is_secure("https://auth.example/token", "https", &hosts()));
+        assert!(!realm_is_secure("http://attacker.example/token", "https", &hosts()));
         // HTTPS ping but an http realm on an explicitly-insecure/loopback
         // host is allowed (matches the plain-http ping allowance).
-        assert!(realm_is_secure("http://127.0.0.1:5000/token", "https"));
+        assert!(realm_is_secure("http://127.0.0.1:5000/token", "https", &hosts()));
         // Unparseable realm is not trusted under an HTTPS ping.
-        assert!(!realm_is_secure("not a url", "https"));
+        assert!(!realm_is_secure("not a url", "https", &hosts()));
         // Plain-http ping is already an insecure registry — any realm is fine.
-        assert!(realm_is_secure("http://whatever/token", "http"));
+        assert!(realm_is_secure("http://whatever/token", "http", &hosts()));
     }
 
     #[test]

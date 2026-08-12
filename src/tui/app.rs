@@ -3433,6 +3433,7 @@ mod tests {
     fn member_parent_registry_from_registries_prefers_namespaced_over_bare_host() {
         let registries = vec![
             ResolvedRegistry {
+                insecure: false,
                 url: "ghcr.io".to_string(),
                 alias: None,
                 is_default: false,
@@ -3440,6 +3441,7 @@ mod tests {
                 filter: crate::config::registry_filter::RegistryFilter::default(),
             },
             ResolvedRegistry {
+                insecure: false,
                 url: "ghcr.io/acme".to_string(),
                 alias: None,
                 is_default: true,
@@ -4173,6 +4175,7 @@ mod tests {
         // bare url with no alias) — C-016 / ADR D7 (a derived root label) are
         // withdrawn, so a filter must never reach this map.
         let filtered = |url: &str, alias: Option<&str>| ResolvedRegistry {
+            insecure: false,
             url: url.to_string(),
             alias: alias.map(str::to_string),
             is_default: false,
@@ -4261,6 +4264,7 @@ mod tests {
     fn source(url: &str, include: &[&str], exclude: &[&str]) -> ResolvedRegistry {
         let own = |p: &[&str]| p.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         ResolvedRegistry {
+            insecure: false,
             url: url.to_string(),
             alias: None,
             is_default: false,
@@ -4903,6 +4907,7 @@ mod tests {
         // a derived expectation must never be the function-under-test's own
         // body.
         let bare = ResolvedRegistry {
+            insecure: false,
             url: "ghcr.io/acme".to_string(),
             alias: None,
             is_default: true,
@@ -4973,6 +4978,7 @@ mod tests {
         let ctx = ctx_with_registries(
             vec![
                 ResolvedRegistry {
+                    insecure: false,
                     url: "ghcr.io/acme".to_string(),
                     alias: None,
                     is_default: true,
@@ -4980,6 +4986,7 @@ mod tests {
                     filter: crate::config::registry_filter::RegistryFilter::default(),
                 },
                 ResolvedRegistry {
+                    insecure: false,
                     url: "ghcr.io/other".to_string(),
                     alias: None,
                     is_default: false,
@@ -4997,6 +5004,7 @@ mod tests {
         // F13: registry roots in the tree follow the precedence order of
         // `[[registries]]` declarations — first declared = first root.
         let bare = ResolvedRegistry {
+            insecure: false,
             url: "ghcr.io/acme".to_string(),
             alias: None,
             is_default: true,
@@ -5004,6 +5012,7 @@ mod tests {
             filter: crate::config::registry_filter::RegistryFilter::default(),
         };
         let aliased = ResolvedRegistry {
+            insecure: false,
             url: "registry.corp.example/team".to_string(),
             alias: Some("internal".to_string()),
             is_default: false,
@@ -5026,6 +5035,7 @@ mod tests {
     #[test]
     fn registry_order_single_entry_returns_one_element_vec() {
         let only = ResolvedRegistry {
+            insecure: false,
             url: "ghcr.io/acme".to_string(),
             alias: None,
             is_default: true,
@@ -5183,6 +5193,7 @@ mod tests {
     fn test_ctx(workspace: &std::path::Path, access: Arc<dyn OciAccess>) -> TuiContext {
         TuiContext {
             registries: vec![ResolvedRegistry {
+                insecure: false,
                 url: "localhost:5050".to_string(),
                 alias: None,
                 is_default: true,
@@ -6314,6 +6325,7 @@ mod tests {
         let workspace = tmp.path().to_path_buf();
         let ctx = TuiContext {
             registries: vec![ResolvedRegistry {
+                insecure: false,
                 url: "localhost:5050".to_string(),
                 alias: None,
                 is_default: true,
@@ -6837,6 +6849,7 @@ mod p2_app_member_node_tests {
         let access: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
         TuiContext {
             registries: vec![ResolvedRegistry {
+                insecure: false,
                 url: "localhost:5050".to_string(),
                 alias: None,
                 is_default: true,

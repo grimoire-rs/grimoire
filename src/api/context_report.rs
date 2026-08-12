@@ -76,6 +76,17 @@ pub struct ContextRegistry {
     /// The authored browse-`exclude` glob patterns for this source, in
     /// declaration order; `[]` when the source is unfiltered.
     pub exclude: Vec<String>,
+    /// Whether this entry declared `insecure = true`, opting its host into
+    /// plain HTTP.
+    ///
+    /// The authored field, **not the effective transport**: the implicit
+    /// loopback set (`localhost` / `127.0.0.1`, bare and on `:5000`) and
+    /// `GRIM_INSECURE_REGISTRIES` also reach a host over HTTP without any
+    /// entry saying so, and neither shows up here. It is the value
+    /// `grim config get registry.<alias>.insecure` reads back, so the two
+    /// surfaces cannot disagree. `false` for every entry under
+    /// `--registry`, whose forced browse set has no config entry behind it.
+    pub insecure: bool,
 }
 
 /// Where the effective offline mode came from.
@@ -181,6 +192,9 @@ impl Printable for ContextReport {
             let alias = r.alias.as_deref().unwrap_or("-");
             let default = if r.default { ", default" } else { "" };
             let auth = if r.authenticated { ", authenticated" } else { "" };
+            // Only when opted in: a `false` on every row would be noise, and
+            // an unflagged row stays byte-identical to what shipped before.
+            let insecure = if r.insecure { ", insecure" } else { "" };
             // Browse-filter COUNTS, not the patterns (plan C-020): a glob
             // list has no width bound and this cell is already the widest in
             // the table, so the patterns stay in `--format json` (and in
@@ -203,7 +217,7 @@ impl Printable for ContextReport {
             rows.push(vec![
                 "registry".into(),
                 format!(
-                    "{} {} ({}{default}{auth}{filters})",
+                    "{} {} ({}{default}{auth}{insecure}{filters})",
                     alias.escape_debug(),
                     r.url.escape_debug(),
                     r.kind
@@ -244,6 +258,7 @@ mod tests {
             offline_source: Some(OfflineSource::Flag),
             clients: vec!["claude".to_string(), "opencode".to_string()],
             registries: vec![ContextRegistry {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 url: "ghcr.io/acme".to_string(),
                 kind: ContextRegistryKind::Registry,
@@ -269,6 +284,33 @@ mod tests {
         assert!(out.contains(", authenticated"));
         assert!(out.contains("(exists)"));
         assert!(out.contains("(absent)"));
+    }
+
+    #[test]
+    fn plain_row_names_insecure_only_when_the_entry_opted_in() {
+        let mut r = report();
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        assert!(
+            !String::from_utf8(buf).unwrap().contains(", insecure"),
+            "an https entry's row stays byte-identical to what shipped before the field"
+        );
+
+        r.registries[0].insecure = true;
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains(", authenticated, insecure,"), "got: {out}");
+    }
+
+    #[test]
+    fn json_registry_carries_insecure_even_when_false() {
+        // Always-present, like every other key in this report: an absent key
+        // would read as "older grim" to a consumer that tolerates both.
+        let mut buf = Vec::new();
+        report().print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["registries"][0]["insecure"], serde_json::json!(false));
     }
 
     #[test]

@@ -144,6 +144,7 @@ fn context_registry(r: crate::config::ResolvedRegistry, authenticated: bool) -> 
             ContextRegistryKind::Registry
         },
         default: r.is_default,
+        insecure: r.insecure,
         url: r.url,
     }
 }
@@ -157,6 +158,7 @@ mod tests {
     /// One project entry filtered on both sides.
     fn filtered_entry() -> RegistryConfig {
         RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
@@ -207,6 +209,7 @@ mod tests {
     #[test]
     fn context_registry_unfiltered_entry_reports_empty_lists() {
         let entry = RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             ..Default::default()

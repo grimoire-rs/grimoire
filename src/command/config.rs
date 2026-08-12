@@ -130,6 +130,14 @@ pub enum RegistryCommand {
         /// Mark this registry as the default (clears any prior default).
         #[arg(long)]
         default: bool,
+        /// Contact this registry over plain HTTP instead of HTTPS. For a
+        /// local or in-cluster registry without TLS; rejected on `--index`,
+        /// whose locator already carries its own scheme. The host is matched
+        /// exactly including its port, and the downgrade applies to every
+        /// reference to that host — `grimoire.toml` is normally committed, so
+        /// it applies to everyone who clones the project.
+        #[arg(long)]
+        insecure: bool,
     },
     /// Edit an existing registry entry in place, leaving unnamed fields alone.
     Set {
@@ -165,6 +173,15 @@ pub enum RegistryCommand {
         /// another entry.
         #[arg(long)]
         default: bool,
+        /// Contact this registry over plain HTTP instead of HTTPS (see
+        /// `add --insecure`). Absent, the entry's current setting is left
+        /// alone; unlike `--default` this one can be turned back off, with
+        /// `--no-insecure`.
+        #[arg(long, overrides_with = "no_insecure")]
+        insecure: bool,
+        /// Restore HTTPS for this registry, undoing `--insecure`.
+        #[arg(long, overrides_with = "insecure")]
+        no_insecure: bool,
     },
     /// Remove a registry entry by alias.
     Rm {
@@ -212,7 +229,17 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 include,
                 exclude,
                 default,
-            } => run_registry_add(ctx, alias, oci.as_deref(), index.as_deref(), *default, include, exclude),
+                insecure,
+            } => run_registry_add(
+                ctx,
+                alias,
+                oci.as_deref(),
+                index.as_deref(),
+                *default,
+                include,
+                exclude,
+                *insecure,
+            ),
             RegistryCommand::Set {
                 alias,
                 oci,
@@ -222,6 +249,8 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 clear_include,
                 clear_exclude,
                 default,
+                insecure,
+                no_insecure,
             } => run_registry_set(
                 ctx,
                 alias,
@@ -232,6 +261,7 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
                 *clear_include,
                 exclude,
                 *clear_exclude,
+                flag_pair(*insecure, *no_insecure),
             ),
             RegistryCommand::Rm { alias } => run_registry_rm(ctx, alias),
             RegistryCommand::Use { alias } => run_registry_use(ctx, alias),
@@ -241,6 +271,20 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
             // work outside any project (unlike every other registry verb).
             RegistryCommand::Fields => run_registry_fields(),
         },
+    }
+}
+
+/// Collapse a `--flag` / `--no-flag` pair into the tri-state the `set`
+/// verbs consume: `None` means the caller named neither, so the field keeps
+/// whatever the entry already has.
+///
+/// The two flags are mutually `overrides_with` at the clap layer, so at
+/// most one is ever set; the match order is a fallback if both arrive true.
+fn flag_pair(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
     }
 }
 
@@ -448,6 +492,8 @@ fn registry_field_value(rc: &RegistryConfig, field: RegistryField) -> Option<Str
         RegistryField::Exclude => pattern_list_value(&rc.exclude),
         // `default` always has an effective value — it has no unset state.
         RegistryField::Default => Some(rc.default.to_string()),
+        // Same: a bool with a meaningful `false`, never unset.
+        RegistryField::Insecure => Some(rc.insecure.to_string()),
     }
 }
 
@@ -801,6 +847,22 @@ fn apply_set(
                     set_registry_default(registries, alias, b);
                     Ok(value_str.to_string())
                 }
+                RegistryField::Insecure => {
+                    let b = parse_bool(value_str, &format!("registry.{alias}.insecure"))?;
+                    // Set-time twin of the load-time `index '{locator}' must not
+                    // set insecure` rejection (65 here, 78 there). Only the
+                    // enabling direction: turning it off on a mis-authored entry
+                    // must stay possible.
+                    if b && find_registry(registries, alias).is_some_and(|rc| rc.index.is_some()) {
+                        let alias = alias.escape_debug();
+                        return Err(super::config_value(format!(
+                            "registry '{alias}' is an index entry; an index locator already carries \
+                             its own http(s):// scheme, so insecure says nothing there"
+                        )));
+                    }
+                    set_registry_field(registries, alias, |rc| rc.insecure = b);
+                    Ok(value_str.to_string())
+                }
             }
         }
     }
@@ -911,6 +973,15 @@ fn apply_unset(
                     )));
                 }
                 set_registry_default(registries, alias, false);
+                Ok(())
+            }
+            // Clears back to HTTPS. Unlike `default` there is no
+            // at-most-one invariant to restore, so it is a plain field write.
+            RegistryField::Insecure => {
+                if find_registry(registries, alias).is_none() {
+                    return Err(no_such_registry_for_unset(alias));
+                }
+                set_registry_field(registries, alias, |rc| rc.insecure = false);
                 Ok(())
             }
         },
@@ -1299,6 +1370,10 @@ fn run_list(ctx: &Context, all: bool) -> anyhow::Result<(ConfigReport, ExitCode)
     Ok((ConfigReport::List(ConfigListReport { items }), ExitCode::Success))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one parameter per writable field, matching `run_registry_set`'s flat signature; collapsing both into a params struct is deferred rather than mixed into a feature diff (Two Hats, quality-core.md)"
+)]
 fn run_registry_add(
     ctx: &Context,
     alias: &str,
@@ -1307,6 +1382,7 @@ fn run_registry_add(
     make_default: bool,
     include: &[String],
     exclude: &[String],
+    insecure: bool,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
     // FIX 1: pre-validate alias at the CLI boundary (exit 64) so a bad alias
     // exits UsageError rather than ConfigError after write → validate_registries.
@@ -1324,6 +1400,15 @@ fn run_registry_add(
         }
     };
     reject_control_chars(locator, if is_index { "registry.index" } else { "registry.oci" })?;
+    // Add-time twin of the load-time `index '{locator}' must not set insecure`
+    // rejection (65 here, 78 there).
+    if is_index && insecure {
+        return Err(super::config_value(
+            "--insecure does not apply to --index; an index locator already carries its own \
+             http(s):// scheme"
+                .to_string(),
+        ));
+    }
     if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
         // Escaped like its `apply_set` twin above: the control-char guard on
         // the line before does not match the bidi and zero-width format
@@ -1379,6 +1464,7 @@ fn run_registry_add(
         include: include.to_vec(),
         exclude: exclude.to_vec(),
         default: make_default,
+        insecure,
     });
 
     commit_config(&scope, &scope.options, &registries)?;
@@ -1450,6 +1536,9 @@ fn run_registry_set(
     clear_include: bool,
     exclude: &[String],
     clear_exclude: bool,
+    // `--insecure` / `--no-insecure` collapsed by `flag_pair`: `None` is the
+    // leave-it-alone case, the tri-state `--default` deliberately lacks.
+    insecure: Option<bool>,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
     // Unlike `add`, neither locator flag is the "leave it alone" case, so
     // `(None, None)` is the no-locator-edit shape and `_` is where it lands.
@@ -1481,12 +1570,13 @@ fn run_registry_set(
         && exclude.is_empty()
         && !clear_include
         && !clear_exclude
+        && insecure.is_none()
     {
         return Err(super::config_usage(format!(
             "nothing to change for registry '{}'; name at least one of \
              --oci/--index, --include, --exclude, --clear-include, \
-             --clear-exclude, --default. To clear a browse filter use \
-             --clear-include/--clear-exclude, or with \
+             --clear-exclude, --default, --insecure/--no-insecure. To clear a \
+             browse filter use --clear-include/--clear-exclude, or with \
              `grim config unset registry.{}.include`",
             alias.escape_debug(),
             alias.escape_debug()
@@ -1520,6 +1610,19 @@ fn run_registry_set(
         )));
     };
     check_filter_flags(alias, include, exclude)?;
+    // Judged against the kind the entry will have *after* this write, so
+    // `--index … --insecure` in one invocation is refused too. Enabling only:
+    // `--no-insecure` on a mis-authored entry has to stay possible.
+    if insecure == Some(true) {
+        let will_be_index = locator.map_or(existing.index.is_some(), |(_, is_index)| is_index);
+        if will_be_index {
+            return Err(super::config_value(format!(
+                "--insecure does not apply to registry '{}': it is an index entry, and an index \
+                 locator already carries its own http(s):// scheme",
+                alias.escape_debug()
+            )));
+        }
+    }
 
     let _guard = acquire_config_lock(&scope)?;
 
@@ -1528,6 +1631,9 @@ fn run_registry_set(
     if make_default {
         clear_all_defaults(&mut registries);
         set_registry_default(&mut registries, alias, true);
+    }
+    if let Some(insecure) = insecure {
+        set_registry_field(&mut registries, alias, |rc| rc.insecure = insecure);
     }
     if let Some((locator, is_index)) = locator {
         // Swapping the kind clears the other side. `config set
@@ -1580,6 +1686,7 @@ fn run_registry_set(
                 clear_include,
                 exclude,
                 clear_exclude,
+                insecure,
             ),
         }),
         ExitCode::Success,
@@ -1604,8 +1711,13 @@ fn run_registry_set(
 /// exactly one thing: which locator side actually held a value, so a kind swap
 /// reports `cleared` for the side it emptied and nothing for a side that was
 /// already absent. It is the caller's own `&RegistryConfig`, passed instead of
-/// two derived `bool`s so the parameter list stays inside clippy's threshold
-/// without an `allow`.
+/// two derived `bool`s. That kept the list inside clippy's threshold until
+/// `insecure` arrived as an eighth; folding the rest into a params struct is a
+/// refactor, and this is a feature diff (Two Hats, `quality-core.md`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one parameter per writable field, mirroring `run_registry_set`'s own flat signature; collapsing both into a params struct is deferred rather than mixed into a feature diff"
+)]
 fn registry_set_fields(
     locator: Option<(&str, bool)>,
     existing: &RegistryConfig,
@@ -1614,6 +1726,7 @@ fn registry_set_fields(
     clear_include: bool,
     exclude: &[String],
     clear_exclude: bool,
+    insecure: Option<bool>,
 ) -> Vec<RegistryFieldChange> {
     let set_string = |value: &str| RegistryFieldChangeAction::Set {
         value: RegistryFieldValue::String(value.to_string()),
@@ -1650,6 +1763,13 @@ fn registry_set_fields(
                 }),
                 RegistryField::Include => list(include, clear_include),
                 RegistryField::Exclude => list(exclude, clear_exclude),
+                // Both directions are a `set`, never a `cleared`: the flag pair
+                // assigns a value, and `false` is a real state the entry holds.
+                // `cleared` is `config unset`'s word, and it lands on the same
+                // `false` by a different route.
+                RegistryField::Insecure => insecure.map(|value| RegistryFieldChangeAction::Set {
+                    value: RegistryFieldValue::Bool(value),
+                }),
             };
             action.map(|action| RegistryFieldChange {
                 field: field.field_name(),
@@ -1730,6 +1850,7 @@ fn run_registry_show(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport
             include: rc.include.clone(),
             exclude: rc.exclude.clone(),
             default: rc.default,
+            insecure: rc.insecure,
         }),
         ExitCode::Success,
     ))
@@ -1747,6 +1868,7 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
             include: rc.include.clone(),
             exclude: rc.exclude.clone(),
             default: rc.default,
+            insecure: rc.insecure,
         })
         .collect();
     Ok((
@@ -1755,9 +1877,9 @@ fn run_registry_list(ctx: &Context) -> anyhow::Result<(ConfigReport, ExitCode)> 
     ))
 }
 
-/// `grim config registry fields` — static metadata for the 5 addressable
-/// per-registry fields (`oci`, `index`, `default`, and the browse filters
-/// `include` / `exclude`). Unlike every other
+/// `grim config registry fields` — static metadata for the 6 addressable
+/// per-registry fields (`oci`, `index`, `default`, `insecure`, and the
+/// browse filters `include` / `exclude`). Unlike every other
 /// `config` subcommand this takes no [`Context`], resolves no scope, and
 /// acquires no lock: the field set and its type/title/description are
 /// fixed at compile time (see [`RegistryField::spec`]), so the command
@@ -2198,6 +2320,7 @@ mod tests {
     fn collect_entries_all_emits_registry_locator_null_rows() {
         let options = ConfigOptions::default();
         let registries = vec![RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: None,
             index: Some("https://index.example".to_string()),
@@ -2251,6 +2374,7 @@ mod tests {
         use crate::config::declaration::RegistryConfig;
         let mut registries = vec![
             RegistryConfig {
+                insecure: false,
                 alias: Some("a".to_string()),
                 oci: Some("u1".to_string()),
                 index: None,
@@ -2258,6 +2382,7 @@ mod tests {
                 ..Default::default()
             },
             RegistryConfig {
+                insecure: false,
                 alias: Some("b".to_string()),
                 oci: Some("u2".to_string()),
                 index: None,
@@ -2788,6 +2913,7 @@ mod tests {
     /// One aliased registry carrying an authored filter on both sides.
     fn filtered_registries() -> Vec<RegistryConfig> {
         vec![RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
@@ -2800,6 +2926,7 @@ mod tests {
     /// The same entry with no filter authored on either side.
     fn unfiltered_registries() -> Vec<RegistryConfig> {
         vec![RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             ..Default::default()
@@ -3173,6 +3300,7 @@ mod tests {
                 false,
                 &["platform/**,tools/**".to_string()],
                 &[],
+                false,
             )
             .map(|_| ())
             .expect("a comma is legal in a pattern — warn, do not reject");
@@ -3479,6 +3607,7 @@ mod tests {
             false,
             &include,
             &exclude,
+            false,
         )
         .expect("registry add with filters must succeed");
 
@@ -3507,6 +3636,7 @@ mod tests {
             false,
             &["acme{unclosed".to_string()],
             &[],
+            false,
         )
         // `ConfigReport` is not `Debug`; drop the Ok payload so `expect_err`
         // has a printable `T`.
@@ -3528,7 +3658,7 @@ mod tests {
         // the malformed one exposed the ordering.
         for pattern in ["acme/platform/**", "acme{unclosed"] {
             let (_tmp, config_path, ctx) = project_scope();
-            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
                 .map(|_| ())
                 .expect("the first add must succeed");
             let before = std::fs::read_to_string(&config_path).expect("config readable");
@@ -3540,6 +3670,7 @@ mod tests {
                 false,
                 &[pattern.to_string()],
                 &[],
+                false,
             )
             .map(|_| ())
             .expect_err("a duplicate alias must be refused");
@@ -3565,7 +3696,7 @@ mod tests {
         // is where the user lands. It now names `registry set`, which takes
         // the very flags the refused invocation already carried.
         let (_tmp, _config_path, ctx) = project_scope();
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
             .map(|_| ())
             .expect("the first add must succeed");
         let msg = run_registry_add(
@@ -3576,6 +3707,7 @@ mod tests {
             false,
             &["tools/**".to_string()],
             &[],
+            false,
         )
         .map(|_| ())
         .expect_err("a duplicate alias must be refused")
@@ -3599,9 +3731,18 @@ mod tests {
     /// to "first entry wins".
     fn three_entries(ctx: &Context) {
         for alias in ["first", "second", "third"] {
-            run_registry_add(ctx, alias, Some(&format!("ghcr.io/{alias}")), None, false, &[], &[])
-                .map(|_| ())
-                .expect("seed add must succeed");
+            run_registry_add(
+                ctx,
+                alias,
+                Some(&format!("ghcr.io/{alias}")),
+                None,
+                false,
+                &[],
+                &[],
+                false,
+            )
+            .map(|_| ())
+            .expect("seed add must succeed");
         }
     }
 
@@ -3624,6 +3765,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .map(|_| ())
         .expect("editing the first entry must succeed");
@@ -3651,6 +3793,7 @@ mod tests {
             true,
             &["old/**".to_string()],
             &["legacy/**".to_string()],
+            false,
         )
         .map(|_| ())
         .expect("seed add must succeed");
@@ -3665,6 +3808,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .map(|_| ())
         .expect("a filter-only edit must succeed");
@@ -3688,7 +3832,7 @@ mod tests {
         // other side is cleared rather than refused — an entry carrying both
         // would fail `validate_registries` on the way out.
         let (_tmp, config_path, ctx) = project_scope();
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
             .map(|_| ())
             .expect("seed add must succeed");
         run_registry_set(
@@ -3701,6 +3845,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .map(|_| ())
         .expect("swapping to an index must succeed");
@@ -3716,10 +3861,10 @@ mod tests {
         // Same invariant `registry use` holds: exactly one default.
         let (_tmp, config_path, ctx) = project_scope();
         three_entries(&ctx);
-        run_registry_set(&ctx, "second", None, None, true, &[], false, &[], false)
+        run_registry_set(&ctx, "second", None, None, true, &[], false, &[], false, None)
             .map(|_| ())
             .expect("promoting an entry must succeed");
-        run_registry_set(&ctx, "third", None, None, true, &[], false, &[], false)
+        run_registry_set(&ctx, "third", None, None, true, &[], false, &[], false, None)
             .map(|_| ())
             .expect("promoting another entry must succeed");
 
@@ -3751,6 +3896,7 @@ mod tests {
                 false,
                 &[],
                 false,
+                None,
             )
             .map(|_| ())
             .expect_err("a missing alias must be refused");
@@ -3772,7 +3918,7 @@ mod tests {
         // The same exit-65 gate `add` and `config set` share, and the file
         // must be untouched — validation runs before the lock.
         let (_tmp, config_path, ctx) = project_scope();
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
             .map(|_| ())
             .expect("seed add must succeed");
         let before = std::fs::read_to_string(&config_path).expect("config readable");
@@ -3786,6 +3932,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .map(|_| ())
         .expect_err("an invalid pattern must be rejected");
@@ -3805,11 +3952,11 @@ mod tests {
         // name `unset`, since "give me an empty list" is the one edit the
         // patch semantics deliberately cannot express.
         let (_tmp, config_path, ctx) = project_scope();
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
             .map(|_| ())
             .expect("seed add must succeed");
         let before = std::fs::read_to_string(&config_path).expect("config readable");
-        let err = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false)
+        let err = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false, None)
             .map(|_| ())
             .expect_err("a set naming no field must be refused");
         assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
@@ -3833,7 +3980,7 @@ mod tests {
         // names the value the entry already held. The third case below is the
         // one that pins that, and the docs say the same.
         let (_tmp, _config_path, ctx) = project_scope();
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[])
+        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &[], &[], false)
             .map(|_| ())
             .expect("seed add must succeed");
 
@@ -3847,6 +3994,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .expect("a filter-only edit must succeed");
         assert_eq!(code, ExitCode::Success);
@@ -3860,8 +4008,19 @@ mod tests {
             _ => panic!("expected a write report"),
         }
 
-        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], false, &[], false)
-            .expect("a locator edit must succeed");
+        let (report, _) = run_registry_set(
+            &ctx,
+            "acme",
+            Some("ghcr.io/other"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .expect("a locator edit must succeed");
         match report {
             ConfigReport::Write(w) => assert_eq!(w.value.as_deref(), Some("ghcr.io/other")),
             _ => panic!("expected a write report"),
@@ -3870,8 +4029,19 @@ mod tests {
         // Re-naming the locator the entry already holds. No field changed, and
         // the report still carries it: `value` answers "what did the call
         // name", never "what moved".
-        let (report, _) = run_registry_set(&ctx, "acme", Some("ghcr.io/other"), None, false, &[], false, &[], false)
-            .expect("re-naming the current locator must succeed");
+        let (report, _) = run_registry_set(
+            &ctx,
+            "acme",
+            Some("ghcr.io/other"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .expect("re-naming the current locator must succeed");
         match report {
             ConfigReport::Write(w) => assert_eq!(
                 w.value.as_deref(),
@@ -3910,6 +4080,8 @@ mod tests {
                     clear_include,
                     clear_exclude,
                     default,
+                    insecure: _,
+                    no_insecure: _,
                 } => {
                     assert_eq!(alias, "acme");
                     assert!(oci.is_none() && index.is_none() && !default);
@@ -4037,8 +4209,17 @@ mod tests {
         let (_tmp, _config_path, ctx) = project_scope();
         let include = vec!["acme/platform/**".to_string()];
         let exclude = vec!["acme/legacy/**".to_string()];
-        run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &include, &exclude)
-            .expect("registry add must succeed");
+        run_registry_add(
+            &ctx,
+            "acme",
+            Some("ghcr.io/acme"),
+            None,
+            false,
+            &include,
+            &exclude,
+            false,
+        )
+        .expect("registry add must succeed");
 
         let (report, _) = run_registry_show(&ctx, "acme").expect("show must succeed");
         match report {
@@ -4063,6 +4244,7 @@ mod tests {
         use crate::config::declaration::RegistryConfig;
         let mut registries = vec![
             RegistryConfig {
+                insecure: false,
                 alias: Some("x".to_string()),
                 oci: Some("u1".to_string()),
                 index: None,
@@ -4070,6 +4252,7 @@ mod tests {
                 ..Default::default()
             },
             RegistryConfig {
+                insecure: false,
                 alias: Some("y".to_string()),
                 oci: Some("u2".to_string()),
                 index: None,
@@ -4099,6 +4282,7 @@ mod tests {
             false,
             &["a/**".to_string(), "b/**".to_string()],
             &["legacy/**".to_string()],
+            false,
         )
         .map(|_| ())
         .expect("seed add must succeed");
@@ -4111,6 +4295,171 @@ mod tests {
         find_registry(&scope.registries, "acme")
             .expect("the entry survives every edit")
             .clone()
+    }
+
+    // ── `insecure` (plain-HTTP transport) ────────────────────────────────
+
+    #[test]
+    fn registry_add_insecure_round_trips_through_the_written_config() {
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(
+            &ctx,
+            "acme",
+            Some("localhost:5050/grimoire"),
+            None,
+            false,
+            &[],
+            &[],
+            true,
+        )
+        .map(|_| ())
+        .expect("add must succeed");
+        assert!(reread_acme(&ctx, &config_path).insecure);
+    }
+
+    #[test]
+    fn registry_add_insecure_on_an_index_entry_is_a_data_error() {
+        let (_tmp, config_path, ctx) = project_scope();
+        let before = std::fs::read_to_string(&config_path).expect("config readable");
+        let err = run_registry_add(
+            &ctx,
+            "hub",
+            None,
+            Some("https://index.grimoire.rs"),
+            false,
+            &[],
+            &[],
+            true,
+        )
+        .map(|_| ())
+        .expect_err("--insecure must not apply to an index entry");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("config readable"),
+            before,
+            "nothing may be written when the pairing is rejected"
+        );
+    }
+
+    #[test]
+    fn registry_set_insecure_flag_pair_turns_the_field_on_and_back_off() {
+        // The one field `--default`'s one-way shape would not serve: an
+        // opt-in to a transport downgrade has to be revocable in place.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        assert!(!reread_acme(&ctx, &config_path).insecure, "seeded off");
+
+        set_insecure(&ctx, Some(true));
+        assert!(reread_acme(&ctx, &config_path).insecure);
+        set_insecure(&ctx, Some(false));
+        assert!(!reread_acme(&ctx, &config_path).insecure);
+    }
+
+    #[test]
+    fn registry_set_leaves_insecure_alone_when_neither_flag_is_given() {
+        // `None` is the leave-it-alone case: an unrelated edit must not
+        // silently restore HTTPS on an entry that opted out of it.
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        set_insecure(&ctx, Some(true));
+        run_registry_set(
+            &ctx,
+            "acme",
+            Some("localhost:5050/grimoire"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .map(|_| ())
+        .expect("a locator-only edit must succeed");
+        assert!(reread_acme(&ctx, &config_path).insecure);
+    }
+
+    #[test]
+    fn registry_set_reports_insecure_as_a_set_in_both_directions() {
+        // `--no-insecure` is a `set` to `false`, never a `cleared`: `cleared`
+        // is `config unset`'s word for the same resulting state.
+        for value in [true, false] {
+            let (_tmp, _config_path, ctx) = project_scope();
+            acme_with_both_filters(&ctx);
+            let (report, _code) =
+                run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false, Some(value))
+                    .expect("set must succeed");
+            let ConfigReport::Write(w) = report else {
+                panic!("expected a write report");
+            };
+            assert_eq!(
+                serde_json::to_value(&w.fields).expect("fields serialize"),
+                serde_json::json!([{ "field": "insecure", "action": "set", "value": value }])
+            );
+        }
+    }
+
+    #[test]
+    fn registry_set_naming_only_insecure_is_not_the_nothing_to_change_error() {
+        let (_tmp, _config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+        set_insecure(&ctx, Some(true));
+    }
+
+    #[test]
+    fn set_and_unset_reach_insecure_through_the_dotted_key() {
+        let (_tmp, config_path, ctx) = project_scope();
+        acme_with_both_filters(&ctx);
+
+        run_set(&ctx, "registry.acme.insecure", "true", false).expect("set must succeed");
+        assert!(reread_acme(&ctx, &config_path).insecure);
+        // `get` reads back a bool with no unset state, like `default`.
+        let (report, code) = run_get(&ctx, "registry.acme.insecure").expect("get must succeed");
+        assert_eq!(code, ExitCode::Success);
+        let ConfigReport::Get(g) = report else {
+            panic!("expected a get report");
+        };
+        assert_eq!(g.value.as_deref(), Some("true"));
+
+        run_unset(&ctx, "registry.acme.insecure").expect("unset must succeed");
+        assert!(!reread_acme(&ctx, &config_path).insecure);
+    }
+
+    #[test]
+    fn setting_insecure_true_on_an_index_entry_is_a_data_error() {
+        let (_tmp, config_path, ctx) = project_scope();
+        run_registry_add(
+            &ctx,
+            "hub",
+            None,
+            Some("https://index.grimoire.rs"),
+            false,
+            &[],
+            &[],
+            false,
+        )
+        .map(|_| ())
+        .expect("add must succeed");
+        let err = run_set(&ctx, "registry.hub.insecure", "true", false)
+            .map(|_| ())
+            .expect_err("an index entry must refuse the opt-in");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        // The disabling direction stays open, so a mis-authored entry is
+        // repairable without hand-editing the file.
+        run_set(&ctx, "registry.hub.insecure", "false", false).expect("turning it off must succeed");
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).expect("re-parse");
+        assert!(
+            !find_registry(&scope.registries, "hub")
+                .expect("entry survives")
+                .insecure
+        );
+    }
+
+    /// `registry set --insecure` / `--no-insecure` on the `acme` fixture.
+    fn set_insecure(ctx: &Context, value: Option<bool>) {
+        run_registry_set(ctx, "acme", None, None, false, &[], false, &[], false, value)
+            .map(|_| ())
+            .expect("an insecure-only edit must succeed");
     }
 
     #[test]
@@ -4173,13 +4522,13 @@ mod tests {
         // the exit code, because the guard returns before any list moves.
         let (_tmp, _config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
             .expect("a clear-only edit must be accepted");
         assert_eq!(code, ExitCode::Success);
 
         let (_tmp, _config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true, None)
             .expect("a clear-exclude-only edit must be accepted");
         assert_eq!(code, ExitCode::Success);
     }
@@ -4192,7 +4541,7 @@ mod tests {
         // stays: owner decision 9 keeps both routes valid.
         let (_tmp, _config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        let msg = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false)
+        let msg = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false, None)
             .map(|_| ())
             .expect_err("a set naming no field must still be refused")
             .to_string();
@@ -4223,7 +4572,7 @@ mod tests {
         // here rather than passing silently.
         let (_tmp, config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
             .map(|_| ())
             .expect("--clear-include must succeed");
 
@@ -4249,7 +4598,7 @@ mod tests {
         // `clear_exclude` are interchangeable at every call site in the suite.
         let (_tmp, config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+        run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true, None)
             .map(|_| ())
             .expect("--clear-exclude must succeed");
 
@@ -4281,7 +4630,7 @@ mod tests {
         // `--default` only — the handover's exact reproduction.
         let (_tmp, config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", None, None, true, &[], false, &[], false)
+        run_registry_set(&ctx, "acme", None, None, true, &[], false, &[], false, None)
             .map(|_| ())
             .expect("a --default-only edit must succeed");
         let rc = reread_acme(&ctx, &config_path);
@@ -4291,9 +4640,20 @@ mod tests {
         // `--oci` only.
         let (_tmp, config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", Some("ghcr.io/moved"), None, false, &[], false, &[], false)
-            .map(|_| ())
-            .expect("a locator-only edit must succeed");
+        run_registry_set(
+            &ctx,
+            "acme",
+            Some("ghcr.io/moved"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .map(|_| ())
+        .expect("a locator-only edit must succeed");
         let rc = reread_acme(&ctx, &config_path);
         assert_eq!(rc.include, include(), "a locator edit must not touch include");
         assert_eq!(rc.exclude, exclude(), "a locator edit must not touch exclude");
@@ -4313,6 +4673,7 @@ mod tests {
             false,
             &["new/**".to_string()],
             false,
+            None,
         )
         .map(|_| ())
         .expect("an exclude-only edit must succeed");
@@ -4334,11 +4695,11 @@ mod tests {
         // pinned: 1, and the >1 length that makes the other path warn.
         for patterns in [vec!["a/**".to_string()], vec!["a/**".to_string(), "b/**".to_string()]] {
             let (_tmp, _config_path, ctx) = project_scope();
-            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &patterns, &[])
+            run_registry_add(&ctx, "acme", Some("ghcr.io/acme"), None, false, &patterns, &[], false)
                 .map(|_| ())
                 .expect("seed add must succeed");
             let logs = capture_logs(|| {
-                run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+                run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
                     .map(|_| ())
                     .expect("--clear-include must succeed");
             });
@@ -4359,7 +4720,7 @@ mod tests {
         // side, where a builder can actually break it.
         let (_tmp, cleared_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
             .map(|_| ())
             .expect("--clear-include must succeed");
         let cleared = std::fs::read_to_string(&cleared_path).expect("config written");
@@ -4383,6 +4744,7 @@ mod tests {
             false,
             &[],
             &["legacy/**".to_string()],
+            false,
         )
         .map(|_| ())
         .expect("seed add must succeed");
@@ -4400,12 +4762,12 @@ mod tests {
         // a UI that does not know the current list.
         let (_tmp, config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+        run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
             .map(|_| ())
             .expect("the first clear must succeed");
         let after_first = std::fs::read_to_string(&config_path).expect("config readable");
 
-        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false)
+        let (_report, code) = run_registry_set(&ctx, "acme", None, None, false, &[], true, &[], false, None)
             .expect("a clear of an already-empty list must still exit 0");
         assert_eq!(code, ExitCode::Success);
         assert_eq!(
@@ -4432,7 +4794,7 @@ mod tests {
         // is exactly what this must reject.
         let (_tmp, _config_path, ctx) = project_scope();
         acme_with_both_filters(&ctx);
-        let (report, _code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true)
+        let (report, _code) = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], true, None)
             .expect("--clear-exclude must succeed");
         let ConfigReport::Write(w) = report else {
             panic!("expected a write report");
@@ -4470,6 +4832,7 @@ mod tests {
             false,
             &[],
             true,
+            None,
         )
         .expect("a multi-field edit must succeed");
         let ConfigReport::Write(w) = report else {
@@ -4477,11 +4840,11 @@ mod tests {
         };
         let fields = serde_json::to_value(&w.fields).expect("fields serialize");
 
-        // `index` was never named, so it must not appear at all.
+        // `index` and `insecure` were never named, so neither may appear.
         let expected_order: Vec<&str> = RegistryField::ALL
             .into_iter()
             .map(RegistryField::field_name)
-            .filter(|name| *name != "index")
+            .filter(|name| *name != "index" && *name != "insecure")
             .collect();
         let emitted: Vec<&str> = fields
             .as_array()
@@ -4532,6 +4895,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .expect("a kind swap must succeed");
         let ConfigReport::Write(w) = report else {
@@ -4559,6 +4923,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .expect("re-pointing the index must succeed");
         let ConfigReport::Write(w) = report else {
@@ -4573,8 +4938,19 @@ mod tests {
         // The mirror: the entry now carries an `index`, so swapping back
         // clears that side and reports it. `oci` still precedes `index` — the
         // order is `ALL`'s, never "named field first".
-        let (report, _code) = run_registry_set(&ctx, "acme", Some("ghcr.io/back"), None, false, &[], false, &[], false)
-            .expect("swapping back must succeed");
+        let (report, _code) = run_registry_set(
+            &ctx,
+            "acme",
+            Some("ghcr.io/back"),
+            None,
+            false,
+            &[],
+            false,
+            &[],
+            false,
+            None,
+        )
+        .expect("swapping back must succeed");
         let ConfigReport::Write(w) = report else {
             panic!("expected a write report");
         };
@@ -4603,6 +4979,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .expect("a locator edit must succeed");
         let ConfigReport::Write(w) = report else {
@@ -4631,6 +5008,7 @@ mod tests {
             false,
             &[],
             false,
+            None,
         )
         .expect("re-naming the same locator must succeed");
         let ConfigReport::Write(w) = report else {
@@ -4644,10 +5022,10 @@ mod tests {
 
         // The same clause on the flag side. `--default` on an entry that is
         // already the default writes `true` over `true` and reports it.
-        run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false)
+        run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false, None)
             .map(|_| ())
             .expect("promoting the entry must succeed");
-        let (report, _code) = run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false)
+        let (report, _code) = run_registry_set(&fresh, "acme", None, None, true, &[], false, &[], false, None)
             .expect("re-promoting the default entry must succeed");
         let ConfigReport::Write(w) = report else {
             panic!("expected a write report");

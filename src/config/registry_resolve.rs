@@ -138,6 +138,20 @@ pub struct ResolvedRegistry {
     /// reading the patterns back, `load_catalog`'s per-row filter) can call
     /// straight through with no `Option`-unwrapping at the call site.
     pub filter: RegistryFilter,
+    /// Whether this entry opted its locator host into plain HTTP
+    /// (`insecure = true`).
+    ///
+    /// The authored field verbatim, not the effective transport: the
+    /// implicit loopback set and `GRIM_INSECURE_REGISTRIES` also reach a
+    /// host over HTTP without any entry saying so, and neither shows up
+    /// here. `grim context` reports this value, so it must stay the thing
+    /// `grim config get registry.<alias>.insecure` reads back.
+    ///
+    /// Always `false` on the `--registry`-forced and fallback branches:
+    /// those synthesize a source from a locator with no config entry
+    /// behind it, so there is no authored field to carry. Such a host still
+    /// reaches plain HTTP through the env var, which is what it is for.
+    pub insecure: bool,
 }
 
 impl ResolvedRegistry {
@@ -293,6 +307,7 @@ pub fn resolve_registries(
                 is_default: forced_set.is_empty(),
                 kind: SourceKind::Registry,
                 filter: RegistryFilter::default(),
+                insecure: false,
             });
         }
     }
@@ -376,6 +391,10 @@ pub fn resolve_registries(
                 is_default: rc.default,
                 kind,
                 filter,
+                // Only meaningful for a registry source; `validate_registries`
+                // rejects it on an index entry, and an unvalidated one is
+                // ignored here rather than downgrading an https:// locator.
+                insecure: rc.insecure && kind == SourceKind::Registry,
             });
         } else if !rc.include.is_empty() || !rc.exclude.is_empty() {
             // Same alias, same locator, so the entry and the one that won are
@@ -419,6 +438,7 @@ pub fn resolve_registries(
             is_default: true,
             kind: SourceKind::Registry,
             filter: RegistryFilter::default(),
+            insecure: false,
         }];
     }
     vec![ResolvedRegistry {
@@ -427,6 +447,7 @@ pub fn resolve_registries(
         is_default: true,
         kind: classify_index(trim_locator(fallback)).unwrap_or(SourceKind::Registry),
         filter: RegistryFilter::default(),
+        insecure: false,
     }]
 }
 
@@ -563,6 +584,53 @@ mod tests {
         assert_eq!(set[0].kind, SourceKind::IndexHttp);
         assert!(set[0].is_default);
         assert_eq!(set[1].kind, SourceKind::Registry);
+    }
+
+    #[test]
+    fn insecure_carries_from_the_config_entry_onto_the_resolved_source() {
+        let insecure = RegistryConfig {
+            insecure: true,
+            ..rc(Some("local"), "localhost:5050/grimoire", true)
+        };
+        let set = resolve_registries(
+            &[],
+            &[insecure, rc(Some("corp"), "registry.corp/team", false)],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert!(set[0].insecure, "the declaring entry keeps its opt-in");
+        assert!(!set[1].insecure, "and it does not leak onto its neighbours");
+    }
+
+    #[test]
+    fn insecure_is_dropped_on_an_index_entry_and_on_synthesized_sources() {
+        // `validate_registries` rejects the pairing, so this can only be a
+        // programmatic config — resolution ignores it rather than downgrading
+        // a locator that already spells its own scheme.
+        let bad = RegistryConfig {
+            insecure: true,
+            ..rc_index(Some("hub"), "https://index.grimoire.rs", true)
+        };
+        let set = resolve_registries(&[], &[bad], None, &[], None, "registry.example", None);
+        assert!(!set[0].insecure);
+
+        // `--registry` and the legacy fallback tiers synthesize a source from
+        // a bare locator with no entry behind it; there is nothing to carry.
+        let forced = resolve_registries(
+            &["localhost:5050".to_string()],
+            &[],
+            None,
+            &[],
+            None,
+            "registry.example",
+            None,
+        );
+        assert!(!forced[0].insecure);
+        let fallback = resolve_registries(&[], &[], None, &[], None, "registry.example", None);
+        assert!(!fallback[0].insecure);
     }
 
     #[test]

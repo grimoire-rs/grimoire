@@ -119,7 +119,10 @@ pub async fn run(ctx: &Context, args: &LoginArgs) -> anyhow::Result<(LoginReport
         tracing::warn!("offline mode: skipping credential verification for {registry}");
         VerificationStatus::Skipped
     } else {
-        match super::grim(crate::auth::verify::verify_credential(&registry, &cred).await)? {
+        // Same list the OCI client is built with, so a `[[registries]]` entry
+        // that opted into plain HTTP is pinged over plain HTTP too.
+        let plain_http = super::plain_http_hosts(ctx);
+        match super::grim(crate::auth::verify::verify_credential(&registry, &cred, &plain_http).await)? {
             VerifyOutcome::Verified => VerificationStatus::Verified,
             VerifyOutcome::NoAuthRequired => VerificationStatus::NoAuthRequired,
         }

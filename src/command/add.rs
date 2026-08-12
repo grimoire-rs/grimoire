@@ -1005,6 +1005,13 @@ pub(crate) fn write_config(
         if rc.default {
             let _ = writeln!(out, "default = true");
         }
+        // Same shape as `default`: emitted only when true, so an entry that
+        // never opted into plain HTTP stays byte-identical to one written
+        // before the field existed. `registry_config_round_trips_every_field`
+        // fails when a new field is added here and forgotten.
+        if rc.insecure {
+            let _ = writeln!(out, "insecure = true");
+        }
         out.push('\n');
     }
     if !set.bundles.is_empty() {
@@ -1334,6 +1341,7 @@ mod tests {
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let registries = vec![
             RegistryConfig {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1341,6 +1349,7 @@ mod tests {
                 ..Default::default()
             },
             RegistryConfig {
+                insecure: false,
                 alias: None,
                 oci: Some("registry.corp/team".to_string()),
                 index: None,
@@ -1379,6 +1388,7 @@ mod tests {
             include: vec!["platform".to_string(), "tools/*".to_string()],
             exclude: vec!["platform/legacy/**".to_string()],
             default: true,
+            insecure: true,
         }];
         write_config(&path, &ConfigOptions::default(), &registries, &set).unwrap();
 
@@ -1388,10 +1398,11 @@ mod tests {
     }
 
     #[test]
-    fn write_config_omits_filters_when_unset() {
-        // The companion to the tripwire: an entry with no filter must not
-        // grow an `include = []` / `exclude = []` line, so an unfiltered
-        // config is byte-identical to one written before filters existed.
+    fn write_config_omits_filters_and_insecure_when_unset() {
+        // The companion to the tripwire: an entry with no filter and no
+        // transport opt-in must not grow an `include = []` / `exclude = []` /
+        // `insecure = false` line, so such a config is byte-identical to one
+        // written before those fields existed.
         use crate::config::declaration::RegistryConfig;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("grimoire.toml");
@@ -1410,6 +1421,10 @@ mod tests {
         assert!(
             !body.contains("exclude"),
             "unfiltered entry must not emit exclude: {body}"
+        );
+        assert!(
+            !body.contains("insecure"),
+            "an https entry must not emit insecure: {body}"
         );
     }
 
@@ -1507,6 +1522,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let registries = vec![RegistryConfig {
+            insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
@@ -1702,6 +1718,7 @@ tree_separators_typo = 1
             tui: Default::default(),
         };
         let registries = vec![RegistryConfig {
+            insecure: false,
             alias: None,
             oci: Some("array.example".to_string()),
             index: None,

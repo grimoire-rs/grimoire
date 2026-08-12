@@ -324,6 +324,24 @@ pub struct RegistryConfig {
     /// when none do. Setting it on two or more entries is a parse error.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+    /// Controls whether this registry is contacted over plain HTTP instead
+    /// of HTTPS. Disabled by default; the loopback forms `localhost` and
+    /// `127.0.0.1` (bare and on port 5000) are always reached over plain
+    /// HTTP. Adds this entry's host to the same plain-HTTP set as the
+    /// `GRIM_INSECURE_REGISTRIES` environment variable, which still covers
+    /// hosts no entry declares.
+    ///
+    /// Rejected on an `index` entry — an index locator already carries its
+    /// own `http(s)://` scheme, so the flag would say nothing.
+    ///
+    /// The host contributed is this entry's locator host *including its
+    /// port*, matched exactly: `localhost:5050` and `localhost` are
+    /// different hosts. Enabling it downgrades transport for every
+    /// reference to that host in this invocation, not only for packages
+    /// browsed through this entry. `grimoire.toml` is normally committed,
+    /// so the downgrade applies to everyone who clones the project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 impl RegistryConfig {

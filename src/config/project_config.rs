@@ -213,8 +213,9 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 
 /// Validate a `[[registries]]` array: every entry sets exactly one of
 /// `oci` / `index` (non-empty), every `index` locator classifies as an
-/// HTTP(S) or git transport, every present `alias` is non-empty and unique
-/// across the array, and at most one entry sets `default = true`.
+/// HTTP(S) or git transport and does not set `insecure`, every present
+/// `alias` is non-empty and unique across the array, and at most one entry
+/// sets `default = true`.
 /// At-most-one default is checked after the per-entry structural checks so
 /// a `default = true` entry necessarily already has a valid locator.
 pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
@@ -249,6 +250,20 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 ));
             }
             _ => {}
+        }
+        // `insecure` names the transport for an OCI host that carries no
+        // scheme of its own. An index locator is a URL and already does, so
+        // the flag would silently mean nothing there — reject instead.
+        if index_set && rc.insecure {
+            return Err(ConfigError::new(
+                path.to_path_buf(),
+                ConfigErrorKind::RegistryInvalid {
+                    reason: format!(
+                        "index '{locator}' must not set insecure; an index locator already carries \
+                         its own http(s):// scheme"
+                    ),
+                },
+            ));
         }
         if index_set && crate::config::registry_resolve::classify_index(rc.locator()).is_none() {
             return Err(ConfigError::new(
@@ -1150,6 +1165,31 @@ surprise = "x"
         )
         .expect_err("unknown registry field must reject");
         assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
+    }
+
+    #[test]
+    fn registries_insecure_on_an_oci_entry_accepted() {
+        let cfg = ProjectConfig::from_toml_str("[[registries]]\noci = \"localhost:5050/grimoire\"\ninsecure = true\n")
+            .expect("insecure on an oci entry is the whole point of the field");
+        assert!(cfg.registries[0].insecure);
+    }
+
+    #[test]
+    fn registries_insecure_on_an_index_entry_rejected() {
+        // An index locator is a URL and already carries its own scheme, so
+        // the flag could only be a silent no-op there. Same kind (and so the
+        // same exit 78) as the oci/index mutual-exclusion rejection.
+        let err =
+            ProjectConfig::from_toml_str("[[registries]]\nindex = \"https://index.grimoire.rs\"\ninsecure = true\n")
+                .expect_err("insecure on an index entry must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_insecure_defaults_false_and_is_optional() {
+        let cfg = ProjectConfig::from_toml_str("[[registries]]\nindex = \"https://index.grimoire.rs\"\n")
+            .expect("an index entry that never mentions insecure still loads");
+        assert!(!cfg.registries[0].insecure);
     }
 
     // ── C-006: `validate_registries` include/exclude validation ──────

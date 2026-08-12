@@ -177,7 +177,7 @@ impl ConfigKey {
     }
 }
 
-/// The 5 per-registry field names addressable as `registry.<alias>.<field>`.
+/// The 6 per-registry field names addressable as `registry.<alias>.<field>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryField {
     Oci,
@@ -185,11 +185,12 @@ pub enum RegistryField {
     Include,
     Exclude,
     Default,
+    Insecure,
 }
 
 impl RegistryField {
-    /// Every registry field, in `oci, index, default, include, exclude`
-    /// order.
+    /// Every registry field, in `oci, index, default, include, exclude,
+    /// insecure` order.
     ///
     /// **Append here, never insert.** This array is the item order of
     /// `grim config registry fields --format json`, and consumers index it
@@ -200,12 +201,13 @@ impl RegistryField {
     /// shipped index; appending leaves every existing position untouched,
     /// matching the append-only discipline `VENDOR_ROOTS` rows and enum
     /// literals already follow.
-    pub const ALL: [RegistryField; 5] = [
+    pub const ALL: [RegistryField; 6] = [
         RegistryField::Oci,
         RegistryField::Index,
         RegistryField::Default,
         RegistryField::Include,
         RegistryField::Exclude,
+        RegistryField::Insecure,
     ];
 
     /// This field's short name — the last segment of its pattern key
@@ -219,6 +221,7 @@ impl RegistryField {
             Self::Include => "include",
             Self::Exclude => "exclude",
             Self::Default => "default",
+            Self::Insecure => "insecure",
         }
     }
 
@@ -284,12 +287,26 @@ impl RegistryField {
                            against. Only one entry may set this; the first entry wins when none do.",
             constraints: None,
         };
+        // Same rationale as `DEFAULT` above: mirrors `RegistryConfig`'s
+        // serde-derived `bool` default, not a `config::defaults` const.
+        const INSECURE: KeySpec = KeySpec {
+            key: "registry.<alias>.insecure",
+            value_type: ValueType::Bool { default: false },
+            title: "Plain-HTTP transport",
+            description: "Controls whether this registry is contacted over plain HTTP instead of HTTPS. \
+                           Disabled by default; the loopback forms `localhost` and `127.0.0.1` (bare and on \
+                           port 5000) are always reached over plain HTTP. Adds this entry's host to the same \
+                           plain-HTTP set as the `GRIM_INSECURE_REGISTRIES` environment variable, which still \
+                           covers hosts no entry declares.",
+            constraints: None,
+        };
         match self {
             Self::Oci => &OCI,
             Self::Index => &INDEX,
             Self::Include => &INCLUDE,
             Self::Exclude => &EXCLUDE,
             Self::Default => &DEFAULT,
+            Self::Insecure => &INSECURE,
         }
     }
 }
@@ -441,8 +458,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_field_all_has_five_fields_including_include_and_exclude() {
-        assert_eq!(RegistryField::ALL.len(), 5);
+    fn registry_field_all_has_six_fields_including_include_exclude_and_insecure() {
+        assert_eq!(RegistryField::ALL.len(), 6);
         for field in [RegistryField::Include, RegistryField::Exclude] {
             assert!(
                 matches!(field.spec().value_type, ValueType::StringList { default: None }),
@@ -604,6 +621,7 @@ mod tests {
         // addressable field) is removed.
         use crate::config::declaration::RegistryConfig;
         let config = RegistryConfig {
+            insecure: true,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
             index: Some("https://index.example".to_string()),
@@ -787,6 +805,7 @@ mod tests {
                 RegistryField::Include => &registry_config["properties"]["include"],
                 RegistryField::Exclude => &registry_config["properties"]["exclude"],
                 RegistryField::Default => &registry_config["properties"]["default"],
+                RegistryField::Insecure => &registry_config["properties"]["insecure"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);

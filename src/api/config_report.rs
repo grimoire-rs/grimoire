@@ -599,8 +599,8 @@ impl fmt::Display for Origin {
 ///
 /// JSON format: `{"items": [...]}` of
 /// `{"alias":"…"|null,"oci":"…"|null,"index":"…"|null,"include":[…],
-/// "exclude":[…],"default":bool}` objects — uniform `items` envelope per
-/// `subsystem-cli-api.md`.
+/// "exclude":[…],"default":bool,"insecure":bool}` objects — uniform `items`
+/// envelope per `subsystem-cli-api.md`.
 #[derive(Debug, Serialize)]
 pub struct RegistryListReport {
     /// All registries declared in the scope's `[[registries]]`.
@@ -623,10 +623,11 @@ impl Printable for RegistryListReport {
                     source,
                     r.default.to_string(),
                     filter_cell(&r.include, &r.exclude),
+                    r.insecure.to_string(),
                 ]
             })
             .collect();
-        print_table(w, &["Alias", "Type", "Source", "Default", "Filters"], &rows)
+        print_table(w, &["Alias", "Type", "Source", "Default", "Filters", "Insecure"], &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -684,20 +685,24 @@ pub struct RegistryRow {
     pub exclude: Vec<String>,
     /// Whether this is the default registry.
     pub default: bool,
+    /// Whether this registry is contacted over plain HTTP. The authored
+    /// field, not the effective transport — the implicit loopback set and
+    /// `GRIM_INSECURE_REGISTRIES` do not show up here.
+    pub insecure: bool,
 }
 
 /// Result of `grim config registry show <alias>`.
 ///
 /// Plain format: one-row table — `Alias | Type | Source | Default |
-/// Filters`. The `Filters` cell carries **counts** in `grim context`'s
-/// spelling (`N include, M exclude`, `—` when unfiltered); the patterns
-/// themselves stay in `--format json`, since a glob list has no width
-/// bound (plan C-014/C-020).
+/// Filters | Insecure`. The `Filters` cell carries **counts** in `grim
+/// context`'s spelling (`N include, M exclude`, `—` when unfiltered); the
+/// patterns themselves stay in `--format json`, since a glob list has no
+/// width bound (plan C-014/C-020).
 ///
 /// JSON format: `{"alias": "…", "oci": "…"|null, "index": "…"|null,
-/// "include": […], "exclude": […], "default": bool}` — both locator keys
-/// always present, exactly one non-null; both pattern lists always
-/// present, `[]` when unfiltered (always-present policy,
+/// "include": […], "exclude": […], "default": bool, "insecure": bool}` —
+/// both locator keys always present, exactly one non-null; both pattern
+/// lists always present, `[]` when unfiltered (always-present policy,
 /// `subsystem-cli-api.md`).
 #[derive(Debug, Serialize)]
 pub struct RegistryShowReport {
@@ -713,6 +718,10 @@ pub struct RegistryShowReport {
     pub exclude: Vec<String>,
     /// Whether this is the default registry.
     pub default: bool,
+    /// Whether this registry is contacted over plain HTTP. The authored
+    /// field, not the effective transport — the implicit loopback set and
+    /// `GRIM_INSECURE_REGISTRIES` do not show up here.
+    pub insecure: bool,
 }
 
 impl Printable for RegistryShowReport {
@@ -721,13 +730,14 @@ impl Printable for RegistryShowReport {
         let (ty, source) = type_and_source(self.oci.as_deref(), self.index.as_deref());
         print_table(
             w,
-            &["Alias", "Type", "Source", "Default", "Filters"],
+            &["Alias", "Type", "Source", "Default", "Filters", "Insecure"],
             &[vec![
                 self.alias.escape_debug().to_string(),
                 ty.to_string(),
                 source,
                 self.default.to_string(),
                 filter_cell(&self.include, &self.exclude),
+                self.insecure.to_string(),
             ]],
         )
     }
@@ -1211,6 +1221,7 @@ mod tests {
         // The alias needs the same call for the U+202E reason above.
         let r = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some(format!("zz{BIDI_OVERRIDE}acme")),
                 oci: Some(format!("ghcr.io/{ESC}[2J{ESC}[Hwiped")),
                 index: None,
@@ -1235,6 +1246,7 @@ mod tests {
         // lives there — but "shared today" is not "shared tomorrow", and this
         // is the surface a user reaches for one hostile alias by name.
         let r = RegistryShowReport {
+            insecure: false,
             alias: format!("zz{BIDI_OVERRIDE}acme"),
             oci: None,
             index: Some(format!("https://{ESC}[2Jindex.example")),
@@ -1541,6 +1553,7 @@ mod tests {
         // ADR: registry list — one table (Alias | Type | Source | Default).
         let r = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1560,6 +1573,7 @@ mod tests {
     fn registry_list_report_json_is_items_envelope() {
         let r = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1583,6 +1597,7 @@ mod tests {
     #[test]
     fn registry_show_report_json_keeps_null_locator_key() {
         let r = RegistryShowReport {
+            insecure: false,
             alias: "pub".to_string(),
             oci: None,
             index: Some("https://index.example".to_string()),
@@ -1608,6 +1623,7 @@ mod tests {
         // apart from an absent key.
         let r = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1629,6 +1645,7 @@ mod tests {
         // carry the authored patterns on their own side. Swapping the two
         // fields at the producer fails this assertion.
         let r = RegistryShowReport {
+            insecure: false,
             alias: "acme".to_string(),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
@@ -1646,6 +1663,7 @@ mod tests {
         // Plan C-014 / S-010: `[]`, never an absent key — `src/api/` bans
         // `skip_serializing_if` (subsystem-cli-api.md).
         let r = RegistryShowReport {
+            insecure: false,
             alias: "acme".to_string(),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,
@@ -1668,6 +1686,7 @@ mod tests {
         // glob list has no width bound), and an unfiltered row reads `—`.
         let filtered = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1678,6 +1697,7 @@ mod tests {
         };
         let unfiltered = RegistryListReport {
             items: vec![RegistryRow {
+                insecure: false,
                 alias: Some("acme".to_string()),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1716,6 +1736,7 @@ mod tests {
         // disagree about how a filter looks.
         let render = |include: Vec<String>, exclude: Vec<String>| {
             let r = RegistryShowReport {
+                insecure: false,
                 alias: "acme".to_string(),
                 oci: Some("ghcr.io/acme".to_string()),
                 index: None,
@@ -1767,7 +1788,7 @@ mod tests {
         let field_keys: Vec<&str> = items.iter().filter_map(|i| i["key"].as_str()).collect();
         assert_eq!(
             field_keys,
-            ["oci", "index", "default", "include", "exclude"],
+            ["oci", "index", "default", "include", "exclude", "insecure"],
             "must list every registry field in declared order; got: {items:?}"
         );
         assert_eq!(items[0]["key"], "oci", "first field must be 'oci'; got: {items:?}");
@@ -1814,6 +1835,7 @@ mod tests {
     fn registry_show_report_plain_is_one_row_table() {
         // ADR: registry show — one-row table (Alias | Type | Source | Default).
         let r = RegistryShowReport {
+            insecure: false,
             alias: "acme".to_string(),
             oci: Some("ghcr.io/acme".to_string()),
             index: None,

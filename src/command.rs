@@ -565,7 +565,40 @@ where
 /// rolling release re-resolves the floating tag instead of serving a
 /// cached pin — no separate "remote" routing mode is needed.
 pub fn access_seam(ctx: &crate::context::Context) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
-    map_access_io(ctx, ctx.access())
+    let plain_http = plain_http_hosts(ctx);
+    map_access_io(ctx, ctx.access(plain_http))
+}
+
+/// The complete plain-HTTP exception list for this invocation: the implicit
+/// loopback forms, every `GRIM_INSECURE_REGISTRIES` entry, and the locator
+/// host of every resolved `[[registries]]` entry that set `insecure = true`.
+///
+/// This is where config re-enters a decision `Context` cannot make on its
+/// own — it holds env reads only, by design. The two consumers are
+/// [`access_seam`] (the OCI client) and `grim login`'s verification ping;
+/// both take the finished list rather than re-deriving it, so the scheme
+/// decision stays single-sourced.
+///
+/// **Infallible.** A command that browses outside a project, or against an
+/// unreadable global config, must not fail *here* — it has its own error
+/// path for that, reached moments later. An unresolvable scope contributes
+/// nothing and leaves the env-var and loopback halves intact, which is
+/// exactly the behaviour that shipped before the config field existed.
+pub fn plain_http_hosts(ctx: &crate::context::Context) -> Vec<String> {
+    let scope = scope_resolution::resolve(ctx, ctx.global(), ctx.config()).ok();
+    let registries = match &scope {
+        Some(scope) => registries_for_scope(ctx, scope),
+        None => registries_global_fallback(ctx),
+    }
+    .unwrap_or_default();
+    let declared: Vec<String> = registries
+        .iter()
+        .filter(|r| r.insecure)
+        // The locator host without its namespace, and *with* its port —
+        // `HttpsExcept` matches the exact `host[:port]` a request carries.
+        .map(|r| crate::oci::access::registry_client::registry_host(&r.url).to_string())
+        .collect();
+    crate::oci::access::registry_client::plain_http_hosts_with(&declared)
 }
 
 fn map_access_io(
