@@ -1395,7 +1395,7 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
 /// derives from its own lock entry + install record.
 fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeContext) -> ArtifactState {
     if row_kind(kind) == ArtifactKind::Bundle {
-        derive_bundle_state(&format!("{registry}/{repository}"), ctx.declared_bundle_repos)
+        derive_bundle_state(&format!("{registry}/{repository}"), ctx)
     } else {
         // A row installed but not directly declared is present only via a bundle
         // → ViaBundle, consistent with the member-node badge.
@@ -1426,17 +1426,77 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
 /// stale/lingering snapshot left by a hand-edit, branch switch, or
 /// retag-without-relock — neither of which must mislead the row.
 ///
-/// It deliberately does **NOT** depend on whether the member artifacts are
-/// installed. A bundle is installed because it is declared, not because its
-/// skills happen to be present: installing member skills standalone must never
-/// flip an undeclared bundle to "installed", and a declared bundle's row must
-/// not flip as its members are installed or removed. Per-member health is
-/// surfaced on the member rows, never folded into the bundle row.
-fn derive_bundle_state(bundle_repo: &str, declared_bundle_repos: &std::collections::BTreeSet<String>) -> ArtifactState {
-    if declared_bundle_repos.contains(bundle_repo) {
-        ArtifactState::Installed
-    } else {
-        ArtifactState::NotInstalled
+/// **Installed-vs-not never depends on member health.** Installing member
+/// skills standalone must not flip an *undeclared* bundle to "installed", and
+/// an undeclared bundle stays `NotInstalled` however healthy its members look.
+/// That rule is what this function was originally written to protect.
+///
+/// Within a **declared** bundle, though, the row folds in the worst member
+/// health — `pending` / `outdated` / `modified` / `integrity-missing`. That
+/// does not weaken the rule above: the bundle is declared either way, so no
+/// member state can move it across the installed/not-installed line. What it
+/// fixes is a declared bundle reading a confident `installed` while every one
+/// of its members needed work, with no way to act on the whole bundle: the
+/// row was `Installed`, `op_allows` refuses `i` on that, and the user was left
+/// pressing keys that answered "already installed".
+///
+/// A member that was never materialized folds in as `Pending`, not
+/// `NotInstalled` — for a declared bundle, "an install would write this" is
+/// precisely what pending means, and mapping it to `NotInstalled` would drag
+/// the row back across the very line this function protects.
+///
+/// Members are read from the lock's `[[bundle]]` snapshot. No snapshot (a
+/// pre-cache lock, or a bundle not yet locked) ⇒ plain `Installed`: the
+/// declaration is all we know, which is exactly the old behaviour. Nested
+/// bundles cannot occur — `BundleMember::kind` rejects them at expansion.
+fn derive_bundle_state(bundle_repo: &str, ctx: &BadgeContext) -> ArtifactState {
+    if !ctx.declared_bundle_repos.contains(bundle_repo) {
+        return ArtifactState::NotInstalled;
+    }
+    let Some(locked) = ctx
+        .lock
+        .and_then(|l| l.bundles.iter().find(|b| b.repo() == Some(bundle_repo)))
+    else {
+        return ArtifactState::Installed;
+    };
+
+    // Worst-of, in the same precedence the tree rollup uses:
+    // IntegrityMissing > Modified > Outdated > Pending > Installed.
+    let rank = |s: ArtifactState| match s {
+        ArtifactState::IntegrityMissing => 4,
+        ArtifactState::Modified => 3,
+        ArtifactState::Outdated => 2,
+        // A declared bundle's un-materialized member is pending work, not a
+        // not-installed bundle (see the doc comment above).
+        ArtifactState::Pending | ArtifactState::NotInstalled => 1,
+        ArtifactState::Installed | ArtifactState::ViaBundle => 0,
+    };
+    let worst = locked
+        .members
+        .iter()
+        .filter_map(|m| crate::oci::Identifier::parse(&m.id).ok().map(|id| (m.kind, id)))
+        .map(|(kind, id)| {
+            derive_artifact_state(
+                kind,
+                id.registry(),
+                id.repository(),
+                ctx.lock,
+                ctx.state,
+                ctx.roots,
+                ctx.active,
+                ctx.snapshot_repos,
+                ctx.target,
+            )
+        })
+        .max_by_key(|s| rank(*s));
+
+    match worst.map(rank) {
+        Some(4) => ArtifactState::IntegrityMissing,
+        Some(3) => ArtifactState::Modified,
+        Some(2) => ArtifactState::Outdated,
+        Some(1) => ArtifactState::Pending,
+        // No members, or every member present and intact.
+        _ => ArtifactState::Installed,
     }
 }
 
@@ -4257,7 +4317,7 @@ mod tests {
             )],
             Vec::new(),
         );
-        lock.bundles = vec![crate::lock::locked_bundle::LockedBundle {
+        lock.bundles = vec![LockedBundle {
             name: "stack".to_string(),
             source: crate::lock::locked_bundle::LockedBundleSource::Registry {
                 repo: "ghcr.io/acme/bundles/stack".to_string(),
@@ -6455,7 +6515,7 @@ mod tests {
         // the lock — member presence never drives the bundle row.
         let none_declared = std::collections::BTreeSet::<String>::new();
         assert_eq!(
-            derive_bundle_state("r/bundles/ai-pack", &none_declared),
+            bundle_state_from_declaration("r/bundles/ai-pack", &none_declared),
             ArtifactState::NotInstalled,
             "an undeclared bundle is NotInstalled even though a member is present"
         );
@@ -6479,24 +6539,191 @@ mod tests {
         assert_eq!(targets[0], (ArtifactKind::Agent, "my-agent".to_string()));
     }
 
-    // ── derive_bundle_state: declared gate (installed iff in [bundles]) ────────
+    // ── derive_bundle_state: declared gate, then member health ────────────────
     //
-    // A bundle row is installed iff its `registry/repository` is declared in the
-    // active scope's `[bundles]` table (the declared-repos set). The function
-    // takes ONLY that set — by construction it cannot be swayed by member
-    // install health, a pre-cache lock with no snapshot, or a stale/lingering
-    // snapshot. Installing or uninstalling member skills can never flip the row;
-    // an undeclared bundle stays NotInstalled even with every member installed.
+    // Declaration is still the gate: a bundle is installed-ish iff its
+    // `registry/repository` is declared in the active scope's `[bundles]`
+    // table, and no member state can move an undeclared row off NotInstalled.
+    // Past that gate the row folds in its members' worst state, so a bundle
+    // whose members are all pending reads `pending` and `i` acts on it.
+    // A member that is merely NotInstalled folds to Pending, never to
+    // NotInstalled — the gate owns that line, not the members.
 
     fn declared(repos: &[&str]) -> std::collections::BTreeSet<String> {
         repos.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The bundle-row state for `repo` given only a declaration set: no lock,
+    /// so `derive_bundle_state` finds no `[[bundle]]` snapshot and answers
+    /// from the declaration alone. That is the case these tests are about —
+    /// member-health folding is covered separately, with a lock.
+    fn bundle_state_from_declaration(
+        repo: &str,
+        declared_bundle_repos: &std::collections::BTreeSet<String>,
+    ) -> ArtifactState {
+        let state = InstallState::empty(std::path::Path::new("/tmp/s.json"));
+        let roots = AnchorRoots {
+            workspace: std::path::PathBuf::from("/ws"),
+            grim_home: std::path::PathBuf::from("/ws"),
+            vendor_roots: Default::default(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        };
+        let empty = std::collections::BTreeSet::new();
+        derive_bundle_state(
+            repo,
+            &BadgeContext {
+                lock: None,
+                state: &state,
+                roots: &roots,
+                active: &[],
+                declared_bundle_repos,
+                direct_repos: &empty,
+                snapshot_repos: &empty,
+                target: None,
+            },
+        )
+    }
+
+    /// A declared bundle whose members are all fine reads `installed`; one
+    /// member needing work drags the row to that member's state, so the user
+    /// can see it AND act on the bundle as a unit (`op_allows` refuses `i` on
+    /// `Installed`, which is what left them pressing keys that answered
+    /// "already installed").
+    #[test]
+    fn a_declared_bundle_folds_in_its_worst_member_state() {
+        use crate::install::install_state::InstallRecord;
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+        use crate::oci::{Digest, PinnedIdentifier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = test_roots(ws);
+        let covered = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+
+        // One member skill, materialized for claude at the current layout and
+        // byte-intact, recorded at the locked pin.
+        let dest = covered.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), b"canonical\n").unwrap();
+        let anchored = crate::install::path_anchor::AnchoredPath::from_target(
+            &dest,
+            ConfigScope::Project,
+            ClientTarget::Claude,
+            ArtifactKind::Skill,
+            &roots,
+        )
+        .unwrap();
+        let pin = PinnedIdentifier::try_from(
+            Identifier::new_registry("acme/x", "reg.example.io").clone_with_digest(Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        let mut state = InstallState::empty(std::path::Path::new("/tmp/s.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pin.clone()),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                content_hash: crate::install::content_hash::content_hash(&dest).unwrap(),
+                target: anchored,
+                support_dir: None,
+                entry: None,
+                adopted: false,
+            }],
+        });
+
+        let mut lock = lock_fixture(vec![], vec![]);
+        lock.skills = vec![crate::lock::locked_artifact::LockedArtifact {
+            name: "x".to_string(),
+            kind: ArtifactKind::Skill,
+            source: crate::lock::locked_source::LockedSource::Registry(pin),
+            bundles: Vec::new(),
+        }];
+        lock.bundles = vec![LockedBundle {
+            name: "pack".to_string(),
+            source: LockedBundleSource::Registry {
+                repo: "reg.example.io/bundles/pack".to_string(),
+                tag: "latest".to_string(),
+                pinned: PinnedIdentifier::try_from(
+                    Identifier::new_registry("bundles/pack", "reg.example.io")
+                        .clone_with_digest(Digest::Sha256("b".repeat(64))),
+                )
+                .unwrap(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "x".to_string(),
+                id: "reg.example.io/acme/x:latest".to_string(),
+            }],
+        }];
+
+        let decl = declared(&["reg.example.io/bundles/pack"]);
+        let none = std::collections::BTreeSet::new();
+        let empty = std::collections::BTreeSet::new();
+        let base = BadgeContext {
+            lock: Some(&lock),
+            state: &state,
+            roots: &roots,
+            active: &[ClientTarget::Claude],
+            declared_bundle_repos: &decl,
+            direct_repos: &empty,
+            snapshot_repos: &empty,
+            target: None,
+        };
+
+        // Member intact and fully covered ⇒ the bundle row is plain `installed`.
+        assert_eq!(
+            derive_bundle_state(
+                "reg.example.io/bundles/pack",
+                &BadgeContext {
+                    target: Some(&covered),
+                    ..base
+                }
+            ),
+            ArtifactState::Installed
+        );
+
+        // A second configured client the member has no copy for ⇒ the member
+        // is pending, so the bundle is too — and `i` can now act on the row.
+        let widened = InstallTarget::new(
+            ws,
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        assert_eq!(
+            derive_bundle_state(
+                "reg.example.io/bundles/pack",
+                &BadgeContext {
+                    target: Some(&widened),
+                    ..base
+                }
+            ),
+            ArtifactState::Pending,
+            "a pending member makes the bundle pending, so `i` can act on the row"
+        );
+
+        // The declaration gate still owns the installed/not-installed line.
+        assert_eq!(
+            derive_bundle_state(
+                "reg.example.io/bundles/pack",
+                &BadgeContext {
+                    declared_bundle_repos: &none,
+                    target: Some(&widened),
+                    ..base
+                }
+            ),
+            ArtifactState::NotInstalled
+        );
     }
 
     #[test]
     fn derive_bundle_state_installed_when_declared() {
         let set = declared(&["r/bundles/pack"]);
         assert_eq!(
-            derive_bundle_state("r/bundles/pack", &set),
+            bundle_state_from_declaration("r/bundles/pack", &set),
             ArtifactState::Installed,
             "a bundle declared in [bundles] is Installed"
         );
@@ -6510,12 +6737,12 @@ mod tests {
         // the row aggregated member health and flipped to Installed once the
         // skills were installed.)
         assert_eq!(
-            derive_bundle_state("r/bundles/pack", &declared(&["r/bundles/other"])),
+            bundle_state_from_declaration("r/bundles/pack", &declared(&["r/bundles/other"])),
             ArtifactState::NotInstalled,
             "installing member skills must not flip an undeclared bundle to Installed"
         );
         assert_eq!(
-            derive_bundle_state("r/bundles/pack", &declared(&[])),
+            bundle_state_from_declaration("r/bundles/pack", &declared(&[])),
             ArtifactState::NotInstalled,
             "no declared bundles ⇒ NotInstalled"
         );
@@ -6524,7 +6751,7 @@ mod tests {
     #[test]
     fn derive_bundle_state_matches_only_its_own_repo() {
         assert_eq!(
-            derive_bundle_state("r/bundles/other", &declared(&["r/bundles/pack"])),
+            bundle_state_from_declaration("r/bundles/other", &declared(&["r/bundles/pack"])),
             ArtifactState::NotInstalled,
             "another declared bundle does not mark this one installed"
         );

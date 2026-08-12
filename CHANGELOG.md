@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above `installed` so a row with a louder problem keeps reporting it. `i`
   installs a pending row (that is the remedy that clears it) and `u`/`d` treat
   it as installed, since it is.
+- A TUI bundle row now reports its members' worst state instead of a flat
+  `installed` — a declared bundle whose members are pending, outdated or
+  modified says so, and `i`/`u` act on the whole bundle. Declaration still
+  owns the installed/not-installed line: an undeclared bundle stays
+  `not installed` however healthy its members are, and a member that was
+  never materialized folds in as `pending`, never as `not installed`.
 - The TUI `?` overlay gains a **Status column legend** explaining every glyph,
   built from the same projection the rows render so it cannot drift from the
   screen. The status hint line drops the conventional keys (arrows, `/`,
