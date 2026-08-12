@@ -17,6 +17,11 @@
 //! passes — `prune_orphans` and `reap_dropped_clients` — gate on the same
 //! flag, so one `--force` governs every way this command can destroy
 //! hand-edited work.
+//!
+//! A refusal does not suppress the report: the refused artifact keeps its
+//! bytes, every other artifact still reconciles, and the `UpdateReport` for
+//! what did happen is emitted alongside exit 65 — the refused row flagged
+//! `refused: true`, and every refusal also named on stderr.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -68,9 +73,10 @@ pub struct UpdateArgs {
 /// # Errors
 ///
 /// Lock/resolve failures (78/79/80/69/75), partial stale-lock (65), or
-/// integrity/I-O failures propagate via the typed chain. A locally modified
-/// artifact refuses with an integrity mismatch (65) unless `--force`, the
-/// same gate and exit code `grim install` applies.
+/// I/O failures propagate via the typed chain. A locally modified artifact
+/// is **not** an error: it returns the report with
+/// [`ExitCode::DataError`] (65) — the same gate and exit code `grim install`
+/// applies — and names the refusal on stderr.
 pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -294,8 +300,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         }
     }
 
-    // Build the report before surfacing any error so it reflects the new
-    // lock; then propagate the first install failure if there was one.
+    // Build the report before surfacing any failure so it reflects the new
+    // lock.
     //
     // A refusal is `Ok(InstallOutcome::Refused { .. })`, NOT `Err` — so
     // inspecting only the `Err` arm would let a locally-modified artifact
@@ -303,18 +309,53 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // worse failure than the unconditional overwrite this replaced. Route it
     // through `install`'s own error constructor so both commands answer the
     // same on-disk situation with the same error, message and exit code (65).
-    let report = build_report(&new_lock, previous.as_ref(), &pruned, &reaped);
+    //
+    // A refusal is reported, not propagated. By the time it is known, the new
+    // lock is saved, every other artifact is re-materialized, and prune/reap
+    // have already deleted — all of it irreversible. `return Err` here threw
+    // the report away, so one hand-edited file turned a fully-completed
+    // reconciliation of every other artifact into a bare failure with no
+    // record of what happened. The command already returns
+    // `(UpdateReport, ExitCode)`: the report goes out with a non-zero code
+    // instead, the refused row carrying `refused: true` so a machine consumer
+    // can tell an integrity refusal from any other 65. stderr names every
+    // refusal too — the plain table has no such column.
+    //
+    // A hard `Err` keeps propagating: its exit code comes from
+    // `classify_error` walking the chain, which a fixed code here would flatten.
+    let mut report = build_report(&new_lock, previous.as_ref(), &pruned, &reaped);
+    let mut refused = false;
     for o in outcomes {
+        let (kind, name) = (o.reference.kind, o.reference.name.clone());
         match o.result {
             Err(e) => return Err(e.into()),
             Ok(outcome) => {
                 if let Some(e) = super::install::refusal_error(o.reference, outcome) {
-                    return Err(e.into());
+                    refused = true;
+                    // Machine-readable counterpart to the stderr line: the
+                    // exit code says "something was refused", this row says
+                    // which one.
+                    report.mark_refused(kind, &name);
+                    // Wrap at the call site (`quality-rust-errors.md`'s
+                    // library/CLI boundary): the shared `IntegrityMismatch`
+                    // message stays generic for `grim install`, and update
+                    // adds the one thing only it knows — that its `--force`
+                    // also authorizes the prune and reap deletions above.
+                    tracing::error!(
+                        "{:#}",
+                        anyhow::Error::from(e).context(
+                            "Update refused a locally modified artifact; rerunning with --force overwrites it and \
+                             also authorizes update's prune and reap deletions"
+                        )
+                    );
                 }
             }
         }
     }
 
+    if refused {
+        return Ok((report, ExitCode::DataError));
+    }
     Ok((report, ExitCode::Success))
 }
 
@@ -446,6 +487,9 @@ fn build_report(
                 kept_modified_clients: drop.map(|d| d.kept_modified.clone()).unwrap_or_default(),
                 retained: drop.map(|d| d.retained.clone()).unwrap_or_default(),
                 abandoned_entries: drop.map(|d| d.abandoned_entries.clone()).unwrap_or_default(),
+                // The lock diff cannot see the installer's verdict; the
+                // refusal loop flips this via `mark_refused` afterwards.
+                refused: false,
             }
         })
         .collect();
@@ -467,6 +511,8 @@ fn build_report(
         kept_modified_clients: Vec::new(),
         retained: p.retained.clone(),
         abandoned_entries: p.abandoned_entries.clone(),
+        // A pruned orphan left the lock; the installer never saw it.
+        refused: false,
     }));
 
     UpdateReport::new(entries)

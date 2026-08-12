@@ -7,7 +7,7 @@
 //!
 //! JSON format: `{"items": [...]}` where each item is a
 //! `{kind, name, old, new, action, reaped_clients, kept_modified_clients,
-//! retained, abandoned_entries}` object (uniform `items` envelope, per
+//! retained, abandoned_entries, refused}` object (uniform `items` envelope, per
 //! subsystem-cli-api.md). `old` is `null` for an artifact that had no
 //! previous lock entry; `reaped_clients` / `kept_modified_clients` are
 //! always-present sorted client-name arrays (`[]` when no client was
@@ -17,6 +17,8 @@
 //! healthy row); `abandoned_entries` is `retained`'s counterpart for a
 //! shared, user-owned config file grim never intended to delete —
 //! always-present `{path, pointer}` objects (`[]` on every healthy row).
+//! `refused` is an always-present bool — `true` only on a row the integrity
+//! gate refused to overwrite (exit 65, forceable), `false` everywhere else.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -65,6 +67,16 @@ pub struct UpdateEntry {
     /// file grim never intended to delete. Always present, `[]` on every
     /// healthy row.
     pub abandoned_entries: Vec<AbandonedEntry>,
+    /// The integrity gate refused this artifact: its on-disk bytes drifted
+    /// from the recorded hash, so it was left untouched while the rest of
+    /// the pass reconciled. Always present, `false` on every other row.
+    ///
+    /// The exit code is already 65, but the report is emitted alongside it —
+    /// this is what tells a consumer *which* row the 65 is about, and that
+    /// it is a forceable integrity refusal rather than any other data error.
+    /// `action` deliberately keeps reporting the lock diff: the pin did roll
+    /// forward, only the materialization was refused.
+    pub refused: bool,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -88,6 +100,18 @@ impl UpdateReport {
     /// Build from operation results.
     pub fn new(items: Vec<UpdateEntry>) -> Self {
         Self { items }
+    }
+
+    /// Flag the row for `(kind, name)` as refused by the integrity gate.
+    ///
+    /// Applied after the fact because the refusal is only known once the
+    /// installer has run, while the rows come from the lock diff. A name the
+    /// report does not carry is a no-op — a refusal can only ever name a
+    /// locked artifact, and a silent miss beats a panic on the failure path.
+    pub fn mark_refused(&mut self, kind: ArtifactKind, name: &str) {
+        if let Some(e) = self.items.iter_mut().find(|e| e.kind == kind && e.name == name) {
+            e.refused = true;
+        }
     }
 }
 
@@ -137,6 +161,7 @@ mod tests {
             kept_modified_clients: Vec::new(),
             retained: Vec::new(),
             abandoned_entries: Vec::new(),
+            refused: false,
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -161,6 +186,7 @@ mod tests {
                 kept_modified_clients: Vec::new(),
                 retained: Vec::new(),
                 abandoned_entries: Vec::new(),
+                refused: false,
             },
             UpdateEntry {
                 kind: ArtifactKind::Rule,
@@ -175,6 +201,7 @@ mod tests {
                     path: PathBuf::from("/elsewhere/.mcp.json"),
                     pointer: "/mcpServers/grim".to_string(),
                 }],
+                refused: true,
             },
         ]);
         let mut buf = Vec::new();
@@ -187,6 +214,10 @@ mod tests {
         // and nothing left behind.
         assert_eq!(v["items"][0]["reaped_clients"], serde_json::json!([]));
         assert_eq!(v["items"][0]["kept_modified_clients"], serde_json::json!([]));
+        // `refused` is always present, both ways round — a consumer's
+        // presence check must never distinguish "clean" from "older grim".
+        assert_eq!(v["items"][0]["refused"], serde_json::json!(false));
+        assert_eq!(v["items"][1]["refused"], serde_json::json!(true));
         assert_eq!(v["items"][0]["retained"], serde_json::json!([]));
         assert_eq!(v["items"][0]["abandoned_entries"], serde_json::json!([]));
         assert!(v["items"][1]["old"].as_str().unwrap().starts_with("sha256:"));
@@ -199,5 +230,36 @@ mod tests {
             v["items"][1]["abandoned_entries"],
             serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim"}])
         );
+    }
+
+    fn plain_row(kind: ArtifactKind, name: &str) -> UpdateEntry {
+        UpdateEntry {
+            kind,
+            name: name.to_string(),
+            old: None,
+            new: Some(Algorithm::Sha256.hash(b"x")),
+            action: UpdateAction::Updated,
+            reaped_clients: Vec::new(),
+            kept_modified_clients: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
+            refused: false,
+        }
+    }
+
+    #[test]
+    fn mark_refused_flags_only_the_matching_row() {
+        let mut r = UpdateReport::new(vec![
+            plain_row(ArtifactKind::Rule, "edited"),
+            plain_row(ArtifactKind::Rule, "sibling"),
+            // Same name, different kind: the pair is the key, not the name.
+            plain_row(ArtifactKind::Skill, "edited"),
+        ]);
+        r.mark_refused(ArtifactKind::Rule, "edited");
+        r.mark_refused(ArtifactKind::Rule, "never-locked");
+
+        assert!(r.items[0].refused);
+        assert!(!r.items[1].refused, "a sibling that reconciled stays clean");
+        assert!(!r.items[2].refused, "same name, other kind, must not be flagged");
     }
 }
