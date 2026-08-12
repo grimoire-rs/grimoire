@@ -341,6 +341,25 @@ grim install --force              # overwrite the local edit
 `grim update --force` overwrites it just the same. What must never happen
 again: a plain `grim update` exiting 0 with the edit gone.
 
+The TUI carries the same gate, and this is the part only a human can check:
+
+```sh
+echo "tampered" >> .claude/skills/hello-world/SKILL.md
+grim tui
+```
+
+Select the `hello-world` row and press **`u`** (update). Expect the
+**Overwrite** confirmation dialog — the same one `i` (install) has always
+shown — quoting `installed artifact was modified locally`. Choosing Overwrite
+re-runs the action forced; cancelling leaves the edit intact. Before 0.13.0
+`u` silently overwrote it and the dialog was unreachable.
+
+On a **bundle member** node the dialog does not open (a member has no row
+index for the retry to address). The member shows
+`refused (locally modified)` plus a status line naming
+`grim install --force` as the remedy. That gap is known and pre-existing;
+verify the status line appears, not a dialog.
+
 ### 4a. Materialization drift (`outputs_pending`)
 
 The drift no other field can see: the artifact is byte-intact at its locked

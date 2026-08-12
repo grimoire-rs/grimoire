@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field, while `install` refused the identical bytes — and while update's own
   prune and client-reap passes already gated the same destruction behind
   `--force`.
+- **BREAKING** — the TUI's update action (`u`) carries the same change: it no
+  longer forces unconditionally, so a locally modified artifact now opens the
+  existing **Overwrite** confirmation dialog instead of being silently
+  replaced. The dialog was already wired for update; the unconditional force
+  made it unreachable. On a bundle member node the refusal is reported in the
+  status line with the remedy, since a member has no row index for the retry
+  to address.
 - The integrity gate now refuses only outputs a pass would actually
   **overwrite**. A drifted output belonging to a client outside the target
   set, or one stranded at a path a render-layout move left behind, is left to

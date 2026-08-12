@@ -385,7 +385,6 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     modal.working(&repo);
                     let label = match op {
                         BatchOp::Install | BatchOp::Update => {
-                            let is_update = op == BatchOp::Update;
                             // D8a: resolve the tag from the catalog rows — a
                             // related member reuses its row's pinned/latest tag,
                             // a non-catalog member falls back to "latest".
@@ -394,18 +393,25 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             // registry so a namespaced registry (e.g.
                             // `ghcr.io/acme`) is not mis-split on the first `/`.
                             let parent_registry = member_parent_registry(&ctx, &repo);
-                            let res = perform_member(
-                                &ctx,
-                                repo.clone(),
-                                kind,
-                                is_update,
-                                tag,
-                                name.clone(),
-                                &parent_registry,
-                            )
-                            .await;
+                            let res =
+                                perform_member(&ctx, repo.clone(), kind, tag, name.clone(), &parent_registry).await;
                             match res {
-                                Ok(s) => Some(s.label),
+                                Ok(s) => {
+                                    // A member has no index in `state.rows`, and
+                                    // `TuiAction::ForceRetry` addresses a row by
+                                    // index — so the Overwrite dialog cannot open
+                                    // here the way it does for a row action. The
+                                    // label alone ("refused (locally modified)")
+                                    // would leave the user with no route out, so
+                                    // name the remedy explicitly.
+                                    if s.forceable_refusal.is_some() {
+                                        state.set_status(format!(
+                                            "{repo}: refused — locally modified; \
+                                             re-run as `grim install --force` to overwrite"
+                                        ));
+                                    }
+                                    Some(s.label)
+                                }
                                 // Same status-line seam the batch path uses
                                 // (`run_batch_with_progress`): a member action
                                 // hitting a containment refusal must get the
@@ -2218,8 +2224,10 @@ async fn run_batch_with_progress(
         };
         state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
         let outcome: anyhow::Result<Option<InstallSummary>> = match op {
-            BatchOp::Install => perform(ctx, &row, false, None, &batch, force).await.map(Some),
-            BatchOp::Update => perform(ctx, &row, true, None, &batch, force).await.map(Some),
+            // Install and update do identical work here — declare, relock,
+            // materialize. The only thing that ever differed was `force`, and
+            // that now comes from the Overwrite dialog for both.
+            BatchOp::Install | BatchOp::Update => perform(ctx, &row, None, &batch, force).await.map(Some),
             BatchOp::Uninstall => {
                 progress.advance(n + 1, &row.repo);
                 perform_uninstall(ctx, &row).map(|()| None)
@@ -2509,7 +2517,6 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
 async fn perform(
     ctx: &TuiContext,
     row: &TuiRow,
-    is_update: bool,
     name_override: Option<&str>,
     progress: &dyn InstallProgress,
     force: bool,
@@ -2518,7 +2525,7 @@ async fn perform(
     // record), so it must route to the local seam BEFORE the empty-`registry`
     // guard below — that guard would otherwise reject it as malformed.
     if matches!(row.source, RowSource::Local) {
-        return perform_local(ctx, row, is_update, progress, force).await;
+        return perform_local(ctx, row, progress, force).await;
     }
 
     // Use the authoritative registry/repository fields directly — never
@@ -2583,9 +2590,19 @@ async fn perform(
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
 
-    // `update` forces re-materialization (rolling-release contract),
-    // matching `command::update`; `install` honours the integrity gate. The
-    // shared pipeline (materialize + persist + vendor config sync) is the
+    // Both `install` and `update` honour the integrity gate — `force` comes
+    // from the user's answer to the Overwrite dialog, never from the fact
+    // that this is an update. A changed pin still re-materializes without
+    // force (the gate only refuses bytes that drifted from the RECORDED
+    // hash), so the rolling-release contract is intact.
+    //
+    // This used to pass `is_update || force`, mirroring `command::update`'s
+    // hard-coded force. Both are fixed: `u` on a hand-edited artifact now
+    // refuses, `install_outcomes_label` reports it as a forceable refusal,
+    // and the existing Overwrite dialog offers the retry — the same route
+    // `i` has always had, which the unconditional force made unreachable.
+    //
+    // The shared pipeline (materialize + persist + vendor config sync) is the
     // same seam `grim install` and `grim add` funnel through.
     let outcomes = install_and_persist(
         &single,
@@ -2597,7 +2614,7 @@ async fn perform(
         ctx.scope,
         &ctx.workspace,
         &ctx.config_path,
-        is_update || force,
+        force,
         InstallIntent::Declared,
         progress,
     )
@@ -2619,7 +2636,6 @@ async fn perform(
 async fn perform_local(
     ctx: &TuiContext,
     row: &TuiRow,
-    is_update: bool,
     progress: &dyn InstallProgress,
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
@@ -2633,7 +2649,7 @@ async fn perform_local(
         .ok()
         .is_some_and(|(_options, _registries, set)| declared_as_path(&set, kind, &name));
     if declared {
-        return perform_local_declared(ctx, kind, &name, is_update, progress, force).await;
+        return perform_local_declared(ctx, kind, &name, progress, force).await;
     }
 
     // Otherwise route a dev-install record (`grim install <path>`, no
@@ -2648,7 +2664,7 @@ async fn perform_local(
             "'{name}' is not a declared path artifact or a dev-install record"
         ));
     };
-    perform_local_dev(ctx, kind, &name, &record.source, is_update, progress, force).await
+    perform_local_dev(ctx, kind, &name, &record.source, progress, force).await
 }
 
 /// Whether `(kind, name)` is declared in `set` as a local path source.
@@ -2672,7 +2688,6 @@ async fn perform_local_declared(
     ctx: &TuiContext,
     kind: ArtifactKind,
     name: &str,
-    is_update: bool,
     progress: &dyn InstallProgress,
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
@@ -2722,7 +2737,7 @@ async fn perform_local_declared(
         ctx.scope,
         &ctx.workspace,
         &ctx.config_path,
-        is_update || force,
+        force,
         InstallIntent::Declared,
         progress,
     )
@@ -2740,7 +2755,6 @@ async fn perform_local_dev(
     kind: ArtifactKind,
     name: &str,
     source: &crate::lock::locked_source::LockedSource,
-    is_update: bool,
     progress: &dyn InstallProgress,
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
@@ -2820,7 +2834,7 @@ async fn perform_local_dev(
         ctx.scope,
         &ctx.workspace,
         &ctx.config_path,
-        is_update || force,
+        force,
         InstallIntent::Dev,
         progress,
     )
@@ -3336,7 +3350,6 @@ async fn perform_member(
     ctx: &TuiContext,
     repo: String,
     kind: crate::oci::ArtifactKind,
-    is_update: bool,
     tag: String,
     name: String,
     parent_registry: &str,
@@ -3385,7 +3398,7 @@ async fn perform_member(
     // Never forced: a bundle member is a virtual projection row with no
     // `rows` index, so it cannot carry a `PendingForce` retry — its refusal
     // stays a status-line report.
-    perform(ctx, &synthetic_row, is_update, Some(&name), &SilentProgress, false).await
+    perform(ctx, &synthetic_row, Some(&name), &SilentProgress, false).await
 }
 
 /// Perform a member uninstall action, reusing the shared seams for file
@@ -4337,7 +4350,7 @@ mod tests {
         row.registry = String::new();
         row.repository = String::new();
 
-        let result = perform(&ctx, &row, false, None, &SilentProgress, false).await;
+        let result = perform(&ctx, &row, None, &SilentProgress, false).await;
 
         // Positive contract: the row routed into `perform_local`, which — with
         // no path declaration and no dev record for this name — fails with the
@@ -5476,7 +5489,7 @@ mod tests {
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
 
-        let label = perform(&ctx, &row, false, None, &SilentProgress, false)
+        let label = perform(&ctx, &row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert_eq!(label.label, "installed");
@@ -5540,7 +5553,7 @@ mod tests {
         let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &row, false, None, &SilentProgress, false)
+        perform(&ctx, &row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -5593,7 +5606,7 @@ mod tests {
         let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         row.kind = "bundle".to_string();
         row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &row, false, None, &SilentProgress, false)
+        perform(&ctx, &row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/alpha/SKILL.md").is_file());
@@ -5660,7 +5673,7 @@ mod tests {
         row.source = RowSource::Local;
         row.state = ArtifactState::NotInstalled;
 
-        let label = perform_local(&ctx, &row, false, &SilentProgress, false)
+        let label = perform_local(&ctx, &row, &SilentProgress, false)
             .await
             .expect("a local-bundle Local row must not hit the resolved-lock-missing partial failure");
         assert_eq!(label.label, "installed", "the bundle's member must materialize");
@@ -5700,7 +5713,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -5760,7 +5773,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "latest".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None, &SilentProgress, false)
+        perform(&ctx, &skill_row, None, &SilentProgress, false)
             .await
             .expect("skill install succeeds");
 
@@ -5768,7 +5781,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -5803,7 +5816,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -5872,7 +5885,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         let lock = lock_io::load(&ctx.lock_path).expect("lock loads");
@@ -5909,7 +5922,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -5924,7 +5937,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "1.0.0".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None, &SilentProgress, false)
+        perform(&ctx, &skill_row, None, &SilentProgress, false)
             .await
             .expect("skill install succeeds");
 
@@ -5964,7 +5977,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
 
@@ -5994,7 +6007,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -6047,7 +6060,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
 
@@ -6073,7 +6086,7 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "1.0.0".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None, &SilentProgress, false)
+        perform(&ctx, &skill_row, None, &SilentProgress, false)
             .await
             .expect("skill install succeeds");
         let (lock, install_state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
@@ -6109,7 +6122,7 @@ mod tests {
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
@@ -6145,14 +6158,14 @@ mod tests {
         let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
         skill_row.latest_tag = "latest".to_string();
         skill_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &skill_row, false, None, &SilentProgress, false)
+        perform(&ctx, &skill_row, None, &SilentProgress, false)
             .await
             .expect("skill install succeeds");
 
         let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
         bundle_row.kind = "bundle".to_string();
         bundle_row.state = ArtifactState::NotInstalled;
-        perform(&ctx, &bundle_row, false, None, &SilentProgress, false)
+        perform(&ctx, &bundle_row, None, &SilentProgress, false)
             .await
             .expect("bundle install succeeds");
 
@@ -6980,7 +6993,6 @@ mod tests {
             &ctx,
             "localhost:5050/grimoire/skills/demo".to_string(),
             ArtifactKind::Skill,
-            false,
             tag,
             "demo".to_string(),
             "localhost:5050",
@@ -7165,7 +7177,6 @@ mod p2_app_member_node_tests {
             &ctx,
             "noslash".to_string(),
             ArtifactKind::Skill,
-            false,
             "latest".to_string(),
             "noslash".to_string(),
             "localhost:5050",
