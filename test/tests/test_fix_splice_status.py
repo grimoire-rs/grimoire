@@ -285,6 +285,43 @@ def test_global_opencode_mcp_follows_opencode_config_file_override(
     assert "grim-mcp" not in doc.get("mcp", {}), f"uninstall must remove the live entry: {doc}"
 
 
+def test_global_opencode_mcp_edits_an_existing_jsonc_instead_of_a_json_sibling(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """OpenCode reads ``opencode.jsonc`` at *every* config location, but the
+    global write path hardcoded the ``.json`` spelling: a user whose global
+    config was ``~/.config/opencode/opencode.jsonc`` got a second, competing
+    ``opencode.json`` written next to it (and went undetected as an OpenCode
+    user, since `detect` probes that same path).
+    """
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_mcp(runner, tmp_path / "src", registry, unique_repo)
+
+    # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
+    cfg_dir = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_dir / "opencode.jsonc"
+    cfg.write_text('{\n  // which model to use\n  "model": "anthropic/claude"\n}\n')
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "opencode")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    added = cfg.read_text()
+    assert '"grim-mcp"' in added, f"the entry must land in the .jsonc: {added}"
+    assert "// which model to use" in added, f"JSONC comment must survive: {added}"
+    assert not (cfg_dir / "opencode.json").exists(), "no competing .json sibling may be created"
+
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+    runner.json("uninstall", "--global", "mcp", "grim-mcp")
+    removed = cfg.read_text()
+    assert "grim-mcp" not in removed, f"uninstall must remove the live entry: {removed}"
+    assert "// which model to use" in removed, "the user's config must survive uninstall"
+
+
 # ── (d) status: a client that declines the kind is not `clients_missing` ───
 
 

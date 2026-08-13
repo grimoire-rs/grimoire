@@ -16,10 +16,10 @@
 //! Config resolution mirrors OpenCode's own:
 //! - **project** scope edits `<workspace>/opencode.jsonc` when present,
 //!   else `<workspace>/opencode.json`, with a workspace-relative glob;
-//! - **global** scope edits `$OPENCODE_CONFIG` when set, else
-//!   `$XDG_CONFIG_HOME/opencode/opencode.json` (default
-//!   `~/.config/opencode/opencode.json`), with an absolute glob rooted at
-//!   `$GRIM_HOME` (the global install workspace).
+//! - **global** scope edits `$OPENCODE_CONFIG` when set, else the
+//!   `opencode.jsonc`-when-present / `opencode.json` pair under
+//!   `$XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`), with an
+//!   absolute glob rooted at `$GRIM_HOME` (the global install workspace).
 //!
 //! `$OPENCODE_CONFIG` (a config **file** path) and `$OPENCODE_CONFIG_DIR`
 //! (OpenCode's additive skills/agents scan **directory**, honored by
@@ -43,7 +43,7 @@ use crate::oci::ArtifactKind;
 use crate::store::atomic_write;
 
 use super::client_target::ClientTarget;
-use super::json_config::with_path;
+use super::json_config::{prefer_jsonc, with_path};
 use super::json_splice::{self, Splice};
 
 /// The workspace-relative glob grim manages for project-scope installs.
@@ -127,21 +127,21 @@ pub fn global_config_dir(
     (!parent.as_os_str().is_empty()).then_some(parent)
 }
 
-/// The project-scope config: `opencode.jsonc` when present (OpenCode
-/// supports both spellings), else `opencode.json`.
+/// The project-scope config at the workspace root — OpenCode reads both
+/// spellings, so [`prefer_jsonc`] picks the one that exists.
 fn project_config_path(workspace: &Path) -> PathBuf {
-    let jsonc = workspace.join("opencode.jsonc");
-    if jsonc.is_file() {
-        jsonc
-    } else {
-        workspace.join("opencode.json")
-    }
+    prefer_jsonc(workspace, "opencode")
 }
 
-/// The global-scope config: `$OPENCODE_CONFIG` wins (it is OpenCode's own
-/// "custom config file path" override), else the XDG default. `None` when
+/// The global-scope config: `$OPENCODE_CONFIG` wins verbatim (it is
+/// OpenCode's own "custom config file path" override — an explicit file, not
+/// a spelling to guess), else the XDG default directory, where [`prefer_jsonc`]
+/// picks the spelling exactly as it does for the project scope. `None` when
 /// no variable resolves a location — a relative fallback would silently
 /// land the edit wherever the process happens to run.
+///
+/// Touches the filesystem (the `.jsonc` existence probe); on a location that
+/// does not exist yet it resolves to `opencode.json`.
 fn global_config_path(
     env_override: Option<PathBuf>,
     xdg_config_home: Option<PathBuf>,
@@ -151,7 +151,7 @@ fn global_config_path(
         return Some(path);
     }
     let config_dir = xdg_config_home.or_else(|| home.map(|h| h.join(".config")))?;
-    Some(config_dir.join("opencode").join("opencode.json"))
+    Some(prefer_jsonc(&config_dir.join("opencode"), "opencode"))
 }
 
 /// Converge the vendor config on the state's needs: ensure the managed
@@ -530,6 +530,32 @@ mod tests {
             global_config_path(None, None, None),
             None,
             "no variable at all: skip the sync, never a CWD-relative path"
+        );
+    }
+
+    #[test]
+    fn global_config_prefers_existing_jsonc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let xdg = tmp.path().to_path_buf();
+        let dir = xdg.join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            global_config_path(None, Some(xdg.clone()), None),
+            Some(dir.join("opencode.json")),
+            "no config on disk yet: create the .json spelling"
+        );
+
+        std::fs::write(dir.join("opencode.jsonc"), "{}\n").unwrap();
+        assert_eq!(
+            global_config_path(None, Some(xdg.clone()), None),
+            Some(dir.join("opencode.jsonc")),
+            "an existing global .jsonc is edited in place, not shadowed by a .json sibling"
+        );
+        assert_eq!(
+            global_config_path(Some(dir.join("oc.json")), Some(xdg), None),
+            Some(dir.join("oc.json")),
+            "OPENCODE_CONFIG names an explicit file — never probed for a sibling spelling"
         );
     }
 

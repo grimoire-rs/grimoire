@@ -136,18 +136,12 @@ impl Vendor for AmpVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         // Amp reads both `settings.json` and `settings.jsonc`
-        // (`research_vendor_verification_zed_amp.md:43`). Edit an existing
-        // `.jsonc` in place rather than writing a competing sibling; when both
-        // spellings exist the comment-bearing `.jsonc` wins (documented
-        // policy). A fresh install with neither present defaults to
-        // `settings.json`. Mirrors OpenCode's `opencode.jsonc`-preference.
-        let root = amp_scope_root(workspace, scope);
-        let jsonc = root.join("settings.jsonc");
-        if jsonc.is_file() {
-            Some(jsonc)
-        } else {
-            Some(root.join("settings.json"))
-        }
+        // (`research_vendor_verification_zed_amp.md:43`) — the same
+        // dual-spelling shape as OpenCode, so both go through one helper.
+        Some(super::json_config::prefer_jsonc(
+            &amp_scope_root(workspace, scope),
+            "settings",
+        ))
     }
 
     fn mcp_entry(

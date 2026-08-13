@@ -13,6 +13,25 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The `<stem>.jsonc` spelling in `dir` when that file already exists, else
+/// `<stem>.json`.
+///
+/// Several vendors (OpenCode, Amp) read both spellings of the same config.
+/// grim edits the one that is there rather than writing a competing sibling
+/// next to it; when both exist the comment-bearing `.jsonc` wins. A fresh
+/// install with neither present creates `.json` — the spelling every vendor
+/// doc and schema mapping names, and grim writes no comments of its own. A
+/// user who later renames the file to `.jsonc` is followed automatically on
+/// the next sync.
+pub fn prefer_jsonc(dir: &Path, stem: &str) -> PathBuf {
+    let jsonc = dir.join(format!("{stem}.jsonc"));
+    if jsonc.is_file() {
+        jsonc
+    } else {
+        dir.join(format!("{stem}.json"))
+    }
+}
+
 /// Parse `raw` as a JSON object, falling back to a JSONC sanitization pass
 /// (comments, trailing commas). Returns the object and whether the
 /// sanitization changed anything (⇒ rewriting loses comments).
