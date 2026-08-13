@@ -54,6 +54,17 @@ footer = """
 {% endfor %}
 """
 trim = true
+# cargo-dist embeds this changelog in the `plan` job's `val` output, and GitHub
+# withholds any job output containing a secret's value — the whole output, not
+# just the match. A commit subject that happens to reproduce one therefore
+# empties `val`, `fromJson` fails on line 95 of release.yml, and every build and
+# publish job skips while the run still reports success (run 31671136186).
+# Backtick the auth-scheme prose so the rendered line cannot match verbatim.
+# This covers one known collision; the general fix is to not hold a secret whose
+# value is ordinary English.
+postprocessors = [
+  { pattern = 'Bearer realm', replace = '`Bearer` realm' },
+]
 
 [git]
 conventional_commits = true

@@ -5,62 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- `grim update` now runs the same local-modification integrity gate as
-  `grim install`: a locally modified artifact is refused with exit `65`
-  instead of being overwritten silently. Pass `--force` for the previous
-  behaviour. A changed pin still overwrites machine-managed content with no
-  flag, so ordinary rolling updates are unaffected. Previously `update` forced
-  unconditionally, destroying hand-edited work with no warning and no report
-  field, while `install` refused the identical bytes — and while update's own
-  prune and client-reap passes already gated the same destruction behind
-  `--force`.
-- The TUI's update action (`u`) carries the same change: it no longer forces
-  unconditionally, so a locally modified artifact now opens the existing
-  **Overwrite** confirmation dialog instead of being silently replaced. The
-  dialog was already wired for update; the unconditional force made it
-  unreachable. On a bundle member node the refusal is reported in the status
-  line with the remedy, since a member has no row index for the retry to
-  address.
-- The integrity gate now refuses only outputs a pass would actually
-  **overwrite**. A drifted output belonging to a client outside the target
-  set, or one stranded at a path a render-layout move left behind, is left to
-  the reaper that already preserves it rather than blocking the command.
+## [0.13.0] - 2026-08-13
 
 ### Added
 
-- `grim status --format json` items carry `outputs_pending`: the
-  `{client, path}` outputs `grim install` would write right now that the
-  install record does not already account for — materialization drift from
-  either of two causes: a client installed after the fact, or an unmigrated
-  layout move. A deleted output is not one of them; it surfaces as
-  `state: missing`. Reported under autodetect too, never moves `state`,
-  never affects the exit code. Remediation is `grim install`.
-- The TUI and `grim search` gain a matching `pending` badge, ranked directly
-  above `installed` so a row with a louder problem keeps reporting it. `i`
-  installs a pending row (that is the remedy that clears it) and `u`/`d` treat
-  it as installed, since it is.
-- A TUI bundle row now reports its members' worst state instead of a flat
-  `installed` — a declared bundle whose members are pending, outdated or
-  modified says so, and `i`/`u` act on the whole bundle. Declaration still
-  owns the installed/not-installed line: an undeclared bundle stays
-  `not installed` however healthy its members are, and a member that was
-  never materialized folds in as `pending`, never as `not installed`.
-- The TUI `?` overlay gains a **Status column legend** explaining every glyph,
-  built from the same projection the rows render so it cannot drift from the
-  screen. The status hint line drops the conventional keys (arrows, `/`,
-  `→/←`, pgup/pgdn) it was spending its widest tier on, leaving room for the
-  bindings nobody guesses.
+- Add per-registry browse filters *(config)*
+- Add `registry set` to edit an entry in place *(config)*
+- Match browse filters against the repository path *(config)*
+- Match browse filters against both candidate strings *(config)*
+- Add `--clear-include` / `--clear-exclude` to `registry set` *(config)*
+- Attribute every JSON item to its registry entry *(search)*
+- Match fuzzily and rank results by relevance *(search)*
+- Add insecure as a per-registry config field *(config)*
+- Report materialization drift as outputs_pending *(status)*
 
-### Performance
+### Changed
 
-- The OCI access seam is reused within an invocation instead of rebuilt per
-  call, so the registry bearer token `oci-client` caches on the client
-  survives. `grim mcp` previously paid a full token handshake on every tool
-  call.
+- Reuse the access seam within one invocation *(oci)*
+
+### Documentation
+
+- Document registry browse filters and what they do not do
+- Move the browse-filter remedy past the schema prefix boundary *(config)*
+- State that a wildcard-free pattern expands downward only *(config)*
+- Restate the browse-filter rule as dual-candidate everywhere *(config)*
+- Document insecure as a per-registry field *(config)*
+- State the --registry and credential boundaries *(config)*
+- Document the update integrity gate and outputs_pending
+- Reframe the update integrity gate as a contract restoration
+- Describe the update integrity gate and the TUI states it produces
+- Report insecure as the sixth addressable registry field
+
+### Fixed
+
+- Resolve logout's registry from the config the user named *(login)*
+- Browse every entry a file declares at one locator *(config)*
+- Give every declared entry its own tree root *(tui)*
+- Key registry identity by entry, not locator *(tui)*
+- Flip every row sharing a repo when a check reports outdated *(tui)*
+- Re-pin a declared artifact instead of refusing the tag change *(add)*
+- Resolve plain-HTTP hosts from declared registries *(config)*
+- Never follow a plaintext `Bearer` realm from an HTTPS registry *(login)*
+- Report 65 when an index swap collides with insecure *(config)*
+- Re-resolve the declared tag, not the repository head *(status)*
+- Run the same integrity gate as install *(update)*
+- Update honours the integrity gate and opens the Overwrite dialog *(tui)*
+- Let `i` act on a pending row, and explain the badges *(tui)*
+- Derive the status-bar legend so `pending` appears in it *(tui)*
+- Fold member health into the bundle row state *(tui)*
+- Correct the badge ladder's stale cross-enum claims *(status)*
+- Stage a forced install before publishing it *(install)*
+- Bound the access-seam memo so credential changes take effect *(oci)*
+- Stop claiming outputs_pending detects a deleted output *(status)*
+- Keep the report when the integrity gate refuses *(update)*
+- Measure the status-bar legend against what it actually paints *(tui)*
 
 ## [0.12.1] - 2026-08-02
 
@@ -743,6 +741,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.13.0]: https://github.com/grimoire-rs/grimoire/compare/v0.12.1..v0.13.0
 [0.12.1]: https://github.com/grimoire-rs/grimoire/compare/v0.12.0..v0.12.1
 [0.12.0]: https://github.com/grimoire-rs/grimoire/compare/v0.11.1..v0.12.0
 [0.11.1]: https://github.com/grimoire-rs/grimoire/compare/v0.11.0..v0.11.1
