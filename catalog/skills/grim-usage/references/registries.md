@@ -696,6 +696,30 @@ registry and the accepted value is persisted as a `[[registries]]` entry with
 actions go through the same seams as `grim add`/`install`/`uninstall`. Press
 `?` inside for the full key map.
 
+Three row states are worth knowing before you press anything, because each
+one changes what the action keys do:
+
+- **`+ pending`** marks an artifact that is installed but does not yet cover
+  every client it should — the same materialization drift `grim status`
+  reports as `outputs_pending`. Nothing is broken and nothing is out of
+  date: `i` writes the missing outputs and clears the badge. `u` and `d`
+  work on a pending row too, making it the one state both action sets share.
+- **The Overwrite dialog** is the integrity gate seen from the TUI. `i` and
+  `u` both refuse an artifact whose bytes drifted from the hash grim
+  recorded — `u` included, since 0.13.0 — and the refusal opens a modal
+  offering the forced retry. Answering that modal is what supplies
+  `--force`; the key you pressed does not. Only a single-artifact action
+  offers it, since one answer cannot speak for several artifacts, so a batch
+  leaves its refusals in the status line instead. A retry that refuses again
+  does not re-open the dialog, so there is no confirm loop to get stuck in.
+- **A bundle row folds in its members' health.** Declaration is the gate — a
+  bundle absent from `[bundles]` reads `not installed` whatever its members
+  look like — but past it the row shows the *worst* member state, at the
+  precedence `integrity-missing > modified > outdated > pending >
+  installed`. A member that was never materialized folds in as `pending`,
+  not `not installed`, so no member can drag the row back across the line
+  declaration owns, and the bundle stays actionable as a unit.
+
 `grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
 STDIO. An AI agent host such as [Claude Code][claude-code] connects to it
 and can call these tools:

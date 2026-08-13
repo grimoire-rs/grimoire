@@ -270,9 +270,18 @@ gates.
 
 `grim status --check` adds one live catalog round-trip: it fills in
 `deprecated`/`replaced_by` on every registry-sourced item and, via a
-fresh per-artifact tag re-resolution, `update_available` — "is a newer
-version out there right now" versus status's normal offline read. The
-top-level `checked` field says whether the check actually ran online;
+fresh per-artifact re-resolution, `update_available`.
+
+That re-resolution follows **the reference the config declares**, tag and
+all — so `update_available` answers *would `grim update` move this pin?*,
+the same decision the TUI's `↑ outdated` badge makes. It is deliberately
+not "is a newer version out there right now": a release the declared
+reference does not point at is **not** an available update, so an exact
+version pin, an unmoved advisory float, and a digest pin all report
+`false` while the repository carries a strictly higher tag. Widen the
+declared reference (`grim add <ref>` re-pins it) to follow those releases.
+
+The top-level `checked` field says whether the check actually ran online;
 `checked == false` means all three of those item fields are `null`.
 When scripting against it, treat `update_available: null` as "could not
 determine", never as "up to date": it is `null` (not `false`) for a
