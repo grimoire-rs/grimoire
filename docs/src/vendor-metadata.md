@@ -507,16 +507,19 @@ when it exists, otherwise `<workspace>/opencode.json`, and writes the
 workspace-relative glob `.opencode/rules/*.md`.
 
 For a **global-scope** install, grim edits the file at `$OPENCODE_CONFIG`
-when that variable is set, otherwise the [XDG Base Directory][xdg-spec]
-default (`$XDG_CONFIG_HOME/opencode/opencode.json`, falling back to
-`~/.config/opencode/opencode.json`). The glob in a global config is an
-absolute path rooted at `$GRIM_HOME`.
+when that variable is set — an explicit path, used as given — otherwise the
+[XDG Base Directory][xdg-spec] default
+`$XDG_CONFIG_HOME/opencode/opencode.jsonc` when that file exists, else
+`$XDG_CONFIG_HOME/opencode/opencode.json` (falling back to
+`~/.config/opencode/`), the same both-spellings rule as the project scope.
+The glob in a global config is an absolute path rooted at `$GRIM_HOME`.
 
 Config editing is conservative. A config file that does not parse — even
 after stripping JSONC comments and trailing commas — is never rewritten.
-grim returns a sync error instead. A parseable JSONC file is rewritten as
-plain JSON; any JSONC comments it contained are lost. grim emits a warning
-when that happens.
+grim returns a sync error instead. A file that *does* parse is edited
+through the span-preserving splice engine: only the bytes of the one
+managed element change, so key order, formatting, and JSONC comments all
+survive.
 
 ## Drift detection for rendered files {#drift}
 
