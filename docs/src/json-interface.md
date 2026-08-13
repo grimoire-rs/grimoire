@@ -90,8 +90,8 @@ One row object per item inside `{"items": [...]}`:
 | `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on `update` also authorizes its prune and reap deletions). **A refusal does not suppress the report:** every other artifact still reconciles and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column | `action`: `updated`, `unchanged`, `removed`, `kept-modified` — the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused) |
 | `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
-| `config registry list` | `{alias, oci, index, include, exclude, default}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered | — |
-| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
+| `config registry list` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered; `insecure` is the entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`) | — |
+| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
 | `publish` | `{ref, kind, digest, tags, status, pushed_to}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
 `kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
@@ -189,14 +189,15 @@ own validation is the source of truth, `constraints` is a client-side
 pre-check hint to fail fast before round-tripping to the CLI.
 
 `config registry fields` describes the field *pattern*
-(`registry.<alias>.oci`, `.index`, `.default`, `.include`, `.exclude`), not
+(`registry.<alias>.oci`, `.index`, `.default`, `.include`, `.exclude`,
+`.insecure`), not
 any resolved alias's values, so its rows are a slimmer shape than `config
 list`'s `ConfigEntry`: just `key`/`type`/`title`/`description`. It resolves
 no scope and reads no file, so it succeeds identically inside or outside a
 project.
 
-The row set is **append-only**: `oci, index, default, include, exclude`
-today, and a future field is added at the end. Positional access to the
+The row set is **append-only**: `oci, index, default, include, exclude,
+insecure` today, and a future field is added at the end. Positional access to the
 existing rows therefore stays valid across releases — `items[2]` is the
 `default` row before and after the two filter fields landed — but read the
 count from `items.length` rather than assuming it, and prefer matching on
@@ -226,7 +227,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
 | `config set` / `unset` / `registry add` / `set` / `rm` / `use` | `{action, key, value, scope, dry_run, fields}` — `dry_run` is `true` only for `config set --dry-run`, `false` for every other write verb (`unset` has no `--dry-run` flag). `value` keeps its per-verb meaning: for `registry set` it is the locator the call **named** — the argument of `--oci`/`--index` — and `null` when neither flag was given (a filter-only or `--default`-only edit reports `null`), which is why the structured `fields` array exists beside it. It echoes the flag and is never compared against the stored entry, so naming an entry's current locator reports that locator, not `null`. `fields` is an always-present array, `[]` on all five other write verbs and one element per field `registry set` wrote — see [the `fields` array](#config-write-fields) | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set` |
-| `config registry show` | `{alias, oci, index, include, exclude, default}` — both locator keys present, exactly one non-null; `include`/`exclude` always-present arrays, `[]` when unfiltered | — |
+| `config registry show` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` always-present arrays, `[]` when unfiltered; `insecure` is the authored opt-in, not the effective transport | — |
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude, insecure}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); `insecure` is that entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
@@ -258,8 +259,8 @@ Only `registry set` populates it, with one element per field the call wrote:
 }
 ```
 
-- `field` is the short field name — `oci`, `index`, `default`, `include` or
-  `exclude`, the same vocabulary [`config registry
+- `field` is the short field name — `oci`, `index`, `default`, `include`,
+  `exclude` or `insecure`, the same vocabulary [`config registry
   fields`](#shapes-items) uses.
 - `action` is `"set"` or `"cleared"`. A `"cleared"` element carries **no**
   `value` key at all — not `value: null`. `null` already means two things in
@@ -269,9 +270,10 @@ Only `registry set` populates it, with one element per field the call wrote:
   overload. Discriminate on `action`, never on the presence of `value`.
 - `value` on a `"set"` element takes the field's own JSON type: a string for
   `oci`/`index`, an array of strings for `include`/`exclude`, a boolean for
-  `default`.
-- Element order follows the frozen `oci, index, default, include, exclude`
-  sequence, so two calls touching the same fields emit byte-identical arrays.
+  `default`/`insecure`.
+- Element order follows the frozen `oci, index, default, include, exclude,
+  insecure` sequence, so two calls touching the same fields emit
+  byte-identical arrays.
 
 **It reports the write, not the invocation.** A field named with the value it
 already held still emits its element — presence means "this field was
