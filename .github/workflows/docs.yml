@@ -55,16 +55,16 @@ jobs:
         with:
           matcher: true
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       # Pinned to 0.5.3: docs/theme/index.hbs vendors that release's stock
       # index.hbs byte for byte. Bumping the pin needs a re-copy via
       # `mdbook init --theme` and a re-diff, or it silently drifts from upstream.
       - name: Install mdBook
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: mdbook@0.5.3
       # Builds grim, regenerates docs/src/schemas/*.json from the parser,
