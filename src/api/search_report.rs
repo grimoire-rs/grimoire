@@ -12,14 +12,15 @@
 //!
 //! JSON format: `{"items": [...]}` where each item is a
 //! `{kind, repo, source, summary, description, version, latest_tag,
-//! repository, revision, created, deprecated, status}` object (uniform
-//! `items` envelope, per subsystem-cli-api.md).
+//! repository, revision, created, deprecated, replaced_by, rating, status}`
+//! object (uniform `items` envelope, per subsystem-cli-api.md).
 //! The `description` stays full and untruncated; both `version` and the
 //! representative `latest_tag` are kept; `source` is the `{alias, locator}`
 //! attribution of the configured registry entry the row came from;
 //! `repository` is the HTTPS source URL or `null`; `revision`/`created` are
 //! the git provenance (`--git` opt-in) or `null`; `deprecated` is the
-//! deprecation message or `null`.
+//! deprecation message or `null`; `rating` is the community rating joined
+//! from the index sidecar, or `null` when the artifact is unrated.
 
 use std::io::{self, Write};
 
@@ -52,6 +53,25 @@ pub struct SearchSource {
     /// The entry's locator, byte-identical to the configured `[[registries]]`
     /// value it was resolved from.
     pub locator: String,
+}
+
+/// One row's community rating — the count and the human-facing thread link.
+///
+/// Deliberately **not** the whole
+/// [`crate::catalog::registry_catalog::RatingSummary`]: that struct also
+/// carries the forge's opaque vote-subject `target`, which the ADR declares
+/// "never parsed or constructed by any client". Emitting it would freeze a
+/// forge-internal node id into the JSON contract — the same reason
+/// [`SearchSource`] refuses to emit `RowSource::root_key()` — and no consumer
+/// can act on it: a vote goes through `grim rate <ref>`, which resolves the
+/// target itself. `up` is the count; `url` opens the thread. Both halves a
+/// client can use; nothing it cannot.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchRating {
+    /// Upvote count as of the index sidecar's generation.
+    pub up: u32,
+    /// Human-facing link to the forge thread the votes live on.
+    pub url: String,
 }
 
 /// One catalog match annotated with its install status.
@@ -90,6 +110,10 @@ pub struct SearchEntry {
     /// The successor reference when the publisher named a replacement; `None`
     /// otherwise. JSON-only — never shown as its own plain-table column.
     pub replaced_by: Option<String>,
+    /// The community rating, when the browse source published one for this
+    /// artifact; `None` means *unrated* — never a zero-vote record. JSON-only
+    /// — never shown as its own plain-table column.
+    pub rating: Option<SearchRating>,
     /// How the repository relates to the current scope.
     pub status: StatusBadge,
 }
@@ -101,7 +125,7 @@ impl Serialize for SearchEntry {
         // Field count below is asserted by
         // `json_carries_replaced_by_plain_table_does_not` — adding a field
         // here requires bumping both, or the test fails.
-        let mut s = serializer.serialize_struct("SearchEntry", 13)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 14)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("source", &self.source)?;
@@ -114,6 +138,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("created", &self.created)?;
         s.serialize_field("deprecated", &self.deprecated)?;
         s.serialize_field("replaced_by", &self.replaced_by)?;
+        s.serialize_field("rating", &self.rating)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
     }
@@ -231,6 +256,7 @@ mod tests {
             version: None,
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status,
         }
     }
@@ -286,6 +312,7 @@ mod tests {
             version: Some("2.1.0".to_string()),
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -312,6 +339,7 @@ mod tests {
             version: None,
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -335,6 +363,7 @@ mod tests {
             version: None,
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -359,6 +388,7 @@ mod tests {
             version: None,
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -385,6 +415,7 @@ mod tests {
             version: None,
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -409,6 +440,7 @@ mod tests {
             version: Some("1.2.0".to_string()),
             deprecated: None,
             replaced_by: None,
+            rating: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -515,10 +547,10 @@ mod tests {
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 13-field object still round-trips. This count is linked to
+        // The full 14-field object still round-trips. This count is linked to
         // the manual `Serialize for SearchEntry` impl's serialize_struct count
         // — the two must move together.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 13);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 14);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
@@ -531,6 +563,54 @@ mod tests {
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("x2"), "plain table unchanged");
+    }
+
+    #[test]
+    fn json_carries_rating_plain_table_does_not() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.rating = Some(SearchRating {
+            up: 42,
+            url: "https://github.com/acme/index/discussions/7".to_string(),
+        });
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"][0]["rating"]["up"], 42);
+        assert_eq!(
+            v["items"][0]["rating"]["url"],
+            "https://github.com/acme/index/discussions/7"
+        );
+        // Exactly the two halves a consumer can act on — the forge's opaque
+        // vote-subject handle is deliberately not frozen into the contract.
+        let rating = v["items"][0]["rating"].as_object().expect("rating is an object");
+        assert_eq!(rating.len(), 2, "rating carries `up` and `url` only: {rating:?}");
+        assert!(!rating.contains_key("target"), "the opaque target is not emitted");
+        // The full 14-field object still round-trips (see the count assertion
+        // in `json_carries_replaced_by_plain_table_does_not`).
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 14);
+
+        // Unrated ⇒ explicit null, key always present — and never `0`, which
+        // would read as "rated, nobody voted".
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let item = v["items"][0].as_object().unwrap();
+        assert!(item.contains_key("rating"), "key present even when unrated");
+        assert!(item["rating"].is_null(), "unrated is null, never 0 or an empty object");
+
+        // The plain table stays five columns — no rating leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("42"), "plain table unchanged: {out}");
+        assert!(!out.contains("discussions"), "no thread link in the plain table");
+        assert_eq!(
+            out.lines().next().unwrap().split_whitespace().count(),
+            5,
+            "header still five columns"
+        );
     }
 
     #[test]

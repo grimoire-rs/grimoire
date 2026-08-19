@@ -11,6 +11,7 @@
 //! atomically written, with a 1 hour TTL; offline degrades to whatever is
 //! cached rather than failing.
 
+pub mod browse_sort;
 pub mod catalog_error;
 pub mod catalog_service;
 pub mod forge;
@@ -22,6 +23,8 @@ pub mod search_match;
 pub mod update_availability;
 pub mod vote_store;
 
+#[allow(unused_imports)]
+pub use browse_sort::{SortKey, SortMode};
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
