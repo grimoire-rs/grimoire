@@ -770,13 +770,24 @@ def test_registry_fields_works_without_config(
     result = runner.json("config", "registry", "fields")
     items = result["items"]
 
-    assert len(items) == 6, (
-        f"registry fields must list exactly the 6 per-registry fields; got: {items!r}"
+    assert len(items) == 7, (
+        f"registry fields must list exactly the 7 per-registry fields; got: {items!r}"
     )
     keys = [i.get("key") for i in items]
-    assert keys == ["oci", "index", "default", "include", "exclude", "insecure"], (
-        f"fields must be oci, index, default, include, exclude, insecure in that "
-        f"order; got: {keys!r}"
+    # `trust_hooks` is APPENDED. `RegistryField::ALL` is documented
+    # append-only with frozen positions, and the `default` index assertion
+    # below depends on that, so a new field never lands mid-list.
+    assert keys == [
+        "oci",
+        "index",
+        "default",
+        "include",
+        "exclude",
+        "insecure",
+        "trust_hooks",
+    ], (
+        f"fields must be oci, index, default, include, exclude, insecure, "
+        f"trust_hooks in that order; got: {keys!r}"
     )
     # The browse filters were appended after `default` partly to keep this
     # index stable.

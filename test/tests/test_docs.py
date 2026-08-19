@@ -106,3 +106,35 @@ def test_internal_links_resolve(page: Path) -> None:
         if anchor not in _anchors(page):
             problems.append(f"(#{anchor}): no such anchor on this page")
     assert not problems, f"{page.name}: " + "; ".join(problems)
+
+
+def test_every_hook_arming_cause_is_documented() -> None:
+    """The ``cause`` → ``state`` table lists every ``HookArmingCause`` variant.
+
+    Round 1 of review found `not-registered` missing from it -- the reporting
+    half of the audit's P-1 fix, and the one cause whose meaning a reader cannot
+    guess from the token. Two frozen-contract claims made the omission
+    load-bearing: the table is introduced as a substitute for the consumer's own
+    mapping, and `stability.md` tells consumers to branch on `cause` because it
+    is frozen. So a consumer following the docs exactly could not recognize the
+    state that fix exists to make legible.
+
+    A forgotten member of a hand-maintained enumeration was the single most
+    common defect the panel found across this feature. This test is that class
+    made mechanical for the one enumeration a consumer is told to rely on.
+    """
+    display = (PROJECT_ROOT / "src" / "api" / "artifact_status.rs").read_text(
+        encoding="utf-8"
+    )
+    impl = display.split("impl std::fmt::Display for HookArmingCause")[1]
+    tokens = set(re.findall(r'=> "([a-z][a-z0-9-]*)"', impl.split("}\n}")[0]))
+    assert len(tokens) >= 9, f"failed to parse the cause tokens: {sorted(tokens)}"
+
+    table = (_DOCS_DIR / "json-interface.md").read_text(encoding="utf-8")
+    undocumented = sorted(token for token in tokens if f"`{token}`" not in table)
+    assert not undocumented, (
+        "docs/src/json-interface.md's cause table omits "
+        f"{undocumented} — the table is documented as complete, and "
+        "stability.md tells consumers to branch on the frozen `cause` enum, so a "
+        "missing row is a contract gap and not a typo"
+    )

@@ -22,6 +22,7 @@ project, and a `teardown.sh`.
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
 | `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
+| `catalog/hooks/<name>/hook.toml` | Source-of-truth sample hooks + their payload scripts (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
@@ -58,6 +59,8 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
 | agent | `localhost:5050/grimoire/agents/reviewer` | 1.0.0, 1.1.0 |
 | agent | `localhost:5050/grimoire/agents/release-bot` | 1.0.0 (vendor-override demo) |
+| hook | `localhost:5050/grimoire/hooks/tool-logger` | 1.0.0 (observer; alternation matcher) |
+| hook | `localhost:5050/grimoire/hooks/write-guard` | 1.0.0 (gatekeeper; JSON verdict) |
 | bundle | `localhost:5050/grimoire/bundles/starter-pack` | 1.0.0, 2.0.0 (v2 adds commit-helper, drops security-baseline) |
 | bundle | `localhost:5050/grimoire/bundles/review-pack` | 1.0.0 (shares code-reviewer with starter-pack, adds the reviewer agent) |
 
@@ -490,6 +493,157 @@ grim --global install
 GRIM_OFFLINE=1 grim search        # serves cached catalog, exit 0
 GRIM_OFFLINE=1 grim install       # warm blob cache succeeds; cold -> exit 81
 ```
+
+### 9. Hooks — arming, then the dispatcher
+
+Hooks are the only kind grim declines on **policy** rather than capability, so
+this scenario is mostly about arming. `bootstrap.sh` already published both;
+nothing below is automatic. Every command here was run against this rig.
+
+**a. Declaring a hook does not arm it.** `add` and `lock` behave like any other
+kind, and `install` skips with one warning naming the single cause:
+
+```sh
+cd test/manual/project
+grim add localhost:5050/grimoire/hooks/tool-logger:1
+grim install                          # WARN … hooks are gated; …  exit 0
+grim status --format json | jq -c '.items[] | select(.kind=="hook") | {name, state, arming}'
+```
+
+```
+{"name":"tool-logger","state":"gated","arming":[{"client":"claude","cause":"feature-flag-off","message":"hooks are disabled for this scope; …","transient":false}]}
+```
+
+**Branch on `cause`, never on `message`** — the enum is frozen, the text is not.
+
+> `grim add` rewrites `grimoire.toml` through a lossy re-serializer, so it
+> **drops this file's comments** (a known limitation — `toml_edit` is a deferred
+> upgrade). Restore the annotated original with
+> `git checkout -- test/manual/project/grimoire.toml` when you are done, and do
+> not commit the rewritten one: step (a) depends on the flag starting off.
+
+**b. Gate one: the experimental flag.** Per scope, off by default:
+
+```sh
+grim config set options.experimental.hooks true
+grim install                          # now it arms: "updated  claude (observer)"
+grim hook list
+```
+
+**Why one gate was enough here.** The second gate is per-registry trust, and
+this rig already satisfies it *implicitly*: `.grim-home/grimoire.toml` declares
+`oci = "localhost:5050/grimoire"` — a **global**, **namespaced** `oci` entry,
+which is the documented implicit grant. A **bare host** (`oci =
+"localhost:5050"`) would not grant, because that is the whole shared registry;
+it would prompt on a TTY and report `registry-not-trusted` otherwise. This is
+worth internalizing: trust is granted at namespace granularity, and adding the
+namespace to a locator is what consents.
+
+**c. The dispatcher.** `grim hook run` is invoked by the launcher grim
+generated, not by you — but driving it by hand shows the envelope and the
+verdict with no client in the loop:
+
+```sh
+TABLE="$GRIM_HOME/hooks/dispatch.json"
+ROOT=$(jq -r '.roots | keys[0]' "$TABLE")
+jq -c '.roots[].hooks[] | {artifact,id,matcher,handler}' "$TABLE"
+```
+
+```
+{"artifact":"tool-logger","id":"log-tool-calls","matcher":"Bash|Write","handler":{"argv":["sh","${GRIM_HOOK_DIR}/log.sh"]}}
+```
+
+Fire it for each alternative and for a tool the matcher excludes:
+
+```sh
+for tool in Bash Write Read; do
+  echo "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"$tool\",\"tool_input\":{\"command\":\"ls\"},\"cwd\":\"$PWD\",\"session_id\":\"s-1\"}" \
+    | grim hook run --client claude --event PreToolUse --table "$TABLE" --root "$ROOT" >/dev/null
+done
+cat "$GRIM_HOME"/hooks/payload/*/tool-calls.log
+```
+
+```
+PreToolUse	claude	Bash	547 bytes
+PreToolUse	claude	Write	549 bytes
+```
+
+Two lines, not three: `Bash|Write` is an alternation matcher and `Read` is in
+neither alternative. Note where the log landed — **beside** the payload tree,
+not inside it. `GRIM_HOOK_DIR` is the materialized artifact tree whose content
+hash `grim status` compares, so a payload that writes into it would report
+itself locally modified on the next `grim status`.
+
+**d. A gatekeeper's refusal travels as a document, not an exit code.**
+
+```sh
+grim add localhost:5050/grimoire/hooks/write-guard:1 && grim install
+echo "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\".env\"},\"cwd\":\"$PWD\",\"session_id\":\"s-2\"}" \
+  | grim hook run --client claude --event PreToolUse --table "$TABLE" --root "$ROOT"
+echo "exit=$?"
+```
+
+```
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"write-guard (a manual-rig demonstration hook) refused a Write mentioning .env"}}
+exit=0
+```
+
+The payload wrote `{"decision":"deny","reason":"…"}`; grim projected it onto
+Claude's own response shape. The exit code is `0` on every path grim controls —
+deliberately, because a client that fails closed on a non-zero hook exit must
+never be denied a tool call by grim's internals.
+
+**e. The audit trail answers "did the guardrail apply here?"**
+
+```sh
+tail -3 "$GRIM_HOME/hooks/hook_audit.jsonl" | jq -c '{hook_id, outcome, verdict}'
+```
+
+```
+{"hook_id":"log-tool-calls","outcome":"completed","verdict":"noopinion"}
+{"hook_id":"log-tool-calls","outcome":"completed","verdict":"noopinion"}
+{"hook_id":"log-tool-calls","outcome":"no-match","verdict":null}
+```
+
+The `no-match` record is the point: "this hook did not apply to that call" has
+to stay answerable, so a decline is recorded rather than passed over silently.
+
+**f. Things that should NOT work.** Each exits `0` and runs nothing:
+
+```sh
+P="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{},\"cwd\":\"$PWD\",\"session_id\":\"s3\"}"
+
+# A relative --table would resolve against the client-spawned CWD — the
+# repository — which is what makes a table repo-plantable.
+echo "$P" | grim hook run --client claude --event PreToolUse --table hooks/dispatch.json --root "$ROOT"
+
+# An unknown root token is indistinguishable from an absent one.
+echo "$P" | grim hook run --client claude --event PreToolUse --table "$TABLE" --root deadbeef
+```
+
+**g. Revoking.** An explicit `trust_hooks = false` beats every grant, in either
+scope — including the implicit namespace grant from step (b):
+
+```sh
+grim --global config set registry.primary.trust_hooks false
+grim install                          # both hooks skipped
+grim status --format json | jq -c '[.items[] | select(.kind=="hook") | {name, state}]'
+grim uninstall hook tool-logger       # reaps the dispatch row AND the registration
+```
+
+```
+[{"name":"tool-logger","state":"gated"},{"name":"write-guard","state":"gated"}]
+```
+
+The reported `cause` is `registry-not-trusted` for both the never-granted and
+the explicitly-opted-out case: one cause on purpose, since the remedy is the
+same `trust_hooks` line. Restore the rig with
+`grim --global config unset registry.primary.trust_hooks`.
+
+> **A grim hook is defence in depth, never a security boundary.** `write-guard`
+> is a demonstration: its check is a substring match that any rewording evades,
+> and every layer of this design fails open so a broken guardrail can never deny
+> you a tool call. Copy the shape, never the check.
 
 ## Teardown
 
