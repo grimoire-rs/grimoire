@@ -95,6 +95,85 @@ research-axes:
 
 ## Memory
 
+- **Active plan (2026-08-19):** `.agents/plans/plan_ratings_deferred_findings.md`
+  — State `review`. Eight WPs closing the nine findings the ratings review
+  deferred, landed on the same three feature branches so the one-PR-per-repo
+  rule held. Two findings rested on false premises and were recorded as such
+  rather than "fixed": the site already hid deprecated artifacts (the reviewer
+  had read a comparator tiebreak as browse behaviour), and `vote.ts`'s 39%
+  coverage was an artifact of `.vscode-test.mjs` instrumenting only
+  `dist/extension.js` — see
+  [`research_vscode_coverage_instrument.md`](../research/research_vscode_coverage_instrument.md).
+
+- **Three things this run cost time on, worth not repeating:**
+  - **`rtk`-filtered `git status`/`git diff` returned wrong answers in both
+    directions** — a clean file reported modified, empty diffs for a modified
+    one. Two agents were misled. Use `/usr/bin/git` for anything you act on.
+  - **Reviewers mutating the WP worktree race the builder.** One left an
+    uncompilable probe in `df-a`; the next reviewer found the tree unusable and
+    had to verify in a throwaway checkout. Mutation checks belong in a detached
+    copy.
+  - **`test/bin/grim` is a copy, not a symlink.** A bare `uv run pytest`
+    silently tests whatever binary was built last — here a two-hour-old one,
+    producing four failures that read exactly like an integration break between
+    two just-merged WPs. `cp -f target/release/grim test/bin/grim` first, or go
+    through `task`.
+
+- **Prior plan (2026-08-19):** `.agents/plans/plan_artifact_ratings.md` —
+  State `done`, tier high. 16 WPs executed across three repos; one flattened
+  branch and one PR each (grimoire#99, indexer#5, grimoire-vscode#18), all
+  awaiting the owner's merge. Implements the Accepted
+  [`adr_artifact_ratings.md`](../adr/adr_artifact_ratings.md), which execution
+  amended nine times — every amendment a builder or reviewer finding against
+  the accepted design, not a scope change. Deferred findings are recorded in
+  the PR bodies, not here.
+  Discover found two **factual errors in the Accepted ADR** (login-keyed
+  `findTrustedBot`; `MINIMUM_GRIM_VERSION` bump) — both amended in the ADR
+  rather than left to diverge at execution time.
+
+  **Opus subagents are effectively unavailable this session.** Every opus spawn
+  failed: the `/hex-architect` panel went silently idle (4 workers, twice
+  each), and the `/hex-plan` panel died on **API 529 Overloaded** (`pr-spec`,
+  `pr-arch`, each twice). Sonnet workers succeeded throughout — all three
+  explorers and both SOTA researchers delivered. The spec and architect reviews
+  were run **inline by the orchestrator**, which is a real weakness: the plan's
+  author reviewed the plan. The cross-model `codex:rescue` pass was therefore
+  load-bearing rather than a formality, and it earned it — 4 Blocks, including
+  two defects the orchestrator *introduced while fixing earlier review findings*
+  (a wave-2 CI job invoking a wave-3 verb, and one file owned by two WPs).
+  **Lesson: when the native panel is lost, treat the cross-model pass as the
+  primary gate, not the backstop.**
+
+  **`codex:rescue` as a forked subagent also died on 529, twice.** Invoking the
+  `codex` CLI directly (`codex exec --sandbox read-only --skip-git-repo-check -`
+  with the prompt on stdin) worked both times. Prefer the direct call when the
+  wrapper fails.
+
+- **ADR drafted (2026-08-18, Proposed):** `.agents/adr/adr_artifact_ratings.md`
+  + `.agents/specs/design_artifact_ratings.md` — forge-backed artifact ratings
+  (GitHub Discussions / GitLab work items), tracking
+  [#82](https://github.com/grimoire-rs/grimoire/issues/82). Run: `/hex-architect`
+  tier high, research=3 (data-model/compat, security, operability),
+  artifact=adr+system-design. Five research artifacts under
+  `.agents/research/research_rating_*.md`. Decisions D1–D13, invariants R-1
+  (marker authority), R-2 (no silent emptying), R-3 (tri-state vote display).
+  Chosen option beats *doing nothing* by **3 points of 85** — that margin is
+  load-bearing and revisit trigger 4 exists to falsify it. Cross-model
+  `codex:rescue` pass **not yet run**. Three `[NEEDS CLARIFICATION]` markers
+  open, all owner decisions.
+
+  **Subagent non-delivery recurred, and is now a pattern worth planning
+  around.** The `architect` and all three opus reviewers (`rev-spec`,
+  `rev-quality`, `rev-security`) went idle without returning a report — the
+  reviewers twice each, including after an explicit re-request, exactly as the
+  materialization-drift round-2 entry below records. The architect's *files*
+  landed intact; only its summary was lost, so **always check the artifact path
+  before assuming a silent agent failed**. The lost review panel was recovered
+  by the orchestrator running the checks inline (code-claim verification,
+  ADR-vs-design divergence, the trade-off-margin arithmetic). `rev-sota` and
+  `rev-docs`, both sonnet, delivered normally — the failure so far correlates
+  with opus workers.
+
 - **Landed plan (finalized 2026-08-13):** `.agents/plans/plan_review_fixes_materialization_drift.md` —
   applies the 7 Block + 10 High findings of the tier-high review of
   `feat/materialization-drift-and-freshness`
