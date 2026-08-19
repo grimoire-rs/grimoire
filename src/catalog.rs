@@ -16,9 +16,11 @@ pub mod catalog_service;
 pub mod forge;
 pub mod index_announce;
 pub mod index_source;
+pub mod rating_provider;
 pub mod registry_catalog;
 pub mod search_match;
 pub mod update_availability;
+pub mod vote_store;
 
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
@@ -28,3 +30,5 @@ pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow
 pub use registry_catalog::{Catalog, CatalogEntry, OciMeta};
 #[allow(unused_imports)]
 pub use search_match::SearchQuery;
+#[allow(unused_imports)]
+pub use vote_store::{VoteIdentity, VoteState, VoteStore};

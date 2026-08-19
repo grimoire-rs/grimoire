@@ -70,6 +70,17 @@ impl GrimPaths {
         self.root.join("state")
     }
 
+    /// The local vote cache (`$GRIM_HOME/state/votes.json`), sibling of
+    /// `global.json`.
+    ///
+    /// Deliberately outside the `state.json` install-state schema: it
+    /// caches a forge fact about the current account, carries its own
+    /// version, and is discardable at any time — see
+    /// [`crate::catalog::vote_store`].
+    pub fn votes_file(&self) -> PathBuf {
+        self.state_dir().join("votes.json")
+    }
+
     /// The staging directory for in-progress writes (`$GRIM_HOME/tmp`).
     pub fn tmp_dir(&self) -> PathBuf {
         self.root.join("tmp")
