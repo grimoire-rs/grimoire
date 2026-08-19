@@ -159,8 +159,12 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - `oauth` on `stdio`/`ws`, `cwd` on a remote, `headers_helper` on stdio,
   or a non-https `auth_server_metadata_url` → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
-- Not a bundle member: bundles carry only `[skills]`/`[rules]`/`[agents]`
-  tables — MCP descriptors cannot be listed in one; declare them directly.
+- Not a bundle member: a bundle source carries
+  `[skills]`/`[rules]`/`[agents]`/`[hooks]` tables and **no `[mcp]` table**
+  — an MCP descriptor cannot be listed in one; declare it directly. (The
+  restriction is the authoring parser's, not the wire format's: a bundle
+  whose members document names an `mcp` member does resolve, so do not
+  read this as "the resolver rejects mcp members".)
 
 An MCP descriptor's layer is a single JSON document — it carries no
 in-tree README. For a readme/logo/changelog on the *repository*, publish

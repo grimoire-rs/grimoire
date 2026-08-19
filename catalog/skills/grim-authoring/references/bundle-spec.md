@@ -32,13 +32,13 @@ tables — not in any nested map:
 | `replaced-by` | Successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
 
 The bundle source parser is **strict** (`deny_unknown_fields`): any key
-outside this set and the three member tables is a hard parse error.
+outside this set and the member tables is a hard parse error.
 Unlike skill/rule frontmatter, a typo'd bundle key cannot slip through.
 
 ## Member Tables
 
-Three optional tables, each mapping a **config binding name** (the name
-the member installs under when a consumer adds the bundle) to a
+Four optional tables, each mapping a **config binding name** (the name the
+member installs under when a consumer adds the bundle) to a
 fully-qualified reference:
 
 ```toml
@@ -48,7 +48,22 @@ code-reviewer = "registry.example.com/grimoire/skills/code-reviewer:1"
 rust-style = "registry.example.com/grimoire/rules/rust-style:1"
 [agents]
 reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b..."
+[hooks]
+shell-guard = "registry.example.com/grimoire/hooks/shell-guard:1"
 ```
+
+`[mcp]` is **not** a member table — an MCP descriptor cannot be listed in a
+bundle source; declare it directly.
+
+A `[hooks]` member is a **declaration only**. It lands in the consumer's
+lock with the bundle as its provenance and keeps its own digest-pinned
+source, then meets the same install-time gate a directly declared hook
+meets: the experimental feature flag first, then the member registry's own
+`trust_hooks` grant — asked once per registry, never per hook. Bundling a
+hook does not pre-approve it, and the consent decision keys on the member's
+own source — so a consumer who trusts your bundle's registry has not thereby
+trusted a member you pinned from a different one. See
+[hook-spec.md](hook-spec.md).
 
 References are fully qualified — `registry/repo:tag` or
 `registry/repo@sha256:…` — or **deployment-relative**: a leading `./`
@@ -68,6 +83,24 @@ fails validation. `.`/`..` beyond the leading run is an error, and a
 `../` chain past the registry root fails the release (exit 65). `--pin`
 resolves relative members against the release target and freezes them
 absolute. There is no `[bundles]` table — nested bundles are invalid.
+
+**Two of grim's six artifact kinds cannot be a bundle member.** There is no
+`[mcp]` table and no `[bundles]` table, and because the parser is strict,
+writing one is a hard error rather than a silently dropped member:
+
+```
+$ grim build ./mcpbundle.toml --kind bundle
+unknown field `mcp`, expected one of `skills`, `rules`, `agents`, `hooks`,
+`summary`, `keywords`, `description`, `license`, `repository`, `deprecated`,
+`replaced-by`
+$ echo $?
+78
+```
+
+Note what that accepted-field list includes: **`hooks` is a member table**,
+exactly as [Member tables](#member-tables) says. Ship an MCP server as its
+own reference and let the consumer `grim add` it directly; nested bundles
+have no equivalent — flatten them.
 
 ## Floating vs. Pinned
 
@@ -120,6 +153,7 @@ rust-style = "ghcr.io/acme/rust-style:2"
 | `keywords` as a TOML array | Hard parse error — must be one string |
 | Member ref not fully qualified | Hard error — invalid reference |
 | Nested bundle member | Invalid — no `[bundles]` table exists |
+| An `[mcp]` member table | Hard parse error — an MCP descriptor is not bundleable; ship it as its own reference (`[hooks]` **is** accepted) |
 | More than 512 members, or members document > 512 KiB | Rejected |
 | `repository` not `https://` | Hard error, exit 65 |
 | Two declared bundles disagreeing on a member | Consumer-side `BundleConflict` at lock time (exit 78, fail-closed) — keep curated sets disjoint |

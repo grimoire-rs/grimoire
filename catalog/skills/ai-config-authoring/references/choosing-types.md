@@ -81,7 +81,9 @@ Ask in order; the first decisive answer picks the type.
    baseline but not a universal one — Claude Code, Cursor, Kiro, Gemini CLI,
    and Junie each read their own file instead, so the baseline needs a
    per-client wrapper, import, or symlink. Vendor-native rules and hooks are
-   lock-in surfaces.
+   lock-in surfaces — a packaging layer can narrow that (grim's `hook` kind
+   translates one declaration into three clients' dialects) but never remove
+   it, since the surface has to exist in the client to be written at all.
 8. **Would removing it cause mistakes?** The deletion test, applied to
    every always-on line. If not, cut.
 
@@ -100,7 +102,7 @@ until its own docs say otherwise:
 | Always-on file | all ten, under different filenames | — | — |
 | Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode, Junie (per-file, no scoping) | Codex, Gemini CLI, Zed, Amp — always-on file only |
 | Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI | Kiro, Junie, Zed, Amp — no installable format |
-| Hook | — | Claude Code, OpenCode, Copilot | unsurveyed for the other seven |
+| Hook | — | Claude Code, OpenCode, Copilot, Codex | unsurveyed for the other six |
 
 The skills-only assumption above is not a hedge — it is the observed
 pattern. A later survey of seven more clients (Antigravity, Cline, Droid,
@@ -135,10 +137,17 @@ type** — which is why cross-client packaging defaults to skills.
   Cline's docs name three skill directories and not that one. One copy in
   the pool is read by every member, so a name collision there collides for
   every member. See [skill-design.md](skill-design.md).
-- **Hooks are three technologies.** Shell + exit codes (Claude Code),
+- **Hooks are several technologies.** Shell + exit codes (Claude Code),
   JS/TS plugins that can cancel tool calls (OpenCode), declarative JSON
-  command/http/prompt hooks (Copilot). Hooks must be re-implemented per
-  client.
+  command/http/prompt hooks (Copilot and Codex). Authored natively, a hook
+  must be re-implemented per client. **A packaging layer can now hide part
+  of that**: grim ships a `hook` artifact kind that declares an event, a
+  tier, a matcher, and a handler once and translates each into the target
+  client's own dialect at install time — but only for **Claude, Codex, and
+  Copilot**, and only Claude at project scope. OpenCode's plugin surface is
+  not one grim writes, and every other client declines hooks. So the type is
+  packageable across a narrow set, not portable, and grim's hooks are
+  experimental and off by default. See the `grim-authoring` skill.
 - **Name-collision precedence is client-specific** and contradicts the
   spec guide's stated convention. Unique names are the only portable
   strategy.

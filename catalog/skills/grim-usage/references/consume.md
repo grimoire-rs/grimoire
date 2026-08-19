@@ -7,7 +7,7 @@ update loop and the two files it maintains.
 Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Declaring](#declaring) · [Installing](#installing) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
-[Removing](#removing) · [Bundles](#bundles)
+[Removing](#removing) · [Bundles](#bundles) · [Hooks](#hooks)
 
 Flags shown here track the release this package ships beside; confirm with
 `grim <cmd> --help` before relying on one.
@@ -63,10 +63,14 @@ grim add --kind bundle ghcr.io/acme/python-stack:1
 grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
-- `--kind` (skill, rule, agent, bundle, mcp) is normally inferred from the
-  artifact's kind metadata set at release time (the `com.grimoire.kind`
+- `--kind` (skill, rule, agent, bundle, mcp, hook) is normally inferred from
+  the artifact's kind metadata set at release time (the `com.grimoire.kind`
   annotation; legacy `artifactType` on older artifacts). If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
+  `hook` is **appended** to that value list, never inserted — the accepted
+  set is a frozen CLI surface, so widening it is the only permitted
+  direction. A hook may be added with the experimental flag off: declaring
+  and locking are not arming (see [Hooks](#hooks)).
 - `--name` defaults to the reference's last path segment. Re-adding a
   declared name from the *same* repository at another tag or digest
   re-pins it — config, lock and installed files all move to the new
@@ -104,6 +108,10 @@ digest, then installed the same way:
 grim add ./skills/my-skill
 grim add --kind agent ../shared/reviewer.md
 ```
+
+A **hook** has no path form: the config parser refuses a path value under
+`[hooks]`, and there is no dev-install for the kind — a hook always comes
+from a registry reference. See [Hooks](#hooks).
 
 The kind infers from the path's shape the same way `grim build` does (a
 directory with `SKILL.md` is a skill, a bare `.md` is a rule; pass
@@ -404,6 +412,121 @@ step and pinned by the SHA-256 of its canonical members layer rather than
 a manifest digest. Its members must still be registry references: `grim
 lock` rejects a relative (`./`/`../`) member id, since a local bundle has
 no registry identity of its own to resolve one against.
+
+A bundle's member tables are `[skills]`, `[rules]`, `[agents]`, and
+`[hooks]` — **an MCP server is not bundleable.** If you want one, declare it
+directly.
+
+A bundle-provided **hook** is declared, never armed: it locks with the
+bundle as its provenance and its own digest-pinned source, then faces the
+same gates a directly declared hook faces — the feature flag, then the
+**registry** trust question answered against the member's *own* source, not
+the bundle's, so trusting the bundle's registry never silently grants a
+member pinned from a different one. Removing the bundle removes the hook,
+unless you also declared it directly.
+
+## Hooks
+
+A **hook** is an artifact that registers with a client's lifecycle so a
+handler runs at a defined moment — before a tool call, after one, at session
+start, or when the agent's turn stops. It is the only kind that causes code
+to execute, and grim treats it accordingly.
+
+**It is experimental and off by default.** Arming is **two gates**, and the
+second can be satisfied three ways — deliberately answered in separate places
+rather than folded into one switch:
+
+| Gate | Question | Where | Default |
+|---|---|---|---|
+| 1 | Is the feature on? | `options.experimental.hooks` in project or global config | `false` |
+| 2 | Is this artifact's registry trusted for hooks? | the per-registry `trust_hooks` field | see below |
+| 2 | …or did this one invocation get an explicit pass? | `--allow-hooks` on `grim install` / `update` / `add` | off |
+| 2 | …or did you answer the prompt? | asked once per registry, on a TTY only | — |
+
+`--allow-hooks` is per-invocation and **never persisted**, and it does *not*
+turn the feature on — the flag above must already be set. It is a **flag
+only: there is no `GRIM_ALLOW_HOOKS`**, and that absence is deliberate. The
+environment is repo-carried — `.envrc`, `.mise.toml` and a devcontainer's
+`containerEnv` are ordinary files in a repository — so an environment form
+would let a cloned repository grant itself trust.
+
+The feature flag is **config-only** — no environment variable overrides it:
+
+```sh
+grim config get options.experimental.hooks          # prints nothing, exit 1, unless set true
+grim config set options.experimental.hooks true     # opt in, per scope
+```
+
+Enabling the feature is not consent to run any particular hook. The
+per-registry `trust_hooks` field is a tri-state with a deliberate asymmetry.
+
+In **global** config an unset value means trusted *for most entries*, because
+configuring a registry there is itself the trust act — but two shapes never
+grant implicitly, and both are easy to hit:
+
+- a **bare host** (`oci = "ghcr.io"`), which is the whole shared multi-tenant
+  registry: an implicit grant there would consent to every publisher on it.
+  Add the namespace (`ghcr.io/acme`) or set `trust_hooks = true` explicitly.
+- an entry declaring **`insecure = true`**, because plain HTTP makes the first
+  resolution attacker-influenceable on the wire and no digest pin can rescue
+  that. Loopback is the one exemption.
+
+An `index` entry never grants either. An explicit `false` opts out, and beats
+every grant in either scope.
+
+In **project** config the key may only *restrict* — a file that travels with a
+repository never grants trust, so `false` still opts out while neither unset
+nor `true` grants anything. Inspect it with
+`grim config get registry.<alias>.trust_hooks`, which unlike the feature flag
+does print an authored `false`.
+
+### What you get today
+
+Declaring and locking a hook work with the flag off, and that is
+intentional — declaring is not arming, so refusing the declaration would
+make the flag mean something it does not:
+
+```sh
+grim add ghcr.io/acme/hooks/shell-guard:1     # declares under [hooks], pins the lock
+```
+
+`grimoire.toml` grows a `[hooks]` table and `grimoire.lock` a `[[hook]]`
+section, alongside the other kinds. **`[hooks]` takes registry references
+only** — a path value is refused, and there is no dev-install for the kind,
+because a working-tree source would put something armable inside a
+repository.
+
+Only **Claude**, **Codex**, and **Copilot** name a hook surface at all, and
+only Claude at *project* scope — Codex's and Copilot's registration files
+are tracked repository files, so grim writes them at global scope only.
+Every other client declines hooks and records nothing.
+
+### `grim hook list`
+
+The report command for hooks. One row per declared entry, or per
+`(entry, client)` where clients differ:
+
+```
+$ grim hook list
+Hook  Tier  Events  Client  State  Detail
+
+$ grim hook list --format json
+{
+  "items": []
+}
+```
+
+An empty table is the normal answer on a project that declares no hooks —
+`Hook` is `<artifact>/<id>`, the `State` token comes from the same
+vocabulary `grim status` uses, and the JSON `items` objects carry a nested
+`arming` array so a consumer asking "which clients withheld this hook" does
+not have to re-group rows.
+
+**`grim hook run` is not for you.** It is the other `grim hook`
+subcommand, and its caller is the launcher grim generates — it takes
+`--client`, `--event`, `--table`, and `--root`, resolves no scope and reads
+no configuration. `grim hook --help` says so outright. Treat it like
+`grim mcp`: a machine-facing entry point, not a command to type.
 
 ## Further Reading
 

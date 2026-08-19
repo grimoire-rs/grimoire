@@ -8,9 +8,11 @@ need to refresh it against a newer grim release.
 1. Run `grim --version` and `grim <cmd> --help` for every command this
    package narrates (init, config, add, lock, install, update, status,
    context, fetch, describe, remove, uninstall, search, schema,
-   completions, tui, mcp, build, release, publish, login, logout). Diff
-   the help output against what the reference files claim. Run `grim
-   --help` too — the global flag set is narrated in `SKILL.md`.
+   completions, tui, mcp, hook, build, release, publish, login, logout).
+   Diff the help output against what the reference files claim. Run `grim
+   --help` too — the global flag set is narrated in `SKILL.md`, and its
+   command list is the cheapest check that a whole subcommand has not
+   appeared unremarked.
 2. Re-read the docs pages each reference file distills (links below) and
    diff against the file's claims — especially lifecycle semantics
    (pruning, effective declarations, integrity gates, deprecation
@@ -24,14 +26,29 @@ need to refresh it against a newer grim release.
    `retryable` / `forceable` set in
    [troubleshooting.md](troubleshooting.md). Fields and reasons are
    additive, so a new one is a gap here, never a contradiction.
-5. Bump the `compatibility` frontmatter in `SKILL.md` to the verified
+5. **Re-count the kinds.** The kind list is the single claim most likely to
+   be silently wrong, because it appears in the `SKILL.md` frontmatter
+   `description`, its opening paragraph, the `--kind` value list in
+   [consume.md](consume.md), the batch kind order in
+   [publish.md](publish.md), and the tier note below — and a new kind
+   lands in all five. Ground it in `grim add --help`'s
+   `[possible values: …]`, which is generated from the CLI enum.
+6. **Re-check the hook gate.** This package deliberately documents hooks as
+   experimental and disarmed and describes **no** arming behaviour. Before
+   widening any of it: `grim config get options.experimental.hooks`,
+   `grim hook --help`, `grim hook list`. `grim hook run` stays framed as
+   launcher-invoked, never as a command a person types.
+7. Bump the `compatibility` frontmatter in `SKILL.md` to the verified
    version line. The prose and the footer stay version-neutral — they
    track the release the package ships beside, so nothing else to bump.
 
 ## What Drifts, and How Fast
 
-Tier-1 invariants (the four kinds, reference syntax, exit-code classes,
-cascade-tag semantics) are design commitments — they rarely move.
+Tier-1 invariants (the **six** kinds — skill, rule, agent, mcp, hook,
+bundle — reference syntax, exit-code classes, cascade-tag semantics) are
+design commitments and rarely move, but "rarely" is not "never": this line
+said *four* while the skill body said *five*, so re-derive the count from
+`grim add --help` rather than trusting either.
 Tier-2 content (flag names, command lifecycles, precedence details)
 drifts with **every minor release** — re-verify it on each new grim
 minor. Anything resembling a flag list belongs in `--help`, not here; if
@@ -43,6 +60,7 @@ a reference file has accreted one, delete it and link instead.
 - `github grimoire-rs grimoire releases changelog`
 - `grim release cascade tags pin bundle`
 - `grim exit codes sysexits`
+- `grim hook list arming gated options.experimental.hooks trust_hooks`
 
 ## Canonical Pages
 

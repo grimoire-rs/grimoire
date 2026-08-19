@@ -8,6 +8,7 @@ Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
 [Integrity Gates](#integrity-gates) ·
 [Containment Refusals](#containment-refusals) ·
 [Kind Inference](#the-kind-inference-gotcha) ·
+[A Hook That Never Fires](#a-hook-that-never-fires) ·
 [Offline Failures](#offline-failures) · [Auth Failures](#auth-failures)
 
 ## Exit Codes
@@ -83,6 +84,17 @@ Common causes, roughly in order of frequency:
 - **Vendor metadata.** A known `<vendor>.<field>` key with a bad
   literal (e.g. a non-`"true"/"false"` boolean, a value outside a
   closed enum set).
+- **Hook manifest.** `hook.toml` is a strict document, so its refusals are
+  all 65: a handler whose first token names a payload file (the one to
+  learn — a registry-delivered payload has no exec bit, so name an
+  interpreter: `argv = ["sh", "${GRIM_HOOK_DIR}/guard.sh"]`), an entry with
+  both or neither of `argv`/`command`, `mutator` outside `PreToolUse`,
+  `gatekeeper` on an event no client can block at, a regex or an
+  over-256-byte value in `matcher`, an override table named for something
+  that is not a client, catalog keys like `summary` at top level, a
+  duplicate `id`, a `name` that is not the directory stem, an artifact named
+  `bin` or `dispatch.json`, or an unknown `schema`. Reproductions for each:
+  the `grim-authoring` skill's `references/hook-spec.md`.
 - **Release tag errors.** Reference with no tag; invalid version
   string; exact-version tag already exists at a different digest
   (re-release with `--force` only if you mean to rewrite it).
@@ -116,9 +128,9 @@ A confusing 78 with an intact `grimoire.toml` usually means grim resolved
 a client set that cannot host the kinds you asked for. It happens when
 **nothing is detected**: grim then targets the generic `agents` client —
 one copy into the shared `.agents/skills` pool — and `agents` renders
-**skills only**. A lock holding nothing but rules, agents, or MCP servers
-has nowhere to go, so `grim install` (and `grim add` of such an artifact)
-exits 78 naming both ways to pick a client.
+**skills only**. A lock holding nothing but rules, agents, MCP servers, or
+hooks has nowhere to go, so `grim install` (and `grim add` of such an
+artifact) exits 78 naming both ways to pick a client.
 
 ```sh
 grim install --client claude            # one run
@@ -191,18 +203,81 @@ Only the final-component escape above is refused.
 
 Kind is inferred from shape — and agents break the pattern:
 
-- At `build`/`release`: a directory packs as a skill, `.md` as a rule,
-  `.toml` as a bundle. A bare `.md` is **always a rule** by shape — an
+- At `build`/`release`: a directory packs as a skill *unless* it carries a
+  `hook.toml`, `.md` as a rule, `.toml` as a bundle. A bare `.md` is
+  **always a rule** by shape — an
   agent requires `--kind agent` explicitly. Forgetting it is not an
   error: the file silently publishes as a rule (grim warns when a rule
   carries both `name` and `description` — heed that warning). Likewise a
   `.toml` is **always a bundle** by shape — an MCP server descriptor
   requires `--kind mcp` (grim errors with a `--kind mcp` hint when the
   TOML carries a `[server]` table).
+- **A directory carrying `hook.toml` is a hook, and that arm is checked
+  before the skill arm.** So the two directory kinds never need a flag —
+  but a stray `hook.toml` dropped into a *skill* tree silently
+  reclassifies it. Read the `Kind` column `grim build` prints; that is the
+  cheap check.
 - At `add`: kind is read from the published manifest's kind metadata
   (the `com.grimoire.kind` annotation; legacy `artifactType` on older
   artifacts). A non-Grimoire image cannot be inferred — `add` errors
-  and asks for `--kind`.
+  and asks for `--kind` (`skill`, `rule`, `agent`, `bundle`, `mcp`, or
+  `hook`).
+
+## A Hook That Never Fires
+
+**This is expected, not a fault.** Hooks are experimental and **off by
+default**, so a declared, locked, installed hook that does nothing is grim
+working as designed. Nothing here is a bug to chase:
+
+```sh
+grim hook list                                    # what is declared, and its state
+grim config get options.experimental.hooks        # exit 1 = off (see below); prints true = on
+grim config get registry.<alias>.trust_hooks      # exit 1 = unset; prints false = opted out
+```
+
+Work through it in this order:
+
+1. **The feature flag.** `options.experimental.hooks` is `false` unless
+   someone set it, and it is **config-only** — there is no environment
+   variable, so exporting something will not turn it on. Set it per scope:
+   `grim config set options.experimental.hooks true`.
+
+   The flag is written only when `true`, so `config set … false` *removes the
+   key*: `config get` can never print `false` for it, and **exit 1 is what
+   "off" looks like**. `trust_hooks` behaves differently on purpose — it is a
+   tri-state and an authored `false` is kept, because silently dropping an
+   opt-out would re-arm a registry the user deliberately excluded.
+2. **The registry's `trust_hooks`.** A separate question from the flag, and an
+   unset value in global config does **not** simply mean trusted. A *global*
+   `[[registries]]` entry grants implicitly only when all three hold:
+   - it is an `oci` entry (an `index` entry never grants);
+   - it is **namespaced** (`ghcr.io/acme`, not the bare host `ghcr.io` — a bare
+     host is the whole shared multi-tenant registry, so granting it would
+     consent to every publisher on it);
+   - it does not declare `insecure = true` (plain HTTP makes the first
+     resolution attacker-influenceable on the wire, so the digest pin cannot
+     rescue it). Loopback is the one exemption.
+
+   Anything else prompts on a TTY and reports `registry-not-trusted` otherwise.
+   In *project* config the key can only restrict, so a `trust_hooks = false`
+   that travelled in with a cloned repository opts the registry out and no
+   project-level edit can grant it back. Move the grant to global config —
+   adding the **namespace** to the locator is often the whole fix.
+3. **The client.** Only Claude, Codex, and Copilot name a hook surface at
+   all, and only **Claude** at project scope — Codex and Copilot host hooks
+   at global scope only, because their registration files are tracked
+   repository files. Every other client declines hooks, records nothing, and
+   says so. Check with `grim context` which clients actually resolved.
+4. **The tier and the moment.** The design refuses rather than degrades: a
+   `gatekeeper` or `mutator` a client cannot honour is *declined* for that
+   `(hook, client)` pair, never quietly downgraded to an observer, because
+   reporting a guardrail as installed when it only logs would be worse than
+   refusing it. So a hook that reports as declined for a tier reason is doing
+   what it should; change the tier or the client, not your expectations of
+   the other one.
+
+`grim hook run` is not part of this diagnosis: it is the launcher's entry
+point, not a command to invoke by hand.
 
 ## Offline Failures
 

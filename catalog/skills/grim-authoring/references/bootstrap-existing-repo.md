@@ -14,12 +14,18 @@ Contents: [Inventory](#inventory) · [Fix Names](#fix-names) ·
 ## Inventory
 
 Classify every artifact by the same shape rules `grim build` uses to
-infer kind ([The Five Kinds][five-kinds]):
+infer kind ([The Six Kinds][six-kinds]):
 
-- A directory containing `SKILL.md` is a **skill**, whichever parent
-  hosts it — the agentskills.io convention (`skills/<name>/SKILL.md`) and
-  a Claude-specific project layout (`.claude/skills/<name>/SKILL.md`) are
-  both directory-with-index shape, so grim infers identically either way.
+- A directory containing `hook.toml` is a **hook**, and this arm is checked
+  **first** — before the skill arm — so a directory carrying both
+  `hook.toml` and `SKILL.md` classifies as a hook. Worth a `grep` across
+  the repo before you start: an unrelated file that happens to be named
+  `hook.toml` silently reclassifies its whole directory.
+- A directory containing `SKILL.md` (and no `hook.toml`) is a **skill**,
+  whichever parent hosts it — the agentskills.io convention
+  (`skills/<name>/SKILL.md`) and a Claude-specific project layout
+  (`.claude/skills/<name>/SKILL.md`) are both directory-with-index shape,
+  so grim infers identically either way.
 - A bare top-level `.md` file is **rule**-shaped by default.
 - Anything meant as an **agent** — a system prompt a client delegates
   to — needs `--kind agent` on every build/release call. A bare `.md` is
@@ -45,7 +51,10 @@ Catalog fields (`summary`, `keywords`, `repository`, `deprecated`,
 `replaced-by`) live in a different place per kind — skills and agents
 inside the frontmatter `metadata` map, rules at the top level of
 frontmatter. Get this wrong and nothing errors; the field is just never
-seen by `grim search`. See the Metadata-Location Asymmetry
+seen by `grim search`. **A hook is the one kind with no such surface**:
+`hook.toml` is strict, so a catalog key there is a hard build failure
+rather than silent loss — fold the text into `description` instead.
+See the Metadata-Location Asymmetry
 ([../SKILL.md#the-metadata-location-asymmetry][asymmetry]) for the full
 picture, and the per-kind field tables in
 [skill-spec.md](skill-spec.md#catalog-metadata),
@@ -72,6 +81,12 @@ repository = "acme/rules/style"
 repository = "acme/agents/reviewer"
 ```
 
+`publish.toml` also has an `[mcp]` and a `[hooks]` table; their
+conventional source paths are `mcp/<name>.toml` and `hooks/<name>/` (a
+directory). Batch publish walks the kinds in a fixed order — skills, rules,
+agents, mcp, hooks, bundles — so nothing depends on the order you write
+them in the file.
+
 Write `repository` out verbatim on every entry (the `<ns>/<kind-subdir>/<name>`
 shape) rather than leaning on `repository_prefix` — a renamed or moved
 artifact then can't silently change its published address. `--version`
@@ -96,6 +111,7 @@ Iterate before your first release touches a registry:
 grim build ./skills/code-review        # per artifact, until every kind is clean
 grim build ./rules/style.md
 grim build ./agents/reviewer.md --kind agent
+grim build ./hooks/shell-guard --kind hook   # flag optional; pass it so the kind is explicit
 
 grim publish --dry-run                 # whole-manifest validation, zero pushes
 ```
@@ -126,7 +142,7 @@ flags with `grim publish --help`.
 - [Batch Publish][batch-publish] — the full `publish.toml` schema.
 - [Exit-65 Triage][exit-65-triage] — symptom → cause → fix table.
 
-[five-kinds]: ../SKILL.md#the-five-kinds
+[six-kinds]: ../SKILL.md#the-six-kinds
 [universal-invariants]: ../SKILL.md#universal-invariants
 [asymmetry]: ../SKILL.md#the-metadata-location-asymmetry
 [exit-65-triage]: release-checklist.md#exit-65-triage

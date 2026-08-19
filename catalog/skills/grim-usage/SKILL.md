@@ -1,22 +1,22 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.13
 metadata:
   summary: How to use the grim CLI end to end
-  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
+  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,multi-registry
   repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Usage
 
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
-It distributes five artifact kinds — **skills**, **rules**, **agents**,
-**MCP servers**, and **bundles** — through any standard OCI registry (GHCR,
-Docker Hub, a private Distribution), with lockfile-pinned installs into a
-growing fleet of AI clients plus a vendor-neutral `agents` target. The
-current names are listed in
+It distributes six artifact kinds — **skills**, **rules**, **agents**,
+**MCP servers**, **hooks**, and **bundles** — through any standard OCI
+registry (GHCR, Docker Hub, a private Distribution), with lockfile-pinned
+installs into a growing fleet of AI clients plus a vendor-neutral `agents`
+target. The current names are listed in
 [references/registries.md](references/registries.md#client-targets); the
 set grows every minor release, so read it there rather than assuming. An
 MCP server artifact installs by registering an entry in each client's
@@ -25,13 +25,23 @@ only that entry, never the file.
 
 Not every client can host every kind: a **skill** is the one kind every
 client hosts, but a rule needs a per-file scoping surface, an agent needs a
-shipped file format, and an MCP server needs a config file grim can splice —
-and many clients lack one or more of those. Where a client cannot faithfully
-host a kind, grim warns and skips it, writing zero files. Most of the fleet
-declines rules and agents, and the skills-only clients write no MCP config
-at all. The authoritative per-client support matrix is the [Client
-Compatibility][clients] docs page — trust it over this summary, and check it
-rather than assuming.
+shipped file format, an MCP server needs a config file grim can splice, and
+a hook needs a lifecycle-registration surface — and many clients lack one or
+more of those. Where a client cannot faithfully host a kind, grim warns and
+skips it, writing zero files. Most of the fleet declines rules and agents,
+the skills-only clients write no MCP config at all, and **hooks are the
+narrowest kind of all** — only Claude, Codex, and Copilot name a hook
+surface, and only Claude at project scope. The authoritative per-client
+support matrix is the [Client Compatibility][clients] docs page — trust it
+over this summary, and check it rather than assuming.
+
+> **Hooks are experimental and off by default.** The kind publishes,
+> resolves, locks, installs, and reports today; **arming is gated** behind
+> `options.experimental.hooks` (`false` unless you set it, config-only —
+> no environment variable overrides it). So adding a hook gives you a
+> declaration, a lock pin, and a materialized payload tree, and nothing
+> fires. `grim hook list` is the surface for inspecting what you have. Full
+> picture: [references/consume.md](references/consume.md#hooks).
 
 Two consequences of that shape are worth knowing before your first
 install. When **nothing** is detected, grim targets the generic `agents`
@@ -73,11 +83,12 @@ full reference is `--help` plus the docs site linked below.
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
+| `grim hook list` | Report every declared hook with its tier, events, and per-client arming state | [consume](references/consume.md#hooks) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
-| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor | [publish](references/publish.md) |
+| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor / `hook.toml` | [publish](references/publish.md) |
 | `grim completions <shell>` | Print a shell completion script (bash, elvish, fish, powershell, zsh) to stdout; redirect it into your shell's completion dir | `grim completions --help` |
 
 > **Deprecation:** a publisher can retire a package without
@@ -92,6 +103,13 @@ full reference is `--help` plus the docs site linked below.
 > **Git provenance:** `build`, `release`, and `publish` can embed
 > the publishing commit, date, and origin as OCI annotations via opt-in
 > `--git`; confirm with `grim release --help`.
+>
+> **`grim hook run` is not a command you type.** `grim hook` has two
+> subcommands, and only `list` is user-facing; `run` dispatches one client
+> event and its caller is the launcher grim generates, which passes it
+> `--client`, `--event`, `--table`, and `--root`. `grim hook --help` says
+> as much. Same shape as `grim mcp`, which speaks JSON-RPC on stdout rather
+> than to a person — invoke neither by hand expecting readable output.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global`,
 > `--config`, `--registry`, `--offline`, `--log-level`, and `--color
@@ -114,7 +132,8 @@ disk directly. The discriminant is used everywhere a reference is accepted
 value): a value starting with `./` or `../`, or an absolute path, is a
 local path source; anything else is an OCI reference. See
 [references/consume.md](references/consume.md#declaring) for how it is
-declared and installed.
+declared and installed. **`[hooks]` accepts registry references only** — a
+path value there is refused, so a hook always comes from a registry.
 
 A short reference with no registry resolves against the default registry —
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the
