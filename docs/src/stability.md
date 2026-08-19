@@ -29,7 +29,7 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
 | OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], and the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts |
-| [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json` and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree |
+| [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json`, the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised (most indexes publish none, and a `404` is a normal, non-error answer); its **path and document shape** are, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
 | Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars] |
@@ -68,13 +68,25 @@ whose vendor cannot host that artifact kind at that scope drops out of
 it, because the install was never going to record an output there.
 Strictly fewer names in an already-present array is not a shape change.
 
-The newest instance is [`grim publish`][publishing-report]'s
-`announce.fork` (`{repo, created}` or `null`), added when `--announce`
-gained automatic fork detection. It extends the already-frozen `announce`
-object the same always-present-null way: `null` when the branch pushed
-straight to the index repository (no fork involved, or the `[announce]
-fork` policy resolved to `never`), populated with the fork's full name
-and whether it was newly created once forking activated.
+[`grim publish`][publishing-report]'s `announce.fork` (`{repo, created}` or
+`null`) is the same shape, added when `--announce` gained automatic fork
+detection. It extends the already-frozen `announce` object the same
+always-present-null way: `null` when the branch pushed straight to the
+index repository (no fork involved, or the `[announce] fork` policy
+resolved to `never`), populated with the fork's full name and whether it
+was newly created once forking activated.
+
+The newest instance is [`grim search`][search]'s `rating`
+(`{up, url}` or `null`), added with [artifact ratings][ratings]. It is the
+worked example of what always-present-null buys a consumer: `null` means
+*this artifact is unrated* — no sidecar published, no entry for the ref, or
+no votes yet — while an **absent** `rating` key means *this grim predates
+the field*. A client can tell those apart without sniffing the version,
+which is the whole point of the rule. A consumer written against the
+pre-rating `search` shape keeps parsing unchanged, because the field was
+appended and nothing else moved. The `rating` object emits `up` and `url`
+only; the forge's opaque vote target is deliberately kept out of the frozen
+document, so no forge's node-id format is frozen with it.
 
 Manifest *inputs* are covered by the mirror image of that rule. A minor
 release may widen what a key accepts — a new optional key, a new accepted
@@ -302,6 +314,27 @@ where that matters in practice: a project that adopts a browse filter is
 unreadable by any `grim` build that predates it, the same trade the lock
 and install-state already make.
 
+The **catalog cache** (`$GRIM_HOME/catalog/<hash>.json`) parses the same
+strict way, and it is the one place where that strictness used to be worse
+than a rebuild. Its `CatalogEntry` carries `deny_unknown_fields`, so a
+cache written by a newer grim is refused wholesale by an older one — which
+is *fine*, because a cache is not a contract and rebuilding it costs one
+network refresh. That is now true: from this release on, a cache the loader
+refuses reads as **cold** while online, so the very next browse overwrites
+it (offline the refusal still surfaces, because there is nothing to rebuild
+from and reporting the registry as empty would be a lie).
+
+It was **not** true before this release. In 0.13.0 and earlier the parse
+error was raised above the rebuild decision, so a refused cache degraded
+that registry to an empty browse *without* overwriting the file — on every
+subsequent run, `--refresh` included, until someone deleted it by hand.
+This release cannot reach a binary that already shipped, so a user who
+browses a [rating-publishing index][ratings] on 0.14 and then downgrades to
+0.13 has to delete `$GRIM_HOME/catalog/` once; see
+[Upgrading][upgrading-catalog-downgrade]. An entry with no rating still
+serializes byte-identically to what 0.13 wrote, so only a user who actually
+browsed a rated index is exposed at all.
+
 A lock's **size** cuts the same way, for one release boundary. Builds up
 to and including 0.12.0 read `grimoire.toml`, `grimoire.lock`, and
 `publish.toml` under a 64 KiB cap; later builds read them under 8 MiB. A
@@ -379,6 +412,10 @@ unaffected — they read straight from disk and never touch a manifest.
 [mcp-descriptor]: ./mcp-servers.md#format
 [mcp-server]: ./commands.md#mcp
 [package-index]: ./package-index.md#spec
+[stats-sidecar]: ./package-index.md#spec-stats
+[ratings]: ./ratings.md
+[search]: ./commands.md#search
+[upgrading-catalog-downgrade]: ./upgrading.md#catalog-cache-downgrade
 [init]: ./commands.md#init
 [configuration]: ./configuration.md
 [options-vendors]: ./configuration.md#options-vendors

@@ -757,6 +757,58 @@ Confirm current flags with `grim mcp --help`.
 > registry. See [Registry compatibility][registry-compat] for the full
 > table.
 
+## Ratings and Voting {#ratings}
+
+Some indexes publish community ratings — a `stats.json` sidecar served
+beside `all.json`, tallied from upvotes on the index operator's own forge
+threads. There is no Grimoire service holding them; the forge *is* the
+database. When the browsed index publishes them, `grim search --format
+json` carries a `rating` object per row (`{up, url}`, or `null` when
+unrated), the TUI detail pane gains a `Rating:` row, and `--sort rating`
+orders the browse by upvotes.
+
+Two facts decide whether you see any rating at all, and neither is an
+error condition:
+
+- **Ratings ride the HTTP index transport only.** A git-transport index
+  and an OCI registry browsed by `_catalog` read unrated, permanently.
+- **Absence is never an error.** No sidecar, no entry for a ref, or a
+  document from a newer schema all mean *unrated*, logged at `debug`. A
+  browse never fails over ratings, and `null` never means `0`.
+
+`--sort <name|updated|rating>` applies to `grim search` and `grim tui`
+alike. Unrated and undated artifacts sort into a bucket of their own at
+the *end* rather than as zero votes or epoch 0, and every mode is total —
+two runs over the same catalog render identically. Given together with a
+query, `--sort` **replaces** relevance ranking rather than composing with
+it; omitted, ordering is exactly what it was before the flag existed.
+Confirm with `grim search --help`.
+
+`grim rate <ref>` casts a vote. It posts publicly under **your own** forge
+account, so an interactive run confirms first and a non-interactive one
+must pass `--yes` (it exits 64 rather than hanging or voting unconfirmed).
+`--remove` retracts your own upvote — it is not a downvote. It uses its
+own narrow credential ladder, deliberately **not** the publishing or
+announce token: `--token-stdin`, else `GRIM_RATE_TOKEN`, else a
+host-matched CI token, else `gh`/`glab auth token`, else a refusal. There
+is no `--token <value>` flag, because argv is world-readable.
+
+Voting against a GitHub Enterprise Server or self-managed GitLab needs
+`GRIM_RATING_HOST`. It is read from your own environment only — a fetched
+`stats.json` carries no host at all — and compared exactly, with no suffix
+matching. `grim rate <ref> --dry-run --format json` reports the resolved
+host without a credential, a forge request, or a mutation, which is how a
+client learns where a vote would go before it authenticates.
+
+Piping a credential into that same dry run (`--dry-run --token-stdin`,
+which needs no `--yes` because it posts nothing) adds one read-only query
+and reports `viewer_up` — whether *this* account has already voted. It is
+tri-state: `true`, `false`, or `null` for **not asked, or not knowable**.
+Never read `null` as "not voted"; a query that failed observed nothing,
+and saying otherwise is the one claim the design refuses to make. Full
+surface, every flag, and all seven exit codes: [command reference:
+rate][rate] and [Artifact Ratings][ratings-doc].
+
 ## Further Reading
 
 - [Concepts: scopes][scopes], [clients][clients], and
@@ -765,7 +817,9 @@ Confirm current flags with `grim mcp --help`.
   schema, precedence rules, data layout under `GRIM_HOME`.
 - [The Package Index][package-index] — index spec, auto-merge rules.
 - [Host Your Own Index][hosting] — scaffold, deploy, and gate your own.
-- [Command reference: search][search], [tui][tui], and [mcp][mcp].
+- [Artifact Ratings][ratings-doc] — how an index collects them, per forge.
+- [Command reference: search][search], [tui][tui], [rate][rate], and
+  [mcp][mcp].
 
 [scopes]: https://grimoire.rs/concepts.html#scopes
 [clients]: https://grimoire.rs/concepts.html#clients
@@ -779,6 +833,8 @@ Confirm current flags with `grim mcp --help`.
 [index-repo]: https://github.com/grimoire-rs/index
 [config-cmd]: https://grimoire.rs/commands.html#config
 [search]: https://grimoire.rs/commands.html#search
+[rate]: https://grimoire.rs/commands.html#rate
+[ratings-doc]: https://grimoire.rs/ratings.html
 [tui]: https://grimoire.rs/commands.html#tui
 [mcp]: https://grimoire.rs/commands.html#mcp
 [mcp-spec]: https://spec.modelcontextprotocol.io/

@@ -88,7 +88,7 @@ One row object per item inside `{"items": [...]}`:
 | `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
 | `status` | `{kind, name, source, pinned, state, outputs, outputs_pending, clients_missing, clients_extra, clients_unresolved, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `pinned` null until locked; `outputs` is `[{client, path}]`; `outputs_pending` is the same `[{client, path}]` shape naming the outputs `grim install` would write **right now** that the install record does not already account for — **materialization drift** — sorted by client and `[]` when an install would write nothing new. Two causes, both real install work: a client that gained support since the last install (present on the machine, or newly configured), and a render-layout move (reported at the NEW path). A present-but-*drifted* output is deliberately absent from it — that is `state: modified`, a different problem with a different remedy — and so is a recorded output whose file was **deleted**, which surfaces as `state: missing`. Unlike `clients_missing` it is reported under autodetect too, because it asks what an install would do rather than what the user configured, and it is derived from the same seam the installer's own no-op check uses. Remediation is `grim install` — **not** `grim update`, which also re-resolves floating tags and rolls the lock forward. `state` is unaffected (an intact artifact at the locked pin still reads `installed`) and the exit code stays `0`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `clients_missing` additionally omits any configured client whose vendor cannot host that artifact kind at that scope (a Codex rule, say), since no output was ever going to be recorded for it; `clients_unresolved` is a sorted client-name array naming every active client whose recorded output could not be resolved (anchor root absent here, or refused by the containment guard) and is therefore missing from `outputs` — `[]` normally; `state` stays `missing` and the exit code stays `0`; `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
 | `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on `update` also authorizes its prune and reap deletions). **A refusal does not suppress the report:** every other artifact still reconciles and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column | `action`: `updated`, `unchanged`, `removed`, `kept-modified` — the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused) |
-| `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, status}` — `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
+| `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, rating, status}` — `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; `rating` is the [artifact rating](./ratings.md) object or `null` — see [the `rating` object](#search-rating) below; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
 | `config registry list` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered; `insecure` is the entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`) | — |
 | `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
@@ -115,6 +115,30 @@ artifact's kind — e.g. a rule installed with only [Codex][codex-subagents-docs
 selected (Codex has no path-scoped rule mechanism), or an mcp descriptor
 no selected client can register. Nothing was written to disk in that
 case, so there is no path to report; `status` is `skipped`.
+
+#### The `search` rating object {#search-rating}
+
+`search`'s `rating` is `{up, url}` when the browsed index published an
+[artifact rating](./ratings.md) for that row, and **explicit `null`**
+otherwise — the [always-present rule](#null-policy) applies to it like
+every other optional field, so it is never an absent key and `null` always
+means *unrated*, never *older grim*.
+
+```json
+{ "up": 42, "url": "https://github.com/acme/index/discussions/117" }
+```
+
+`up` is the upvote count as of the index's last tally; `url` opens the
+forge thread the votes live on. Both halves are things a client can act on.
+
+The vote **target** — the opaque forge node id the mutation addresses — is
+deliberately **not** emitted. It is a forge-internal identifier the ratings
+contract declares opaque, no consumer can do anything with it (a vote goes
+through [`grim rate <ref>`][commands-rate], which resolves the target
+itself), and emitting it would freeze a forge's node-id format into this
+document forever. `null` covers every absence uniformly: the index
+publishes no ratings at all, the source is not an HTTP index, or this
+particular artifact has no votes yet.
 
 #### `status --check` nullability {#status-check-nullability}
 
@@ -223,6 +247,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `uninstall` | `{kind, name, status, retained, abandoned_entries}` — `retained` is an always-present array of absolute paths (`[]` unless something was deliberately left behind) naming the on-disk footprint grim kept while the install-state record was dropped anyway — either the containment guard refused to delete it, or it is a locally-modified copy stranded at a vendor root a release relocated, which the kept-modified rule preserves; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` | `status`: `built` |
 | `release` | `{ref, manifest_digest, tags, pushed, pushed_to}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive | `pushed`: bool (`false` = dry run) |
+| `rate` | `{ref, action, up, url, provider, host, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
@@ -231,6 +256,31 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude, insecure}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); `insecure` is that entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
+
+### The `rate` report's `viewer_up` field {#rate-viewer-up}
+
+`rate`'s `viewer_up` is the one field in the interface where `null` is
+**load-bearing rather than merely absent**, so it is worth stating on its
+own.
+
+| Value | Meaning | Render as |
+|---|---|---|
+| `true` | The forge reports this account as having upvoted | voted |
+| `false` | The forge reports it as not having upvoted | not voted |
+| `null` | Not asked, or not knowable | **neutral / unknown** |
+
+`null` covers three causes a consumer cannot and need not distinguish: no
+credential was piped, no host resolved, or the read-only query failed or
+was unauthorised. It is populated **only** by
+[`grim rate <ref> --dry-run --token-stdin`][commands-rate-viewer]; every
+other invocation reports `null`, including a successful vote.
+
+**Never coerce `null` to `false`.** They are different claims: `false` is
+*the forge told us you have not voted*, `null` is *we do not know*. A
+client that renders unknown as a not-voted affordance tells the user
+something no system observed, which is what
+[invariant R-3][ratings-guarantees] exists to prevent — and it is why a
+failed query reports `null` and exit `0` rather than `false`, or an error.
 
 ### The config write `fields` array {#config-write-fields}
 
@@ -630,6 +680,9 @@ can ship in a minor release.
 [commands-color]: ./commands.md#global-options
 [commands-status]: ./commands.md#status
 [commands-search]: ./commands.md#search
+[commands-rate]: ./commands.md#rate
+[commands-rate-viewer]: ./commands.md#rate-viewer-state
+[ratings-guarantees]: ./ratings.md#workflow-guarantees
 [commands-context]: ./commands.md#context
 [commands-describe]: ./commands.md#describe
 [commands-fetch]: ./commands.md#fetch

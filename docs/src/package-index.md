@@ -141,6 +141,7 @@ A statically-served index publishes the compiled form:
 |---|---|
 | `/all.json` | Every package, one JSON array. Each element is the `metadata.json` object plus a derived `namespace` field (e.g. `"github.com/grimoire-rs"`). |
 | `/index/<namespace…>/<package>/metadata.json` | Path-addressable copy of each pointer. |
+| `/stats.json` | *Optional.* Per-package publisher statistics — today, [artifact ratings](./ratings.md). Absent on an index that publishes none; see [the ratings sidecar](#spec-stats). |
 
 `all.json` is the only endpoint grim's HTTP transport requires. The
 path-addressable copies allow cheap single-package lookups by any
@@ -148,7 +149,78 @@ consumer without downloading the full set.
 
 The git transport skips compilation entirely: grim walks the
 `index/**/metadata.json` tree of the clone, so a plain git repository
-with the layout above *is already a fully functional index*.
+with the layout above *is already a fully functional index*. It has no
+`stats.json`, so a git-transport index is always unrated.
+
+### The Ratings Sidecar (`stats.json`) {#spec-stats}
+
+An index that collects [artifact ratings](./ratings.md) serves a second
+compiled document at `<base>/stats.json`, a sibling of `all.json`. It is a
+**bag of statistics per artifact ref**, not a ratings file: `rating` is the
+first key inside it and a later signal lands beside it additively, without
+a second endpoint and without a version bump for consumers that ignore it.
+
+```jsonc
+{
+  // Monotonic integer, crates.io style — NOT semver.
+  "schema_version": 1,
+
+  // RFC3339 UTC. Makes staleness observable to every consumer.
+  "generated_at": "2026-08-18T09:00:00Z",
+
+  // Per-STAT provider block. Each statistic names its own producer,
+  // because they are genuinely different: ratings come from a forge, a
+  // future `downloads` would come from the registry. A single top-level
+  // `provider` would have been wrong the moment a second signal landed.
+  "providers": {
+    // Which write mutation `grim rate` issues. A plain string, NOT a
+    // tagged union: `target` and `url` are hoisted onto the entry, so this
+    // carries no read-path data and an unrecognised value degrades to
+    // "readable, not writable".
+    "rating": "github"
+  },
+
+  // Keyed by artifact ref, exactly as it appears in all.json's `ref`.
+  // Each ref maps to a bag of SIGNALS. A stat with nothing to say is
+  // OMITTED; a ref with no stats at all is omitted; the whole `entries`
+  // key may be absent. Absent is first-class at all four levels.
+  "entries": {
+    "ghcr.io/grimoire-rs/grim-usage": {
+      "rating": {
+        "up": 42,
+        // Opaque. No client parses or constructs it. The forge node id the
+        // vote mutation targets.
+        "target": "D_kwDOABCDEF4AQtBz",
+        // Opaque. The human-facing thread link.
+        "url": "https://github.com/grimoire-rs/index/discussions/117"
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `schema_version` | integer | yes | Monotonic, **not** semver. This document specifies `1`. |
+| `generated_at` | string | yes | RFC3339 UTC timestamp of the run that produced the document. |
+| `providers` | object | no | One key per statistic, naming its producer. `providers.rating` is `"github"` or `"gitlab"` — the forge `grim rate` votes through. Absent, or an unrecognised value, leaves every rating **readable but not votable**. |
+| `entries` | object | no | Keyed by artifact ref, spelled exactly as `all.json` spells it. Absent means nothing is rated yet. |
+| `entries[ref].rating` | object | no | `{up, target, url}`. `up` is a non-negative integer count; `target` and `url` are **opaque** — never parsed or constructed by any client. A ref with zero votes is omitted rather than carrying `"up": 0`. |
+
+The consumer contract is the [OSV][osv] formulation, which is the clearest
+in the ecosystem:
+
+> A client that understands `schema_version` *N* must accept and correctly
+> process any document declaring `schema_version` ≤ *N*, ignoring fields it
+> does not recognize. A document declaring `schema_version` > *N* may be
+> skipped or degraded to "no rating available", but must never be treated as
+> a parse error. A missing file, a missing entry, and a missing field all mean
+> **unrated** — never an error, at any of the three levels.
+
+grim implements exactly that: a `404`, a transport or TLS failure, a body
+that does not parse, and a `schema_version` above the one it knows all
+degrade to *no ratings* at `debug` level, and only the `all.json` fetch
+decides whether the catalog build succeeded.
 
 ### Namespaces and Ownership {#spec-namespaces}
 
@@ -397,6 +469,7 @@ index can point at public packages.
 [gl-pages]: https://docs.gitlab.com/ee/user/project/pages/
 [zot]: https://zotregistry.dev/
 [harbor]: https://goharbor.io/
+[osv]: https://ossf.github.io/osv-schema/
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs
