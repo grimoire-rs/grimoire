@@ -224,6 +224,34 @@ it exits, so a follow-up `grim install --client <name>` completes without
 re-adding anything. If you *want* the old behaviour, name the clients
 explicitly; nothing else recovers it, and that is deliberate.
 
+## Downgrading to 0.13 after browsing a rated index {#catalog-cache-downgrade}
+
+[Artifact ratings][ratings] add one field to the catalog cache
+(`$GRIM_HOME/catalog/<hash>.json`), which parses strictly: a cache written
+by a newer grim is refused wholesale by an older one. That is a deliberate,
+cheap trade — a cache is not a contract, and a refusal should cost exactly
+one network rebuild.
+
+**It did not cost one rebuild in 0.13.0 and earlier.** The parse error was
+raised above the rebuild decision, so a refused cache degraded that
+registry to an **empty browse** without overwriting the file — on every
+later run, `--refresh` included, until someone deleted it by hand. This
+release fixes it going forward: a cache the loader refuses now reads as
+cold while online, so the next browse simply rewrites it. That fix cannot
+reach a binary that already shipped.
+
+**What to do.** Only if you *downgrade*, and only if you browsed an index
+that publishes ratings: delete the cache once.
+
+```console
+$ rm -rf "${GRIM_HOME:-$HOME/.grimoire}/catalog"
+```
+
+Upgrading needs nothing — the newer binary rebuilds an older cache
+normally. And a cache whose entries are all unrated is byte-identical to
+what 0.13 wrote, so a user who never browsed a rating-publishing index is
+not affected in either direction.
+
 ## Smaller notes {#smaller-notes}
 
 - **A live symlink at an install destination now exits 65, not 74.** A
@@ -249,6 +277,7 @@ explicitly; nothing else recovers it, and that is deliberate.
 <!-- internal -->
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
 [browse-filters]: ./configuration.md#browse-filters
+[ratings]: ./ratings.md
 [stability]: ./stability.md
 [unstable]: ./stability.md#unstable
 [status]: ./commands.md#status

@@ -40,6 +40,7 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 | [`grim remove`](#remove) | Undeclare an artifact (config + lock only). |
 | [`grim uninstall`](#uninstall) | Fully remove an artifact (files + record + config). |
 | [`grim search`](#search) | Search the registry catalog. |
+| [`grim rate`](#rate) | Vote on an artifact through the index's rating forge. |
 | [`grim fetch`](#fetch) | Print an artifact's content without installing. |
 | [`grim describe`](#describe) | Show an artifact's manifest metadata without downloading it. |
 | [`grim tui`](#tui) | Browse the catalog interactively. |
@@ -953,10 +954,234 @@ deprecated entry is flagged in the `Status` cell with a comma-suffixed
 `deprecated` (e.g. `installed,deprecated`), and JSON carries the notice in a
 `deprecated` field (`null` when the artifact is not deprecated).
 
+When the browsed index publishes [artifact ratings](./ratings.md), JSON
+items carry a `rating` object — `{up, url}`, or `null` for an unrated
+artifact. It is JSON-only; the plain table keeps its five columns.
+
 ```sh
 grim search review
 grim search --show-deprecated review
 grim search --refresh --registry ghcr.io/acme
+```
+
+### Ordering the results (--sort) {#search-sort}
+
+`--sort <name|updated|rating>` replaces the default ordering with an
+explicit one:
+
+| Value | Order |
+|---|---|
+| `name` | Leaf name ascending, case-insensitive |
+| `updated` | Publishing date descending; undated last |
+| `rating` | Upvotes descending, then date descending; unrated last |
+
+`--sort rating` orders by upvotes descending, then by publishing date
+descending, then by name — and an unrated artifact sorts into a bucket of
+its own at the end rather than as zero votes, so a fresh index with no
+ratings yet still reads in a stable, meaningful order. The same applies to
+an undated artifact under `--sort updated`: a missing value is never folded
+into `0` or epoch `0`, which would order it against real data by accident.
+Every mode breaks its last tie on the fully-qualified reference, so the
+order is total — two runs over the same catalog render identically.
+
+Given together with a query, `--sort` **replaces** relevance ranking:
+`grim search review --sort rating` is "the best-rated of the review
+matches", not "the most relevant, subsorted". Omitted, results keep today's
+order — relevance when queried, registry-declaration order otherwise —
+which is what makes the flag purely additive.
+
+[`grim tui --sort`](#tui) takes the same three values and applies the same
+order.
+
+```sh
+grim search --sort rating
+grim search review --sort updated
+grim tui --sort rating
+```
+
+## grim rate {#rate}
+
+`grim rate <ref>` casts a vote on an artifact. There is no Grimoire service
+behind it: the vote is an ordinary upvote on the index operator's own
+discussion thread (GitHub) or an emoji reaction on their work item
+(GitLab), posted under **your own** forge account. How an index turns that
+on, and what it guarantees, is [Artifact Ratings](./ratings.md); this
+section is the command surface.
+
+```
+grim rate <ref> [--up | --remove] [--yes] [--dry-run]
+                [--token-stdin] [--token-host <HOST>]
+```
+
+The reference resolves through the same catalog seam
+[`grim search`](#search) uses, so a short identifier expands against the
+resolved default registry and the global [`--registry`](#global-options)
+flag selects the browse set. The vote applies to the *repository*, so a tag
+or digest suffix parses and is then ignored. A [browse
+filter](./configuration.md#browse-filters) hiding a row from a listing does
+not make it unvotable.
+
+| Flag | Effect |
+|---|---|
+| `--up` | Register an upvote. The default when neither flag is given. |
+| `--remove` | Retract **your own** upvote. Not a downvote — votes are up-only and binary, and both forges' primitives are toggles. Given with `--up`, exit 64. |
+| `--yes` | Skip the confirmation prompt. **Required for every non-interactive run.** |
+| `--dry-run` | Resolve the row, the provider and the host, print the report, and **mutate nothing**. On its own it needs no credential and makes no forge request, so it works under `--offline`. Combined with `--token-stdin` it also reads back your own vote state — see [reading your own vote state](#rate-viewer-state). |
+| `--token-stdin` | Read the forge credential from stdin. There is intentionally **no** `--token <value>` flag — argv is world-readable. Implies a non-interactive run, so it requires `--yes` — **except under `--dry-run`**, which posts nothing and therefore has nothing to confirm. |
+| `--token-host <HOST>` | Declare which host the piped credential belongs to; grim refuses before sending anything if it does not match. Valid only with `--token-stdin`. |
+
+**Voting confirms by default.** A vote posts publicly under your name, so
+an interactive run prompts on stderr before it mutates anything:
+
+```console
+$ grim rate ghcr.io/acme/skills/code-review
+This posts publicly to your github account as alice. Continue? [y/N] y
+```
+
+Only `y` or `yes` proceeds; anything else — including an empty line and
+EOF — exits `0` with no mutation and no local vote record. A
+**non-interactive** run without `--yes` exits `64` naming the flag rather
+than hanging on a prompt nobody can answer, and `--token-stdin` without
+`--yes` exits `64` too: stdin is carrying the credential, so it cannot also
+carry a confirmation, and the prompt is deliberately never rerouted to
+`/dev/tty`.
+
+**On the voting path that rule is absolute**: a piped credential always
+needs `--yes`. It is narrowed by `--dry-run`, and by nothing else — `grim
+rate <ref> --dry-run --token-stdin` does not need `--yes`, because the
+confirmation exists to gate a public post under your account and a dry run
+posts nothing at all. Read separately the two look contradictory; the
+exemption is one flag wide.
+
+### Reading your own vote state {#rate-viewer-state}
+
+`--dry-run` alone answers *where would this vote go*. `--dry-run` plus a
+piped credential also answers *have I already voted* — it consumes the
+credential, issues exactly **one read-only query**, and reports
+`viewer_up`:
+
+```console
+$ printf '%s' "$FORGE_TOKEN" | grim rate acme/skills/code-review \
+    --dry-run --token-stdin --format json | jq .viewer_up
+true
+```
+
+It is the only way to get that answer: the count in `stats.json` is an
+aggregate with no identity in it, and a client is not expected to query a
+forge itself.
+
+`viewer_up` is **tri-state**, and the third state is the point:
+
+| Value | Meaning |
+|---|---|
+| `true` | The forge reports this credential's account as having upvoted |
+| `false` | The forge reports it as not having upvoted |
+| `null` | **Not asked, or not knowable** — no credential was piped, no host resolved, or the query failed or was unauthorised |
+
+A failed query reports `null`, **never `false`**. Rendering a read you
+could not complete as "you have not voted" is the exact claim
+[invariant R-3](./ratings.md#workflow-guarantees) forbids, so a consumer
+treats `null` as *unknown* and renders it neutral rather than as a
+not-voted affordance.
+
+Two interactions are easy to get backwards:
+
+- **It needs the network.** Bare `--dry-run` works under `--offline`;
+  `--dry-run --token-stdin` exits `81`, because it cannot degrade into an
+  answer it never checked.
+- **The credential is still validated as input.** Only the *query* failing
+  yields `null` — a terminal on stdin or multi-line input is still `64`,
+  and empty input is still `80`, exactly as on the voting path.
+  `--token-host` is also still enforced here, before the token is read.
+
+### Credentials {#rate-credentials}
+
+`grim rate` has its **own, narrower** credential ladder — it does not reuse
+the [publishing credential](./authentication.md) or the announce token,
+because voting needs a far smaller grant than publishing does. With
+`--token-stdin` the piped value is used and nothing else is consulted;
+otherwise grim tries, in order:
+
+1. `GRIM_RATE_TOKEN`
+2. a host-matched CI token
+3. the forge CLI's stored credential — `gh auth token --hostname <host>` or
+   `glab auth token --hostname <host>`
+4. refuse with exit `80`, naming the ladder and never a token
+
+Under `--token-stdin`: a terminal on stdin is refused (`64` — the flag
+exists for piping), more than one line is refused (`64`), and empty or
+whitespace-only input is an auth error (`80`) that deliberately does
+**not** fall through to the ladder above. A caller that said it was
+supplying a credential must not silently vote as somebody else.
+
+`github` votes against `api.github.com` and `gitlab` against `gitlab.com`.
+`GRIM_RATING_HOST` redirects that to a GitHub Enterprise Server or
+self-managed GitLab instance. It is read from your own environment only —
+a published `stats.json` carries no host at all — and compared exactly:
+IDNA-normalised, ASCII-lowercased, port included, **no suffix matching**.
+A loopback host — `localhost`, `127.0.0.1` or `[::1]`, on any port — is
+contacted over plain HTTP; every other host over HTTPS.
+See [voting against a private instance](./ratings.md#voting-host).
+
+### JSON output {#rate-json}
+
+`--format json` emits one object (not an array — `rate` concerns exactly
+one reference) with every field always present, nullable ones as explicit
+`null`:
+
+```json
+{
+  "ref": "ghcr.io/acme/skills/code-review",
+  "action": "up",
+  "up": 43,
+  "url": "https://github.com/acme/index/discussions/117",
+  "provider": "github",
+  "host": "api.github.com",
+  "viewer_up": true
+}
+```
+
+`up` is the count after the mutation, or the sidecar's count under
+`--dry-run`; it is `null` when the forge's payload carries no total
+(GitLab's emoji toggle reports state, not a count). `provider` is the value
+the index published, verbatim, so an unrecognised one is still reported.
+`host` is `null` when no host resolves — which under `--dry-run` is exactly
+the "grim cannot vote here" answer a client needs *before* it picks an
+authentication provider. `viewer_up` is the tri-state described
+[above](#rate-viewer-state) and is `null` on every path except
+`--dry-run --token-stdin`.
+
+Plain output is a single-row table:
+`Ref | Action | Up | Voted | Provider | Host | Url`, with `-` for an absent
+value. The `Voted` cell renders `yes` / `no` / `-` — three distinct cells,
+so unknown never reads as "no".
+
+### Exit codes {#rate-exit-codes}
+
+| Code | Condition |
+|---|---|
+| `0` | Vote registered or retracted · confirmation declined (nothing mutated) · `--dry-run` resolved |
+| `64` | `--up` with `--remove`; malformed reference; non-interactive without `--yes`; `--token-stdin` without `--yes`; `--token-host` without `--token-stdin`; `--token-stdin` with a terminal on stdin, or with multi-line input |
+| `65` | The row carries no rating; the index declared no rating provider; the provider is one grim cannot vote through (the raw value is in the message); the forge answered with a populated GraphQL `errors` array |
+| `69` | The forge is unreachable, answered 5xx, or applied a secondary rate limit |
+| `79` | The reference resolves to no catalog row, or the vote target no longer exists |
+| `80` | No credential resolved; the forge rejected it (401/403); `--token-stdin` received empty input; `--token-host` did not match the resolved host — refused **before** the token reached any header |
+| `81` | `--offline` (or `GRIM_OFFLINE`) — a vote hard-refuses rather than degrading silently. Bare `--dry-run` is exempt; `--dry-run --token-stdin` is **not**, because it makes a query. |
+
+Note what is *not* in that table: a failed or unauthorised
+[viewer-state query](#rate-viewer-state) does not fail the command. It
+reports `viewer_up: null` and exits `0` — the read is best-effort by
+design, and the honest answer to a read you could not complete is
+*unknown*.
+
+```sh
+grim rate ghcr.io/acme/skills/code-review
+grim rate acme/skills/code-review --remove --yes
+grim rate acme/skills/code-review --dry-run --format json
+printf '%s' "$FORGE_TOKEN" | grim rate acme/skills/code-review \
+  --dry-run --token-stdin --format json          # + viewer_up, no --yes needed
+printf '%s' "$FORGE_TOKEN" | grim rate acme/skills/code-review \
+  --token-stdin --token-host ghe.corp.example --yes
 ```
 
 ## grim fetch {#fetch}
@@ -1163,6 +1388,15 @@ Like [`grim search`](#search), deprecated artifacts that are not installed are
 Press `h` to reveal or re-hide them live, pass `--show-deprecated` to open with
 them shown, or set [`options.show_deprecated`](#config) to `true` for the
 default.
+
+`--sort <name|updated|rating>` opens the browse in one of the
+[three orders `grim search --sort`](#search-sort) applies, with the same
+semantics — including replacing the relevance ranking the `/` search
+applies. It is a launch flag, not a keybinding: omitted, the browse groups
+by kind and then by name as it always has. When the browse source publishes
+[artifact ratings](./ratings.md), the detail pane gains a `Rating:` row
+below the provenance rows (`42 upvotes`); an unrated artifact simply has no
+such row, never a `0`.
 
 **Tree view** — pressing `t` switches the catalog between flat list mode and
 a collapsible tree grouped by browse source and repository path. Rows from an

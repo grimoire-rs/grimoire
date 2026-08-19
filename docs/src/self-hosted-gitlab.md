@@ -91,6 +91,7 @@ Optional variables:
 |---|---|
 | `GRIM_INDEX_MIN_ACCESS_LEVEL` | Membership threshold for auto-merge (default `30` = Developer) |
 | `GRIM_INDEX_REGISTRY_AUTH` | `user:token` for the reachability check against a **private** container registry (the anonymous token dance fails there) |
+| `GRIM_RATINGS_TOKEN` | Required only if you turn on [artifact ratings](./ratings.md) — a project access token with `api` scope for the tally job. `CI_JOB_TOKEN` is deliberately never read for it, and there is no fallback: it inherits the triggering user's role, which would let a human's identity satisfy the tally's trusted-author check. See [Setup for GitLab](./ratings.md#setup-gitlab) |
 
 ### What auto-merges {#index-automerge}
 
@@ -194,6 +195,15 @@ GitLab Pages serving `all.json` also works as an `index =` locator, but
 only when the Pages site is public — grim's HTTP transport does not
 carry Pages access-control cookies. Prefer the git transport on private
 instances. Details: [Consuming an Index](./package-index.md#consuming).
+
+One consequence worth knowing before you choose: **the git transport
+carries no [artifact ratings](./ratings.md).** The ratings sidecar is a
+compiled document served beside `all.json`, and a git-transport index is a
+tree of `metadata.json` files with no such document, so every row reads
+unrated — silently, and by design, not as a misconfiguration. An instance
+that wants both a private index and ratings needs the HTTP transport,
+which means a reachable (and therefore public, or otherwise
+grim-reachable) Pages site.
 
 <!-- external -->
 [gl-components]: https://gitlab.com/grimoire-rs/components

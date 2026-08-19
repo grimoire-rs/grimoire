@@ -2,15 +2,21 @@
 paths:
   - "src/install/vendor_*.rs"
   - "src/oci/mcp.rs"
+  - "src/catalog/rating_provider.rs"
+  - "docs/src/ratings.md"
 ---
 
 # Vendor Capability Watchlist
 
-Auto-fires on vendor renderer / MCP descriptor edits. Purpose: **re-check
-upstream before patching a decline**. Every skip/warn/decline in a renderer
-encodes an upstream limitation verified at a point in time — vendors ship
-features continuously, and a decline can silently rot into a grim regression
-(it happened: `xhigh` reasoning-effort, Codex `additionalContext`).
+Auto-fires on vendor renderer / MCP descriptor edits, and on the two files
+carrying the ratings feature's own upstream forge claims. Purpose:
+**re-check upstream before patching a decline** — or before touching a
+vendor-version claim. Every skip/warn/decline in a renderer, and every
+dated row in the "Ratings forge capability watchlist" below, encodes an
+upstream fact verified at a point in time — vendors ship features and
+change behavior continuously, and either can silently rot into a grim
+regression or a stale doc (it happened: `xhigh` reasoning-effort, Codex
+`additionalContext`).
 
 ## Re-verify procedure
 
@@ -89,10 +95,13 @@ landed in the vendor-wave expansion). Sources: `research_vendor_verification_*.m
 
 Overlap detection in `test_path_overlaps_declared_or_absent` compares
 `paths:` patterns as **exact strings**. This rule's globs
-(`src/install/vendor_*.rs`, `src/oci/mcp.rs`) are unique strings today, so
-no declared-overlap group is required — but they *semantically* overlap
-`src/**` and `**/*.rs`. If another rule ever adopts these exact strings, a
-declared group in `.claude/rules.md` becomes mandatory.
+(`src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs`,
+`docs/src/ratings.md`) are unique strings today, so no declared-overlap
+group is required — but they *semantically* overlap `src/**`/`**/*.rs`
+(the two `src/` entries) and `docs/**` (`docs/src/ratings.md`, which
+`docs-style.md` and `product-context.md` already glob-match — editing that
+one file loads all three rules). If another rule ever adopts one of these
+exact strings, a declared group in `.claude/rules.md` becomes mandatory.
 
 ## Wave-2 skills-only batch watchlist
 
@@ -117,3 +126,29 @@ not the uniform ones.
 | MCP kind | OpenClaw | declined | `openclaw.json` mixes strict JSON and JSON5 (unquoted keys, a `--strict-json` flag) | needs JSON5 tolerance in the splice engine before any write |
 | `$OPENCLAW_HOME` | OpenClaw | not honored | referenced but **never defined** on any page fetched | honor once upstream documents it |
 | opencode lineage | Kilo | separate client from `opencode` | Kilo's current codebase is built on opencode, which grim supports independently | watch for directory convergence — a shared dir would make two clients contend for one path |
+
+## Ratings forge capability watchlist
+
+Not a `Vendor` renderer decline — `grim rate`/`docs/src/ratings.md` claims
+about the two forges' own version history (GHES, GitLab). Added here
+per F-5 of `plan_ratings_deferred_findings.md`: this rule is the place a
+vendor-version claim gets re-verified before it ages silently in prose,
+and that reasoning applies to forge capabilities the same as renderer
+declines.
+
+All rows `verified 2026-08-19`.
+
+| Capability | Vendor | docs/src/ratings.md claim | Upstream status | Action when claim changes |
+|---|---|---|---|---|
+| Discussions availability | GitHub Enterprise Server | "GHES has shipped Discussions since 3.6" (`docs/src/ratings.md:247`) | **Confirmed.** GHES 3.6 GA'd 2022-08-16 with GitHub Discussions listed among its headline features ([GHES 3.6 GA changelog](https://github.blog/changelog/2022-08-16-github-enterprise-server-3-6-is-now-generally-available/)) | none — re-verify only if GHES ever drops or re-gates Discussions |
+| Personal/project access token expiry ceiling | GitLab | "Token expiry is mandatory since GitLab 16.0 — at most 365 days, 400 on 17.6 and later" (`docs/src/ratings.md:300`) | **Partially wrong, doc corrected 2026-08-19.** Mandatory-expiry-since-16.0 and the 365-day default both confirmed. The 400-day ceiling from GitLab 17.6 is real but ships behind the `buffered_token_expiration_limit` feature flag, **disabled by default** — an instance stays at 365 days unless an admin turns it on ([GitLab PAT docs](https://docs.gitlab.com/user/profile/personal_access_tokens/), [GitLab account and limit settings](https://docs.gitlab.com/administration/settings/account_and_limit_settings/) — states the 365/400 split and the flag in the present tense, so a re-verifier reads the current truth, not a historical feature request). The doc previously implied 400 applied automatically on 17.6+ | drop the feature-flag caveat once `buffered_token_expiration_limit` defaults to enabled |
+| "Award Emoji" → "Emoji Reactions" rename | GitLab | "(GitLab renamed this feature Award Emoji to Emoji Reactions in 16.0...)" (`docs/src/ratings.md:264-265`) — found while auditing the file for other unverified version claims, not one of the two the plan named | **Confirmed.** Rename shipped in GitLab 16.0 ([GitLab emoji reactions docs, v17.9](https://docs.gitlab.com/17.9/user/emoji_reactions/) — the versioned page still carries the history block; the current unversioned page has since pruned it) | none |
+| `awardEmojiToggle` mutation name | GitLab | "the GraphQL mutation is still spelled `awardEmojiToggle`" (`docs/src/ratings.md:266-267`) — present-tense claim about a live API, not a completed historical event like the row above | **Present and undeprecated**, verified 2026-08-19 against the [GitLab GraphQL API reference](https://docs.gitlab.com/api/graphql/reference/) and the [removed-items log](https://docs.gitlab.com/api/graphql/removed_items/) (no `awardEmojiToggle` entry). Has a code dependency: `src/catalog/rating_provider.rs` hard-codes the mutation name at `:592` (the GraphQL document literal), `:601` (response-key lookup), `:843` (write-mutation guard list), and references the `awardEmoji` widget/field at `:549`, `:580` | **`grim rate --up` against GitLab breaks if this is renamed or deprecated** — re-verify against the removed-items log before any GitLab-version-driven change to `rating_provider.rs` |
+| `grim-ratings` resource group `process_mode` — no UI setting | GitLab | `docs/src/ratings.md` tells the operator to change it under **Settings → CI/CD → Resource groups** (`:311-317`) | **Wrong, doc corrected 2026-08-19.** GitLab's own [resource groups doc](https://docs.gitlab.com/ci/resource_groups/) states process mode changes **must use the API**: `PUT /projects/:id/resource_groups/:key` with `process_mode`. No UI exists. Confirmed by the open UI feature request [gitlab-org/gitlab#436986](https://gitlab.com/gitlab-org/gitlab/-/issues/436986) | flip the doc back to a UI pointer once #436986 ships |
+
+The indexer's `README.md` was checked for the same two claims (the plan
+says they are "echoed" there) — as of `.agents/worktrees/grimoire-index` @
+`0a6c221` it contains **neither** the GHES-3.6 nor the GitLab-16.0/17.6
+wording (`grep -in` for "enterprise", "ghes", "expir", "16.0", "17.6",
+"365", "since 3." over the file returns nothing). No indexer edit is
+needed for F-5.
