@@ -158,6 +158,7 @@ mod tests {
     /// One project entry filtered on both sides.
     fn filtered_entry() -> RegistryConfig {
         RegistryConfig {
+            trust_hooks: None,
             insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),

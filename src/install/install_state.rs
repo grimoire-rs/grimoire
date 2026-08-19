@@ -1294,6 +1294,65 @@ mod tests {
         }
     }
 
+    // ── Hook records on the wire (WP-J2) ────────────────────────────
+
+    /// A hook record round-trips through `state.json` with the on-disk kind
+    /// tag `"hook"` and **one output per arming client onto one shared payload
+    /// directory** (S-003). Principle 9: the tag and the several-outputs-one-
+    /// path shape are on-disk contracts — the reap-after-uninstall path and
+    /// the prune refcount both key on them, so a change here is a breaking
+    /// change, not a refactor.
+    #[test]
+    fn a_hook_record_round_trips_with_one_output_per_arming_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let payload = AnchoredPath {
+            anchor: PathAnchor::GrimHome,
+            relative: "hooks/shell-guard".to_string(),
+        };
+        let mut st = InstallState::empty(&path);
+        st.record(InstallRecord {
+            kind: ArtifactKind::Hook,
+            name: "shell-guard".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("shell-guard", 'a')),
+            dev: false,
+            outputs: ["claude", "codex"]
+                .into_iter()
+                .map(|client| ClientOutput {
+                    client: client.to_string(),
+                    target: payload.clone(),
+                    content_hash: Algorithm::Sha256.hash(b"payload"),
+                    support_dir: None,
+                    entry: None,
+                    adopted: false,
+                })
+                .collect(),
+        });
+        st.save().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // The file is pretty-printed, so match the token pair rather than a
+        // compact spelling.
+        assert!(
+            raw.contains(r#""kind""#) && raw.contains(r#""hook""#),
+            "the frozen on-disk kind tag: {raw}"
+        );
+        assert!(raw.contains(r#""grim-home""#), "the frozen anchor tag: {raw}");
+
+        let reloaded = InstallState::load(&path).unwrap();
+        let got = reloaded.get(ArtifactKind::Hook, "shell-guard").expect("present");
+        assert_eq!(got.kind, ArtifactKind::Hook);
+        assert_eq!(got.outputs.len(), 2);
+        assert!(
+            got.outputs.iter().all(|o| o.target == payload),
+            "the payload is client-independent — every output names the ONE directory"
+        );
+        assert!(
+            got.outputs.iter().all(|o| o.entry.is_none() && o.support_dir.is_none()),
+            "a hook payload is a plain directory: no config entry, no support dir"
+        );
+    }
+
     // ── F7: path hash constrained to SHA-256 on the wire ────────────────
 
     /// Contract test (design record F7): an install record's path `hash`

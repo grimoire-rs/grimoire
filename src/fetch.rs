@@ -482,7 +482,16 @@ pub async fn fetch_with_limit(
             }
         }
         FetchedPayload::Artifact(kind) => match kind {
-            ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
+            // A hook joins the tar-unpack arm: `grim fetch` is use-not-install —
+            // it downloads a layer and prints bytes, arming nothing and writing
+            // nothing. Reading a published hook's `hook.toml` and handler
+            // scripts BEFORE consenting to arm them is the single most valuable
+            // thing a user can do with this kind, so refusing it would remove a
+            // review surface while buying no safety at all.
+            //
+            // No feature-flag gate here for the same reason: the flag governs
+            // arming, and a `gated` hook is one the user most wants to inspect.
+            ArtifactKind::Hook | ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
                 let entries = wrap(unpack_tar_in_memory(&fetched.blob, doc_limit as u64))?;
                 report.files = entries
                     .iter()
@@ -494,6 +503,9 @@ pub async fn fetch_with_limit(
 
                 let index_rel = match kind {
                     ArtifactKind::Skill => PathBuf::from(&fetched.name).join("SKILL.md"),
+                    // A hook's index is its manifest, inside the payload dir —
+                    // the skill shape, not the rule/agent single-file shape.
+                    ArtifactKind::Hook => PathBuf::from(&fetched.name).join(crate::oci::hook::HOOK_MANIFEST_FILE),
                     _ => PathBuf::from(format!("{}.md", fetched.name)),
                 };
 
@@ -920,6 +932,17 @@ fn project_index(
     let vendor = client.vendor();
     let pinned_str = pinned.strip_advisory().to_string();
     let rendered = match kind {
+        // A hook has NO per-vendor index projection, and that is structural
+        // rather than unimplemented: for every other kind the vendor-specific
+        // artifact IS a rendered file, whereas a hook's vendor-specific artifact
+        // is a REGISTRATION in the client's own config — not a projection of
+        // `hook.toml` at all. `hook.toml` is byte-identical on every client, so
+        // `--vendor` on a hook correctly returns the canonical bytes.
+        //
+        // Returning `Ok(None)` (canonical verbatim) rather than an error keeps
+        // `grim fetch --vendor claude <hook>` useful instead of making the user
+        // learn which kinds accept the flag.
+        ArtifactKind::Hook => None,
         ArtifactKind::Skill => vendor
             .skill_index(doc)
             .map_err(|e| anyhow!("skill projection failed: {e}"))?,

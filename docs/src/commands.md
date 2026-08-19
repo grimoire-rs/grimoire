@@ -32,7 +32,7 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
 | [`grim config`](#config) | Read and write `grimoire.toml` settings and registries. |
-| [`grim add`](#add) | Declare a skill/rule/agent/mcp server, lock it, and install it by default. |
+| [`grim add`](#add) | Declare a skill/rule/agent/mcp server/hook, lock it, and install it by default. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
@@ -48,9 +48,10 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 | [`grim publish`](#publish) | Validate and batch-release all packages from a manifest. |
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
-| [`grim schema`](#schema) | Print the JSON Schema for `grimoire.toml` or `publish.toml`. |
+| [`grim schema`](#schema) | Print the JSON Schema for one of grim's TOML formats. |
 | [`grim completions`](#completions) | Print a shell completion script. |
 | [`grim mcp`](#mcp) | Run a local STDIO MCP server for AI agent integration. |
+| [`grim hook`](#hook) | List which hooks are armed, and dispatch them when a client fires. |
 
 ## grim init {#init}
 
@@ -310,11 +311,17 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] [--no-install] [--force] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook>] [--name <name>] [--no-install] [--force] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
-or bundle, pins it in the lock, and — by default — materializes it into your
-detected AI clients in one step. `<reference>` is the only required argument —
-`registry/repo:tag` or `registry/repo@sha256:…`.
+[hook](./artifacts.md#hooks), or bundle, pins it in the lock, and — by default —
+materializes it into your detected AI clients in one step. `<reference>` is the
+only required argument — `registry/repo:tag` or `registry/repo@sha256:…`.
+
+A hook is declared and locked like anything else, but it is **not armed** by
+adding it: `add` skips the install half with a warning naming the feature flag,
+and [`grim status`](#status) reports `gated` until both
+[hook gates](./artifacts.md#hook-gates) allow it. `--allow-hooks` is accepted
+here too, for the same reason it is on `install`.
 
 When `--kind` is omitted, the kind is inferred from the artifact's
 `com.grimoire.kind` manifest annotation set at release time (artifacts
@@ -472,6 +479,25 @@ nowhere to go — grim then exits **78** telling you to name a client with
 `--client`. `--force` overwrites a locally modified artifact instead of
 refusing it.
 
+[Hooks](./artifacts.md#hooks) are the one kind install may decline on policy
+rather than on capability. A locked hook installs only when both
+[gates](./artifacts.md#hook-gates) allow it; otherwise the artifact is
+reported `skipped` with a warning naming the one cause and its remedy, and
+the exit code stays `0` — the rest of the install proceeds normally.
+`--allow-hooks` (also on [`grim update`](#update) and [`grim add`](#add))
+grants trust for **this invocation only**: it does not turn the feature flag
+on, it writes nothing to any config file, and there is deliberately **no
+environment variable equivalent** — a repository routinely carries its own
+environment, and a repository must never be able to grant itself trust. Use
+it where there is no terminal to prompt on:
+
+```sh
+grim install --allow-hooks     # CI, cloud agents: never prompts, never hangs
+```
+
+An explicit `trust_hooks = false` beats `--allow-hooks`. The flag answers
+"nobody has said yes yet"; it does not overrule someone who said no.
+
 Install never clobbers files it did not create: a destination that already
 exists on disk **without an install record** — a hand-authored skill
 directory, a rule file, or an MCP config member owned by you or another
@@ -590,7 +616,32 @@ run it, [`grim status`](#status) surfaces that drift ahead of time as
 ## grim status {#status}
 
 Reports each declared artifact's state — installed, outdated, locally modified,
-integrity-missing, or not installed. The `Source` column shows each artifact's
+integrity-missing, not installed, or — for a [hook](./artifacts.md#hooks)
+alone — `gated`, meaning declared and locked but not armed because a
+[gate](./artifacts.md#hook-gates) has not been given. A `gated` hook is not a
+failure: the exit code stays `0`. Every hook row also carries an `arming`
+array in `--format json`, one entry per client, each naming the single cause
+and the remedy for it:
+
+```json
+"state": "gated",
+"arming": [
+  {
+    "client": "claude",
+    "cause": "feature-flag-off",
+    "message": "hooks are disabled for this scope; run grim config set options.experimental.hooks true, then grim install",
+    "transient": false
+  }
+]
+```
+
+> **A hook armed by `--allow-hooks` still reports `gated`.** The verdict is
+> derived from configuration, and the flag is per-invocation and deliberately
+> never persisted, so `status` has nothing to read and under-claims. The hook
+> is armed and does fire. See [Hook
+> reporting](./stability.md#limitations-hook-reporting).
+
+The `Source` column shows each artifact's
 [provenance](./concepts.md#bundles): `direct` for a registry declaration, the
 bundle it came from, `path: <path>` for a declared [local path
 source](#add-path), or `path: <path> (dev)` for a [dev-installed](#install-dev)
@@ -799,7 +850,7 @@ project without `--global` it exits `79` like every other scope command.
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,
-or `mcp`) undeclares an artifact from `grimoire.toml` and the lock. It
+`mcp`, or `hook`) undeclares an artifact from `grimoire.toml` and the lock. It
 leaves already-installed files (or, for an [MCP server](./mcp-servers.md),
 the registered config entry) in place — use [`grim uninstall`](#uninstall)
 to remove those too.
@@ -817,8 +868,8 @@ nothing to undeclare for it — use `grim uninstall` to drop one instead.
 
 ## grim uninstall {#uninstall}
 
-`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, or
-`mcp`) is the full inverse of install: it deletes the materialized files,
+`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`,
+`mcp`, or `hook`) is the full inverse of install: it deletes the materialized files,
 drops the install record, and undeclares the artifact from the config and
 lock. The interactive TUI's delete action reuses the same seam. For an
 [MCP server](./mcp-servers.md#modification-detection), there is no
@@ -1319,11 +1370,14 @@ grim tui --registry ghcr.io/acme
 
 `grim build <path>` validates and packs a local skill directory, rule `.md`
 file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
-`.toml` file, or bundle `.toml` file without pushing it — a dry run for
-authors. `--kind <skill|rule|agent|bundle|mcp>` forces the artifact kind
+`.toml` file, [hook](./artifacts.md#hooks) directory, or bundle `.toml` file
+without pushing it — a dry run for
+authors. `--kind <skill|rule|agent|bundle|mcp|hook>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
-mcp` — a bare `.toml` packs as a bundle. `--git` embeds
+mcp` — a bare `.toml` packs as a bundle. A hook needs no flag: a directory is
+told apart from a skill by its index file, and `hook.toml` is tested before
+`SKILL.md`. `--git` embeds
 [git provenance](./publishing.md#git-provenance) (commit revision, commit
 date, and the `origin` remote) so the preflight reflects what a release would
 stamp.
@@ -1377,7 +1431,8 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 
 `grim publish` reads a `publish.toml` manifest and releases every declared
 package in kind order (skills → rules → agents →
-[mcp servers](./mcp-servers.md) → bundles, alphabetical within kind). It
+[mcp servers](./mcp-servers.md) → [hooks](./artifacts.md#hooks) → bundles,
+alphabetical within kind). It
 validates the whole manifest before any push, then composes
 [`grim release`](#release) per entry.
 
@@ -1473,12 +1528,14 @@ grim logout ghcr.io
 
 ## grim schema {#schema}
 
-`grim schema --kind <config|publish|lock|mcp>` prints a [JSON
+`grim schema --kind <config|publish|lock|mcp|hook>` prints a [JSON
 Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
 `--kind config` describes `grimoire.toml`; `--kind publish` describes
 `publish.toml`; `--kind lock` describes `grimoire.lock` (generated by grim,
 published so tooling can validate or introspect it); `--kind mcp` describes
-the [MCP server descriptor](./mcp-servers.md) (`mcp/<name>.toml`). Each
+the [MCP server descriptor](./mcp-servers.md) (`mcp/<name>.toml`);
+`--kind hook` describes the [hook manifest](./artifacts.md#hooks)
+(`hook.toml`). Each
 schema is generated from grim's own parser, so it accepts exactly what grim
 accepts.
 
@@ -1487,6 +1544,7 @@ grim schema --kind config > grimoire-config.schema.json
 grim schema --kind publish | jq .title
 grim schema --kind lock | jq .title
 grim schema --kind mcp | jq .title
+grim schema --kind hook | jq .title
 ```
 
 The same schemas are published to the docs site; see [Editor schema
@@ -1594,6 +1652,72 @@ published as the [MCP server artifact](./mcp-servers.md) `mcp/grim`, so
 `grim add ghcr.io/grimoire-rs/mcp/grim:1` followed by `grim install`
 registers the same entry — in every detected client, not just Claude Code
 — without hand-editing any config file.
+
+## grim hook {#hook}
+
+`grim hook` covers the two halves of the [hook](./artifacts.md#hooks)
+lifecycle, and only one of them is yours to run.
+
+| Subcommand | Purpose |
+|------------|---------|
+| [`grim hook list`](#hook-list) | Report the declared hooks and their per-client arming state. |
+| [`grim hook run`](#hook-run) | Dispatch armed hooks for one client event. **Not intended for direct invocation** — its caller is the launcher grim generates. |
+
+### grim hook list {#hook-list}
+
+`grim hook list` is the user-facing surface: it resolves a scope, reads the
+declared set, and reports each hook with its tier, events, and the arming
+verdict per client — the same vocabulary [`grim status`](#status) uses, from
+the same enum, so the two never describe one hook differently.
+
+```sh
+grim hook list
+grim hook list --format json     # {"items": [...]}
+```
+
+One item per `[[hooks]]` entry, not per artifact: a hook artifact declaring a
+pre/post pair reports two rows. `arming` is `[]` when the entry is armed on
+every configured client — never "unknown".
+
+The `[[hooks]]` entries are read from the artifact's materialized payload, so
+a hook that the [gates](./artifacts.md#hook-gates) declined is never fetched
+and has no entries to list. That case reports no rows and one warning on
+stderr naming the artifact; it is not an error, and the command still exits
+`0`. Run `grim status` for the declaration-level view of a hook that has
+never been materialized.
+
+The remaining hook reporting gaps are tracked under
+[Hook reporting](./stability.md#limitations-hook-reporting).
+
+### grim hook run {#hook-run}
+
+`grim hook run --client <name> --event <event> --table <path> --root <token>`
+is grim's own entry point, invoked by the launcher script grim generates and
+registers with each client. Documenting it here is a description of a wire
+contract, not an invitation: there is no reason to run it by hand, and it
+does nothing useful without a dispatch table that names the root token you
+pass.
+
+It is deliberately the narrowest command in the CLI. It reads **only** the
+dispatch table named by `--table`, resolves no scope and no configuration,
+and **exits `0` in every case grim controls** — an unknown event, an unknown
+root token, a relative `--table`, a missing table, a handler that failed.
+A client that fails closed on a non-zero hook exit must never be denied a
+tool call by grim's own internals, so every path in it fails open:
+
+```sh
+$ grim hook run --client claude --event PreToolUse \
+    --table "$GRIM_HOME/hooks/dispatch.json" --root <unknown-token>
+$ echo $?
+0
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--client` | The invoking client's grim name (`claude`, `codex`, `copilot`). A lookup key into the response-projection table, never a trust input: naming a client grants nothing that client does not already have. |
+| `--event` | The firing event in the client's own spelling (`PreToolUse`, …). Mapped to a canonical event by lookup; an unrecognized value — including one a *newer* grim's launcher wrote — matches nothing and exits `0`. |
+| `--table` | Absolute path of the dispatch table, baked in at install time. **Must be absolute**: a relative value would resolve against the process working directory, which for a client-spawned run is the workspace, so a hostile repository could ship its own table. A non-absolute value is refused with one log line and exit `0`. |
+| `--root` | The opaque per-install root token. A lookup key only — never a path, never a trust input, and never compared against the current directory. An unknown token matches no root and exits `0`. |
 
 <!-- internal -->
 [global-options]: #global-options

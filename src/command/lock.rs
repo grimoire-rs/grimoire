@@ -70,6 +70,13 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
 
 /// Build the per-artifact report: `unchanged` when the previous lock
 /// already pinned the same content, `locked` otherwise.
+///
+/// Kind-blind by construction — every row comes from
+/// [`GrimoireLock::iter_artifacts`], so a kind added to the lock is reported
+/// here with no edit. That is why `grim lock` needed no `hook` arm: resolve and
+/// lock proceed normally for a hook even with `[options.experimental] hooks`
+/// off, because pinning a digest arms nothing. The gate lives at the install
+/// seam (reported as `gated` by `grim status`), not here.
 fn build_report(lock: &GrimoireLock, previous: Option<&GrimoireLock>, _scope: &ResolvedScope) -> LockReport {
     let entries = lock
         .iter_artifacts()
@@ -112,6 +119,7 @@ mod tests {
 
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,

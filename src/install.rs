@@ -13,6 +13,9 @@
 pub mod client_target;
 pub mod content_hash;
 pub mod expected_outputs;
+pub mod hook_dispatch;
+pub mod hook_launcher;
+pub mod hook_registrar;
 pub mod install_error;
 pub mod install_state;
 pub mod installer;
@@ -53,6 +56,12 @@ pub mod vendor_zed;
 pub use client_target::{ClientTarget, MaterializedFile};
 #[allow(unused_imports)]
 pub use content_hash::{content_hash, footprint_hash};
+#[allow(unused_imports)]
+pub use hook_dispatch::{DispatchEntry, DispatchTable, RootScope, RootToken};
+#[allow(unused_imports)]
+pub use hook_launcher::{CommandSpec, LauncherWrite};
+#[allow(unused_imports)]
+pub use hook_registrar::{ArmRefusal, HookSync};
 #[allow(unused_imports)]
 pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]

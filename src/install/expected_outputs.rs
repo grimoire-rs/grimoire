@@ -77,7 +77,7 @@ pub fn pending_outputs(
     let mut pending: Vec<(ClientTarget, PathBuf)> = expected_clients(kind, target)
         .into_iter()
         .filter(|client| !is_covered(record, *client, target, roots))
-        .map(|client| (client, target.path_for(client, kind, name)))
+        .map(|client| (client, target.path_for(client, kind, name, roots)))
         .collect();
     pending.sort_by_key(|(client, _)| client.as_str());
     pending
@@ -119,7 +119,7 @@ pub fn output_at_current_layout(
     if out.entry.is_some() {
         return true;
     }
-    let dest = target.path_for(client, rec.kind, &rec.name);
+    let dest = target.path_for(client, rec.kind, &rec.name, roots);
     match crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, rec.kind, roots) {
         Ok(current) => current == out.target,
         Err(_) => true,
@@ -236,7 +236,12 @@ mod tests {
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(
             pending[0].1,
-            target.path_for(ClientTarget::Claude, ArtifactKind::Rule, "rust-style")
+            target.path_for(
+                ClientTarget::Claude,
+                ArtifactKind::Rule,
+                "rust-style",
+                &roots(dir.path())
+            )
         );
     }
 
@@ -253,6 +258,58 @@ mod tests {
         );
         let pending = pending_outputs(None, ArtifactKind::Rule, "rust-style", &target, &roots(dir.path()));
         assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    /// A hook's expected-client set is read off `Vendor::hook_surface`, not
+    /// `kind_support` — so the 15 clients with no hook mechanism are never
+    /// expected targets and never report pending drift. Before
+    /// `client_supports_kind` grew its `Hook` arm this set was **all 18**,
+    /// which would have made `grim status` report `outputs_pending` for a
+    /// client no install could ever satisfy.
+    #[test]
+    fn only_hook_capable_clients_are_expected_hook_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Global,
+            vec![ClientTarget::Claude, ClientTarget::Warp, ClientTarget::Zed],
+        );
+        assert_eq!(
+            expected_clients(ArtifactKind::Hook, &target),
+            vec![ClientTarget::Claude],
+            "warp and zed have no hook surface at all"
+        );
+
+        let pending = pending_outputs(None, ArtifactKind::Hook, "shell-guard", &target, &roots(dir.path()));
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].0, ClientTarget::Claude);
+        assert_eq!(
+            pending[0].1,
+            dir.path().join("hooks/shell-guard"),
+            "the shared payload dir, not a per-client path (S-003)"
+        );
+    }
+
+    /// Codex and Copilot host hooks at global scope only (amendment A1): their
+    /// registration file is a tracked repository file. A project-scope pass
+    /// must not report them pending — nothing could clear it.
+    #[test]
+    fn the_own_file_hook_clients_are_expected_at_global_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for client in [ClientTarget::Codex, ClientTarget::Copilot] {
+            let global = InstallTarget::new(dir.path(), ConfigScope::Global, vec![client]);
+            assert_eq!(expected_clients(ArtifactKind::Hook, &global), vec![client], "{client}");
+
+            let project = InstallTarget::new(dir.path(), ConfigScope::Project, vec![client]);
+            assert!(
+                expected_clients(ArtifactKind::Hook, &project).is_empty(),
+                "{client} has no project-scope hook surface"
+            );
+            assert!(
+                pending_outputs(None, ArtifactKind::Hook, "shell-guard", &project, &roots(dir.path())).is_empty(),
+                "{client}"
+            );
+        }
     }
 
     /// C-002: `outputs_pending` must be deterministic regardless of

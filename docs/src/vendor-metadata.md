@@ -183,9 +183,12 @@ the `CLAUDE_SKILL_FIELDS` constant in `src/install/vendor_claude.rs`.
 | `claude.shell` | `shell` | enum | Accepted values: `bash`, `powershell` |
 | `claude.paths` | `paths` | string | Comma-separated glob patterns |
 
-`hooks` is not in this registry. It is an object-valued field that
-cannot be expressed as a single string metadata value; a separate ADR
-governs that surface.
+`hooks` is not in this registry, and it never will be: it is an
+object-valued field that cannot be expressed as a single string metadata
+value. Hooks are a [distributable artifact kind](./artifacts.md#hooks) of
+their own instead — the same resolution MCP servers got — so a hook is
+declared, locked, gated, and armed as its own package rather than smuggled
+through a skill's frontmatter.
 
 ## Agent common fields and override precedence {#agent-overrides}
 
@@ -227,9 +230,10 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 
 `mcpServers` and `hooks` are not in this registry — both are object-valued
 fields that cannot be expressed as a single string metadata value. This
-exclusion is unchanged; an MCP server is registered as its own
-distributable artifact kind instead — see
-[MCP Server Artifacts](./mcp-servers.md).
+exclusion is unchanged, and both surfaces resolved the same way: each is its
+own distributable artifact kind instead of a frontmatter field — see
+[MCP Server Artifacts](./mcp-servers.md) and
+[Hooks](./artifacts.md#hooks).
 
 ## The opencode.* agent registry {#opencode-agent-registry}
 

@@ -1657,6 +1657,10 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         // as `NotInstalled`. Re-derive it the way `local_rows` does, keyed on
         // the binding name (`repo`) instead.
         r.state = if matches!(r.source, RowSource::Local) {
+            // A hook row can reach this badge path (a catalog row's kind is a registry-controlled
+            // string), but it is a pure display derivation: no arm below matches on `ArtifactKind`
+            // exhaustively, so there is nothing to refuse and nothing that can panic. The refusal
+            // lives on the four *action* paths instead.
             let kind = row_kind(&r.kind);
             let locked = locked_by_name.get(&(kind, r.repo.as_str())).copied();
             let locked_bundle = local_locked_bundle(lock.as_ref(), kind, &r.repo);
@@ -1754,11 +1758,21 @@ fn refresh_member_states(
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
+    // D-4 silent site: a hand-maintained array, so a kind omitted here is not a
+    // compile error — it just makes every bundle-provided member of that kind
+    // badge as `ViaBundle` even when it is ALSO declared standalone. `Hook` is
+    // appended because a hook is declarable directly and is a bundle member, so
+    // both halves of that question apply to it.
+    //
+    // `Bundle` stays absent, unchanged: this set answers "is this member also a
+    // standalone install?", and a bundle is never a member. That is a
+    // pre-existing, correct omission — not a gap this change inherits.
     for (kind, map) in [
         (ArtifactKind::Skill, &set.skills),
         (ArtifactKind::Rule, &set.rules),
         (ArtifactKind::Agent, &set.agents),
         (ArtifactKind::Mcp, &set.mcp),
+        (ArtifactKind::Hook, &set.hooks),
     ] {
         for source in map.values() {
             if let Some(id) = source.identifier() {
@@ -1935,6 +1949,17 @@ fn local_rows(config: &DesiredSet, lock: Option<&GrimoireLock>, install_state: &
 
     // (a) Path-declared artifacts, installed or not. A registry-declared entry
     // contributes nothing here — only `DeclaredSource::Path` yields a row.
+    // D-4 silent site, visited and deliberately NOT extended: this array
+    // enumerates PATH-declared artifacts, and a hook has no path source
+    // (`command::add`'s path branch refuses `--kind hook`; shape inference never
+    // yields it). Adding `(Hook, &config.hooks)` would iterate a table whose
+    // every `source.path()` is `None`, so the `continue` below drops every row —
+    // a line that reads like support and provides none.
+    //
+    // `Mcp`'s absence here is pre-existing and out of scope for this change
+    // (`mcp` declarations can carry a path source), flagged rather than
+    // silently "fixed" — a drive-by behaviour change in a kind-dispatch array
+    // is exactly what D-5 says no test would catch.
     for (kind, map) in [
         (ArtifactKind::Skill, &config.skills),
         (ArtifactKind::Rule, &config.rules),
@@ -2378,6 +2403,13 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("malformed catalog repo: {}", row.repo));
     }
     let kind = row_kind(&row.kind);
+    // A hook row is deliberately allowed HERE, unlike the install action below.
+    // `perform_uninstall` only ever reduces capability: it undeclares, deletes
+    // the payload, and lets the registrar's convergence remove the registration
+    // from the client's own config. Refusing it would leave a TUI user looking
+    // at an armed hook with no way to disarm it from the surface they are in,
+    // which is a worse posture than the refusal buys — and there is nothing to
+    // consent to when the answer is "remove it".
     let basename = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
     // Hold the config flock for the whole read-modify-write. The keep-files
@@ -2490,6 +2522,17 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 ///   removed) — there is no declaration to undeclare.
 fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let kind = row_kind(&row.kind);
+    // A hook has no path source, so no Local row can carry one: `local_rows`
+    // enumerates the path-declared tables (hooks are declared registry-only —
+    // `command::add`'s path branch refuses `--kind hook` outright) plus dev
+    // records (hooks are not dev-installable, `command::install`'s decision).
+    // Kept as a live refusal rather than `unreachable!()` because `row_kind`
+    // reads a REGISTRY-controlled string and this function returns `Result`:
+    // fail-safe beats a panic that would exit 101 and bypass `classify_error`
+    // (invariant I3).
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::unsupported_kind().into());
+    }
     let name = row.repo.clone();
 
     // Hold the config flock for the whole read-modify-write (file deletion +
@@ -2599,6 +2642,26 @@ async fn perform(
     }
 
     let kind = row_kind(&row.kind);
+    // ⛔ DECISION (WP-H): the TUI does not install or update a hook row in v1.
+    //
+    // Arming needs an expressed consent, and the two surfaces that express it
+    // are both files: `[options.experimental] hooks` in config (C-026's
+    // replacement, config-only by owner decision) and `trust_hooks` on the
+    // `[[registries]]` entry (C-022). Neither is something the TUI asks for or
+    // could ask for here — it would be a third consent surface nobody designed,
+    // on the keystroke path, for the one kind that executes code. Invariant I4
+    // says new execution capability ships off by default; under the
+    // stabilization freeze, widening this later is additive and narrowing it
+    // never is, so v1 starts narrow deliberately rather than by omission.
+    //
+    // Note this refusal is NOT what keeps the gates honest — a TUI install would
+    // reach the same installer seam the CLI does and be gated identically. What
+    // it avoids is offering an arming action through a surface with no way to
+    // show the user what they are consenting to. `grim add` / `grim install` are
+    // the supported path and the error names them.
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::unsupported_kind().into());
+    }
     // The declaration/lock binding name: an explicit override (a bundle member's
     // own name, which is its lock/install key) wins; a catalog row falls back to
     // the repo's last path segment.
@@ -2700,6 +2763,13 @@ async fn perform_local(
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
     let kind = row_kind(&row.kind);
+    // A hook has no path source (see `perform_local_uninstall` for the full
+    // chain), so no Local row can carry one. Live refusal, not `unreachable!()`:
+    // `row_kind` reads a registry-controlled string and this function returns
+    // `Result`.
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::unsupported_kind().into());
+    }
     let name = row.repo.clone();
 
     // A config-declared path dep is a declared install, never a dev install
@@ -2730,6 +2800,12 @@ async fn perform_local(
 /// Whether `(kind, name)` is declared in `set` as a local path source.
 fn declared_as_path(set: &DesiredSet, kind: ArtifactKind, name: &str) -> bool {
     let map = match kind {
+        // The honest lookup rather than a panic: `set.hooks` exists, so asking
+        // "is this hook declared as a path?" has a real answer (always `false`
+        // today — a hook is declared registry-only), and answering it costs one
+        // map probe. An `unreachable!()` here would be a panic guarding a
+        // question the data can already answer.
+        ArtifactKind::Hook => &set.hooks,
         ArtifactKind::Skill => &set.skills,
         ArtifactKind::Rule => &set.rules,
         ArtifactKind::Agent => &set.agents,
@@ -2854,6 +2930,7 @@ async fn perform_local_dev(
         bundles: Vec::new(),
     };
     let mut synth = GrimoireLock {
+        hooks: vec![],
         metadata: crate::lock::grimoire_lock::LockMetadata {
             lock_version: crate::lock::lock_version::LockVersion::V1,
             declaration_hash_version: crate::config::DECLARATION_HASH_VERSION,
@@ -2868,6 +2945,12 @@ async fn perform_local_dev(
         bundles: Vec::new(),
     };
     match kind {
+        // Hooks are not dev-installable from a path (`command::install`'s
+        // recorded decision: a path source carries no registry, so the
+        // per-registry `trust_hooks` consent C-022 requires cannot be expressed
+        // for it). Same refusal the CLI dev-install path gives, reached from the
+        // TUI's dev action.
+        ArtifactKind::Hook => return Err(crate::oci::hook::unsupported_kind().into()),
         ArtifactKind::Skill => synth.skills.push(entry),
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
@@ -3938,6 +4021,7 @@ mod tests {
         rules: Vec<crate::lock::locked_artifact::LockedArtifact>,
     ) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: crate::lock::grimoire_lock::LockMetadata {
                 lock_version: crate::lock::lock_version::LockVersion::V1,
                 declaration_hash_version: 1,
@@ -6731,7 +6815,7 @@ mod tests {
 
         // One member skill, materialized for claude at the current layout and
         // byte-intact, recorded at the locked pin.
-        let dest = covered.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x");
+        let dest = covered.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x", &roots);
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("SKILL.md"), b"canonical\n").unwrap();
         let anchored = crate::install::path_anchor::AnchoredPath::from_target(

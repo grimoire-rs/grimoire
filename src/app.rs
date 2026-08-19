@@ -24,7 +24,6 @@ use crate::{Cli, Command};
 /// Returns any error a command produces; `main.rs` logs it with `{err:#}`
 /// and classifies it into an exit code.
 pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
-    let ctx = Context::new(&cli.global);
     let format = cli.global.format;
 
     let Some(command) = cli.command else {
@@ -42,6 +41,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         let _ = writeln!(std::io::stdout());
         return Ok(ExitCode::Success);
     };
+
+    // ── The hook runtime is dispatched before any context exists ────────────
+    //
+    // C-007, sharpened by audit finding B1. `Context::new` reads the
+    // environment data root unconditionally (`context.rs:169`), and that
+    // accessor returns its value verbatim — no absoluteness check, a
+    // *relative* `.grimoire` when `HOME` is unset — while the CWD of a
+    // client-spawned `grim hook run` **is the workspace**. Returning here
+    // keeps "the dispatch path never reads an attacker-choosable data root"
+    // true of the whole process rather than only of the hook module, which is
+    // the claim the plan makes. It also keeps the environment off the hot path
+    // of every tool call.
+    //
+    // Pinned by `command::hook`'s `app_dispatches_the_runtime_before_it_builds_a_context_b1`:
+    // deleting this block still compiles and still works, so a source-level
+    // test is what keeps it here.
+    if let Command::Hook(hook) = &command
+        && let crate::command::hook::HookCommand::Run(args) = &hook.command
+    {
+        return Ok(crate::command::hook::run::run(args).await);
+    }
+
+    let ctx = Context::new(&cli.global);
 
     // `Printable` has generic methods (not object-safe), so render inside
     // each arm with the concrete report type rather than boxing.
@@ -159,6 +181,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             crate::command::mcp::run(&ctx, &args).await?
         }
+        // `grim hook` splits by subcommand, and the split is the C-007
+        // contract: `run` takes `&args` only — no context, so it cannot
+        // resolve a scope even by accident — while `list` is an ordinary
+        // report command that needs one.
+        Command::Hook(hook) => match hook.command {
+            // Already returned above, before the context was built. Handled
+            // again rather than `unreachable!()`d: a panic on the hot path of
+            // every tool call is the one thing this command may never do, and
+            // a total match costs one line (invariant I3).
+            crate::command::hook::HookCommand::Run(args) => crate::command::hook::run::run(&args).await,
+            crate::command::hook::HookCommand::List(args) => {
+                let (r, c) = crate::command::hook::list::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+        },
     };
 
     Ok(code)

@@ -30,13 +30,13 @@ pub const DECLARATION_HASH_VERSION: u8 = 1;
 ///
 /// Algorithm (v1):
 /// 1. Build the canonical JSON object
-///    `{["agents":{…},]["bundles":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
+///    `{["agents":{…},]["bundles":{…},]["hooks":{…},]["mcp":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
 ///    where every `idstr` is the `Display` form of the parsed identifier
-///    (`registry/repo[:tag][@digest]`). The `agents` and `bundles` keys
-///    are emitted **only when at least one entry of that kind is
-///    declared**, so an agent-free/bundle-free declaration hashes
-///    identically to one written before those kinds existed — existing
-///    locks stay valid with no version bump.
+///    (`registry/repo[:tag][@digest]`). The `agents`, `bundles`, `hooks`
+///    and `mcp` keys are emitted **only when at least one entry of that
+///    kind is declared**, so a declaration free of those kinds hashes
+///    identically to one written before they existed — existing locks stay
+///    valid with no version bump.
 /// 2. Serialize via RFC 8785 JCS — object keys sorted, strings
 ///    JSON-escaped, no whitespace.
 /// 3. SHA-256 the UTF-8 bytes (reusing the Phase-1 [`Algorithm::Sha256`]).
@@ -56,6 +56,15 @@ pub fn declaration_hash(set: &DesiredSet) -> String {
     if !set.bundles.is_empty() {
         canonical.push_str("\"bundles\":");
         push_canonical_table(&mut canonical, &set.bundles);
+        canonical.push(',');
+    }
+    // "bundles" < "hooks" < "mcp" in JCS key order — the position is
+    // load-bearing, not cosmetic. Emitted only when declared so hook-free
+    // configs hash identically to pre-hooks grim (no version bump), which
+    // is what makes the `[hooks]` break opt-in on first use (plan C-015).
+    if !set.hooks.is_empty() {
+        canonical.push_str("\"hooks\":");
+        push_canonical_table(&mut canonical, &set.hooks);
         canonical.push(',');
     }
     // "mcp" < "rules" in JCS key order; emitted only when declared so

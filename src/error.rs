@@ -22,6 +22,7 @@ use crate::install::path_anchor::AnchorError;
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
+use crate::oci::hook::HookError;
 use crate::oci::identifier::error::IdentifierError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind};
@@ -79,6 +80,12 @@ pub enum Error {
 
     #[error(transparent)]
     Announce(#[from] AnnounceError),
+
+    /// A hook manifest refused at parse / `grim build` validation time, or the
+    /// `hook` artifact kind reaching a seam this build does not implement
+    /// (`crate::oci::hook::unsupported_kind`).
+    #[error(transparent)]
+    Hook(#[from] HookError),
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -201,6 +208,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                     CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
                     CommandError::DeclareConflict { .. } => ExitCode::UsageError,
                     CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
+                    CommandError::ReservedBindingName { .. } => ExitCode::UsageError,
                     CommandError::ConfigUsage(_) => ExitCode::UsageError,
                     CommandError::ConfigValue(_) => ExitCode::DataError,
                 }),
@@ -208,6 +216,11 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 // GitHub API); a local I/O fault classifies as I/O. A failed
                 // required fork is a remote-resource fault too — the packages
                 // ARE published; only the cross-repo announce needs a retry.
+                // Every hook-tier failure is malformed or unsupported input:
+                // a rejected `hook.toml` rule, or a hook artifact reaching a
+                // seam that does not implement the kind. Both are DataError,
+                // never a panic — see `oci::hook::unsupported_kind`.
+                Error::Hook(_) => Classification::new(ExitCode::DataError),
                 Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
                     AnnounceError::Git { .. }

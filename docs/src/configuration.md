@@ -15,7 +15,7 @@ rewrite preserves at the top of the file.
 ## `grimoire.toml` {#grimoire-toml}
 
 The declaration file. An `[options]` table holds defaults, and `[skills]` /
-`[rules]` / `[agents]` map each binding name to a reference:
+`[rules]` / `[agents]` / `[hooks]` map each binding name to a reference:
 
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
@@ -35,6 +35,9 @@ rust-style = "ghcr.io/acme/rust-style:2"
 
 [agents]
 code-reviewer = "ghcr.io/acme/code-reviewer:1"
+
+[hooks]
+shell-guard = "ghcr.io/acme/hooks/shell-guard:1"
 ```
 
 The `[[registries]]` entry with `default = true` sets the primary registry short references expand against; `clients` selects which
@@ -148,11 +151,53 @@ grim config unset options.vendors.cursor.shared_skills
 Because the client name is part of the key, naming a client that does not
 exist is an unknown key — exit 64 (`EX_USAGE`), not a value error.
 
+### `[options.experimental]` {#options-experimental}
+
+The optional `[options.experimental]` sub-table turns on capabilities that
+are shipped but not on by default. An absent table means every one of them
+is off, which is the point: nothing here activates because a file mentions
+it.
+
+```toml
+[options.experimental]
+hooks = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hooks` | boolean | `false` | Whether grim may arm [hooks](./artifacts.md#hooks) in this scope. Off, a declared hook still resolves, locks, and materializes nothing — [`grim status`](./commands.md#status) reports it `gated` with cause `feature-flag-off`, and the exit code stays `0`. |
+
+The flag is deliberately **config-only**: there is no `GRIM_*` environment
+variable that enables hooks. A repository routinely carries its own
+environment — `.envrc`, `.mise.toml`, a devcontainer's `containerEnv`, a CI
+`variables:` block — and a repository must never be able to arm code
+execution on the machine of whoever clones it. Setting the flag is a
+deliberate, legible act in a file you own.
+
+Turning it on is not sufficient by itself. A hook also needs the
+[per-registry trust grant](#registry-trust-hooks) below, and both gates are
+re-read on every `grim install`, so flipping either one and re-running is
+what arms or disarms.
+
+```sh
+grim config set options.experimental.hooks true
+grim install
+```
+
+> **Turning hooks off is two steps.** `grim config set
+> options.experimental.hooks false` (or `grim config unset
+> options.experimental.hooks`) clears the flag and exits **0**, warning that
+> anything already armed stays armed; `grim install` then converges and
+> disarms it. Check the result with `grim status` — the rows should read
+> `gated` and the client registration should be gone. See [Hook
+> reporting](./stability.md#limitations-hook-reporting).
+
 ### `[bundles]` {#bundles}
 
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member
-skills, rules, and [agents](./agents.md) at lock time:
+skills, rules, [agents](./agents.md), and [hooks](./artifacts.md#hooks) at
+lock time:
 
 ```toml
 [bundles]
@@ -730,6 +775,89 @@ variable still reports `false`, as does every entry under `--registry`
 already spells its own scheme, so setting the field there is a parse error
 (exit 78 at load, 65 from `grim config set`).
 
+### Trusting a registry for hooks {#registry-trust-hooks}
+
+Installing a skill or a rule puts text where an agent may read it.
+Installing a [hook](./artifacts.md#hooks) makes a client *execute* something
+automatically. That is a different decision, and grim asks it per registry
+rather than per artifact — one legible answer about a source you chose,
+instead of a prompt per package that everyone learns to click through.
+
+`trust_hooks` is a **tri-state**: absent, `true`, or `false`. The three
+answers are not "on/off plus a default" — each means something different.
+
+```toml
+[[registries]]
+alias = "internal"
+oci = "registry.internal.example/ai"
+trust_hooks = true
+```
+
+or from the CLI — note `--global`, because the scope is what makes the grant
+mean anything:
+
+```sh
+grim --global config registry add internal --oci registry.internal.example/ai
+grim --global config set registry.internal.trust_hooks true
+grim --global config get registry.internal.trust_hooks   # → true
+```
+
+There is no `--trust-hooks` flag on `grim config registry add`/`set`; the
+dotted key above is the CLI route, and it writes all three states —
+including `false`, which round-trips rather than being dropped as an
+emit-only-when-true boolean would be.
+
+| Value | In **global** config | In **project** config |
+|-------|----------------------|-----------------------|
+| `true` | Grants: hooks from this registry may arm | **Grants nothing.** A file that travels with a repository never confers trust |
+| absent | Grants, provided the entry names a namespace rather than a bare host | Grants nothing |
+| `false` | Opts the registry out | Opts the registry out |
+
+Three rules follow from that table, and each one closes a way trust could
+otherwise be acquired by accident:
+
+- **`false` wins over everything.** A `false` in *either* scope beats every
+  grant, including a global `trust_hooks = true` and including
+  [`--allow-hooks`](./commands.md#install). Opting out is the one answer that
+  cannot be overridden by a more permissive statement elsewhere.
+- **A project entry may only restrict.** `grimoire.toml` is a file a
+  repository carries, so a `true` in it is ignored — otherwise cloning a
+  repository would be enough to trust its author's registry. The same file's
+  `false` is honoured, because restricting is always safe.
+- **A bare host never grants implicitly.** `oci = "ghcr.io"` names a whole
+  multi-tenant registry, where anyone may publish; an absent `trust_hooks`
+  there grants nothing. Narrow the locator to a namespace
+  (`ghcr.io/acme`), or say `trust_hooks = true` explicitly and mean it. An
+  `index` entry never grants either, at any scope: an index is a phone book
+  of pointers to other people's registries.
+
+An `insecure = true` entry is held to the same explicit standard — a
+plain-HTTP fetch is attacker-influenceable on the wire, and the digest pin
+cannot help, because the *first* resolution that produces the pin is the one
+being tampered with. Such an entry needs `trust_hooks = true` spelled out,
+with loopback hosts exempted so the local test-registry path still works.
+
+When no rule grants and none denies, grim asks — once, naming the
+**registry** rather than the artifact — and writes `trust_hooks = true` into
+your global config if you accept. With no terminal to ask on it neither
+hangs nor silently trusts: the hook reports `gated`, the install exits `0`,
+and the message names [`--allow-hooks`](./commands.md#install) as the
+per-invocation escape.
+
+> **Accepting the prompt writes a key older grim versions reject.** Both
+> `RegistryConfig` and the top-level config deny unknown fields, so a
+> `grimoire.toml` carrying `trust_hooks` fails to load on any grim released
+> before this one — exit **78**. That matters when a global config is shared
+> across machines with mixed grim versions.
+
+**Where the field is visible is uneven, and worth knowing before you script
+against it.** `grim config get` reads it, `grim config list --all` lists the
+key, and `grim config registry fields` documents it — but
+`grim config registry show`, `grim config registry list`, and
+`grim context` all omit it, reporting the other six per-registry fields
+only. To audit which registries are trusted, read `grimoire.toml`, or infer
+it from the `arming` causes on [`grim status`](./commands.md#status).
+
 ### Registry compatibility {#registry-compatibility}
 
 `grim search` and the TUI browse a registry's catalog through the
@@ -906,6 +1034,17 @@ applies.
 | `GEMINI_CLI_HOME` | Gemini CLI home override (vendor variable). It replaces the **home directory**, so Gemini's config root becomes `$GEMINI_CLI_HOME/.gemini` — the segment is still appended, the opposite shape to `CODEX_HOME`/`KIRO_HOME`. Relocates global-scope Gemini agents and its `settings.json` MCP registration, and drives detection. Does **not** relocate the shared `$HOME/.agents/skills` pool, which serves several clients under one refcount. | unset |
 | `XDG_CONFIG_HOME` | Standard XDG base directory. Roots OpenCode's default config dir, Amp's settings dir, and — **on Linux and FreeBSD only** — Zed's. On macOS Zed uses a hardcoded `~/.config/zed`; on Windows, `%APPDATA%\Zed`. Also one of the candidate roots for Kilo and Goose *detection*. | `~/.config` |
 | `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
+
+**No environment variable enables or trusts [hooks](./artifacts.md#hooks),
+and this is a deliberate omission rather than a gap.** Neither the
+[`hooks` feature flag](#options-experimental) nor
+[`trust_hooks`](#registry-trust-hooks) has an environment form: a repository
+routinely carries its own environment (`.envrc`, `.mise.toml`, a
+devcontainer's `containerEnv`, a CI `variables:` block), so an environment
+variable that armed code execution would let a repository grant itself trust
+on the machine of whoever cloned it. The per-invocation escape is the
+[`--allow-hooks`](./commands.md#install) flag, which must be typed into the
+command line by whoever runs it.
 | `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
 | `NO_COLOR` | Any non-empty value disables color under [`--color auto`](./commands.md#global-options) — the highest-priority `auto` signal, overriding even `CLICOLOR_FORCE`. Only `--color always` overrides it. | unset |
 | `CLICOLOR_FORCE` | A non-empty value other than `0` forces color on under `--color auto`, even when stdout is not a terminal — beaten only by `NO_COLOR`. | unset |

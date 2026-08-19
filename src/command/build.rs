@@ -18,7 +18,9 @@ use crate::api::build_report::BuildReport;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
-use crate::oci::annotations::{annotations_for_agent, annotations_for_rule, annotations_for_skill};
+use crate::oci::annotations::{
+    annotations_for_agent, annotations_for_hook, annotations_for_rule, annotations_for_skill,
+};
 use crate::oci::git_provenance::GitProvenance;
 use crate::skill::rule_frontmatter::RuleFrontmatter;
 use crate::skill::{
@@ -28,11 +30,18 @@ use crate::skill::{
 /// `grim build` arguments.
 #[derive(Debug, Args)]
 pub struct BuildArgs {
-    /// Path to a skill directory or a rule `.md` file.
+    /// Path to a skill directory, a rule `.md` file, or a hook directory.
     pub path: std::path::PathBuf,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
+    ///
+    /// `hook` is **appended** to the accepted list, never inserted: the value
+    /// set is a frozen CLI surface and widening it is the additive direction
+    /// (Principle 9). Accepting `hook` here is what makes `grim build --kind
+    /// hook` reachable at all — before this, `Hook` could only arrive from a
+    /// registry-controlled string, which is why every pre-hook seam could
+    /// treat it as unreachable.
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
     pub kind: Option<String>,
 
     /// Embed git provenance (commit revision, commit date, and the `origin`
@@ -62,7 +71,17 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
         // from_kind_str never returns None here.
         return Ok(ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule));
     }
-    if path.is_dir() && path.join("SKILL.md").is_file() {
+    if path.is_dir() && path.join(crate::oci::hook::HOOK_MANIFEST_FILE).is_file() {
+        // Checked BEFORE the skill arm: both kinds are directories, and a
+        // directory carrying `hook.toml` is a hook even if someone also
+        // dropped a `SKILL.md` in it. Ordering the other way would let a
+        // stray `SKILL.md` silently publish a hook's payload tree as a
+        // skill — the wrong kind on the wire, with no error.
+        //
+        // A hook dir and a bundle `.toml` FILE cannot collide: this arm
+        // requires `is_dir()`, the bundle arm requires `is_file()`.
+        Ok(ArtifactKind::Hook)
+    } else if path.is_dir() && path.join("SKILL.md").is_file() {
         Ok(ArtifactKind::Skill)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
         // A `.toml` source file lists bundle members ([skills]/[rules]).
@@ -76,6 +95,64 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
         ))
         .into())
     }
+}
+
+/// Validate and pack the hook directory at `path` (C-001).
+///
+/// Reads `hook.toml`, runs [`crate::oci::hook::HookManifest::validate`] against
+/// the directory (every `grim build` rule, exit 65 on failure), packs the whole
+/// payload tree into one tar layer, and stamps
+/// [`crate::oci::annotations::annotations_for_hook`].
+///
+/// Validation runs **before** packing, so a manifest that fails a rule never
+/// produces bytes: `grim build` is the release dry run, and a packed-but-invalid
+/// artifact would be a tempting thing to push by hand.
+///
+/// # Errors
+///
+/// A data error (65) when `hook.toml` is absent, does not parse, names a schema
+/// version this grim does not understand, or fails any validation rule; an I/O
+/// error when the directory cannot be read.
+fn pack_hook_dir(
+    path: &Path,
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+) -> anyhow::Result<PackedArtifact> {
+    let manifest_path = path.join(crate::oci::hook::HOOK_MANIFEST_FILE);
+    // A read failure — absent `hook.toml`, unreadable directory — is attributed
+    // to the manifest path, not to the artifact directory: `grim build ./my-hook`
+    // reporting "no such file: ./my-hook" would send the author looking at the
+    // wrong thing.
+    let source = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        crate::error::Error::from(crate::skill::SkillError::new(
+            &manifest_path,
+            crate::skill::SkillErrorKind::Io(e),
+        ))
+    })?;
+    let manifest = super::grim(crate::oci::hook::HookManifest::from_toml_str(&source))?;
+    // Validate BEFORE packing: `grim build` is the release dry run, and a
+    // packed-but-invalid artifact is a tempting thing to push by hand. Every
+    // `grim build` rule lives in `validate` (exit 65) — the matcher allowlist and
+    // length cap, tier/event validity, unique ids, reserved client-name keys,
+    // `name` == directory stem, and the reserved `bin`/`dispatch.json` names.
+    super::grim(manifest.validate(path))?;
+    // The same deterministic directory packer a skill uses: a hook genuinely is
+    // a payload tree in one uncompressed tar layer, keyed on the directory name,
+    // and `pack_skill_dir` requires no `SKILL.md` — it walks whatever is there in
+    // sorted order. A second hook-specific walker would be a second set of
+    // packing bounds and a second sort order to keep byte-identical.
+    let tar = super::grim(pack_skill_dir(path))?;
+    let annotations = annotations_for_hook(&manifest, version, fallback_source, git);
+    Ok(PackedArtifact {
+        kind: ArtifactKind::Hook,
+        // The manifest `name`, which `validate` has just proven equal to the
+        // directory stem — reporting the operation's result rather than the CLI
+        // argument, and the two cannot disagree by the time we are here.
+        name: manifest.name,
+        tar,
+        annotations,
+    })
 }
 
 /// Validate, pack, and compute annotations for the artifact at `path`.
@@ -94,6 +171,17 @@ pub fn validate_and_pack(
     git: Option<&GitProvenance>,
 ) -> anyhow::Result<PackedArtifact> {
     match kind {
+        // C-001: a hook packs like a skill — one tar layer holding the whole
+        // payload directory — and validates through `HookManifest::validate`,
+        // which owns every `grim build` rule (exit 65): the matcher allowlist
+        // and length cap (C-018), tier/event validity, unique ids, reserved
+        // client-name keys, `name` == directory stem, and the reserved
+        // `bin`/`dispatch.json` names.
+        //
+        // It reaches this shared validator rather than a dedicated path (the
+        // shape `Bundle` and `Mcp` take) because it genuinely is a directory
+        // tree in a tar layer, so `PackedArtifact` describes it exactly.
+        ArtifactKind::Hook => pack_hook_dir(path, version, fallback_source, git),
         // Bundles are packed on a dedicated path (`pack_bundle`); the
         // skill/rule validator never receives one.
         ArtifactKind::Bundle => unreachable!("bundles are packed via the bundle path, not validate_and_pack"),
@@ -326,6 +414,21 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    // A hook is a first-class bundle member: the resolver expands it, the lock
+    // holds it in `[[hook]]`, `effective_set` lists `(Hook, set.hooks)`, and
+    // `bundle_members_lock` projects it. Only the authoring side was missing,
+    // which is why a `[hooks]` table used to be a hard config error (78).
+    //
+    // Push order is irrelevant to the wire bytes — `BundleManifest::new` sorts
+    // by `(kind, name)` — so this loop's position is readability only, and an
+    // unchanged bundle's layer digest cannot move.
+    for (name, id) in &source.hooks {
+        members.push(BundleMember {
+            kind: ArtifactKind::Hook,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
@@ -430,12 +533,13 @@ mod tests {
     fn read_bundle_members_covers_every_member_table() {
         // Regression: the [agents] table was parsed by BundleSource but
         // silently dropped here — an authored bundle published without its
-        // agent members.
+        // agent members. `[hooks]` was the same shape one step earlier: not
+        // even parsed, so a `[hooks]` table was a hard config error (78).
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("stack.toml");
         write(
             &f,
-            "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n[agents]\nrv = \"ghcr.io/acme/rv:1\"\n",
+            "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n[agents]\nrv = \"ghcr.io/acme/rv:1\"\n\n[hooks]\ngd = \"ghcr.io/acme/gd:1\"\n",
         );
         let (name, members, _meta) = read_bundle_members(&f).unwrap();
         assert_eq!(name, "stack");
@@ -446,8 +550,63 @@ mod tests {
                 (ArtifactKind::Skill, "cr"),
                 (ArtifactKind::Rule, "rs"),
                 (ArtifactKind::Agent, "rv"),
+                (ArtifactKind::Hook, "gd"),
             ],
-            "every member table maps onto the wire, agents included"
+            "every member table maps onto the wire, hooks included"
+        );
+    }
+
+    #[test]
+    fn read_bundle_members_hook_member_is_deterministic_and_leaves_others_byte_identical() {
+        // Two Principle-9 obligations in one test. (a) A re-read of the same
+        // source produces byte-identical layer bytes, so a re-build of an
+        // unchanged bundle keeps its digest. (b) Adding a `[hooks]` table
+        // APPENDS to the layer: the pre-hook members keep their exact relative
+        // order and bytes, because `ArtifactKind::Hook` is the last variant and
+        // `BundleManifest::new` sorts by its derived `Ord`. If someone reorders
+        // that enum, this test is what fails.
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_toml = "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n[agents]\nrv = \"ghcr.io/acme/rv:1\"\n";
+        let legacy = tmp.path().join("legacy.toml");
+        write(&legacy, legacy_toml);
+        let withhook = tmp.path().join("withhook.toml");
+        write(
+            &withhook,
+            &format!("{legacy_toml}\n[hooks]\ngd = \"ghcr.io/acme/gd:1\"\n"),
+        );
+
+        let bytes_of = |p: &std::path::Path| {
+            let (_, members, _) = read_bundle_members(p).unwrap();
+            crate::oci::bundle::BundleManifest::new(members)
+                .to_layer_bytes()
+                .unwrap()
+        };
+
+        assert_eq!(
+            bytes_of(&legacy),
+            bytes_of(&legacy),
+            "a re-build must be byte-identical"
+        );
+
+        let legacy_bytes = bytes_of(&legacy);
+        let hook_bytes = bytes_of(&withhook);
+        assert_ne!(legacy_bytes, hook_bytes, "the hook member must reach the wire");
+        // The legacy layer minus its closing `]\n}\n` is the prefix of the new
+        // one: proof the hook was appended rather than interleaved.
+        let (_, legacy_members, _) = read_bundle_members(&legacy).unwrap();
+        let (_, hook_members, _) = read_bundle_members(&withhook).unwrap();
+        let sorted = |m: Vec<crate::oci::bundle::BundleMember>| crate::oci::bundle::BundleManifest::new(m).members;
+        let legacy_sorted = sorted(legacy_members);
+        let hook_sorted = sorted(hook_members);
+        assert_eq!(
+            hook_sorted[..legacy_sorted.len()],
+            legacy_sorted[..],
+            "adding a hook member must not reorder the pre-hook members"
+        );
+        assert_eq!(
+            hook_sorted.last().map(|m| m.kind),
+            Some(ArtifactKind::Hook),
+            "a hook member sorts last, so it appends to the layer"
         );
     }
 

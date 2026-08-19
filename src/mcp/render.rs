@@ -97,6 +97,21 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         FetchedPayload::Artifact(kind) => kind,
     };
     match kind {
+        // A hook renders no files, for the same structural reason `mcp` does not:
+        // its vendor-native artifact is a REGISTRATION in the client's own
+        // config file plus a launcher and dispatch table under `$GRIM_HOME`,
+        // none of which is a projection of `hook.toml` into `dest_dir`.
+        //
+        // `grim_render` writes to an arbitrary caller-chosen directory, so even
+        // if a file existed to write it would be the wrong sink: honouring it
+        // would let an MCP client name a destination and have grim arm code
+        // there — repo-resident arming (invariant I1) through grim's own write
+        // tool. Refusing is the answer, not "render somewhere safer".
+        ArtifactKind::Hook => {
+            return Err(anyhow!(
+                "hooks register into client configs and render no files; use grim install"
+            ));
+        }
         ArtifactKind::Mcp => {
             return Err(anyhow!(
                 "mcp descriptors register into client configs and render no files; use grim install"
@@ -122,7 +137,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("rejected above"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook => unreachable!("rejected above"),
     };
     if !canonical.exists() {
         return Err(anyhow!(
@@ -146,7 +161,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let dest = match kind {
         ArtifactKind::Skill => args.dest_dir.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => args.dest_dir.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("rejected above"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook => unreachable!("rejected above"),
     };
 
     let pinned_str = fetched.pinned.strip_advisory().to_string();

@@ -114,7 +114,7 @@ scripts/                           # (optional) build/validation tooling
 |---|---|---|---|
 | `schema` | integer | yes | Metadata schema version. This document specifies `1`. Consumers MUST skip entries with an unknown `schema` (forward compatibility). |
 | `name` | string | yes | Package name. MUST equal the directory name containing the file. |
-| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`. |
+| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `hook`, `bundle`. |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |

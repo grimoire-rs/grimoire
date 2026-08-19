@@ -26,8 +26,11 @@ use super::scope_resolution;
 /// `grim remove` arguments.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// `skill`, `rule`, `agent`, `bundle`, or `mcp`.
-    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
+    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, or `hook`.
+    ///
+    /// `hook` appended, never inserted — an accepted value set is a frozen CLI
+    /// surface and widening it is the additive direction (Principle 9).
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
     pub kind: String,
 
     /// The config binding name to remove.
@@ -41,14 +44,15 @@ pub struct RemoveArgs {
 /// Config (78/79/74) or lock save (74) failures propagate via the typed
 /// error chain. An absent entry is reported, not an error.
 pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveReport, ExitCode)> {
-    // The value_parser above constrains the string to known kinds.
-    let kind = match args.kind.as_str() {
-        "skill" => ArtifactKind::Skill,
-        "agent" => ArtifactKind::Agent,
-        "bundle" => ArtifactKind::Bundle,
-        "mcp" => ArtifactKind::Mcp,
-        _ => ArtifactKind::Rule,
-    };
+    // Derived from the enum, never a local arm list with a `_ => Rule`
+    // catch-all — see the same fix in `command::uninstall::run` for the defect
+    // that catch-all caused once the `value_parser` gained `"hook"`.
+    let kind = ArtifactKind::from_kind_str(&args.kind).ok_or_else(|| {
+        crate::error::Error::from(super::command_error::CommandError::ConfigUsage(format!(
+            "unknown artifact kind '{}'",
+            args.kind
+        )))
+    })?;
 
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -60,6 +64,11 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     let set_before = scope.set.clone();
     let mut set = scope.set.clone();
     let removed = match kind {
+        // `remove` undeclares only (config + lock); files stay on disk, and for
+        // a hook that includes the registration, which `grim uninstall` is what
+        // removes. Refusing a hook here would leave the user no way to
+        // undeclare one, and the gate that matters (arming) is not on this path.
+        ArtifactKind::Hook => set.hooks.remove(&args.name).is_some(),
         ArtifactKind::Skill => set.skills.remove(&args.name).is_some(),
         ArtifactKind::Rule => set.rules.remove(&args.name).is_some(),
         ArtifactKind::Agent => set.agents.remove(&args.name).is_some(),
@@ -213,6 +222,14 @@ pub(crate) fn drop_from_lock(
     // in a lock the restamp below marks FRESH, and the next `grim install`
     // re-spliced it into every client config.
     process(&mut lock.mcp);
+    // `hooks` is the same shape, and its blast radius is the largest of the
+    // five: an undeclared `[[hook]]` surviving in a lock the restamp marks
+    // FRESH is a hook the next `grim install` re-materializes AND re-arms —
+    // code a client then runs automatically, after the user asked for it to be
+    // gone. Reachable two ways: `grim remove --kind hook <name>` (the direct
+    // declaration is dropped from `set.hooks` above, so `after` no longer holds
+    // the key) and removing a bundle that provided a hook member.
+    process(&mut lock.hooks);
 
     // Prune cached snapshots for bundles no longer declared (or retagged).
     lock.bundles.retain(|b| {
@@ -236,6 +253,7 @@ fn direct_id_of(
     name: &str,
 ) -> Option<crate::oci::Identifier> {
     let map = match kind {
+        ArtifactKind::Hook => &set.hooks,
         ArtifactKind::Skill => &set.skills,
         ArtifactKind::Rule => &set.rules,
         ArtifactKind::Agent => &set.agents,
@@ -277,6 +295,17 @@ fn legacy_drop_from_lock(
         })
     };
     match kind {
+        // Same shape as every other non-bundle kind: keep the lock entry (and
+        // mark the lock stale) when a still-declared bundle also provides the
+        // hook, else drop it. A hook is not special here — the retain/stale
+        // decision is about declaration provenance, not about arming.
+        ArtifactKind::Hook => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.hooks.retain(|a| a.name != name);
+            }
+        }
         ArtifactKind::Skill => {
             if provided_by_bundle(name, kind) {
                 stale = true;
@@ -389,6 +418,13 @@ fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &cr
     lock.rules.retain_mut(evict);
     lock.agents.retain_mut(evict);
     lock.mcp.retain_mut(evict);
+    // The legacy path is not a rare corner: `effective_set` degrades for the
+    // WHOLE call, so a single path-declared bundle anywhere in the project (or
+    // a pre-cache lock) routes every mutation through here. Omitting `hooks`
+    // left the dropped bundle's hook member in the lock with `stale` still
+    // false, so the hash was restamped fresh and the next `grim install`
+    // re-armed it — the same re-arm hazard as `drop_from_lock` above.
+    lock.hooks.retain_mut(evict);
 }
 
 #[cfg(test)]
@@ -413,6 +449,7 @@ mod tests {
 
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -450,6 +487,60 @@ mod tests {
             .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
             .collect();
         a
+    }
+
+    /// A locked `[[hook]]` entry, optionally carrying bundle provenance.
+    fn locked_hook(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
+        let mut a = LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Hook,
+            PinnedIdentifier::try_from(id).unwrap(),
+        );
+        a.bundles = bundles
+            .iter()
+            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
+            .collect();
+        a
+    }
+
+    /// A `DesiredSet` declaring `hooks` bindings plus `bundles`.
+    fn hook_set_of(hooks: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
+        let mut set = set_of(&[], bundles);
+        for (n, i) in hooks {
+            set.hooks.insert(
+                (*n).to_string(),
+                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
+            );
+        }
+        set.invalidate_declaration_hash_cache();
+        set
+    }
+
+    /// A one-member `[[bundle]]` snapshot for `kind`/`member`.
+    fn snapshot_of_kind(
+        binding: &str,
+        repo: &str,
+        tag: &str,
+        kind: ArtifactKind,
+        member: (&str, &str),
+    ) -> crate::lock::locked_bundle::LockedBundle {
+        let pinned_id = Identifier::parse(&format!("{repo}:{tag}"))
+            .unwrap()
+            .clone_with_digest(Digest::Sha256("b".repeat(64)));
+        crate::lock::locked_bundle::LockedBundle {
+            name: binding.to_string(),
+            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
+                repo: repo.to_string(),
+                tag: tag.to_string(),
+                pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
+            },
+            members: vec![crate::oci::bundle::BundleMember {
+                kind,
+                name: member.0.to_string(),
+                id: member.1.to_string(),
+            }],
+        }
     }
 
     /// A `DesiredSet` declaring `mcp` bindings plus `bundles`.
@@ -816,6 +907,148 @@ mod tests {
         );
     }
 
+    // ── Hook: the same fan-out gap, with re-arming as its blast radius ───
+
+    #[test]
+    fn remove_hook_drops_its_lock_entry() {
+        // Regression: `drop_from_lock`'s retain pass never covered `lock.hooks`,
+        // yet the hash restamped anyway — so an undeclared `[[hook]]` survived
+        // in a lock reading FRESH, and the next `grim install` re-materialized
+        // AND re-armed it. Strictly worse than the `mcp` case this mirrors: the
+        // resurrected artifact is code a client runs automatically.
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook("shell-guard", &[])];
+        let before = hook_set_of(&[("shell-guard", "localhost:5000/acme/shell-guard:1")], &[]);
+        let after_set = hook_set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Hook, "shell-guard", &before, &after_set);
+        assert!(
+            out.lock.hooks.is_empty(),
+            "the undeclared hook must leave the lock, or install re-arms it: {:?}",
+            out.lock.hooks
+        );
+        assert_eq!(
+            out.lock.metadata.declaration_hash,
+            after_set.declaration_hash_cached(),
+            "nothing is stale, so the hash restamps fresh"
+        );
+    }
+
+    #[test]
+    fn remove_hook_keeps_an_unrelated_entry() {
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook("shell-guard", &[]), locked_hook("fmt-gate", &[])];
+        let before = hook_set_of(
+            &[
+                ("shell-guard", "localhost:5000/acme/shell-guard:1"),
+                ("fmt-gate", "localhost:5000/acme/fmt-gate:1"),
+            ],
+            &[],
+        );
+        let after_set = hook_set_of(&[("fmt-gate", "localhost:5000/acme/fmt-gate:1")], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Hook, "shell-guard", &before, &after_set);
+        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["fmt-gate"], "only the named hook drops");
+    }
+
+    #[test]
+    fn remove_bundle_via_sets_evicts_its_hook_member() {
+        // The requirement's inverse direction, on the primary (snapshot) path:
+        // dropping the bundle drops the hook it provided.
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook("shell-guard", &[("localhost:5000/acme/stack", "1")])];
+        prev.bundles = vec![snapshot_of_kind(
+            "stack",
+            "localhost:5000/acme/stack",
+            "1",
+            ArtifactKind::Hook,
+            ("shell-guard", "localhost:5000/acme/shell-guard:1"),
+        )];
+        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
+        assert!(
+            out.lock.hooks.is_empty(),
+            "the removed bundle's hook member must be evicted: {:?}",
+            out.lock.hooks
+        );
+    }
+
+    #[test]
+    fn remove_bundle_keeps_a_directly_declared_hook() {
+        // The other half of the requirement: a hook the bundle provided AND the
+        // user declared directly survives the bundle's removal, because the
+        // direct declaration still holds it in the effective set. The entry's
+        // bundle provenance is re-derived away, not the entry itself.
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook("shell-guard", &[("localhost:5000/acme/stack", "1")])];
+        prev.bundles = vec![snapshot_of_kind(
+            "stack",
+            "localhost:5000/acme/stack",
+            "1",
+            ArtifactKind::Hook,
+            ("shell-guard", "localhost:5000/acme/shell-guard:1"),
+        )];
+        let before = hook_set_of(
+            &[("shell-guard", "localhost:5000/acme/shell-guard:1")],
+            &[("stack", "localhost:5000/acme/stack:1")],
+        );
+        let after_set = hook_set_of(&[("shell-guard", "localhost:5000/acme/shell-guard:1")], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
+        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["shell-guard"],
+            "a directly-declared hook outlives the bundle that also provided it"
+        );
+    }
+
+    #[test]
+    fn legacy_bundle_eviction_drops_its_hook_member() {
+        // Same gap on the legacy path, and this one is not a corner case:
+        // `effective_set` degrades for the WHOLE call, so one path-declared
+        // bundle anywhere routes every mutation through `evict_bundle_members`.
+        // `prev.bundles` empty while a bundle is declared forces that path.
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook("shell-guard", &[("ghcr.io/acme/stack-a", "1")])];
+        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        assert!(
+            out.lock.hooks.is_empty(),
+            "the sole contributor's removal must evict the hook member: {:?}",
+            out.lock.hooks
+        );
+    }
+
+    #[test]
+    fn legacy_bundle_eviction_keeps_hook_shared_with_other_bundle() {
+        let mut prev = lock_of(vec![]);
+        prev.hooks = vec![locked_hook(
+            "shared-guard",
+            &[("ghcr.io/acme/stack-a", "1"), ("ghcr.io/acme/stack-b", "1")],
+        )];
+        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1"), ("b", "ghcr.io/acme/stack-b:1")]);
+        let after_set = set_of(&[], &[("b", "ghcr.io/acme/stack-b:1")]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["shared-guard"],
+            "a surviving bundle still provides it, so it stays"
+        );
+        assert_eq!(
+            out.lock.hooks[0].bundles.len(),
+            1,
+            "only the removed bundle's provenance is dropped"
+        );
+    }
+
     #[test]
     fn bundle_eviction_keeps_member_shared_with_other_bundle() {
         let prev = lock_of(vec![
@@ -1027,5 +1260,22 @@ mod tests {
             vec!["code-review"],
             "the orphaned member is retained — it cannot be safely evicted offline"
         );
+    }
+
+    /// Every string the `<kind>` positional accepts must resolve to the kind it
+    /// names. **Regression guard, and it caught a live defect:** the
+    /// `value_parser` gained `"hook"` while `run`'s local arm list kept a
+    /// `_ => ArtifactKind::Rule` catch-all, so `grim remove hook <name>` silently
+    /// acted on a *rule*. Deriving the kind from `ArtifactKind::from_kind_str`
+    /// makes the two sides one source of truth; this test pins the accepted set
+    /// against it so appending a kind to the parser and forgetting the mapping
+    /// is a test failure rather than a wrong-target action.
+    #[test]
+    fn every_accepted_kind_string_resolves_to_that_kind() {
+        for accepted in ["skill", "rule", "agent", "bundle", "mcp", "hook"] {
+            let kind = ArtifactKind::from_kind_str(accepted)
+                .unwrap_or_else(|| panic!("the `remove` parser accepts '{accepted}' but no kind parses it"));
+            assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");
+        }
     }
 }

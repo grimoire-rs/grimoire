@@ -3,7 +3,12 @@
 
 //! `grim status` output.
 //!
-//! Plain format: 5-column table (Kind | Name | Source | Pinned | State).
+//! Plain format: 6-column table (Kind | Name | Source | Pinned | State |
+//! Note). `Note` is `-` for every non-hook row; for a `hook` row it names the
+//! client and the arming cause behind a `gated` / `not-armed` / `untrusted`
+//! state. Plain output carries no compatibility promise
+//! (`docs/src/stability.md` § Unstable — "human-readable log or error text"),
+//! unlike the JSON shape below.
 //!
 //! JSON format: `{"items": [...]}` where each item is a
 //! `{kind, name, source, pinned, state, outputs}` object (uniform `items`
@@ -62,6 +67,30 @@
 //! pin (declared-bundle / dev-install / path source), for a bundle member
 //! (it updates via its bundle, not its own tag), or when the re-resolution
 //! failed — absence never lies as `false`.
+//!
+//! `arming` (C-017) is the `hook`-only per-client verdict array:
+//! `[{client, cause, message, transient}]`, sorted by client, **always
+//! present**, `[]` for every non-hook kind and for a hook armed everywhere.
+//! `cause` is the machine-readable
+//! [`HookArmingCause`](crate::api::artifact_status::HookArmingCause) — branch
+//! on it, never on `message`, whose wording is explicitly unstable. It is the
+//! field that makes `state: not-armed` actionable: several different refusals
+//! share that one token, and only `cause` says whether the remedy is fixing
+//! `GRIM_HOME`, enabling the feature flag, granting `trust_hooks`, or
+//! approving `/hooks` inside Codex. Reporting them as one undifferentiated
+//! state is the silent-guardrail defect WP-P0 filed against the
+//! pre-amendment C-017.
+//!
+//! **No reported cause is ever transient.** `grim status` filters a transient
+//! cause out (`crate::command::status`'s refusal branch): a transient answer is
+//! stale the moment it is printed, so it would tell the reader to retry
+//! something that may already have succeeded. `transient` therefore reads
+//! `false` on every status row today — it is the cause's own classification,
+//! carried so a consumer never needs a lookup table, and the surface for a
+//! transient write-time refusal is the install-time warning instead.
+//!
+//! `arming` never influences the exit code — `grim status` is a report, and a
+//! gated hook is the documented default (invariant I4), not a failure.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -71,7 +100,40 @@ use serde::{Serialize, Serializer};
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::{ArtifactKind, PinnedIdentifier};
 
-use super::artifact_status::ArtifactStatus;
+use super::artifact_status::{ArtifactStatus, HookArmingCause};
+
+/// Why one `(hook, client)` pair is not armed and running (C-017).
+///
+/// One element per affected client, so a hook armed on `claude` and gated on
+/// `codex` reports both rather than collapsing to a single verdict the user
+/// cannot act on. `message` is [`HookArmingCause::message`] — carried in the
+/// payload rather than left for the consumer to look up, because the cause
+/// token is stable and the wording is not (`docs/src/stability.md` § Unstable
+/// covers human-readable text).
+/// `Clone` because `grim hook list` reports one item per `[[hooks]]` entry and
+/// every entry of one artifact carries that artifact's whole verdict set — the
+/// verdicts are a property of the `(artifact, client)` pair, not of the entry,
+/// so they are copied rather than re-derived per entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookArming {
+    /// The client target this verdict is about.
+    pub client: String,
+    /// The machine-readable cause. Consumers branch on this, never on
+    /// `message`.
+    pub cause: HookArmingCause,
+    /// The distinguishing, remedy-bearing text — the half of C-017 that keeps
+    /// four different refusals from reading identically.
+    pub message: String,
+    /// Whether re-running may succeed with no user action
+    /// ([`HookArmingCause::transient`]). True only for a held dispatch lock;
+    /// every other cause needs the user to change something first.
+    ///
+    /// Consequently `false` on every `grim status` row: a transient cause is
+    /// filtered before it reaches a report (see the module doc). Present rather
+    /// than omitted so a consumer branching on `cause` gets the classification
+    /// without maintaining its own copy of the table.
+    pub transient: bool,
+}
 
 /// One client's materialized output location for a status entry.
 #[derive(Debug, Serialize)]
@@ -152,6 +214,19 @@ pub struct StatusEntry {
     /// did not run, the row has no lock pin, it is a bundle member, or the
     /// re-resolution failed. See the module doc for the full contract.
     pub update_available: Option<bool>,
+    /// Per-client arming verdicts for a `hook` row (C-017). Sorted by client;
+    /// **always present**, and `[]` for every non-hook kind and for a hook
+    /// armed and running everywhere.
+    ///
+    /// `[]` therefore means "nothing to report", never "unknown" — the
+    /// always-present-null discipline applied to an array, exactly as
+    /// `clients_missing` does it.
+    ///
+    /// The row's [`ArtifactStatus`] is derived from these by the precedence in
+    /// [`crate::command::status`]'s `hook_row_state`; this field is what makes
+    /// the state actionable, since the token alone does not say which client or
+    /// which cause.
+    pub arming: Vec<HookArming>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -163,6 +238,26 @@ fn serialize_opt_pinned<S: Serializer>(pinned: &Option<PinnedIdentifier>, s: S) 
         Some(p) => s.serialize_some(&p.strip_advisory().to_string()),
         None => s.serialize_none(),
     }
+}
+
+/// The `Note` cell: `<client>: <cause>` per arming verdict, `-` when there is
+/// none.
+///
+/// The short **cause token**, not [`HookArmingCause::message`] — a table cell
+/// is not a place for a sentence, and the full remedy text reaches the user on
+/// stderr from [`crate::command::status`] (the repo's standing split: tables on
+/// stdout, human guidance through `tracing`). The token alone still
+/// distinguishes all four `not-armed` refusals from each other, which is what
+/// C-017 requires of the human surface.
+fn note_cell(arming: &[HookArming]) -> String {
+    if arming.is_empty() {
+        return "-".to_string();
+    }
+    arming
+        .iter()
+        .map(|a| format!("{}: {}", a.client, a.cause))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The result of a status query: one row per declared artifact.
@@ -197,10 +292,11 @@ impl Printable for StatusReport {
                         .map(|p| p.strip_advisory().to_string())
                         .unwrap_or_else(|| "-".to_string()),
                     e.state.to_string(),
+                    note_cell(&e.arming),
                 ]
             })
             .collect();
-        print_table(w, &["Kind", "Name", "Source", "Pinned", "State"], &rows)
+        print_table(w, &["Kind", "Name", "Source", "Pinned", "State", "Note"], &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -235,6 +331,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             update_available: None,
+            arming: Vec::new(),
         }
     }
 

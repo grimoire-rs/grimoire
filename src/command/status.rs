@@ -36,13 +36,17 @@ use clap::Args;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::api::artifact_status::ArtifactStatus;
-use crate::api::status_report::{StatusEntry, StatusOutput, StatusReport};
+use crate::api::artifact_status::{ArtifactStatus, HookArmingCause};
+use crate::api::status_report::{HookArming, StatusEntry, StatusOutput, StatusReport};
 use crate::catalog::update_availability::{outdated_from_resolve, resolve_declared_digest};
 use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
+use crate::config::declaration::RegistryConfig;
+use crate::config::scope::ConfigScope;
 use crate::context::Context;
+use crate::hook::trust::{AuthoredRegistry, LocatorKind};
 use crate::install::client_target::ClientTarget;
+use crate::install::hook_registrar::{ArmRefusal, arming_refusal};
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
 use crate::install::installer::client_supports_kind;
 use crate::install::path_anchor::{AnchorRoots, Containment};
@@ -53,7 +57,7 @@ use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::AccessError;
 use crate::oci::reference::ArtifactRef;
-use crate::oci::{ArtifactKind, Digest, Identifier};
+use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
 use super::scope_resolution;
 
@@ -189,6 +193,15 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         Some(target.clients().to_vec())
     };
 
+    // C-017's inputs, resolved once and only when a hook is actually in play —
+    // it reads the global config, which is not a cost every `grim status` should
+    // carry. `None` therefore means "no hook anywhere", never "unknown".
+    let hook_inputs = if declares_a_hook(&scope, lock.as_ref()) {
+        Some(HookArmingInputs::resolve(ctx, &scope, &target)?)
+    } else {
+        None
+    };
+
     let mut entries = Vec::new();
 
     // Declared bundles: one row each so the user sees what they declared.
@@ -227,6 +240,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // `--check` has nothing to match it against.
             deprecated: None,
             replaced_by: None,
+            // A declared bundle is not a hook and arms nothing; its
+            // hook members carry their own rows and their own verdicts.
+            arming: Vec::new(),
             update_available: None,
         });
     }
@@ -266,7 +282,21 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
                 client_supports_kind(c, decl.kind, &scope.workspace, scope.scope)
             });
+        // C-017: a `hook` row's real state is its per-client arming verdict,
+        // not its materialization lifecycle. A hook whose payload is on disk
+        // and whose registration was refused is `not-armed`, NOT `installed` —
+        // reporting a silent no-op as installed is the single most misleading
+        // thing this kind could do. `hook_arming` answers `[]` for every other
+        // kind, and `hook_row_state` then leaves `entry_state` untouched.
+        // The lock pin is resolved first because the arming verdict needs it:
+        // C-022 keys on the **resolved** registry and repository, never on the
+        // reference the user typed (B5.4).
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
+        let arming = hook_arming_for_row(decl.kind, &decl.name, pinned.as_ref(), hook_inputs.as_ref(), record);
+        warn_unarmed(decl.kind, &decl.name, &arming);
+        if let Some(state) = hook_row_state(&arming) {
+            entry_state = state;
+        }
         // A directly-declared registry-locked row is the only kind eligible
         // for a fresh update re-resolution (issue #43): path/dev rows carry no
         // pin, and a bundle member updates via its bundle rather than its own
@@ -302,6 +332,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             deprecated: None,
             replaced_by: None,
             update_available: None,
+            arming,
         });
     }
 
@@ -339,6 +370,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             deprecated: None,
             replaced_by: None,
             update_available: None,
+            // Structurally always empty: a hook is not dev-installable from a
+            // path in v1 (`command::install`'s recorded decision — a path
+            // source has no registry, so the per-registry `trust_hooks`
+            // consent C-022 requires cannot be expressed for it), so no dev
+            // record can carry `ArtifactKind::Hook`.
+            arming: Vec::new(),
         });
     }
 
@@ -348,7 +385,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // above.
     if let Some(l) = lock.as_ref() {
         for member in l.iter_artifacts().filter(|a| a.is_from_bundle()) {
-            let st = derive_state(
+            let mut st = derive_state(
                 member.kind,
                 &member.name,
                 Some(member),
@@ -367,6 +404,23 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                     client_supports_kind(c, member.kind, &scope.workspace, scope.scope)
                 });
             let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
+            // A bundle-provided hook is a first-class member (`effective_set`
+            // lists `(Hook, set.hooks)`), so its arming verdict is reported the
+            // same way a directly-declared hook's is. Omitting it here would
+            // report an unarmed bundle hook as `installed` — the same
+            // silent-no-op defect C-017 exists to close, reached by a second
+            // route.
+            let arming = hook_arming_for_row(
+                member.kind,
+                &member.name,
+                member.source.pinned(),
+                hook_inputs.as_ref(),
+                record,
+            );
+            warn_unarmed(member.kind, &member.name, &arming);
+            if let Some(state) = hook_row_state(&arming) {
+                st = state;
+            }
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -381,6 +435,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 deprecated: None,
                 replaced_by: None,
                 update_available: None,
+                arming,
             });
         }
     }
@@ -525,8 +580,19 @@ fn update_available_from_resolve(locked: &Digest, resolved: Result<Option<Digest
     }
 }
 
-/// Every declared artifact (skills, then rules, then agents, then mcp) as
-/// a reference.
+/// Every declared artifact (skills, then rules, then agents, then mcp, then
+/// hooks) as a reference.
+///
+/// **This array is one of the two production silent sites C-016(b) enumerates**
+/// (`status.rs` and `release.rs`): nothing makes it exhaustive over
+/// [`ArtifactKind`], so a kind omitted here is simply never reported — no
+/// compile error, no failing test, just an artifact the user declared and
+/// `grim status` never mentions. `hooks` is appended last so the pre-hook row
+/// order is byte-stable for anyone diffing plain output.
+///
+/// C-016(b) covers exactly this array and `release.rs`'s two kind
+/// special-cases. It does **not** protect an array added later; that limit is
+/// stated rather than implied.
 fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef> {
     let mut out = Vec::new();
     let tables = [
@@ -534,6 +600,7 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
         (&scope.set.rules, ArtifactKind::Rule),
         (&scope.set.agents, ArtifactKind::Agent),
         (&scope.set.mcp, ArtifactKind::Mcp),
+        (&scope.set.hooks, ArtifactKind::Hook),
     ];
     for (table, kind) in tables {
         for (name, source) in table.iter() {
@@ -547,7 +614,609 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
     out
 }
 
-fn find_locked<'a>(lock: &'a GrimoireLock, kind: ArtifactKind, name: &str) -> Option<&'a LockedArtifact> {
+/// Per-client arming verdicts for one artifact (C-017); `[]` for every kind
+/// but [`ArtifactKind::Hook`].
+///
+/// The **reporting** half of C-017. The **refusal** half is WP-I's
+/// (`hook_registrar` / `sync_config`), and both are required: a refusal with no
+/// reported state arms nothing while `status` claims it did, and a reported
+/// state with no refusal claims a guardrail that does not exist. This function
+/// therefore reads the same inputs the registrar decides on, through the
+/// registrar's and the trust gate's **own** seams — never a cached duplicate of
+/// their verdicts — so the two cannot drift into disagreement.
+///
+/// Each client gets exactly one cause, and the order they are tried in is the
+/// order of decreasing specificity, because the reported cause is the one the
+/// user is meant to act on:
+///
+/// 1. a client with no hook surface at this scope ⇒
+///    [`HookArmingCause::ClientHasNoHookSurface`] — first because it is
+///    per-client and permanent: pointing a Warp user at a feature flag would
+///    name a knob that changes nothing for them.
+/// 2. `[options.experimental] hooks` off ⇒ [`HookArmingCause::FeatureFlagOff`]
+///    for every remaining client (config-only; there is deliberately no
+///    environment form, so nothing in a cloned repository can flip it).
+/// 3. the artifact's **resolved** registry without `trust_hooks = true` ⇒
+///    [`HookArmingCause::RegistryNotTrusted`] (C-022, via
+///    [`crate::hook::trust::decide`]).
+/// 4. `grim_home()` relative or workspace-nested, or a launcher path holding a
+///    control character ⇒ that refusal's cause (WP-P0 B1, B2). A **transient**
+///    refusal is deliberately not reported — see the filter at that branch.
+/// 5. armed, and the client has not been told to trust it ⇒
+///    [`HookArmingCause::ClientTrustPending`] (Codex `/hooks`).
+///
+/// One element per **affected** client: a client that is armed and running
+/// contributes nothing, so `[]` means "armed everywhere" for a hook and
+/// "not applicable" for every other kind — never "unknown". Sorted by client
+/// name (see [`HookArmingInputs::resolve`]) so the report is deterministic.
+/// Never fails: `status` is a read-only report, and an unanswerable question
+/// yields no verdict rather than an error (invariant I3).
+///
+/// **`pub` because `grim hook list` calls it too, and that is the point.** This
+/// function and [`HookArmingInputs`] are the single derivation of the arming
+/// gates; a report command that spelled them a second time is how the two
+/// commands would come to describe one hook differently, with no way for the
+/// user to tell which is right. Widen the visibility, never copy the body.
+pub fn hook_arming(
+    kind: ArtifactKind,
+    artifact: &str,
+    pinned: Option<&PinnedIdentifier>,
+    inputs: Option<&HookArmingInputs>,
+) -> Vec<HookArming> {
+    if kind != ArtifactKind::Hook {
+        return Vec::new();
+    }
+    // `None` only when no hook is declared anywhere, in which case `kind` cannot
+    // be `Hook` — but a read-only report answers "nothing to say" rather than
+    // panicking on a combination it believes impossible (invariant I3).
+    let Some(inputs) = inputs else {
+        return Vec::new();
+    };
+
+    // Whole-artifact gates, evaluated once: neither depends on the client.
+    let artifact_cause = if !inputs.feature_enabled {
+        Some(HookArmingCause::FeatureFlagOff)
+    } else {
+        match pinned {
+            // C-022, resolved through WP-G's `decide` rather than re-derived
+            // here: B4's scope precedence and B5's identity matching are a
+            // security predicate, and a second spelling of one is how the two
+            // halves come to disagree. `OptedOut` and `NeedsConsent` are one
+            // reported cause on purpose — both mean "this registry has not been
+            // trusted for hooks", and the remedy is the same `trust_hooks` line.
+            Some(pin) => match crate::hook::trust::decide(pin.registry(), pin.repository(), &inputs.authored()) {
+                crate::hook::trust::TrustDecision::Trusted => None,
+                crate::hook::trust::TrustDecision::OptedOut | crate::hook::trust::TrustDecision::NeedsConsent => {
+                    Some(HookArmingCause::RegistryNotTrusted)
+                }
+            },
+            // No lock pin — declared but never resolved. The trust gate keys on
+            // the *resolved* registry and repository (B5.4), which do not exist
+            // yet, so there is no subject to answer about; the row's lifecycle
+            // state already reads `stale`/`missing`, which is the real problem.
+            None => None,
+        }
+    };
+
+    inputs
+        .clients
+        .iter()
+        .filter_map(|client| {
+            // The dispatch table is consulted FIRST and outranks every
+            // config-derived gate. A row present for this root means this hook
+            // is armed for this client right now, whatever the config would
+            // conclude — most visibly for an arming granted by `--allow-hooks`,
+            // which is per-invocation and never persisted, so no config file
+            // records it. Without this, `grim status` reports `gated` while the
+            // guardrail is live, which is the state every CI run is in.
+            if inputs.arms_artifact(&client.to_string(), artifact) {
+                return None;
+            }
+            let cause = if !inputs.client_has_hook_surface(*client) {
+                // Per-client and permanent, so it is answered before the
+                // artifact-wide gates: telling a Warp user to enable a feature
+                // flag would point them at a knob that changes nothing for them.
+                HookArmingCause::ClientHasNoHookSurface
+            } else if let Some(cause) = artifact_cause {
+                cause
+            } else if let Some(cause) = inputs.refusal.map(cause_from_refusal).filter(|c| !c.transient()) {
+                // **`grim status` never reports a transient cause**, and that is
+                // a general rule rather than a carve-out for one variant: a
+                // transient answer is stale the moment it is printed, so a
+                // report that carried it would tell the user to retry something
+                // that may already have succeeded — or claim a refusal that no
+                // longer exists. Today the rule filters exactly
+                // `DispatchLockHeld`, which `arming_refusal` structurally never
+                // returns anyway (Decision L forbids recording it, so no later
+                // read can populate it); the filter is what keeps that true if a
+                // future transient cause is added. The honest surface for a
+                // transient write-time refusal is WP-I's install-time warning.
+                cause
+            } else if requires_client_approval(*client) {
+                HookArmingCause::ClientTrustPending
+            } else {
+                // Armed and running: no verdict, so the row keeps its ordinary
+                // materialization lifecycle state.
+                return None;
+            };
+            Some(HookArming {
+                client: client.to_string(),
+                cause,
+                message: cause.message().to_string(),
+                transient: cause.transient(),
+            })
+        })
+        .collect()
+}
+
+/// Everything every hook row's arming verdicts are derived from, resolved
+/// **once** per `grim status` run.
+///
+/// Built only when the scope actually declares or locks a hook
+/// ([`declares_a_hook`]): it reads the global config, and
+/// `super::global_config_tiers` compiles every browse-filter glob on that read,
+/// so an unconditional build would put that cost on every `grim status` in every
+/// project — measurably (the seam's own doc records 12.6 s → 21.5 s for a second
+/// load on a 60-entry config).
+///
+/// Resolved once rather than per row because a second row must not be able to
+/// get a different answer to the same question: the feature flag, the authored
+/// registry set, the `$GRIM_HOME` refusal and the client set are all properties
+/// of the invocation, not of the artifact.
+pub struct HookArmingInputs {
+    /// `[options.experimental] hooks` for the resolved scope, read through the
+    /// one seam ([`crate::config::declaration::ExperimentalOptions::hooks_enabled`]).
+    feature_enabled: bool,
+    /// Authored `[[registries]]` from **both** config files, each tagged with
+    /// the scope it was authored in — the shape C-022's B4 precedence table
+    /// turns on. Deliberately not the resolved browse set, which has already
+    /// discarded the scope tag and the `trust_hooks` tri-state; and deliberately
+    /// not deduplicated, because the deny rule has to see every matching entry.
+    registries: Vec<(ConfigScope, RegistryConfig)>,
+    /// The scope-level refusal `$GRIM_HOME` and the workspace imply (C-017
+    /// causes 1–3), re-derived read-only through WP-I's own seam so `status` and
+    /// the registrar cannot disagree. `None` when nothing refuses.
+    ///
+    /// **Never carries cause 4.** `arming_refusal`'s contract is that
+    /// `DispatchLocked` is observable at write time only and Decision L forbids
+    /// recording it, so no later read can populate it — see
+    /// [`cause_from_refusal`].
+    refusal: Option<ArmRefusal>,
+    /// The clients an install would target, sorted by name so the `arming`
+    /// array is deterministic.
+    clients: Vec<ClientTarget>,
+    /// The `(client, artifact, entry-id)` triples this scope's dispatch table
+    /// **already arms**, read once per run.
+    ///
+    /// Entry-level, not artifact-level, and the difference is P-1's reporting
+    /// half: one artifact can have one entry registered and another declined for
+    /// the same client, so a pair-keyed set answers "armed" for the declined
+    /// entry too. [`Self::arms_artifact`] projects the pair question off these
+    /// triples; [`Self::arms_entry`] asks the exact one.
+    ///
+    /// # The table outranks the config, and that is the whole point
+    ///
+    /// Every other field here answers "would an install arm this?" from
+    /// config. That under-reports by exactly one case, and it is the case every
+    /// CI run is in: `--allow-hooks` grants trust **per invocation** and is
+    /// deliberately never persisted, so a hook armed through it leaves no trace
+    /// in any config file and the config-derived verdict says `gated` while the
+    /// guardrail is live. Reporting a running guardrail as off is the wrong
+    /// direction to be wrong in — a user who believes a hook is inert may act
+    /// as if nothing is watching.
+    ///
+    /// A row present for this root **is** armed, whatever the config says: the
+    /// table is the machine-local arming authority and is what `grim hook run`
+    /// actually reads. So the table is consulted first and a match reports no
+    /// cause at all.
+    ///
+    /// Empty when no key file exists (nothing on this machine can be armed),
+    /// when the table is absent or unreadable, or when the read fails — all of
+    /// which degrade to the config-derived answer rather than to an error,
+    /// because a report must not refuse to render (I3).
+    armed: std::collections::BTreeSet<(String, String, String)>,
+    /// The scope the verdicts are about — needed for the per-client surface
+    /// probe, which is scope-dependent (codex and copilot host hooks at global
+    /// scope only).
+    scope: ConfigScope,
+    /// The workspace the verdicts are about, carried solely so the surface probe
+    /// can call [`client_supports_kind`] rather than re-spelling its `Hook` arm.
+    /// Unused by the hook path itself — that arm asks `hook_surface` and
+    /// `kind_surface`, neither of which takes a path — but passing the real value
+    /// keeps the call honest instead of handing a shared predicate a placeholder.
+    workspace: std::path::PathBuf,
+}
+
+impl HookArmingInputs {
+    /// Resolve the invocation-level inputs. `target` is the same
+    /// `InstallTarget::parse` result the rest of the report uses, so the clients
+    /// named here are the clients an install would actually write to.
+    ///
+    /// # Errors
+    ///
+    /// A malformed or invalid global config (78) — the same failure
+    /// `super::global_config_tiers` surfaces for every other consumer.
+    /// Swallowing it would silently drop every globally-authored `trust_hooks`
+    /// grant and report a trusted hook as untrusted.
+    pub fn resolve(
+        ctx: &Context,
+        scope: &scope_resolution::ResolvedScope,
+        target: &InstallTarget,
+    ) -> anyhow::Result<Self> {
+        let (global_registries, _) = super::global_config_tiers(ctx, scope.scope)?;
+        // The active scope's own entries first, then the global fallback tier.
+        // At global scope `global_config_tiers` is empty by construction, so the
+        // global config is never read — or tagged — twice.
+        let mut registries: Vec<(ConfigScope, RegistryConfig)> =
+            scope.registries.iter().cloned().map(|r| (scope.scope, r)).collect();
+        registries.extend(global_registries.into_iter().map(|r| (ConfigScope::Global, r)));
+        let mut clients = target.clients().to_vec();
+        clients.sort_by_key(ToString::to_string);
+        Ok(Self {
+            feature_enabled: scope.options.experimental.hooks_enabled(),
+            registries,
+            refusal: arming_refusal(ctx.grim_home(), &scope.workspace, scope.scope),
+            clients,
+            scope: scope.scope,
+            workspace: scope.workspace.clone(),
+            armed: armed_rows(ctx.grim_home(), scope),
+        })
+    }
+
+    /// The borrowed [`AuthoredRegistry`] view WP-G's `decide` takes, built per
+    /// query over the owned entries above. Never pre-normalized — `grants` owns
+    /// the locator normalization, so no two call sites can normalize
+    /// differently.
+    fn authored(&self) -> Vec<AuthoredRegistry<'_>> {
+        self.registries
+            .iter()
+            .filter_map(|(scope, entry)| {
+                // An entry declares exactly one locator; one with neither is
+                // rejected by `validate_registries` long before here, so a
+                // `None` here is a shape that cannot grant and cannot deny.
+                let (locator, kind) = match (entry.oci.as_deref(), entry.index.as_deref()) {
+                    (Some(oci), _) => (oci, LocatorKind::Oci),
+                    (None, Some(index)) => (index, LocatorKind::Index),
+                    (None, None) => return None,
+                };
+                Some(AuthoredRegistry {
+                    scope: *scope,
+                    locator,
+                    kind,
+                    insecure: entry.insecure,
+                    trust_hooks: entry.trust_hooks,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `client` has a hook surface grim can write at this scope.
+    ///
+    /// **Delegates to [`client_supports_kind`]** — the install side's own
+    /// predicate — so the report side cannot answer a different question than
+    /// the installer. This was spelled out here while that function had no
+    /// `Hook` arm; the arm landed with WP-J2, and the note that owed this
+    /// collapse is discharged by it.
+    ///
+    /// Kept as a named method rather than inlined at its call sites because the
+    /// name is what makes the verdict readable there, and because one call is
+    /// the only place the report side asks the installer's question.
+    fn client_has_hook_surface(&self, client: ClientTarget) -> bool {
+        client_supports_kind(client, ArtifactKind::Hook, &self.workspace, self.scope)
+    }
+
+    /// Whether the dispatch table arms **any** of `artifact`'s entries for
+    /// `client` — the artifact-granularity question a `grim status` row asks.
+    pub fn arms_artifact(&self, client: &str, artifact: &str) -> bool {
+        self.armed
+            .iter()
+            .any(|(c, a, _)| c.as_str() == client && a.as_str() == artifact)
+    }
+
+    /// Whether the dispatch table arms one specific `[[hooks]]` entry for
+    /// `client` — the entry-granularity question `grim hook list` asks.
+    pub fn arms_entry(&self, client: &str, artifact: &str, id: &str) -> bool {
+        self.armed
+            .contains(&(client.to_string(), artifact.to_string(), id.to_string()))
+    }
+}
+
+/// Merge [`HookArmingCause::NotRegistered`] verdicts into an artifact-level
+/// `arming` array — the one gap the config-derived pass structurally cannot see.
+///
+/// # Why a second pass rather than a branch inside `hook_arming`
+///
+/// [`hook_arming`] answers per `(artifact, client)` from invocation-level inputs.
+/// The two facts this verdict needs are per **artifact** and (for `grim hook
+/// list`) per **entry**: which clients an install actually materialized this
+/// artifact for, and whether the dispatch table arms *this* entry there. Neither
+/// is an invocation fact, so both arrive as arguments here, and both callers
+/// share this one derivation rather than spelling the rule twice.
+///
+/// # The rule
+///
+/// A client earns the verdict when all three hold:
+///
+/// 1. an install recorded an output for it (`installed`), so convergence ran for
+///    that client and this artifact — without this a never-installed hook would
+///    report "not registered" instead of letting its `missing`/`stale` lifecycle
+///    token tell the real story;
+/// 2. the config-derived pass reported **nothing** for it — a gated, untrusted,
+///    surface-less or `GRIM_HOME`-refused client already has the actionable
+///    cause, and that cause also *explains* the missing row;
+/// 3. `armed` answers `false` — the dispatch table, which is what `grim hook
+///    run` actually reads, arms nothing here for it.
+///
+/// The one existing verdict this **overrides** is
+/// [`HookArmingCause::ClientTrustPending`], because that cause asserts a written
+/// registration the client has not approved yet. With no dispatch row there is no
+/// registration to approve, so reporting it would name the wrong actor.
+///
+/// Sorted by client, like [`hook_arming`]'s own output, so the merged array stays
+/// deterministic.
+pub fn merge_not_registered(
+    arming: Vec<HookArming>,
+    installed: &std::collections::BTreeSet<String>,
+    armed: impl Fn(&str) -> bool,
+) -> Vec<HookArming> {
+    let cause = HookArmingCause::NotRegistered;
+    let mut merged: Vec<HookArming> = arming
+        .into_iter()
+        // Rule 2's one exception: `ClientTrustPending` presupposes a registration.
+        .filter(|v| v.cause != HookArmingCause::ClientTrustPending || armed(&v.client))
+        .collect();
+    for client in installed {
+        if merged.iter().any(|v| &v.client == client) || armed(client) {
+            continue;
+        }
+        merged.push(HookArming {
+            client: client.clone(),
+            cause,
+            message: cause.message().to_string(),
+            transient: cause.transient(),
+        });
+    }
+    merged.sort_by(|a, b| a.client.cmp(&b.client));
+    merged
+}
+
+/// [`hook_arming`] for one `grim status` row, plus the artifact-level
+/// [`HookArmingCause::NotRegistered`] gap [`merge_not_registered`] adds.
+///
+/// One function so the directly-declared loop and the bundle-member loop cannot
+/// drift. `record` is the install record; its `outputs` name the clients an
+/// install materialized this artifact for, which is rule 1 of the merge.
+///
+/// Artifact granularity: a client is "not registered" here only when the table
+/// arms **no** entry of this artifact for it. A *partially* declined artifact —
+/// one entry armed, another refused — still reads armed on a `status` row,
+/// because a row has no entry dimension to carry the difference; `grim hook list`
+/// is the surface that does, and it applies the same merge per entry.
+fn hook_arming_for_row(
+    kind: ArtifactKind,
+    name: &str,
+    pinned: Option<&PinnedIdentifier>,
+    inputs: Option<&HookArmingInputs>,
+    record: Option<&InstallRecord>,
+) -> Vec<HookArming> {
+    let arming = hook_arming(kind, name, pinned, inputs);
+    let Some(inputs) = inputs.filter(|_| kind == ArtifactKind::Hook) else {
+        return arming;
+    };
+    let installed: std::collections::BTreeSet<String> =
+        recorded_clients(record).iter().map(|o| o.client.clone()).collect();
+    merge_not_registered(arming, &installed, |client| inputs.arms_artifact(client, name))
+}
+
+/// The `(client, artifact, entry-id)` triples the dispatch table already arms
+/// for this scope's root.
+///
+/// **Read-only, and it must stay that way.** It resolves the root token through
+/// [`hook_dispatch::existing_root_token`], which never creates the machine key
+/// — a report that minted arming key material as a side effect would break the
+/// guarantee that `status`, `search` and `context` cannot touch the arming
+/// path. No key means nothing is armed, so `None` and an unreadable table are
+/// the same answer as an empty table.
+///
+/// Every failure degrades to "nothing armed", which falls back to the
+/// config-derived verdict rather than to an error (I3). That is the safe
+/// direction: the fallback under-claims, and under-claiming a guardrail is
+/// recoverable where over-claiming one is not.
+fn armed_rows(
+    grim_home: &std::path::Path,
+    scope: &scope_resolution::ResolvedScope,
+) -> std::collections::BTreeSet<(String, String, String)> {
+    let root = crate::install::hook_registrar::root_scope_for(&scope.workspace, scope.scope);
+    let Ok(Some(token)) = crate::install::hook_dispatch::existing_root_token(grim_home, root) else {
+        return std::collections::BTreeSet::new();
+    };
+    let (table, _degrade) =
+        crate::install::hook_dispatch::read_table(&crate::install::hook_dispatch::dispatch_path(grim_home));
+    table
+        .roots
+        .get(&token)
+        .map(|entry| {
+            entry
+                .hooks
+                .iter()
+                .map(|row| (row.client.clone(), row.artifact.clone(), row.id.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether any hook is declared in the config or contributed by a locked
+/// bundle — the gate on building [`HookArmingInputs`] at all.
+///
+/// The lock half matters: a bundle-provided hook appears in no `[hooks]` table,
+/// and omitting it here would leave every bundle hook row with `arming: []`,
+/// i.e. reported as armed. That is C-017's defect reached by a second route.
+pub fn declares_a_hook(scope: &scope_resolution::ResolvedScope, lock: Option<&GrimoireLock>) -> bool {
+    !scope.set.hooks.is_empty() || lock.is_some_and(|l| l.iter_artifacts().any(|a| a.kind == ArtifactKind::Hook))
+}
+
+/// The reported cause for a write-time [`ArmRefusal`].
+///
+/// Total on purpose, and total *without* an escape: a refusal cause added
+/// without deciding which reported cause it is becomes a `cargo check` failure,
+/// which is the whole point of C-017's eight-variant modelling. Whether a cause
+/// is fit to *report* from a read-only path is a separate question, answered by
+/// [`HookArmingCause::transient`] at the one call site in [`hook_arming`] —
+/// keeping the two apart is what stops "we cannot report this one" from decaying
+/// into "we forgot this one".
+///
+/// The `ArmRefusal::LauncherPath` payload is deliberately dropped: it carries
+/// WP-I's own wording for the same condition, and one control character in a
+/// path has exactly one remedy regardless of which character it was.
+fn cause_from_refusal(refusal: ArmRefusal) -> HookArmingCause {
+    match refusal {
+        ArmRefusal::GrimHomeRelative => HookArmingCause::GrimHomeRelative,
+        ArmRefusal::GrimHomeInWorkspace => HookArmingCause::GrimHomeInWorkspace,
+        ArmRefusal::LauncherPath(_) => HookArmingCause::LauncherPathControlCharacter,
+        ArmRefusal::DispatchLocked => HookArmingCause::DispatchLockHeld,
+    }
+}
+
+/// Whether this client needs an out-of-band human approval before a
+/// registration grim has already written actually fires.
+///
+/// Only Codex does: it requires a human to approve hooks in its interactive
+/// `/hooks` TUI, there is no scripted verb to grant it, and an unapproved hook
+/// is skipped **silently** — no warning, session looks normal (WP-B executed
+/// this). Grim cannot observe the approval, so `untrusted` is the honest
+/// standing report for a codex hook row rather than a guess: grim's own work is
+/// complete and the client is the one withholding.
+///
+/// A total match, not a `matches!`: this is a per-vendor property with no
+/// `Vendor` trait method behind it yet, so the only thing keeping a new client
+/// from silently defaulting to "no approval needed" is the compiler.
+///
+/// **Owed:** promote to `Vendor::hook_approval()` when `vendor.rs` is next open
+/// (the same debt `hook_registrar::sync_for_state` records for
+/// `hook_config_path`), and delete this function in that change.
+fn requires_client_approval(client: ClientTarget) -> bool {
+    match client {
+        ClientTarget::Codex => true,
+        // Claude splices its own settings file and fires immediately; copilot
+        // globs a file grim owns outright and fires immediately. The remaining
+        // 15 have no hook surface at all, so they never reach this question —
+        // listed rather than wildcarded so promoting one to a hook surface has
+        // to decide this too.
+        ClientTarget::Claude
+        | ClientTarget::OpenCode
+        | ClientTarget::Copilot
+        | ClientTarget::Cursor
+        | ClientTarget::Kiro
+        | ClientTarget::Junie
+        | ClientTarget::Gemini
+        | ClientTarget::Zed
+        | ClientTarget::Amp
+        | ClientTarget::Agents
+        | ClientTarget::Antigravity
+        | ClientTarget::Cline
+        | ClientTarget::Droid
+        | ClientTarget::Goose
+        | ClientTarget::Warp
+        | ClientTarget::OpenClaw
+        | ClientTarget::Kilo => false,
+    }
+}
+
+/// How actionable one arming state is, and therefore both the row-state
+/// precedence and the stderr severity.
+///
+/// One total match over [`ArtifactStatus`] instead of three: the precedence,
+/// the warn/debug split, and "is this even an arming state" are the same
+/// question asked three ways, and three separate matches would be three places
+/// for a new token to be forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ArmingSeverity {
+    /// `not-armed` — grim tried to arm and refused. Most actionable.
+    Refused,
+    /// `untrusted` — grim armed it and the client is withholding.
+    ClientWithheld,
+    /// `gated` — the documented default under invariant I4. Not a failure.
+    Gated,
+    /// A lifecycle token, which no [`HookArmingCause::state`] produces. Sorts
+    /// last so a future cause mapped to one could never outrank a real
+    /// refusal, and logs at `debug` so it can never masquerade as a warning.
+    NotAnArmingState,
+}
+
+fn arming_severity(state: ArtifactStatus) -> ArmingSeverity {
+    match state {
+        ArtifactStatus::NotArmed => ArmingSeverity::Refused,
+        ArtifactStatus::Untrusted => ArmingSeverity::ClientWithheld,
+        ArtifactStatus::Gated => ArmingSeverity::Gated,
+        ArtifactStatus::Installed
+        | ArtifactStatus::Stale
+        | ArtifactStatus::Modified
+        | ArtifactStatus::Missing
+        | ArtifactStatus::Outdated => ArmingSeverity::NotAnArmingState,
+    }
+}
+
+/// The row `state` a hook's arming verdicts imply, or `None` to keep the
+/// ordinary materialization lifecycle state.
+///
+/// Precedence — most-actionable first, because a row carries one token and the
+/// user should be pointed at the thing they can actually fix:
+/// `not-armed` > `untrusted` > `gated`. A hook gated on `codex` and refused on
+/// `claude` reads `not-armed`, and the per-client detail lives in `arming`.
+///
+/// `None` for a non-hook row (empty verdicts) **and** for a hook armed and
+/// running on every client — in the latter case the lifecycle state
+/// (`installed` / `modified` / `outdated` / `missing`) is the honest answer,
+/// since arming succeeded and the remaining question is about the payload.
+pub fn hook_row_state(arming: &[HookArming]) -> Option<ArtifactStatus> {
+    arming
+        .iter()
+        .map(|a| a.cause.state())
+        .min_by_key(|state| arming_severity(*state))
+}
+
+/// Emit the distinguishing per-cause message on stderr, once per verdict.
+///
+/// The human half of C-017: the plain table's `Note` cell carries the short
+/// cause token (a table cell is not a place for a sentence), and the full
+/// remedy text arrives here — the repo's standing split of tables on stdout,
+/// human guidance through `tracing`.
+///
+/// `warn` for a `not-armed` or `untrusted` verdict (grim tried to arm and did
+/// not, or the client is silently skipping a registration grim wrote — both are
+/// things the user wants told); `debug` for a `gated` one, because a gated hook
+/// is the documented default under invariant I4 and warning on every `grim
+/// status` would train the user to ignore the channel.
+fn warn_unarmed(kind: ArtifactKind, name: &str, arming: &[HookArming]) {
+    for verdict in arming {
+        let state = verdict.cause.state();
+        // One line per verdict, naming the client and the hook — C-017's
+        // requirement — then the distinguishing remedy. Never aggregated: a
+        // hook refused on claude and gated on codex has two different remedies,
+        // and a joined line has nowhere to put the second one.
+        match arming_severity(state) {
+            ArmingSeverity::Refused | ArmingSeverity::ClientWithheld => {
+                tracing::warn!(
+                    "{kind} '{name}' is {state} on client '{}': {}",
+                    verdict.client,
+                    verdict.message
+                );
+            }
+            // A gated hook is the documented default under invariant I4, not a
+            // failure. Warning on every `grim status` would train the user to
+            // ignore the channel the refusals arrive on.
+            ArmingSeverity::Gated | ArmingSeverity::NotAnArmingState => {
+                tracing::debug!(
+                    "{kind} '{name}' is {state} on client '{}': {}",
+                    verdict.client,
+                    verdict.message
+                );
+            }
+        }
+    }
+}
+
+pub fn find_locked<'a>(lock: &'a GrimoireLock, kind: ArtifactKind, name: &str) -> Option<&'a LockedArtifact> {
     lock.iter_artifacts().find(|a| a.kind == kind && a.name == name)
 }
 
@@ -704,7 +1373,7 @@ fn client_drift(
 /// no install record ⇒ `missing`; recorded but content drifted ⇒
 /// `modified`; installed digest != lock digest ⇒ `outdated`; else
 /// `installed`.
-fn derive_state(
+pub fn derive_state(
     kind: ArtifactKind,
     name: &str,
     locked: Option<&LockedArtifact>,
@@ -914,6 +1583,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             update_available: None,
+            arming: Vec::new(),
         }
     }
 
@@ -990,6 +1660,208 @@ mod tests {
         let rows = vec![catalog_row("localhost:5000", "some-other-repo", Some("msg"), None)];
         apply_catalog_check(&mut entries, &rows);
         assert!(entries[0].deprecated.is_none());
+    }
+
+    // ── C-017: arming verdicts, row-state precedence, severity split ───────
+
+    fn verdict(client: &str, cause: HookArmingCause) -> HookArming {
+        HookArming {
+            client: client.to_string(),
+            cause,
+            message: cause.message().to_string(),
+            transient: cause.transient(),
+        }
+    }
+
+    /// `[]` means "nothing to report", never "unknown" — so an empty verdict
+    /// array must leave the ordinary materialization lifecycle state alone.
+    #[test]
+    fn no_verdicts_keep_the_lifecycle_state() {
+        assert_eq!(hook_row_state(&[]), None);
+    }
+
+    fn installed_on(clients: &[&str]) -> std::collections::BTreeSet<String> {
+        clients.iter().map(|c| (*c).to_string()).collect()
+    }
+
+    /// P-1's reporting half, rule by rule.
+    ///
+    /// `merge_not_registered` exists because `hook_arming` answers from
+    /// invocation-level inputs and has no way to say "grim registered nothing
+    /// here" — before it, the declined entry reported `arming: []`, which is the
+    /// documented spelling of *armed everywhere*.
+    #[test]
+    fn a_client_with_no_dispatch_row_reads_not_registered() {
+        // Rule 1 + 3: installed for claude, armed for nobody.
+        let merged = merge_not_registered(Vec::new(), &installed_on(&["claude"]), |_| false);
+        assert_eq!(
+            merged.iter().map(|v| (v.client.as_str(), v.cause)).collect::<Vec<_>>(),
+            [("claude", HookArmingCause::NotRegistered)],
+            "{merged:?}"
+        );
+
+        // Rule 3 satisfied: a row exists, so there is nothing to report.
+        assert!(merge_not_registered(Vec::new(), &installed_on(&["claude"]), |_| true).is_empty());
+
+        // Rule 1 unsatisfied: no install ever recorded an output, so the row's
+        // own `missing`/`stale` lifecycle token is the honest story — reporting
+        // "not registered" for a hook nothing installed would be noise.
+        assert!(merge_not_registered(Vec::new(), &installed_on(&[]), |_| false).is_empty());
+
+        // Rule 2: an existing verdict already carries the actionable cause AND
+        // explains the missing row, so it is never overwritten.
+        let gated = merge_not_registered(
+            vec![verdict("claude", HookArmingCause::FeatureFlagOff)],
+            &installed_on(&["claude"]),
+            |_| false,
+        );
+        assert_eq!(
+            gated.iter().map(|v| v.cause).collect::<Vec<_>>(),
+            [HookArmingCause::FeatureFlagOff],
+            "{gated:?}"
+        );
+    }
+
+    /// The one verdict the merge replaces: `ClientTrustPending` asserts a written
+    /// registration the client has not approved. With no dispatch row there is no
+    /// registration to approve, so it would name the wrong actor.
+    #[test]
+    fn client_trust_pending_yields_to_not_registered_when_nothing_is_armed() {
+        let merged = merge_not_registered(
+            vec![verdict("codex", HookArmingCause::ClientTrustPending)],
+            &installed_on(&["codex"]),
+            |_| false,
+        );
+        assert_eq!(
+            merged.iter().map(|v| (v.client.as_str(), v.cause)).collect::<Vec<_>>(),
+            [("codex", HookArmingCause::NotRegistered)],
+            "{merged:?}"
+        );
+
+        // …and it survives untouched when the entry IS armed, which is the case
+        // the cause was written for.
+        let armed = merge_not_registered(
+            vec![verdict("codex", HookArmingCause::ClientTrustPending)],
+            &installed_on(&["codex"]),
+            |_| true,
+        );
+        assert_eq!(
+            armed.iter().map(|v| v.cause).collect::<Vec<_>>(),
+            [HookArmingCause::ClientTrustPending],
+            "{armed:?}"
+        );
+    }
+
+    /// Deterministic order, like [`hook_arming`]'s own output: the merged array
+    /// reaches `--format json` and a shifting order would churn every consumer's
+    /// diff.
+    #[test]
+    fn the_merged_verdicts_are_sorted_by_client() {
+        let merged = merge_not_registered(
+            vec![verdict("copilot", HookArmingCause::FeatureFlagOff)],
+            &installed_on(&["codex", "claude"]),
+            |_| false,
+        );
+        assert_eq!(
+            merged.iter().map(|v| v.client.as_str()).collect::<Vec<_>>(),
+            ["claude", "codex", "copilot"],
+            "{merged:?}"
+        );
+    }
+
+    /// The documented precedence: `not-armed` > `untrusted` > `gated`. A row
+    /// carries one token, so it must be the most actionable of its verdicts —
+    /// pointing the user at a gate they could flip while a refusal is silently
+    /// blocking everything is the misleading direction.
+    #[test]
+    fn row_state_reports_the_most_actionable_verdict() {
+        let refused_and_gated = [
+            verdict("codex", HookArmingCause::FeatureFlagOff),
+            verdict("claude", HookArmingCause::GrimHomeRelative),
+        ];
+        assert_eq!(hook_row_state(&refused_and_gated), Some(ArtifactStatus::NotArmed));
+
+        let withheld_and_gated = [
+            verdict("copilot", HookArmingCause::RegistryNotTrusted),
+            verdict("codex", HookArmingCause::ClientTrustPending),
+        ];
+        assert_eq!(hook_row_state(&withheld_and_gated), Some(ArtifactStatus::Untrusted));
+
+        let all_gated = [
+            verdict("warp", HookArmingCause::ClientHasNoHookSurface),
+            verdict("claude", HookArmingCause::FeatureFlagOff),
+        ];
+        assert_eq!(hook_row_state(&all_gated), Some(ArtifactStatus::Gated));
+    }
+
+    /// Every write-time refusal maps to its own reported cause. The map is
+    /// total by construction; this pins the pairs so a cause cannot quietly
+    /// change which refusal it stands for.
+    /// The refusal → cause pairing, and the rule that decides which of them
+    /// `grim status` may report: a transient cause is stale the moment it is
+    /// printed, so it is filtered as a *property of the cause* rather than as a
+    /// carve-out for one variant, and a future transient cause is filtered with
+    /// no code change.
+    ///
+    /// Only `DispatchLocked` is asserted here on purpose. The two `GrimHome`
+    /// variants are constructed solely by WP-I's `validate_grim_home`, whose
+    /// body is still a stub — naming them in a test would make them live in the
+    /// test profile and dead in the bin profile, which is a lint expectation
+    /// that cannot be satisfied in both at once. The pairing itself is a total
+    /// match no arm can silently leave.
+    #[test]
+    fn the_transient_refusal_maps_to_its_cause_and_is_the_unreportable_one() {
+        let cause = cause_from_refusal(ArmRefusal::DispatchLocked);
+        assert_eq!(cause, HookArmingCause::DispatchLockHeld);
+        assert!(cause.transient(), "a held lock is the one refusal a retry may clear");
+        let transient: Vec<HookArmingCause> = HookArmingCause::ALL.into_iter().filter(|c| c.transient()).collect();
+        assert_eq!(
+            transient,
+            vec![HookArmingCause::DispatchLockHeld],
+            "exactly one cause is filtered out of a status report"
+        );
+    }
+
+    /// Codex is the only client whose registration needs an out-of-band human
+    /// approval grim cannot observe. A silent `false` for a newly hook-capable
+    /// client would report an inert registration as armed.
+    #[test]
+    fn only_codex_needs_an_out_of_band_approval() {
+        let needing: Vec<ClientTarget> = ClientTarget::ALL
+            .iter()
+            .copied()
+            .filter(|c| requires_client_approval(*c))
+            .collect();
+        assert_eq!(needing, vec![ClientTarget::Codex]);
+    }
+
+    /// The severity ladder both the precedence and the stderr split read from.
+    /// A lifecycle token sorts last so it can never outrank a real refusal.
+    #[test]
+    fn arming_severity_ranks_refusals_above_gates_and_lifecycle_last() {
+        assert!(arming_severity(ArtifactStatus::NotArmed) < arming_severity(ArtifactStatus::Untrusted));
+        assert!(arming_severity(ArtifactStatus::Untrusted) < arming_severity(ArtifactStatus::Gated));
+        assert!(arming_severity(ArtifactStatus::Gated) < arming_severity(ArtifactStatus::Installed));
+        assert_eq!(
+            arming_severity(ArtifactStatus::Missing),
+            ArmingSeverity::NotAnArmingState
+        );
+    }
+
+    /// Every non-hook kind reports `[]`, and the row keeps its lifecycle state.
+    /// Guards the cheap early return that keeps C-017 off the hot path for the
+    /// five kinds that arm nothing.
+    #[test]
+    fn non_hook_kinds_report_no_arming_verdicts() {
+        for kind in [
+            ArtifactKind::Skill,
+            ArtifactKind::Rule,
+            ArtifactKind::Agent,
+            ArtifactKind::Mcp,
+            ArtifactKind::Bundle,
+        ] {
+            assert!(hook_arming(kind, "x", None, None).is_empty(), "{kind} must arm nothing");
+        }
     }
 
     // ── C4: update-availability null/bool mapping + deterministic merge ────

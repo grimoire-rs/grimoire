@@ -174,18 +174,19 @@ pub fn prune_orphans(
     force: bool,
 ) -> Result<Vec<PrunedArtifact>, PruneError> {
     // Keys the lock still declares; everything recorded but not here is an
-    // orphan. Every locked kind must be chained here — an omitted kind
-    // (agents/mcp were missing until this fix) makes every one of its
-    // still-declared records look orphaned and prunes them on every
-    // `grim update`.
-    let declared: HashSet<(ArtifactKind, String)> = lock
-        .skills
-        .iter()
-        .chain(lock.rules.iter())
-        .chain(lock.agents.iter())
-        .chain(lock.mcp.iter())
-        .map(|a| (a.kind, a.name.clone()))
-        .collect();
+    // orphan — so an omitted kind makes every one of its still-declared
+    // records look orphaned and **deletes them on the next `grim update`**.
+    //
+    // Derived from [`GrimoireLock::iter_artifacts`], never a local chain of
+    // arrays. The local chain was a standing data-loss trap and it fired
+    // twice: agents and mcp were missing when they landed, and `hooks` was
+    // missing again the moment a hook could install (found by execution — a
+    // `grim update` over an installed hook printed `unchanged` then `removed`
+    // and deleted the payload). `iter_artifacts` is the lock's own definition
+    // of "every locked artifact", so adding a kind can no longer skip this
+    // set. Bundles are correctly absent from it: a bundle expands into members
+    // at resolve time and never enters the lock as an artifact.
+    let declared: HashSet<(ArtifactKind, String)> = lock.iter_artifacts().map(|a| (a.kind, a.name.clone())).collect();
 
     // Snapshot the orphan keys (plus last-known digest, primary target, and
     // recorded clients) before any mutation — `uninstall` borrows `state`
@@ -863,6 +864,7 @@ mod tests {
 
     fn lock_of(rules: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -980,6 +982,168 @@ mod tests {
             !shared_by_surviving_sibling(&reaping, &outputs, &["codex".to_string()], &roots),
             "a sibling that resolves to the same target but a DIFFERENT support dir does not share the footprint"
         );
+    }
+
+    // ── C-020: the shared hook payload directory ───────────────────
+    //
+    // A hook's payload is client-INDEPENDENT (S-003): one directory per scope,
+    // with one `ClientOutput` per arming client pointing at it. That is the
+    // same several-outputs-one-path shape the pool-skill guard above protects,
+    // reached by a second route — so the refcount guard is what keeps a
+    // narrowed `[options].clients` from deleting a payload another client's
+    // dispatch entry still names.
+
+    /// Materialize a hook payload at `$GRIM_HOME/hooks/<name>` once and record
+    /// one output per client onto it — exactly what `install_one` writes.
+    fn install_hook_for(
+        state: &mut InstallState,
+        root: &std::path::Path,
+        name: &str,
+        clients: &[&str],
+    ) -> std::path::PathBuf {
+        let dir = root.join(format!("hooks/{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hook.toml"), format!("schema = 1\nname = \"{name}\"\n")).unwrap();
+        std::fs::write(dir.join("guard.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let hash = content_hash(&dir).unwrap();
+        state.record(InstallRecord {
+            kind: ArtifactKind::Hook,
+            name: name.to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name)),
+            dev: false,
+            outputs: clients
+                .iter()
+                .map(|client| ClientOutput {
+                    client: (*client).to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::GrimHome,
+                        relative: format!("hooks/{name}"),
+                    },
+                    content_hash: hash.clone(),
+                    support_dir: None,
+                    entry: None,
+                    adopted: false,
+                })
+                .collect(),
+        });
+        dir
+    }
+
+    /// **C-020, the concrete sequence.** Install hook H for claude + codex →
+    /// drop codex → the payload directory **survives** and is still recorded
+    /// for claude → drop claude → it is removed.
+    #[test]
+    fn c020_shared_hook_payload_survives_until_the_last_client_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude", "codex"]);
+        assert!(payload.is_dir());
+
+        // `[options].clients` narrows to claude alone: codex's output is reaped.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+        assert_eq!(acted.len(), 1, "{acted:?}");
+        assert_eq!(acted[0].reaped, vec!["codex".to_string()]);
+        assert!(
+            payload.is_dir(),
+            "the payload directory must survive: claude's record still names it"
+        );
+        let rec = state.get(ArtifactKind::Hook, "shell-guard").expect("still recorded");
+        assert_eq!(
+            rec.outputs.iter().map(|o| o.client.as_str()).collect::<Vec<_>>(),
+            vec!["claude"],
+            "only the dropped client's output leaves the record"
+        );
+
+        // Now the last arming client drops too — nothing references the
+        // payload, so it goes.
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Cursor], &roots(ws), false).unwrap();
+        assert_eq!(acted.len(), 1, "{acted:?}");
+        assert_eq!(acted[0].reaped, vec!["claude".to_string()]);
+        assert!(!payload.exists(), "the last reference is gone; the payload is released");
+        assert!(
+            state.get(ArtifactKind::Hook, "shell-guard").is_none(),
+            "a record left with no outputs is removed whole"
+        );
+    }
+
+    /// **DATA-LOSS REGRESSION GUARD.** `prune_orphans`' `declared` set is what
+    /// separates "recorded but no longer declared" from "still declared", and
+    /// it was a hand-maintained chain of lock arrays. A kind omitted from it
+    /// makes **every still-declared record of that kind** look orphaned, so
+    /// `grim update` deletes it on the very next run — the failure its own
+    /// comment records for agents and mcp, and the one `hooks` reproduced
+    /// verbatim once a hook could install.
+    ///
+    /// Found by execution, not by inference: `grim --global update` over an
+    /// installed hook printed `unchanged` and then `removed`, and the payload
+    /// directory was gone. The set is now derived from
+    /// `GrimoireLock::iter_artifacts`, so it cannot drift again.
+    #[test]
+    fn a_still_declared_hook_is_never_pruned_as_an_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude", "codex"]);
+
+        let lock = GrimoireLock {
+            hooks: vec![locked_of_kind(ArtifactKind::Hook, "shell-guard")],
+            ..lock_of(vec![])
+        };
+        let acted = prune_orphans(&mut state, &lock, &roots(ws), false).unwrap();
+        assert!(acted.is_empty(), "a declared hook is not an orphan: {acted:?}");
+        assert!(payload.is_dir(), "the payload must survive a prune pass");
+        assert!(
+            state.get(ArtifactKind::Hook, "shell-guard").is_some(),
+            "the record must survive a prune pass"
+        );
+    }
+
+    /// The other direction, so the guard above cannot be satisfied by simply
+    /// never pruning a hook: a hook that really has dropped out of the lock is
+    /// pruned, payload and all.
+    #[test]
+    fn a_hook_that_dropped_out_of_the_lock_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude"]);
+
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(ws), false).unwrap();
+        assert_eq!(acted.len(), 1, "{acted:?}");
+        assert!(!payload.exists(), "an undeclared hook's payload is released");
+        assert!(state.get(ArtifactKind::Hook, "shell-guard").is_none());
+    }
+
+    /// **C-020's second direction (issue #54).** The refcount is *record-only*,
+    /// with no filesystem fallback (documented limitation A8), so the property
+    /// that has to hold is the safe one: while a sibling output survives **in
+    /// the record**, the payload is never deleted — including when several
+    /// clients drop in the same pass.
+    #[test]
+    fn c020_a_partial_drop_never_deletes_a_payload_a_sibling_still_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude", "codex", "copilot"]);
+        let outputs = state.get(ArtifactKind::Hook, "shell-guard").unwrap().outputs.clone();
+
+        // Two of three drop together; claude is kept. Passing the WHOLE drop
+        // set is what stops codex and copilot each mistaking the other for a
+        // survivor.
+        let dropping = ["codex".to_string(), "copilot".to_string()];
+        assert!(
+            shared_by_surviving_sibling(&outputs[1], &outputs, &dropping, &roots(ws)),
+            "claude still records this payload — it must not be deleted"
+        );
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(ws), false).unwrap();
+        assert_eq!(acted[0].reaped, vec!["codex".to_string(), "copilot".to_string()]);
+        assert!(
+            payload.is_dir(),
+            "the payload survives a multi-client drop that keeps one"
+        );
+        assert!(payload.join("hook.toml").is_file(), "and its contents are untouched");
     }
 
     #[test]
