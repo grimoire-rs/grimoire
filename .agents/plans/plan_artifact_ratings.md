@@ -15,7 +15,7 @@
 - **Tier:** high (`architect=on research=3 adversary=on`)
 - State:   done
 - Updated: 2026-08-19
-- Next:    awaiting merge — grimoire#99, indexer#5, grimoire-vscode#18
+- Next:    awaiting merge — grimoire#99, indexer#5, grimoire-vscode#18 (finalized)
 - Repos:   <!-- frozen at execution start; bases are never re-resolved -->
   - `grim`    `/home/mherwig/dev/grimoire`                        trunk `main` base `006753a28a759fec6fb822fc045bec814a36a86f`  landed: no
   - `indexer` `.agents/worktrees/grimoire-index` (grimoire-rs/indexer) trunk `main` base `fe0fdade1b2e6c91a33c819f2eb0f08551f7e0f9`  landed: no

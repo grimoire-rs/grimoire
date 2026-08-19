@@ -6,13 +6,13 @@
 - **Parent plan:** plan_artifact_ratings (State `done`; three PRs open,
   unmerged — this plan's fixes land on those same branches)
 - **Active phase:** 1 — Fixes
-- **Step:** awaiting /hex-review
-- **Last update:** 2026-08-19 (all 8 WPs merged across three repos; F-4 and
-  F-8 both turned out to rest on false premises and are recorded as such)
-- State:   review
+- **Step:** finalized
+- **Last update:** 2026-08-19 (finalized: 20 commits rebased onto
+  origin/main and folded to 6; tree unchanged, `task --force verify` green)
+- State:   done
 - Tier:    medium
 - Updated: 2026-08-19
-- Next:    /hex-review .agents/plans/plan_ratings_deferred_findings.md
+- Next:    awaiting merge — grimoire#99, indexer#5, grimoire-vscode#18
 - Repos:   <!-- frozen; branches already exist and carry open PRs -->
   - `grim`    `/home/mherwig/dev/grimoire` — branch `feat/artifact-ratings`
     @ `88806f8`, PR [grimoire#99](https://github.com/grimoire-rs/grimoire/pull/99)
