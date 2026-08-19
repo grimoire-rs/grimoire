@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use crate::catalog::registry_catalog::{Catalog, OciMeta};
+use crate::catalog::registry_catalog::{Catalog, OciMeta, RatingSummary};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
 use crate::config::registry_resolve::{RowSource, SourceKind, row_source_of};
@@ -126,6 +126,10 @@ pub struct CatalogRow {
     pub latest_tag: Option<String>,
     /// The highest concrete semver tag, if any.
     pub version: Option<String>,
+    /// The community rating joined from the index's `stats.json` sidecar;
+    /// `None` when the artifact is unrated or the source publishes no
+    /// sidecar. Never a zero-vote record — unrated is absent, not `up: 0`.
+    pub rating: Option<RatingSummary>,
     /// How this repository relates to the current scope.
     pub badge: StatusBadge,
 }
@@ -393,6 +397,7 @@ pub async fn load_catalog(
                         oci: e.oci.clone(),
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),
+                        rating: e.rating.clone(),
                         badge: derive_badge(
                             &e.registry,
                             &e.repository,
@@ -854,6 +859,60 @@ mod tests {
         let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
             .expect("tracing writes UTF-8");
         (results, captured)
+    }
+
+    #[tokio::test]
+    async fn a_cached_rating_reaches_the_row_s001() {
+        // S-001 at this seam: WP-A's job ends where the display surfaces
+        // begin, so what it must prove is that a rating cached against a
+        // `CatalogEntry` survives the projection onto the `CatalogRow` the
+        // JSON report and the TUI read — keyed to the right row, and absent
+        // (never zero) on the unrated one.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let path = paths.catalog_file_for("https://index.example");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "registry": "https://index.example",
+                "scope": "",
+                "truncated": false,
+                "built_at": chrono::Utc::now().to_rfc3339(),
+                "entries": {
+                    "ghcr.io/acme/rated": {
+                        "registry": "ghcr.io", "repository": "acme/rated", "kind": "skill",
+                        "fetched_at": "2026-08-18T00:00:00Z",
+                        "rating": {"up": 12, "target": "D_kwDO", "url": "https://f/1"},
+                    },
+                    "ghcr.io/acme/unrated": {
+                        "registry": "ghcr.io", "repository": "acme/unrated", "kind": "skill",
+                        "fetched_at": "2026-08-18T00:00:00Z",
+                    },
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[index_source("https://index.example", Some("hub"), &[], &[])],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        let rows = &results.groups[0].rows;
+        let rated = rows.iter().find(|r| r.repository == "acme/rated").expect("rated row");
+        let rating = rated.rating.as_ref().expect("the cached rating reaches the row");
+        assert_eq!(rating.up, 12);
+        assert_eq!(rating.url, "https://f/1");
+        let unrated = rows
+            .iter()
+            .find(|r| r.repository == "acme/unrated")
+            .expect("unrated row");
+        assert_eq!(unrated.rating, None, "unrated is absent, never a zero-vote record");
     }
 
     #[tokio::test]

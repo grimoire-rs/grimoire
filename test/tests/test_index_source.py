@@ -669,3 +669,341 @@ def test_install_from_http_index_lands_in_claude_config_dir(
     assert not (runner.home / ".claude/skills/index-installed").exists(), (
         "global skill must NOT land in default ~/.claude when CLAUDE_CONFIG_DIR is set"
     )
+
+
+# ---------------------------------------------------------------------------
+# `stats.json` ratings sidecar (C-003, S-001, S-002)
+# ---------------------------------------------------------------------------
+
+
+def _write_stats(root: Path, entries: dict, schema_version: int = 1) -> None:
+    (root / "stats.json").write_text(
+        json.dumps(
+            {
+                "schema_version": schema_version,
+                "generated_at": "2026-08-18T00:00:00Z",
+                "providers": {"rating": "github"},
+                "entries": entries,
+            }
+        )
+    )
+
+
+def _cached_entries(grim_home: Path) -> dict:
+    """Every cached catalog entry across the per-registry cache files, keyed
+    by ref — the read path's only observable surface until the display
+    packages land."""
+    entries: dict = {}
+    for cache in (grim_home / "catalog").glob("*.json"):
+        entries.update(json.loads(cache.read_text()).get("entries", {}))
+    assert entries, f"no catalog cache was written under {grim_home / 'catalog'}"
+    return entries
+
+
+def test_http_index_joins_the_ratings_sidecar_by_ref(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """S-001: an index publishing ``stats.json`` beside ``all.json`` has its
+    ratings joined onto the catalog **by ref** — the rated pointer only."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
+            _package("unrated", "skill", "ghcr.io/acme/skills/unrated", "Unrated"),
+        ],
+    )
+    _write_stats(
+        root,
+        {
+            "ghcr.io/acme/skills/rated": {
+                "rating": {
+                    "up": 12,
+                    "target": "D_kwDOAbCdEf",
+                    "url": "https://github.com/acme/index/discussions/7",
+                }
+            },
+            # A ref the index does not list at all: joined onto nothing,
+            # never invented as a row.
+            "ghcr.io/acme/skills/ghost": {"rating": {"up": 99, "target": "t", "url": "u"}},
+        },
+    )
+    _index_config(project_dir, base)
+
+    rows = _search_rows(grim_at(project_dir))
+    assert len(rows) == 2, f"both pointers still list; got {rows}"
+
+    cached = _cached_entries(grim_home)
+    rating = cached["ghcr.io/acme/skills/rated"]["rating"]
+    assert rating["up"] == 12
+    # Opaque: stored verbatim, never parsed or reconstructed by grim.
+    assert rating["target"] == "D_kwDOAbCdEf"
+    assert rating["url"] == "https://github.com/acme/index/discussions/7"
+    assert "rating" not in cached["ghcr.io/acme/skills/unrated"], (
+        "a ref absent from the sidecar is unrated, never a zero-vote record"
+    )
+    assert "ghcr.io/acme/skills/ghost" not in cached, (
+        "the sidecar joins onto index rows; it never adds one"
+    )
+
+
+def test_http_index_without_a_sidecar_reads_unrated_and_warns_nothing(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """S-002: no ``stats.json`` (404) is the normal case for every index that
+    has not enabled ratings — the catalog builds, rows are unrated, and
+    nothing is said above ``debug``."""
+    root, base = http_index
+    _write_all_json(root, [_package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
+    _index_config(project_dir, base)
+
+    runner = grim_at(project_dir)
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, f"a missing sidecar must not fail the build: {result.stderr}"
+    assert len(json.loads(result.stdout)["items"]) == 1
+    assert "rating" not in _cached_entries(grim_home)["ghcr.io/acme/skills/plain"]
+    # Default filter is `warn`, so anything logged above `debug` shows here.
+    assert "stats.json" not in result.stderr, f"404 is never surfaced: {result.stderr}"
+
+
+def test_http_index_sidecar_server_error_reads_unrated(
+    grim_at, grim_home: Path, project_dir: Path, tmp_path: Path
+) -> None:
+    """C-003: only the ``all.json`` fetch decides whether the build
+    succeeded. A sidecar the server fails on degrades to *no ratings* — the
+    same arm an outright transport fault takes."""
+
+    class FailingStats(SimpleHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's own casing
+            if self.path.endswith("stats.json"):
+                self.send_error(500)
+                return
+            super().do_GET()
+
+    root = tmp_path / "index-dist-500"
+    root.mkdir()
+    _write_all_json(root, [_package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
+    handler = partial(FailingStats, directory=str(root))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _index_config(project_dir, f"http://127.0.0.1:{server.server_address[1]}")
+        runner = grim_at(project_dir)
+        result = runner.run("--format", "json", "search", "--refresh", check=False)
+        assert result.returncode == 0, f"a failing sidecar must not fail the build: {result.stderr}"
+        assert len(json.loads(result.stdout)["items"]) == 1
+        assert "rating" not in _cached_entries(grim_home)["ghcr.io/acme/skills/plain"]
+    finally:
+        server.shutdown()
+
+
+def test_sidecar_503_leaves_a_warm_cache_rated(
+    grim_at, grim_home: Path, project_dir: Path, tmp_path: Path
+) -> None:
+    """F-1 / R-2: a sidecar the server fails on was *not observed* — it is not
+    an observation that nothing is rated. One 503 with ``all.json`` still
+    serving must not publish "nothing is rated" into the cache for a whole
+    TTL, so the previous build's rating carries forward."""
+
+    failing = threading.Event()
+
+    class FlakyStats(SimpleHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's own casing
+            if self.path.endswith("stats.json") and failing.is_set():
+                self.send_error(503)
+                return
+            super().do_GET()
+
+    root = tmp_path / "index-dist-flaky"
+    root.mkdir()
+    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    _write_stats(
+        root,
+        {"ghcr.io/acme/skills/rated": {"rating": {"up": 12, "target": "t", "url": "u"}}},
+    )
+    handler = partial(FlakyStats, directory=str(root))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _index_config(project_dir, f"http://127.0.0.1:{server.server_address[1]}")
+        runner = grim_at(project_dir)
+
+        # A warm cache: one successful build that saw the rating.
+        _search_rows(runner)
+        assert _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]["up"] == 12
+
+        # The sidecar starts failing; `all.json` keeps serving, so the
+        # catalog still rebuilds — over a rating nothing observed.
+        failing.set()
+        rows = _search_rows(runner)
+        rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"].get("rating")
+        assert rating is not None, (
+            "a 503 on the sidecar is an unobserved rating, not an observation "
+            "of none — the warm cache's rating must survive the rebuild"
+        )
+        assert rating["up"] == 12
+        # And the shipped surface, not just the cache behind it: the JSON row
+        # is the contract consumers read.
+        row = next(r for r in rows if r["repo"] == "ghcr.io/acme/skills/rated")
+        assert row["rating"]["up"] == 12, f"the served row keeps the rating too; got {row['rating']}"
+    finally:
+        server.shutdown()
+
+
+def test_git_index_reads_unrated(grim_at, grim_home: Path, project_dir: Path, tmp_path: Path) -> None:
+    """C-003: ratings ride the HTTP index only. A git-transport index is a
+    tree of ``metadata.json`` files with no sidecar — unrated, not an
+    error."""
+    repo = _git_index_repo(
+        tmp_path, [_package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
+    )
+    _index_config(project_dir, repo.as_posix())
+
+    rows = _search_rows(grim_at(project_dir))
+    assert [r.get("repo") for r in rows] == ["ghcr.io/acme/skills/gitpkg"]
+    assert "rating" not in _cached_entries(grim_home)["ghcr.io/acme/skills/gitpkg"]
+
+
+def test_offline_browse_is_unchanged_by_the_sidecar(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """C-003: ``GRIM_OFFLINE`` inherits catalog behaviour verbatim — the
+    cached rating is served, and no sidecar request is made because no
+    rebuild happens at all."""
+    root, base = http_index
+    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    _write_stats(root, {"ghcr.io/acme/skills/rated": {"rating": {"up": 3, "target": "t", "url": "u"}}})
+    _index_config(project_dir, base)
+
+    runner = grim_at(project_dir)
+    _search_rows(runner)
+    assert _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]["up"] == 3
+
+    # Take the index away entirely: offline must not reach for it.
+    (root / "all.json").unlink()
+    (root / "stats.json").unlink()
+    runner.env["GRIM_OFFLINE"] = "1"
+    result = runner.run("--format", "json", "search", check=False)
+    assert result.returncode == 0, f"offline serves the cache: {result.stderr}"
+    assert [r.get("repo") for r in json.loads(result.stdout)["items"]] == [
+        "ghcr.io/acme/skills/rated"
+    ]
+    assert _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]["up"] == 3
+
+
+# ---------------------------------------------------------------------------
+# `--sort` browse ordering (C-017, S-010, S-011)
+# ---------------------------------------------------------------------------
+
+
+def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
+    """A four-package index whose ratings, names, and relevance to the query
+    ``tool`` all disagree — so any single ordering the CLI applies is
+    distinguishable from the other two."""
+    _write_all_json(
+        root,
+        [
+            _package(name, "skill", f"ghcr.io/acme/skills/{name}", desc)
+            for name, desc in [
+                # Scores highest on `tool`: the term appears in the leaf name
+                # AND the description.
+                ("tool-tool", "tool tool tool"),
+                ("apex", "a tool"),
+                ("Zulu", "a tool"),
+                ("unrated", "a tool"),
+            ]
+        ],
+    )
+    _write_stats(
+        root,
+        {
+            "ghcr.io/acme/skills/apex": {"rating": {"up": 7, "target": "t1", "url": "u1"}},
+            "ghcr.io/acme/skills/Zulu": {"rating": {"up": 40, "target": "t2", "url": "u2"}},
+            "ghcr.io/acme/skills/tool-tool": {"rating": {"up": 1, "target": "t3", "url": "u3"}},
+            # `unrated` is deliberately absent from the sidecar.
+        },
+    )
+    _index_config(project_dir, base)
+
+
+def _repos(runner, *args: str) -> list[str]:
+    result = runner.run("--format", "json", "search", "--refresh", *args, check=False)
+    assert result.returncode == 0, f"search must exit 0; stderr: {result.stderr}"
+    return [r["repo"].rsplit("/", 1)[-1] for r in json.loads(result.stdout)["items"]]
+
+
+def test_sort_rating_orders_the_browse_with_unrated_last(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """S-010: ``--sort rating`` orders the whole browse by upvotes descending
+    with the unrated artifact in a bucket of its own at the end — never folded
+    to zero, which would have interleaved it with the low-rated rows."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    assert _repos(grim_at(project_dir), "--sort", "rating") == [
+        "Zulu",  # 40
+        "apex",  # 7
+        "tool-tool",  # 1
+        "unrated",  # no rating record at all
+    ]
+
+
+def test_sort_name_is_case_insensitive_ascending(grim_at, project_dir: Path, http_index) -> None:
+    """C-017: ``--sort name`` is ascending and case-insensitive, so ``Zulu``
+    sorts by its letters rather than ahead of every lowercase name on its
+    capital (a byte-wise sort would put it first)."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    assert _repos(grim_at(project_dir), "--sort", "name") == ["apex", "tool-tool", "unrated", "Zulu"]
+
+
+def test_sort_updated_is_deterministic_when_every_row_is_undated(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """C-017: an index pointer carries no ``created`` at all, so every row
+    falls into the undated bucket together — and the order must still be
+    total, resolved by the name tiebreak rather than left to the sort
+    implementation."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    runner = grim_at(project_dir)
+    first = _repos(runner, "--sort", "updated")
+    assert first == ["apex", "tool-tool", "unrated", "Zulu"]
+    assert _repos(runner, "--sort", "updated") == first, "an undated browse is stable across runs"
+
+
+def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, http_index) -> None:
+    """S-011: with a query present ``--sort`` replaces relevance ranking.
+    ``tool-tool`` is the strongest match for ``tool`` and heads the unsorted
+    query; under ``--sort rating`` it drops to its rating position instead."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    runner = grim_at(project_dir)
+
+    by_relevance = _repos(runner, "tool")
+    assert by_relevance[0] == "tool-tool", f"relevance puts the best match first; got {by_relevance}"
+
+    assert _repos(runner, "tool", "--sort", "rating") == ["Zulu", "apex", "tool-tool", "unrated"], (
+        "--sort must replace the relevance ranking, not compose with it"
+    )
+
+
+def test_absent_sort_leaves_the_browse_exactly_as_it_was(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """Principle 9: ``--sort`` is a new optional flag, so a run without it
+    must be byte-identical to what it was before the flag existed — the
+    unqueried browse in index order, the queried one by relevance."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    runner = grim_at(project_dir)
+
+    # Unqueried: unchanged registry-group order — rows byte-sorted by
+    # repository path within the group, which is why the capitalised `Zulu`
+    # leads. That is *not* what `--sort name` produces (case-insensitive, so
+    # `Zulu` lands last there), which is what makes this a real baseline
+    # rather than a restatement of the new comparator.
+    assert _repos(runner) == ["Zulu", "apex", "tool-tool", "unrated"]
+
+    # Queried: relevance descending, with the strongest match first.
+    assert _repos(runner, "tool")[0] == "tool-tool"
