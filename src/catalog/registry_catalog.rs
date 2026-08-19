@@ -127,6 +127,38 @@ impl OciMeta {
     }
 }
 
+/// One artifact's community rating, joined from an index's `stats.json`
+/// sidecar at catalog-build time.
+///
+/// This is the **cache** representation: `deny_unknown_fields`, following
+/// [`CatalogEntry`]'s discipline, so a cache written by a newer grim is
+/// rejected and rebuilt rather than misread. The **wire** representation in
+/// `stats.json` is a separate lenient struct in
+/// [`super::index_source`] — that is where forward compatibility with a
+/// growing sidecar schema lives. Do not collapse the two; that is the serde
+/// `deny_unknown_fields` forward-compat trap (serde-rs/serde#2634).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RatingSummary {
+    /// Upvote count as of the sidecar's `generated_at`.
+    pub up: u32,
+    /// Opaque vote-subject handle. Never parsed or constructed by grim.
+    pub target: String,
+    /// Opaque human-facing thread link. Never parsed or constructed by grim.
+    pub url: String,
+    /// The sidecar's `providers.rating` — which write mutation `grim rate`
+    /// issues for this artifact. Carried per entry rather than per catalog
+    /// because one cache file can hold rows joined from more than one
+    /// index build; `None` for a sidecar that declared no rating provider,
+    /// and for every cache written before this field existed.
+    ///
+    /// Additive: `serde(default)` keeps an older cache readable, and a
+    /// newer cache meeting an older grim's `deny_unknown_fields` is
+    /// rejected and rebuilt — the S-015 path, not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
 /// One repository's catalog record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,6 +224,14 @@ pub struct CatalogEntry {
     /// `latest` pointer, so the UI can show an explicit version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Community rating, joined from the index's `stats.json` sidecar at
+    /// catalog-build time. `None` when the index publishes no sidecar, the
+    /// artifact has no entry in it, or the source is not an HTTP index —
+    /// absence means *unrated*, never an error. (Like [`Self::replaced_by`],
+    /// adding a field to the `deny_unknown_fields` on-disk shape means an
+    /// older grim rejects a cache a newer grim wrote and rebuilds it.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<RatingSummary>,
     /// RFC3339 UTC timestamp this entry was fetched.
     pub fetched_at: String,
 }
@@ -257,9 +297,16 @@ pub struct Catalog {
 /// catalog ready to serve, or a decision to rebuild (with the advisory lock
 /// when one was won — `None` is the uncoordinated fallback after a lock I/O
 /// fault).
+///
+/// `Rebuild` carries the cache it decided against as well: the index build
+/// needs the prior entries to carry ratings forward over a sidecar it could
+/// not observe (`None` on a cold cache).
 enum PreFlight {
     Serve(Catalog),
-    Rebuild(Option<AdvisoryFileLock>),
+    Rebuild {
+        guard: Option<AdvisoryFileLock>,
+        previous: Option<Catalog>,
+    },
 }
 
 /// Run a blocking catalog op on the blocking pool, surfacing a panic via
@@ -355,6 +402,32 @@ impl Catalog {
         }))
     }
 
+    /// [`Self::load`], but a cache this binary cannot read counts as a
+    /// *cold* cache whenever a rebuild can follow.
+    ///
+    /// The rejected shape is the one a **newer** grim wrote: every field
+    /// added to the `deny_unknown_fields` on-disk struct makes an older
+    /// binary refuse the whole file. Refusing must cost one network refresh
+    /// (S-015), not a permanently empty browse — and it would be permanent,
+    /// because the read precedes the rebuild decision, so even `--refresh`
+    /// would keep hitting it. The rejection still surfaces, as a warning
+    /// naming the file. Offline there is nothing to rebuild from, so there
+    /// the error stands.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError`] for any load failure while offline. Online there is
+    /// none: an unreadable cache is a cold cache.
+    fn load_or_cold(path: &Path, registry: &str, offline: bool) -> Result<Option<Self>, CatalogError> {
+        match Self::load(path, registry) {
+            Err(e) if !offline => {
+                tracing::warn!("rebuilding unreadable catalog cache '{}': {e}", path.display());
+                Ok(None)
+            }
+            other => other,
+        }
+    }
+
     /// Atomically persist the catalog to `path`.
     ///
     /// # Errors
@@ -405,7 +478,7 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let cached = Self::load(path, registry)?;
+        let cached = Self::load_or_cold(path, registry, offline)?;
 
         if offline {
             // Degrade: serve whatever is cached (any scope), never reach
@@ -463,7 +536,9 @@ impl Catalog {
         let scope = query.to_lowercase();
         let guard = match Self::coordinate(path, registry, &scope, offline, force).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
-            PreFlight::Rebuild(guard) => guard,
+            // An OCI `_catalog` walk reads every field it writes from the
+            // registry, so it inherits nothing from the prior cache.
+            PreFlight::Rebuild { guard, .. } => guard,
         };
 
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
@@ -500,12 +575,13 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let guard = match Self::coordinate(path, locator, &scope, offline, force).await? {
+        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
-            PreFlight::Rebuild(guard) => guard,
+            PreFlight::Rebuild { guard, previous } => (guard, previous),
         };
 
-        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path).await {
+        let previous = previous.as_ref().map(|c| &c.entries);
+        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path, previous).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
                 Self::dispose_guard(path, guard).await;
@@ -535,7 +611,7 @@ impl Catalog {
         let key = key.to_string();
         let scope = scope.to_string();
         run_blocking(path.clone(), move || {
-            let cached = Catalog::load(&path, &key)?;
+            let cached = Catalog::load_or_cold(&path, &key, offline)?;
 
             // Offline: serve whatever is cached (any scope), never lock or
             // reach the network. A cold cache is empty.
@@ -565,13 +641,16 @@ impl Catalog {
                     // contended for the lock. Serve their fresh build
                     // instead of redoing it.
                     if !force
-                        && let Some(c) = Catalog::load(&path, &key)?
+                        && let Some(c) = Catalog::load_or_cold(&path, &key, false)?
                         && c.scope == scope
                         && c.is_fresh(chrono::Utc::now())
                     {
                         return Ok(PreFlight::Serve(c));
                     }
-                    Ok(PreFlight::Rebuild(Some(guard)))
+                    Ok(PreFlight::Rebuild {
+                        guard: Some(guard),
+                        previous: cached,
+                    })
                 }
                 // A peer owns the refresh — serve stale (or empty) and move
                 // on rather than walking the registry redundantly.
@@ -580,7 +659,10 @@ impl Catalog {
                 }
                 // A real lock I/O fault: fall back to an uncoordinated
                 // rebuild (the atomic write still prevents corruption).
-                Err(_) => Ok(PreFlight::Rebuild(None)),
+                Err(_) => Ok(PreFlight::Rebuild {
+                    guard: None,
+                    previous: cached,
+                }),
             }
         })
         .await
@@ -619,16 +701,30 @@ impl Catalog {
     /// prefilter and [`MAX_CATALOG_REPOS`] cap as the `_catalog` walk, and
     /// key entries by their full `registry/repository` ref (index entries
     /// span registries, so the bare repository path is not unique).
+    ///
+    /// `previous` is the cache this rebuild replaces, keyed the same way.
+    /// Unlike the `_catalog` walk, an index build reads one field — the
+    /// rating — from a *separate* document (`stats.json`) that can fail
+    /// independently of `all.json`; the prior entries are what a failed
+    /// sidecar fetch falls back to instead of publishing "unrated".
     async fn build_from_index(
         locator: &str,
         kind: crate::config::registry_resolve::SourceKind,
         scope: &str,
         git_dir: &Path,
         cache_path: &Path,
+        previous: Option<&BTreeMap<String, CatalogEntry>>,
     ) -> Result<Self, CatalogError> {
         let fetched_at = now_rfc3339();
-        let fetched =
-            crate::catalog::index_source::fetch_index_entries(locator, kind, git_dir, cache_path, &fetched_at).await?;
+        let fetched = crate::catalog::index_source::fetch_index_entries(
+            locator,
+            kind,
+            git_dir,
+            cache_path,
+            &fetched_at,
+            previous,
+        )
+        .await?;
 
         let mut selected: Vec<CatalogEntry> = fetched
             .into_iter()
@@ -756,6 +852,9 @@ impl Catalog {
             oci: OciMeta::default(),
             latest_tag,
             version,
+            // Ratings ride the index sidecar; an OCI `_catalog` walk has no
+            // sidecar to read, so its rows are always unrated.
+            rating: None,
             fetched_at: fetched_at.clone(),
         };
 
@@ -834,6 +933,7 @@ impl Catalog {
                     oci,
                     latest_tag: Some(tag.clone()),
                     version: version.clone(),
+                    rating: None,
                     fetched_at: fetched_at.clone(),
                 }
             })
@@ -1074,6 +1174,12 @@ mod tests {
                 },
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
+                rating: Some(RatingSummary {
+                    up: 42,
+                    target: "D_kwDOAbCdEf".to_string(),
+                    url: "https://github.com/acme/index/discussions/7".to_string(),
+                    provider: Some("github".to_string()),
+                }),
                 fetched_at: ts(10),
             },
         );
@@ -1090,6 +1196,12 @@ mod tests {
         assert!(loaded.truncated(), "truncated flag round-trips through disk");
         let e = loaded.entries().next().unwrap();
         assert_eq!(e.kind.as_deref(), Some("skill"));
+        // C-002: the cache round-trips a rating verbatim — `target` and
+        // `url` are opaque strings grim never parses or reconstructs.
+        let rating = e.rating.as_ref().expect("rating round-trips through disk");
+        assert_eq!(rating.up, 42);
+        assert_eq!(rating.target, "D_kwDOAbCdEf");
+        assert_eq!(rating.url, "https://github.com/acme/index/discussions/7");
         assert_eq!(e.keywords, vec!["review", "quality"]);
         assert_eq!(
             e.revision.as_deref(),
@@ -1139,6 +1251,95 @@ mod tests {
             err.kind,
             super::super::catalog_error::CatalogErrorKind::Parse(_)
         ));
+    }
+
+    #[test]
+    fn a_newer_cache_is_rebuilt_not_surfaced_as_an_error_s015() {
+        // S-015: run 0.14, downgrade. Every field added to the
+        // `deny_unknown_fields` on-disk struct makes the OLDER binary refuse
+        // the whole file — `rating` is only the latest of them. That refusal
+        // must cost one network refresh, not a wedged source: the cache read
+        // precedes the rebuild decision, so an error there is permanent (even
+        // `--refresh` re-reads the same file first).
+        //
+        // The fixture is the shape a newer grim writes: a cache carrying one
+        // field this binary's struct does not know.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let newer = r#"{"version":1,"registry":"localhost:5000","scope":"","truncated":false,
+            "built_at":"2099-01-01T00:00:00Z","entries":{"acme/x":{"registry":"localhost:5000",
+            "repository":"acme/x","fetched_at":"2099-01-01T00:00:00Z","field_from_the_future":1}}}"#;
+        std::fs::write(&path, newer).unwrap();
+
+        // Strictness itself is intact: the loader still refuses the document.
+        let err = Catalog::load(&path, "localhost:5000").expect_err("an unknown field is rejected");
+        assert!(matches!(
+            err.kind,
+            super::super::catalog_error::CatalogErrorKind::Parse(_)
+        ));
+
+        // Online, the refusal reads as a cold cache so the rebuild below can
+        // overwrite it — no error, no data loss.
+        let cold = Catalog::load_or_cold(&path, "localhost:5000", false).expect("online: rebuild, never error");
+        assert!(cold.is_none(), "an unreadable cache reads cold, not stale");
+
+        // Offline there is nothing to rebuild from, so the refusal stands
+        // rather than silently claiming the registry is empty.
+        assert!(
+            Catalog::load_or_cold(&path, "localhost:5000", true).is_err(),
+            "offline keeps surfacing the rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_cache_costs_one_refresh_and_no_data_s015() {
+        // S-015 end to end, through the seam `grim search` and the TUI use:
+        // the newer cache is refused, the source rebuilds from the registry
+        // in the same call, and the rebuilt catalog is served and persisted.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"registry":"localhost:5000","scope":"","truncated":false,
+                "built_at":"2099-01-01T00:00:00Z","entries":{"acme/x":{"registry":"localhost:5000",
+                "repository":"acme/x","fetched_at":"2099-01-01T00:00:00Z","field_from_the_future":1}}}"#,
+        )
+        .unwrap();
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+
+        // `force = false`: the rebuild is driven by the unreadable cache
+        // alone, which is the downgrade case — not by an explicit refresh.
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, false)
+            .await
+            .expect("an unreadable cache rebuilds rather than erroring");
+        assert_eq!(
+            cat.entries().next().expect("rebuilt from the registry").repository,
+            "acme/code-review"
+        );
+        // Persisted in this binary's shape, so the next run is a cache hit.
+        assert!(Catalog::load(&path, "localhost:5000").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_cache_rating_struct_rejects_unknown_fields() {
+        // C-002's cache half, asserted where the struct lives. The wire half
+        // — the same document parsed leniently — is in `index_source`.
+        assert!(
+            serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u"}"#).is_ok(),
+            "the three original fields parse without the additive `provider`"
+        );
+        assert_eq!(
+            serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u","provider":"github"}"#)
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("github"),
+            "the additive `provider` round-trips"
+        );
+        assert!(
+            serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u","score":0.5}"#).is_err(),
+            "an unknown field is rejected, which is what forces the rebuild in S-015"
+        );
     }
 
     #[test]
@@ -1873,6 +2074,7 @@ mod tests {
             oci: OciMeta::default(),
             latest_tag: Some("latest".to_string()),
             version: None,
+            rating: None,
             fetched_at: ts(1),
         };
         assert!(e.matches(&parse("")), "empty query matches all");
@@ -1897,5 +2099,143 @@ mod tests {
         };
         assert!(r.matches(&parse("rule")), "rule keyword matches rule entry");
         assert!(!r.matches(&parse("skill")), "skill keyword filters out rule entry");
+    }
+
+    // ── F-1: an unobserved ratings sidecar must not empty the cache ──
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const RATED_REF: &str = "ghcr.io/acme/skills/rated";
+
+    /// Spawn a throwaway static index host. `all.json` always serves one
+    /// package pointer; `stats.json` serves that pointer's rating until
+    /// `degraded` is set, and answers with `degraded_response` after.
+    /// A real socket is the only way to exercise the status branch the
+    /// build reads the sidecar through.
+    async fn spawn_index_host(degraded: std::sync::Arc<AtomicBool>, degraded_response: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn ok(body: &str) -> String {
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                // Read to the blank line terminating the request head, not
+                // one `read()`: dispatch turns on the target, so a head
+                // split across TCP segments would silently misroute and
+                // flake the assertions.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_string();
+                let response = if !request.contains("stats.json") {
+                    ok(&format!(
+                        r#"[{{"schema":1,"name":"rated","kind":"skill","ref":"{RATED_REF}","description":"Rated"}}]"#
+                    ))
+                } else if degraded.load(Ordering::SeqCst) {
+                    degraded_response.to_string()
+                } else {
+                    ok(&format!(
+                        r#"{{"schema_version":1,"providers":{{"rating":"github"}},"entries":{{"{RATED_REF}":{{"rating":{{"up":12,"target":"t","url":"u"}}}}}}}}"#
+                    ))
+                };
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        base
+    }
+
+    /// Build the index catalog once against a healthy sidecar, then again
+    /// with the sidecar degraded — returning the rating each build recorded
+    /// for `RATED_REF`, the second one carrying the first's entries forward.
+    async fn ratings_across_a_degraded_rebuild(
+        degraded_response: &'static str,
+    ) -> (Option<RatingSummary>, Option<RatingSummary>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog.json");
+        let git_dir = dir.path().join("git");
+        let degraded = std::sync::Arc::new(AtomicBool::new(false));
+        let base = spawn_index_host(degraded.clone(), degraded_response).await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+
+        let warm = Catalog::build_from_index(&base, kind, "", &git_dir, &cache, None)
+            .await
+            .unwrap();
+        degraded.store(true, Ordering::SeqCst);
+        let rebuilt = Catalog::build_from_index(&base, kind, "", &git_dir, &cache, Some(&warm.entries))
+            .await
+            .unwrap();
+
+        let rating = |c: &Catalog| c.entries.get(RATED_REF).expect("the pointer lists").rating.clone();
+        (rating(&warm), rating(&rebuilt))
+    }
+
+    #[tokio::test]
+    async fn an_unobserved_sidecar_carries_the_previous_ratings_forward() {
+        // R-2 on the read side: `all.json` fetched fine and only the sidecar
+        // failed, so nothing was learned about ratings. Writing the rebuilt
+        // catalog with no rating would publish "nothing is rated" into the
+        // cache for a full TTL off one 503.
+        let (warm, rebuilt) = ratings_across_a_degraded_rebuild(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(warm.map(|r| r.up), Some(12), "the healthy build sees the rating");
+        assert_eq!(
+            rebuilt.map(|r| r.up),
+            Some(12),
+            "an unobserved sidecar keeps what the previous cache knew"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_sidecar_that_dropped_a_ref_clears_it() {
+        // The counter-property's second guard, and the one that does not go
+        // through the fetch layer's status branch at all. R-2 empties a stat
+        // key "only when a completed producer genuinely observed nothing" —
+        // a 2xx that parsed is one, so a ref it no longer names is a
+        // retraction. Without this, a refactor that special-cased the empty
+        // map (`if observed.is_empty() { carry forward }`) would pass every
+        // other test here.
+        let (warm, rebuilt) = ratings_across_a_degraded_rebuild(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+             {\"schema_version\":1,\"providers\":{\"rating\":\"github\"},\"entries\":{}}",
+        )
+        .await;
+        assert_eq!(warm.map(|r| r.up), Some(12), "the healthy build sees the rating");
+        assert_eq!(
+            rebuilt, None,
+            "a sidecar that parsed and no longer names the ref has retracted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_404_sidecar_clears_a_previously_rated_entry() {
+        // The counter-property, and the reason carry-forward keys off an
+        // Option rather than "keep the old rating whenever the new one is
+        // absent": a 404 is a completed observation that this index rates
+        // nothing. A retraction must land, or a rating lives forever.
+        let (warm, rebuilt) = ratings_across_a_degraded_rebuild(
+            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(warm.map(|r| r.up), Some(12), "the healthy build sees the rating");
+        assert_eq!(
+            rebuilt, None,
+            "a completed observation of nothing empties the entry — carry-forward is not 'never forget'"
+        );
     }
 }

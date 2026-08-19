@@ -938,6 +938,7 @@ mod tests {
             oci: crate::catalog::OciMeta::default(),
             latest_tag: None,
             version: None,
+            rating: None,
             badge: crate::install::status_badge::StatusBadge::NotInstalled,
         }
     }
