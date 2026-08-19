@@ -128,6 +128,12 @@ pub struct TuiContext {
     /// once; the live `h` toggle owns it thereafter and persists across a
     /// scope swap (so it is intentionally absent from [`ScopeSwap`]).
     pub show_deprecated: bool,
+    /// The explicit browse ordering from `grim tui --sort`, seeded into the
+    /// state once before the first catalog load. `None` keeps the default
+    /// kind-then-leaf-name grouping. Scope-independent — an ordering is a
+    /// display choice, not a property of the scope — so it is deliberately
+    /// absent from [`ScopeSwap`], like `show_deprecated`.
+    pub sort: Option<crate::catalog::SortMode>,
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
@@ -250,6 +256,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // false`) hides them. The `h` key toggles this live and, unlike the
     // structural tree options above, is NOT re-seeded on a scope swap.
     state.set_hide_deprecated(!ctx.show_deprecated);
+    // Seed the browse ordering BEFORE the first load: `set_rows` is what
+    // applies it, and the load below is the first call.
+    state.set_sort(ctx.sort);
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -1316,6 +1325,9 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 repository_url: e.repository_url.clone(),
                 revision: e.revision.clone(),
                 created: e.created.clone(),
+                // Only the count reaches the pane; the sidecar's opaque
+                // target/url are the vote path's business, not the display's.
+                rating: e.rating.as_ref().map(|r| r.up),
                 deprecated: e.deprecated.clone(),
                 oci: e.oci.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
@@ -1374,6 +1386,9 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 repository_url: e.repository_url.clone(),
                 revision: e.revision.clone(),
                 created: e.created.clone(),
+                // Only the count reaches the pane; the sidecar's opaque
+                // target/url are the vote path's business, not the display's.
+                rating: e.rating.as_ref().map(|r| r.up),
                 deprecated: e.deprecated.clone(),
                 oci: e.oci.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
@@ -2038,6 +2053,7 @@ fn local_row(
         repository_url: None,
         revision: None,
         created: None,
+        rating: None,
         deprecated: None,
         oci: crate::catalog::OciMeta::default(),
         latest_tag: String::new(),
@@ -3444,6 +3460,7 @@ async fn perform_member(
         repository_url: None,
         revision: None,
         created: None,
+        rating: None,
         latest_tag: tag,
         version: String::new(),
         deprecated: None,
@@ -3670,6 +3687,7 @@ mod tests {
                 oci: crate::catalog::OciMeta::default(),
                 latest_tag: Some("1.2.3".to_string()),
                 version: Some("1.2.3".to_string()),
+                rating: None,
                 badge: StatusBadge::NotInstalled,
             }],
         };
@@ -3761,6 +3779,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -4004,6 +4023,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -4474,6 +4494,7 @@ mod tests {
             alt: None,
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
+            sort: None,
         }
     }
 
@@ -4636,6 +4657,7 @@ mod tests {
                     oci: crate::catalog::OciMeta::default(),
                     latest_tag: None,
                     version: None,
+                    rating: None,
                     badge: StatusBadge::NotInstalled,
                 })
                 .collect(),
@@ -5018,6 +5040,39 @@ mod tests {
             "each row carries the key of the ENTRY that produced it (C-023)"
         );
         assert_eq!(narrow_rows[0].source, narrow.key());
+    }
+
+    /// C-003: pin the rating at its **producer**. `detail.rs` renders whatever
+    /// `TuiRow.rating` holds, so replacing the projection with `None` leaves
+    /// every detail-pane test green — the same blind spot C-026 documents
+    /// above.
+    #[test]
+    fn project_group_rows_carries_the_catalog_rating_c003() {
+        let (_tmp, install_state, roots, bundle_repos, repos) = empty_badge_scope();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &bundle_repos,
+            direct_repos: &repos,
+            snapshot_repos: &repos,
+            target: None,
+        };
+        let mut g = group("ghcr.io/acme", 2);
+        // Parsed, not a struct literal: `RatingSummary` is a cache struct that
+        // still grows fields (`provider`), and a literal here would break this
+        // fixture on every addition. `registry_catalog.rs`'s own round-trip
+        // tests use the same idiom.
+        g.rows[0].rating = Some(
+            serde_json::from_str(
+                r#"{"up":7,"target":"opaque-node-id","url":"https://github.com/acme/index/discussions/3"}"#,
+            )
+            .expect("the fixture is a valid RatingSummary"),
+        );
+        let rows = project_group_rows(&g, &badge);
+        assert_eq!(rows[0].rating, Some(7), "the count reaches the row");
+        assert_eq!(rows[1].rating, None, "an unrated entry stays unrated, never 0");
     }
 
     /// S-021: the producer-to-tree-root path, composed. `project_group_rows`
@@ -5529,6 +5584,7 @@ mod tests {
             alt: None,
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
+            sort: None,
         }
     }
 
@@ -6964,6 +7020,7 @@ mod tests {
             alt: None,
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
+            sort: None,
         };
         (tmp, ctx)
     }
@@ -6984,6 +7041,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -7123,6 +7181,7 @@ mod tests {
                 repository_url: None,
                 revision: None,
                 created: None,
+                rating: None,
                 latest_tag: "latest".to_string(),
                 version: "1.0.0".to_string(),
                 deprecated: None,
@@ -7324,6 +7383,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "1.0.0".to_string(),
             version: String::new(),
             deprecated: None,
@@ -7388,6 +7448,7 @@ mod p2_app_member_node_tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: latest_tag.to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -7487,6 +7548,7 @@ mod p2_app_member_node_tests {
             alt: None,
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
+            sort: None,
         }
     }
 

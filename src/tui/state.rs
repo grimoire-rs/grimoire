@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::catalog::{OciMeta, SearchQuery};
+use crate::catalog::{OciMeta, SearchQuery, SortKey, SortMode, browse_sort};
 use crate::config::registry_resolve::RowSource;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
@@ -179,6 +179,11 @@ pub struct TuiRow {
     /// Publishing commit date (RFC3339, `--git` opt-in), shown in the detail
     /// pane. `None` when the artifact carries no git provenance.
     pub created: Option<String>,
+    /// Upvote count from the index's `stats.json` sidecar, shown in the detail
+    /// pane. `None` means *unrated* — the artifact has no rating record, the
+    /// browse source publishes no sidecar, or it is not an HTTP index. Never
+    /// `Some(0)` standing in for absence: an unrated row renders no row at all.
+    pub rating: Option<u32>,
     /// Publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the row marker + detail-pane highlight.
     pub deprecated: Option<String>,
@@ -282,6 +287,12 @@ pub struct TuiState {
     /// .show_deprecated` (negated) and toggled live by the `h` key; installed
     /// deprecated rows always stay visible.
     pub hide_deprecated: bool,
+    /// The explicit browse ordering from `grim tui --sort`, or `None` for the
+    /// default kind-then-leaf-name grouping. When set it replaces both that
+    /// grouping and the relevance ranking a query would otherwise apply —
+    /// the same override `grim search --sort` performs, off the same
+    /// comparator (C-017).
+    pub sort: Option<SortMode>,
     /// Current interaction mode.
     pub mode: Mode,
     /// Whether a catalog load is in flight.
@@ -401,6 +412,7 @@ impl Default for TuiState {
             filtered: Vec::new(),
             selected: 0,
             detail_scroll: 0,
+            sort: None,
             // A sane universal default until the app reports the real
             // size (before the first key event is ever processed).
             term_size: (80, 24),
@@ -491,13 +503,21 @@ impl TuiState {
     /// app.rs derives per-row state by the `repo` string, never by a row
     /// index cached across a `set_rows` call, so sorting here is safe.
     pub fn set_rows(&mut self, mut rows: Vec<TuiRow>) {
-        rows.sort_by(|a, b| {
-            a.kind.cmp(&b.kind).then_with(|| {
-                leaf_name(&a.repo)
-                    .to_lowercase()
-                    .cmp(&leaf_name(&b.repo).to_lowercase())
-            })
-        });
+        match self.sort {
+            // An explicit `--sort` replaces the kind grouping outright, off
+            // the comparator `grim search --sort` and the index's own catalog
+            // page share — a rating browse must read the same in all three.
+            Some(mode) => browse_sort::sort_rows(&mut rows, mode, |r| {
+                SortKey::new(r.rating, r.created.as_deref(), &r.repo)
+            }),
+            None => rows.sort_by(|a, b| {
+                a.kind.cmp(&b.kind).then_with(|| {
+                    leaf_name(&a.repo)
+                        .to_lowercase()
+                        .cmp(&leaf_name(&b.repo).to_lowercase())
+                })
+            }),
+        }
         self.rows = rows;
         self.loading = false;
         self.recompute_filter();
@@ -880,6 +900,14 @@ impl TuiState {
     pub fn set_hide_deprecated(&mut self, v: bool) {
         self.hide_deprecated = v;
         self.recompute_filter();
+    }
+
+    /// Seed the browse ordering from `--sort`. Called once at startup, before
+    /// the first [`Self::set_rows`] — which is what actually applies it. There
+    /// is no live toggle, so nothing here re-sorts an already-loaded row set;
+    /// add the re-sort along with the keybinding if one ever lands.
+    pub fn set_sort(&mut self, sort: Option<SortMode>) {
+        self.sort = sort;
     }
 
     /// Flip the deprecated-hiding filter live (the `h` key). Recomputes the
@@ -1568,7 +1596,11 @@ impl TuiState {
                 Some((score, i))
             })
             .collect();
-        if !query.is_empty() {
+        // An explicit `--sort` overrides relevance (C-017): leaving `scored`
+        // in row-index order preserves exactly the browse order `set_rows`
+        // built, which is what the flag asked for. Composing the two would
+        // let relevance dominate, so `--sort rating` would appear inert.
+        if !query.is_empty() && self.sort.is_none() {
             // Descending by score, ascending by row index on a tie.
             scored.sort_by(|(sa, ia), (sb, ib)| sb.cmp(sa).then_with(|| ia.cmp(ib)));
         }
@@ -1636,6 +1668,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -1696,6 +1729,107 @@ mod tests {
         assert_eq!(s.action_targets(), vec![0, 2]);
         s.toggle_mark_all_filtered(); // all marked ⇒ clears them
         assert!(s.marked.is_empty());
+    }
+
+    /// A rated row: `row()` plus the two fields the browse comparator reads.
+    fn rated(repo: &str, up: Option<u32>, created: Option<&str>) -> TuiRow {
+        let mut r = row(repo, "d", &[], ArtifactState::NotInstalled);
+        r.rating = up;
+        r.created = created.map(str::to_string);
+        r
+    }
+
+    /// The repo order currently displayed in flat mode.
+    fn visible(s: &TuiState) -> Vec<&str> {
+        s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect()
+    }
+
+    #[test]
+    fn sort_rating_replaces_the_kind_grouping_with_unrated_last_s010() {
+        // S-010 in the TUI: `--sort rating` orders the whole browse by
+        // upvotes → date → name and drops the kind grouping, with unrated in
+        // its own bucket at the end. The `bundle` kind sorts BEFORE `skill`
+        // by default, so leaving it grouped would put `r/bundle-unrated` on
+        // top — which is exactly the regression this asserts against.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_sort(Some(SortMode::Rating));
+        let mut bundle = rated("r/bundle-unrated", None, None);
+        bundle.kind = "bundle".to_string();
+        s.set_rows(vec![
+            bundle,
+            rated("r/old-five", Some(5), Some("2020-01-01T00:00:00Z")),
+            rated("r/nine", Some(9), None),
+            rated("r/new-five", Some(5), Some("2026-01-01T00:00:00Z")),
+        ]);
+        assert_eq!(
+            visible(&s),
+            vec!["r/nine", "r/new-five", "r/old-five", "r/bundle-unrated"]
+        );
+    }
+
+    #[test]
+    fn sort_overrides_the_query_relevance_ranking_s011() {
+        // S-011 in the TUI: with `--sort` set, typing a query still filters
+        // but no longer reorders. The fixture is built so the two orders are
+        // genuine inverses — `r/lint` is an exact leaf match and outscores
+        // `r/zzz-lint-helper` on relevance, while carrying the LOWER rating —
+        // and both orders are asserted, so neither assertion can pass by
+        // accidentally agreeing with the other.
+        let rows = || {
+            vec![
+                rated("r/lint", Some(1), None),
+                rated("r/zzz-lint-helper", Some(50), None),
+                rated("r/unrelated", Some(99), None),
+            ]
+        };
+
+        // Without the flag: relevance ranks the exact leaf match first.
+        let mut relevance = TuiState::new();
+        relevance.view_mode = ViewMode::Flat;
+        relevance.set_rows(rows());
+        relevance.apply_query("lint");
+        assert_eq!(
+            visible(&relevance),
+            vec!["r/lint", "r/zzz-lint-helper"],
+            "the untouched relevance path must rank the strongest match first"
+        );
+
+        // With it: the same query filters the same two rows, ordered by
+        // rating instead — the exact inverse.
+        let mut sorted = TuiState::new();
+        sorted.view_mode = ViewMode::Flat;
+        sorted.set_sort(Some(SortMode::Rating));
+        sorted.set_rows(rows());
+        sorted.apply_query("lint");
+        assert_eq!(
+            visible(&sorted),
+            vec!["r/zzz-lint-helper", "r/lint"],
+            "the query filters, --sort orders — relevance never re-ranks"
+        );
+    }
+
+    #[test]
+    fn absent_sort_leaves_the_default_grouping_and_relevance_untouched_principle_9() {
+        // Principle 9: without the flag, both orderings are exactly what they
+        // were before it existed — kind first then leaf name on the browse,
+        // relevance under a query. The rating values here are the inverse of
+        // both, so a comparator leaking into the default path would show.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        let mut bundle = rated("r/zeta-bundle", Some(1), None);
+        bundle.kind = "bundle".to_string();
+        s.set_rows(vec![
+            rated("r/beta", Some(99), None),
+            bundle,
+            rated("r/alpha", Some(50), None),
+        ]);
+        assert_eq!(
+            visible(&s),
+            vec!["r/zeta-bundle", "r/alpha", "r/beta"],
+            "bundle before skill, then leaf name ascending"
+        );
+        assert!(s.sort.is_none(), "no flag, no sort mode");
     }
 
     #[test]
@@ -2426,6 +2560,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -3319,6 +3454,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -3577,6 +3713,7 @@ mod p2_state_member_node_tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
