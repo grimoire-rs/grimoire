@@ -49,6 +49,15 @@ pub fn pack_local_artifact(kind: ArtifactKind, path: &Path) -> Result<(String, V
     let metadata_invalid =
         |e: crate::install::render::RenderError| SkillError::new(path, SkillErrorKind::MetadataInvalid(Box::new(e)));
     match kind {
+        // Unreachable because a hook has no path source: `grim add`'s path
+        // branch refuses `--kind hook` explicitly ("path sources are not
+        // supported for hook artifacts") and its shape inference yields only
+        // Skill or Rule, while dev-install refuses hooks by the decision
+        // recorded in `command::install`. So nothing reaches this packer with a
+        // hook, and `grim build --kind hook` packs through `build::pack_hook_dir`
+        // instead — a hook needs `hook.toml` parsed and validated, which this
+        // function's `SkillError` return type cannot report.
+        ArtifactKind::Hook => unreachable!("hook kind: a hook has no path source (see command::add, command::install)"),
         ArtifactKind::Skill => {
             let fm = validate_skill_dir(path)?;
             let warnings = crate::install::render::validate_namespaced_metadata(&fm).map_err(metadata_invalid)?;

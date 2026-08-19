@@ -41,6 +41,9 @@ const LOCK_SCHEMA_FILE: &str = "grimoire-lock.schema.json";
 /// Published filename of the MCP descriptor (`mcp/<name>.toml`) schema.
 const MCP_SCHEMA_FILE: &str = "grim-mcp.schema.json";
 
+/// Published filename of the hook manifest (`hook.toml`) schema.
+const HOOK_SCHEMA_FILE: &str = "grim-hook.schema.json";
+
 /// Which author-facing TOML format to emit a JSON Schema for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SchemaKind {
@@ -54,6 +57,8 @@ pub enum SchemaKind {
     Lock,
     /// The MCP server descriptor (`mcp/<name>.toml`).
     Mcp,
+    /// The hook manifest (`hook.toml`).
+    Hook,
 }
 
 /// `grim schema` arguments.
@@ -72,6 +77,7 @@ impl SchemaKind {
             SchemaKind::Publish => PUBLISH_SCHEMA_FILE,
             SchemaKind::Lock => LOCK_SCHEMA_FILE,
             SchemaKind::Mcp => MCP_SCHEMA_FILE,
+            SchemaKind::Hook => HOOK_SCHEMA_FILE,
         };
         format!("{SCHEMA_BASE_URL}/{file}")
     }
@@ -83,6 +89,7 @@ impl SchemaKind {
             SchemaKind::Publish => "publish.toml — Grimoire publish manifest",
             SchemaKind::Lock => "grimoire.lock — Grimoire lockfile",
             SchemaKind::Mcp => "mcp/<name>.toml — Grimoire MCP server descriptor",
+            SchemaKind::Hook => "hook.toml — Grimoire hook manifest",
         }
     }
 }
@@ -111,6 +118,7 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Publish => schemars::schema_for!(crate::command::publish::PublishManifest),
         SchemaKind::Lock => crate::lock::grimoire_lock::lock_json_schema(),
         SchemaKind::Mcp => schemars::schema_for!(crate::oci::mcp::McpDescriptor),
+        SchemaKind::Hook => schemars::schema_for!(crate::oci::hook::HookManifest),
     };
     decorate(&schema, &kind.id(), kind.title())
 }

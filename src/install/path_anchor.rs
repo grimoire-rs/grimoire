@@ -667,13 +667,21 @@ impl AnchoredPath {
 /// The closed candidate anchor set for a `(scope, client, kind)` install
 /// target, from the §1.1 root/remainder table.
 ///
-/// Project scope is always `[Workspace]` — a project target that does not
-/// fall under the workspace is an [`AnchorError::UnknownAnchor`], never a
-/// silently absolute path. Global scope uses an explicit match over every
+/// Project scope is `[Workspace]` for every kind **but [`ArtifactKind::Hook`]**
+/// — a project target that does not fall under the workspace is an
+/// [`AnchorError::UnknownAnchor`], never a silently absolute path. A hook payload
+/// is machine-local at both scopes (invariant I1, SEC-1), so it is the one
+/// project triple anchored at `GrimHome`, with `Workspace` retained for the
+/// pre-relocation records the layout reaper collects. Global scope uses an explicit match over every
 /// materializable `(client, kind)` combination so that a future new
 /// `ClientTarget` or `ArtifactKind` variant fails to compile here rather than
 /// silently anchoring to `GrimHome`. The caller tries the returned anchors
 /// longest-root-first so the more specific root wins.
+///
+/// [`ArtifactKind::Hook`] is the one kind whose global anchor is the same for
+/// every client — the payload is client-independent (S-003) — and the one whose
+/// decline is read off `Vendor::hook_surface` rather than `kind_support`; see
+/// [`is_declined_global_pair`] for why that distinction is load-bearing here.
 ///
 /// Pairs that have **no materialization anchor** map to `None`, which the
 /// caller turns into an empty candidate set:
@@ -711,10 +719,37 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
     }
 
     match scope {
+        // The ONE project triple that does not anchor at the workspace: a hook
+        // payload is the code the dispatcher executes, so invariant I1 puts it
+        // under `$GRIM_HOME` at both scopes (SEC-1 — see
+        // `hook_dispatch::payload_dir`). `Workspace` stays in the set, second,
+        // so a record written by the pre-SEC-1 layout
+        // (`.grimoire/hooks/<name>`) still classifies and the layout-migration
+        // reaper can collect it. `from_target`'s sort is longest-root-first with
+        // a stable tie-break, so `GrimHome` also wins the degenerate
+        // `$GRIM_HOME == workspace` fixture — which production refuses to arm in
+        // anyway (C-017 cause 2).
+        ConfigScope::Project if kind == ArtifactKind::Hook => vec![PathAnchor::GrimHome, PathAnchor::Workspace],
         ConfigScope::Project => vec![PathAnchor::Workspace],
         ConfigScope::Global if is_declined_global_pair(client, kind) => Vec::new(),
         ConfigScope::Global => {
             let primary: Option<PathAnchor> = match (client, kind) {
+                // Hook: `$GRIM_HOME/hooks/<name>` for EVERY client, because the
+                // payload is client-independent (S-003 — one directory per
+                // scope, one `ClientOutput` per client onto the shared dir, the
+                // shape the pool skills already established). `GrimHome` is
+                // also the universal fallback, so the tail below collapses this
+                // to the single-element `vec![GrimHome]` and the stored
+                // `relative` is `hooks/<name>`.
+                //
+                // Reached only for a client with a hook surface: the
+                // `is_declined_global_pair` guard above short-circuits the other
+                // 15 to the empty candidate set. Deliberately still spelled as a
+                // total arm rather than left to the guard — a future flip of a
+                // vendor's `hook_surface` must not depend on this table being
+                // updated in the same commit to avoid a panic (the A-3 lesson
+                // the `unreachable!()` here was corrected for).
+                (_, ArtifactKind::Hook) => Some(PathAnchor::GrimHome),
                 // Claude: all three materializable kinds live under the Claude root.
                 (ClientTarget::Claude, ArtifactKind::Skill)
                 | (ClientTarget::Claude, ArtifactKind::Rule)
@@ -926,15 +961,39 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
     }
 }
 
-/// Whether `(client, kind)` is a globally-declined pair — the vendor's
-/// [`kind_support`](crate::install::vendor::Vendor::kind_support) returns
-/// [`KindSupport::Declined`], so it has no anchor remainder.
-/// [`candidate_anchors`] returns an empty set for these instead of anchoring
-/// (matching the Codex-rule precedent). Delegating straight to the vendor
-/// keeps this in lockstep with every `kind_support` override — no separate
-/// list to drift.
+/// Whether `(client, kind)` is a globally-declined pair — the vendor has no
+/// surface for it, so it has no anchor remainder. [`candidate_anchors`] returns
+/// an empty set for these instead of anchoring (matching the Codex-rule
+/// precedent). Delegating straight to the vendor keeps this in lockstep with
+/// every vendor override — no separate list to drift.
+///
+/// # `Hook` resolves through `hook_surface`, never `kind_support`
+///
+/// ADR decision A, and this function is one of the seams it names.
+/// [`kind_support`](crate::install::vendor::Vendor::kind_support) defaults to
+/// [`KindSupport::Native`] and every vendor override closes its `match` with a
+/// wildcard arm, so the unmodified delegation answers "supported" for
+/// [`ArtifactKind::Hook`] on **all 18 vendors** — including Warp and Zed, which
+/// have no hook mechanism of any kind. That would anchor a global hook payload
+/// under `$GRIM_HOME` for a client that can never arm it: a recorded output
+/// nothing reads, which `prune`'s refcount would then keep alive for the
+/// clients that *do* arm it. `hook_surface()` is opt-in, so a forgotten vendor
+/// fails safe.
+///
+/// [`HookSurface::CodegenModule`](crate::oci::hook::HookSurface::CodegenModule)
+/// is deliberately **not** excluded here even though its registration declines
+/// ([`HookDecline::SurfaceUnimplemented`](crate::install::vendor::HookDecline::SurfaceUnimplemented)):
+/// this predicate must agree with `client_supports_kind`'s `Hook` arm
+/// (`hook_surface().is_some() && kind_surface(kind, scope)`, WP-J2), and a
+/// classifier that refused a pair the installer accepts turns a decline into an
+/// `UnknownAnchor` warning instead of a reported skip. No v1 vendor names that
+/// surface, so the two agree vacuously today; the agreement is what a test
+/// pins, not the variant list.
 fn is_declined_global_pair(client: ClientTarget, kind: ArtifactKind) -> bool {
-    client.vendor().kind_support(kind) == KindSupport::Declined
+    match kind {
+        ArtifactKind::Hook => client.vendor().declines_hooks_everywhere(),
+        _ => client.vendor().kind_support(kind) == KindSupport::Declined,
+    }
 }
 
 /// Whether `(client, kind)` can be moved into the shared `.agents/skills`
@@ -2812,8 +2871,33 @@ mod tests {
         client: ClientTarget,
         kind: ArtifactKind,
         name: &str,
+        workspace: &std::path::Path,
     ) -> (PathAnchor, String) {
         match (scope, client, kind) {
+            // Hook (S-003, as amended by SEC-1): one payload directory per
+            // *root*, shared by every client, and machine-local at BOTH scopes —
+            // so both rows anchor at `GrimHome` and the row is
+            // client-independent on both sides. Filled here rather than left
+            // `unreachable!()` because this helper IS the executable form of the
+            // §1.1 table row.
+            //
+            // Project scope keys on the workspace so two workspaces cannot
+            // collide; the remainder is spelled through
+            // `hook_dispatch::payload_relative` rather than restated, because a
+            // second spelling of the payload location is precisely what SEC-1
+            // punished. (`path_for` parity is asserted separately — the ARCH-2
+            // loop below still excludes `Hook` from its kind array.)
+            (ConfigScope::Project, _, ArtifactKind::Hook) => (
+                PathAnchor::GrimHome,
+                crate::install::hook_dispatch::payload_relative(
+                    crate::install::hook_dispatch::RootScope::Workspace(workspace),
+                    name,
+                ),
+            ),
+            (ConfigScope::Global, _, ArtifactKind::Hook) => (
+                PathAnchor::GrimHome,
+                crate::install::hook_dispatch::payload_relative(crate::install::hook_dispatch::RootScope::Global, name),
+            ),
             // ── Project scope ──────────────────────────────────────────────
             // All project targets land under Workspace; the sub-path is
             // the vendor's dot-dir relative to the workspace root.
@@ -3209,7 +3293,8 @@ mod tests {
                     combo_count += 1;
 
                     // Step 1: expected anchor + relative from the §1.1 table.
-                    let (expected_anchor, expected_relative) = expected_anchor_and_relative(scope, client, kind, name);
+                    let (expected_anchor, expected_relative) =
+                        expected_anchor_and_relative(scope, client, kind, name, &roots.workspace);
 
                     // Step 2: build the absolute dest. The anchor root must
                     // resolve (all roots are Some in this fixture) — an

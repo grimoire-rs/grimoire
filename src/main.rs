@@ -24,6 +24,7 @@ mod env;
 mod error;
 mod fetch;
 mod glob;
+mod hook;
 mod install;
 mod lock;
 mod log_switch;
@@ -51,6 +52,7 @@ use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
 use crate::command::describe::DescribeArgs;
 use crate::command::fetch::FetchArgs;
+use crate::command::hook::HookArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
@@ -119,7 +121,8 @@ pub enum Command {
     /// Report an artifact's metadata (kind, annotations, tags) without
     /// downloading its content.
     Describe(DescribeArgs),
-    /// Print the JSON Schema for grimoire.toml, publish.toml, or grimoire.lock.
+    /// Print the JSON Schema for grimoire.toml, publish.toml, grimoire.lock,
+    /// mcp/<name>.toml, or hook.toml.
     Schema(SchemaArgs),
     /// Print a shell completion script (bash, zsh, fish, elvish, powershell).
     Completions(CompletionsArgs),
@@ -127,6 +130,11 @@ pub enum Command {
     Tui(TuiArgs),
     /// Run a local STDIO Model Context Protocol server.
     Mcp(McpArgs),
+    /// Dispatch armed lifecycle hooks, and list what is armed.
+    ///
+    /// `grim hook run` is invoked by the launcher grim generates, not by
+    /// hand; `grim hook list` is the user-facing surface.
+    Hook(HookArgs),
     /// Authenticate to a registry and store the credential.
     Login(LoginArgs),
     /// Remove a stored registry credential.
@@ -162,7 +170,10 @@ fn main() -> std::process::ExitCode {
     // decide whether to emit the JSON error document (OutputFormat: Copy).
     let format = cli.global.format;
 
-    let runtime = match tokio::runtime::Runtime::new() {
+    // The scheduler is chosen from the parsed command rather than fixed, because
+    // `grim hook run` pays for every worker thread on every tool call — see
+    // [`runtime_flavor`].
+    let runtime = match build_runtime(runtime_flavor(cli.command.as_ref())) {
         Ok(rt) => rt,
         Err(err) => {
             tracing::error!("failed to start async runtime: {err}");
@@ -214,6 +225,81 @@ fn parse_cli(color: ColorMode) -> Result<Cli, clap::Error> {
         .styles(color::clap_styles())
         .try_get_matches()?;
     Cli::from_arg_matches_mut(&mut matches)
+}
+
+/// Which Tokio scheduler an invocation is given.
+///
+/// Two flavors, because one subcommand is not like the others. `grim hook run`
+/// is invoked by the generated launcher **once per armed `(client, event)` per
+/// tool call**, and it awaits nothing concurrently: one table read, at most a
+/// few audit appends, and a mutator chain that is serial by design (Decision O).
+/// Every other subcommand may fan out — parallel blob fetches, a TUI, an MCP
+/// server — and keeps the multi-threaded scheduler.
+///
+/// Measured, on the 24-core machine of `.agents/hook_dispatch_latency.md`'s
+/// finding F-1: the multi-threaded scheduler starts one worker per logical CPU,
+/// which is **24 `clone3` plus most of the ~860 extra syscalls** the cheapest
+/// possible no-match made, ≈1.9 ms of its 3.20 ms floor — and it *grows with the
+/// core count*, so the guard path was slowest on the largest machine.
+///
+/// **The trade, stated because it is real and it is not free.** The worker pool
+/// was also, accidentally, hiding the cost of faulting a 26.8 MB binary back in:
+/// with the page cache cold the same no-match measured **13.9 ms on one thread
+/// against 9.3 ms on 24**, and a 6-worker build came out fastest of all (7.6 ms
+/// cold, 2.0 ms warm). Ship the single thread anyway: warm is the case a session
+/// actually pays — cold happens once per idle period, warm happens on every tool
+/// call after it, and the break-even is about three calls — and a
+/// `worker_threads(6)` constant tuned to one 24-core WSL2 host's page-fault
+/// behaviour would be a magic number on the three platforms whose rows are still
+/// unmeasured. The honest fix for the cold row is the binary's size, not the
+/// scheduler. Numbers and method: `.agents/wp-u-report.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeFlavor {
+    /// `worker_threads = num_cpus`, what [`tokio::runtime::Runtime::new`]
+    /// builds. Every subcommand but the hook runtime.
+    MultiThread,
+    /// One thread, no worker pool: `grim hook run` only.
+    CurrentThread,
+}
+
+/// The scheduler `command` needs.
+///
+/// The decision is made **here**, from the already-parsed [`Cli`], and that is
+/// the only place it can be made honestly: it is the last point before the
+/// runtime is built and the first point at which the subcommand is known, so
+/// there is nothing to guess. In particular this is *not* an argv pre-scan like
+/// [`color::mode_from_args`] — that one has to run before clap because clap
+/// renders help *during* parse, whereas this one does not, and a second
+/// hand-rolled parser deciding which scheduler `hook run` gets is a second
+/// spelling of clap's own answer.
+///
+/// It changes no dispatch ordering: `app::run` still returns the
+/// `Hook(Run)` arm before `Context::new` (B1 / C-007), and this function reads
+/// the command without resolving anything.
+fn runtime_flavor(command: Option<&Command>) -> RuntimeFlavor {
+    match command {
+        Some(Command::Hook(hook)) if matches!(hook.command, command::hook::HookCommand::Run(_)) => {
+            RuntimeFlavor::CurrentThread
+        }
+        _ => RuntimeFlavor::MultiThread,
+    }
+}
+
+/// Build the runtime for `flavor`.
+///
+/// `enable_all` on both arms: the hook runtime needs the I/O driver (stdin, the
+/// payload's pipes) and the time driver (the per-hook timeout), so a
+/// current-thread runtime without them would not merely be slower, it would not
+/// work.
+///
+/// # Errors
+///
+/// Any failure starting the runtime — the caller reports it and exits 1.
+fn build_runtime(flavor: RuntimeFlavor) -> std::io::Result<tokio::runtime::Runtime> {
+    match flavor {
+        RuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread().enable_all().build(),
+        RuntimeFlavor::MultiThread => tokio::runtime::Runtime::new(),
+    }
 }
 
 /// Under `--format json`, print the structured error document to stdout:
@@ -297,6 +383,75 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The argv the generated launcher runs, once per armed `(client, event)`
+    /// per tool call.
+    const HOOK_RUN_ARGV: &[&str] = &[
+        "grim",
+        "hook",
+        "run",
+        "--client",
+        "claude",
+        "--event",
+        "PreToolUse",
+        "--table",
+        "/home/u/.grimoire/hooks/dispatch.json",
+        "--root",
+        "0123456789abcdef0123456789abcdef",
+    ];
+
+    fn flavor_of(argv: &[&str]) -> RuntimeFlavor {
+        let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+        runtime_flavor(cli.command.as_ref())
+    }
+
+    /// **F-1: `grim hook run` gets the current-thread scheduler, and the pin is
+    /// the worker count rather than the constructor's name.**
+    ///
+    /// The multi-threaded scheduler starts one worker per logical CPU, which on
+    /// the measured 24-core machine was 24 `clone3` and ≈1.9 ms of a 3.20 ms
+    /// no-match floor — paid on **every tool call**, and growing with the core
+    /// count. Asserting `num_workers() == 1` is what makes a later edit that
+    /// quietly puts this arm back on the multi-thread scheduler fail a test
+    /// instead of merely changing a comment.
+    #[test]
+    fn the_hook_runtime_runs_on_a_single_worker_f1() {
+        assert_eq!(flavor_of(HOOK_RUN_ARGV), RuntimeFlavor::CurrentThread);
+        let runtime = build_runtime(flavor_of(HOOK_RUN_ARGV)).expect("the hook runtime must start");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            1,
+            "the dispatch path awaits nothing concurrently, so a worker pool is pure per-tool-call cost"
+        );
+    }
+
+    /// The other half of F-1, and the one that keeps the optimization honest:
+    /// **no other command may be demoted to a single thread by accident.**
+    ///
+    /// `install`/`update`/`search` fan blob fetches out across a `JoinSet`, the
+    /// TUI and the MCP server are long-lived, and bare `grim` prints help — none
+    /// of them is on a per-tool-call path, so none of them trades the pool away.
+    /// `hook list` is in the list deliberately: it is an ordinary report command
+    /// that shares only a subcommand name with the runtime.
+    #[test]
+    fn every_other_command_keeps_the_multi_thread_runtime_f1() {
+        let others: &[&[&str]] = &[
+            &["grim"],
+            &["grim", "status"],
+            &["grim", "install"],
+            &["grim", "search", "cmake"],
+            &["grim", "hook", "list"],
+            &["grim", "tui"],
+            &["grim", "mcp"],
+        ];
+        for argv in others {
+            assert_eq!(
+                flavor_of(argv),
+                RuntimeFlavor::MultiThread,
+                "{argv:?} must keep the multi-threaded scheduler"
+            );
+        }
+    }
 
     #[test]
     fn error_document_omits_reason_when_absent() {

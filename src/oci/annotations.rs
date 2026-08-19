@@ -501,6 +501,64 @@ pub fn annotations_for_mcp(
     a
 }
 
+/// Build the manifest annotation map for a hook artifact.
+///
+/// The sixth sibling of `annotations_for_{skill,rule,agent,bundle,mcp}`, and
+/// the one **without which a hook cannot be released at all** — no WP owned it
+/// until WP-A's stub review found the gap (`kind_from_manifest` resolves
+/// through `ArtifactKind::from_*`, which covers `Hook` for free on the *read*
+/// side, so nothing on the read path made the write-side absence visible).
+///
+/// The title is the manifest `name` (equal to the artifact directory stem, and
+/// never a [`crate::oci::hook::RESERVED_ARTIFACT_NAMES`] entry — enforced at
+/// `grim build`, not here); `description` is the manifest's required field.
+/// Deterministic (no wall-clock `created`) so re-release is idempotent — see
+/// [`annotations_for_skill`].
+///
+/// **No per-hook metadata reaches the annotations.** `hook.toml` carries no
+/// `summary` / `keywords` / `repository` / `deprecated` keys at v1 (see
+/// [`crate::oci::hook::HookManifest`] — four fields, `deny_unknown_fields`), so
+/// this map is deliberately narrower than its five siblings. That is a
+/// statement about the manifest, not an omission: adding a catalog key later
+/// widens both together, and inventing an annotation with no authored source
+/// would publish a field no author can set.
+///
+/// Nothing from a [`crate::oci::hook::HookEntry`] — no `matcher`, no `id`, no
+/// vendor override — appears here either. Those are C-018b's
+/// never-interpolated values; an annotation is a different sink than a shell
+/// string, but keeping the entry set out of the manifest annotations also keeps
+/// the published catalog row independent of how many handlers a hook declares.
+pub fn annotations_for_hook(
+    manifest: &crate::oci::hook::HookManifest,
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), manifest.name.clone());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        manifest.description.clone(),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback — see `annotations_for_skill`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Hook.to_string());
+    // No `authored` tier: `hook.toml` carries no `repository` key at v1, so the
+    // source annotation is git-or-fallback only. Passing `None` rather than
+    // omitting the call keeps the three-tier precedence in one function, so the
+    // key appears (or not) for a hook on exactly the same terms as for every
+    // other kind.
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: None,
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
+    }
+    insert_git_provenance(&mut a, git);
+    a
+}
+
 /// Extract a scalar string `key` from a rule's forward-compat `extra` map.
 /// Catalog metadata (`keywords`, `summary`, `repository`) is authored as a
 /// plain string — keywords are comma-separated, matching the on-the-wire

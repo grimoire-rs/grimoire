@@ -98,7 +98,7 @@ grim uninstall skill code-review     # Full inverse of install
 
 Global flags: `--offline`, `--global`, `--config <path>`,
 `--registry <ref>`, `--format json`. Full surface:
-`subsystem-cli-commands.md` and `docs/src/commands.md` (18 subcommands).
+`subsystem-cli-commands.md` and `docs/src/commands.md` (23 subcommands).
 
 ## Technical Overview
 

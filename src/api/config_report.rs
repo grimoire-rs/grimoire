@@ -1788,7 +1788,15 @@ mod tests {
         let field_keys: Vec<&str> = items.iter().filter_map(|i| i["key"].as_str()).collect();
         assert_eq!(
             field_keys,
-            ["oci", "index", "default", "include", "exclude", "insecure"],
+            [
+                "oci",
+                "index",
+                "default",
+                "include",
+                "exclude",
+                "insecure",
+                "trust_hooks"
+            ],
             "must list every registry field in declared order; got: {items:?}"
         );
         assert_eq!(items[0]["key"], "oci", "first field must be 'oci'; got: {items:?}");

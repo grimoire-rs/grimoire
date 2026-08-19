@@ -17,6 +17,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::oci::ArtifactKind;
+use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
@@ -62,6 +64,121 @@ impl Vendor for CopilotVendor {
 
     fn root_dir(&self) -> &'static str {
         ".github"
+    }
+
+    /// Copilot hooks: grim owns one file in a directory Copilot globs —
+    /// `$COPILOT_HOME|~/.copilot/hooks/grim.json`.
+    ///
+    /// [`HookSurface::OwnFile`] with no collision risk: the surface is a
+    /// *directory* glob, so grim's own file sits beside the user's without
+    /// grim ever parsing or rewriting theirs.
+    ///
+    /// # Three executed facts, each a silent failure if undone
+    ///
+    /// From WP-B (`research_hooks_launcher_verification.md` § 2.3, § 3, § 6.2),
+    /// run against Copilot CLI 1.0.80:
+    ///
+    /// 1. **Event keys must be PascalCase.** Copilot has two matcher dialects
+    ///    selected by the *casing of the event key*, and they see different tool
+    ///    names (`bash` vs `Bash`). Under camelCase `preToolUse`, grim's
+    ///    `matcher = "Bash"` never fires and `matcher = "*"` is rejected as an
+    ///    invalid regex and the hook is **skipped** — installed, reported,
+    ///    inert. Under PascalCase the Claude-style dialect translates 1:1 and
+    ///    the payload arrives in the same snake_case shape as claude and codex.
+    ///    Enforced structurally: [`Vendor::hook_event_name`]'s derived default
+    ///    emits the canonical PascalCase spelling and this vendor does not
+    ///    override it.
+    /// 2. **`preToolUse` is fail-CLOSED** — the only one of the three v1 clients
+    ///    that blocks. A non-zero hook exit denies the tool call verbatim, so the
+    ///    `[ -x "$L" ] || exit 0` guard is mandatory here rather than merely
+    ///    tidy, and copilot's exec-form `exec`/`args` field must **never** be
+    ///    used: no shell means no guard, and a missing launcher becomes a spawn
+    ///    failure that denies the call (breaks S-009).
+    /// 3. **`mutator` is supported, not declined** (ADR Open Question 2, settled
+    ///    by execution) in the PascalCase dialect. The field it ships as is the
+    ///    `mutation` column of this client's `PreToolUse` row in
+    ///    [`RESPONSE_PROJECTION`](crate::oci::hook::RESPONSE_PROJECTION) — read it
+    ///    there, never restated here: C-021 keeps one instance of that table, and
+    ///    a name copied into prose goes stale silently. **Also refused per tool,
+    ///    not per event:** ADR decision K declines `mutator` for a matcher that
+    ///    could select `Bash`, enforced in `Vendor::hook_registration`.
+    ///    **Accepted, disclosed residual:** with the
+    ///    mutation applied, Copilot's own transcript still displays the
+    ///    *original* command while executing the rewritten one — a real observed
+    ///    vendor behaviour, and precisely what mutator control 5 (S-016) exists
+    ///    to compensate for.
+    ///
+    /// Global scope only — see [`Self::kind_surface`].
+    fn hook_surface(&self) -> Option<HookSurface> {
+        Some(HookSurface::OwnFile)
+    }
+
+    fn hook_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        hook_config_path(workspace, scope)
+    }
+
+    /// Copilot's own hook file: `{"version": 1, "hooks": {"<Event>": [{"type":
+    /// "command", "command": …}]}}` — a **flat** per-event array with the matcher
+    /// on each entry, *not* codex's and claude's nested matcher groups.
+    ///
+    /// Four vendor facts drive the shape, three of them inert-by-default traps:
+    ///
+    /// - **Event keys are PascalCase.** The camelCase dialect makes
+    ///   `matcher = "Bash"` never fire — a hook that reports installed and does
+    ///   nothing.
+    /// - **Match-all omits `matcher` entirely.** Copilot treats `*` as a regex,
+    ///   where it is invalid, and skips the entry. This is why the match-all
+    ///   literal cannot be shared with claude's `*` group value.
+    /// - **`command`, never the exec-form `exec`/`args`.** The exec form removes
+    ///   the shell and therefore the launcher guard, and Copilot's `preToolUse`
+    ///   is fail-closed on the resulting spawn failure — grim would deny every
+    ///   tool call in the session.
+    /// - **`timeoutSec`**, Copilot's own spelling (`timeout` is an accepted alias
+    ///   since 1.0.2; the documented name is used).
+    ///
+    /// `version: 1` is *required* here and *forbidden* on codex — grim owns the
+    /// whole file on both, and that is exactly the difference a shared writer
+    /// would flatten.
+    fn hook_file_document(&self, registrations: &[HookRegistration]) -> Option<serde_json::Value> {
+        let mut events: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for registration in registrations {
+            let HookCommand::Shell(command) = &registration.command else {
+                // Never constructed in v1, and the exec form is the one shape
+                // that must never reach this file.
+                continue;
+            };
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".to_string(), serde_json::Value::String("command".to_string()));
+            entry.insert("command".to_string(), serde_json::Value::String(command.clone()));
+            if let Some(powershell) = &registration.command_windows {
+                entry.insert("powershell".to_string(), serde_json::Value::String(powershell.clone()));
+            }
+            if let Some(matcher) = &registration.matcher {
+                entry.insert("matcher".to_string(), serde_json::Value::String(matcher.clone()));
+            }
+            if let Some(timeout) = registration.timeout {
+                entry.insert("timeoutSec".to_string(), serde_json::Value::from(timeout));
+            }
+            events
+                .entry(registration.event.clone())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                .as_array_mut()?
+                .push(serde_json::Value::Object(entry));
+        }
+        let mut document = serde_json::Map::new();
+        document.insert("version".to_string(), serde_json::Value::from(1));
+        document.insert("hooks".to_string(), serde_json::Value::Object(events));
+        Some(serde_json::Value::Object(document))
+    }
+
+    fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
+        // ADR amendment A1, the same reasoning as codex: `.github/hooks/*.json`
+        // is a TRACKED repository file. WP-B additionally verified that Copilot
+        // interpolates NOTHING into a plain (non-plugin) repo-level hook command
+        // — `{{project_dir}}` arrives as literal braces — so even the one
+        // mechanism that might have made `--root` portable does not apply, and
+        // the launcher path could never be anything but environment-derived.
+        !matches!((kind, scope), (ArtifactKind::Hook, ConfigScope::Project))
     }
 
     // Skill registry empty: Copilot skills are agentskills-universal.
@@ -327,6 +444,19 @@ impl Vendor for CopilotVendor {
         document.push_str(&parsed.body);
         Ok(Some(RenderedDoc { document, warnings }))
     }
+
+    // Hook convergence: **global scope only** (A1), and the one client where the
+    // guard string is a hard requirement rather than a courtesy — Copilot's
+    // `preToolUse` is **fail-closed on a non-zero hook exit**, so every state the
+    // guard fails to exclude means grim *denies every tool call in the session*
+    // (WP-B section 2.3, executed). grim owns
+    // `$COPILOT_HOME|~/.copilot/hooks/grim.json` — a directory Copilot globs, so
+    // a dedicated file collides with nothing and needs no marker. The shape is
+    // `hook_file_document` above; the location is `hook_config_path`.
+    //
+    // **No `sync_config` override** — see `vendor_claude`'s note: hook
+    // convergence runs through `hook_registrar::converge_clients`, which
+    // receives the resolved hook policy that seam cannot see.
 }
 
 /// Copilot CLI's personal config root. `$COPILOT_HOME` "replaces the entire
@@ -337,6 +467,26 @@ impl Vendor for CopilotVendor {
 /// and inconsistent upstream (github/copilot-cli#1750) — not honored here.
 pub(crate) fn global_native_root(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     copilot_home.or_else(|| home.map(|h| h.join(".copilot")))
+}
+
+/// The file Copilot reads grim's hook registrations from — **global scope only**.
+///
+/// `$COPILOT_HOME|~/.copilot/hooks/grim.json`. Copilot **globs** that directory,
+/// so a grim-named file collides with nothing a user or another tool put there —
+/// which is why this surface needs no ownership marker: ownership is the path.
+///
+/// `None` at project scope (A1): `.github/hooks/*.json` is a tracked repository
+/// file, and `{{project_dir}}` does not rescue it — WP-B executed the
+/// interpolation question and found plain (non-plugin) repo-level hook commands
+/// get the literal braces, and in any case interpolation addresses `--root`, not
+/// the executed binary.
+fn hook_config_path(_workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => {
+            global_native_root(env_dir("COPILOT_HOME"), home_dir()).map(|root| root.join("hooks").join("grim.json"))
+        }
+    }
 }
 
 /// Copilot CLI's personal skills dir: the native root + `skills/`.

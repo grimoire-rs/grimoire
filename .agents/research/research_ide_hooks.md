@@ -2,6 +2,13 @@
 
 **Date:** 2026-06-03
 **Author:** worker-researcher (via /architect)
+**Status:** **Superseded for all vendor facts** by
+[`research_hooks_vendor_survey.md`](./research_hooks_vendor_survey.md)
+(2026-08-14) — this survey covers Windsurf / Continue / Aider, which are not
+grim clients, and omits 9 of grim's 17. Its **portability and security analysis
+is retained** and carried forward in
+[`adr_hooks_support.md`](../adr/adr_hooks_support.md). Do not cite the tables
+below for a vendor claim.
 **Question:** Can a package manager distribute portable "hooks" (lifecycle
 event handlers that run commands at agent events) across different IDEs/agents?
 What are the per-tool differences?

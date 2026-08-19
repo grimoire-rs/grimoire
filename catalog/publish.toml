@@ -57,6 +57,24 @@ readme = "descriptions/grim-mcp.md"
 logo = "logo.svg"
 changelog = "CHANGELOG.md"
 
+# Example hooks. Publishing a hook arms nothing: the `[options.experimental]
+# hooks` flag and per-registry `trust_hooks` are consumer-side gates, and
+# neither is reachable from here. Consumers who install these get a warning
+# and a skip until they turn both on deliberately.
+[hooks.tool-call-logger]
+repository = "grimoire-rs/hooks/tool-call-logger"
+[hooks.tool-call-logger.description]
+readme = "descriptions/tool-call-logger.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
+
+[hooks.command-guard]
+repository = "grimoire-rs/hooks/command-guard"
+[hooks.command-guard.description]
+readme = "descriptions/command-guard.md"
+logo = "logo.svg"
+changelog = "CHANGELOG.md"
+
 [bundles.grim-essentials]
 repository = "grimoire-rs/bundles/grim-essentials"
 [bundles.grim-essentials.description]

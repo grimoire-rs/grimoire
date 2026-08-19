@@ -1,8 +1,11 @@
 # Publishing Workflow
 
 You loaded this file because you are turning a local skill, rule, agent,
-or bundle into a published OCI artifact — the build → dry-run → release
-loop, version tagging, and registry authentication.
+MCP server, hook, or bundle into a published OCI artifact — the build →
+dry-run → release loop, version tagging, and registry authentication.
+(Hook-specific authoring rules live in the `grim-authoring` skill's
+`references/hook-spec.md`; everything on this page applies to a hook
+unchanged.)
 
 Contents: [Build, Then Release](#build-then-release) ·
 [Cascade Tags](#cascade-tags) · [Immutability](#immutability) ·
@@ -27,7 +30,8 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3       # validate, pack
 ```
 
 `grim build <path>` detects the kind from the path — a directory packs
-as a **skill**, a `.md` file as a **rule**, a `.toml` file as a
+as a **skill**, a directory carrying a `hook.toml` as a **hook** (that arm
+is checked first), a `.md` file as a **rule**, a `.toml` file as a
 **bundle**. An **agent** always needs `--kind agent`: its `.md` shape is
 indistinguishable from a rule and grim never guesses from content. This
 is the most common publishing mistake — see
@@ -89,8 +93,10 @@ bundle members before the bundle that references them.
 reads a `publish.toml` manifest that declares every package with a `registry`
 and per-entry `version`, validates the whole set before any push, then
 releases each entry in a fixed kind order: skills first, then rules, then
-agents, then MCP servers, then bundles — alphabetical within each kind.
-Bundle members always land before the bundles that reference them.
+agents, then MCP servers, then hooks, then bundles — alphabetical within
+each kind. Bundle members always land before the bundles that reference
+them. (`mcp` and `hooks` are not bundleable — they precede `bundles`
+because the kind sequence is fixed, not because a bundle can hold them.)
 
 The manifest format uses per-entry sub-tables keyed by name. A minimal
 example:
@@ -104,10 +110,18 @@ version = "1.2.0"    # explicit per-entry version wins
 
 [rules.style]         # no version → inherits 0.10.0 (or `version = "${version}"`)
 
+[hooks.shell-guard]   # conventional source path: hooks/shell-guard/ (a directory)
+
 [bundles.dev-stack]
 version = "0.3.0"
 pin = true          # bundle-only: freeze floating member tags to digests
 ```
+
+Each kind's table maps to a conventional source path under the manifest
+directory: `skills/<name>/`, `rules/<name>.md`, `agents/<name>.md`,
+`mcp/<name>.toml`, `hooks/<name>/`, `bundles/<name>.toml`. Override any
+entry's source with its own `path`. The `[hooks]` table is **additive** —
+a `publish.toml` written before it existed parses unchanged.
 
 Key behaviors — confirmed invariants, not subject to minor-release drift:
 
@@ -117,8 +131,8 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
 - **Fail-fast.** The first failing entry stops the batch. The report shows
   all completed entries plus the failed one. Re-run with `--only <name>` to
   resume from a specific entry.
-- **`pin = true` is bundle-only.** Setting it on a skill, rule, or agent
-  entry is a validation error (exit 65).
+- **`pin = true` is bundle-only.** Setting it on any other kind — skill,
+  rule, agent, mcp, or hook — is a validation error (exit 65).
 - **Catalog-wide version.** `--version` is the single version source for a
   run. An optional top-level `version` covers every entry that omits its
   own or sets the literal `${version}`; explicit per-entry versions
@@ -256,9 +270,10 @@ falls to manual maintainer review. Full spec: [The Package Index][package-index]
 
 ## Editor schema support {#editor-schema}
 
-`grim schema --kind config|publish|lock|mcp` prints a JSON Schema for
-`grimoire.toml`, `publish.toml`, `grimoire.lock`, or the MCP server
-descriptor (`mcp/<name>.toml`) — generated from grim's own parser, so it
+`grim schema --kind config|publish|lock|mcp|hook` prints a JSON Schema for
+`grimoire.toml`, `publish.toml`, `grimoire.lock`, the MCP server
+descriptor (`mcp/<name>.toml`), or the hook manifest (`hook.toml`) —
+generated from grim's own parser, so it
 accepts exactly what grim accepts. The same schemas are published to the docs site; adding a
 `#:schema` directive on the first line of a TOML file gives a supporting editor
 (Taplo, Even Better TOML) autocomplete and typo-flagging. Confirm the flags
@@ -306,8 +321,16 @@ file says. Two invariants hold for every kind:
   release with exit 65.
 
 *Where* the fields live differs by kind (skill/agent: the frontmatter
-`metadata` map; rule: top-level frontmatter; bundle: top-level TOML) —
+`metadata` map; rule: top-level frontmatter; mcp/bundle: top-level TOML) —
 see [the per-kind examples][metadata].
+
+**A hook has none of them.** `hook.toml` accepts only `schema`, `name`,
+`description`, and `[[hooks]]`, and it is strict — so `summary`,
+`keywords`, `repository`, `deprecated`, and `replaced-by` each fail the
+build with exit 65 rather than being silently dropped. `description` is a
+hook's only catalog-facing field; write it to carry the whole blurb. A
+repository-level README/logo still works via the description companion
+below.
 
 ## Description Companion {#description-companion}
 

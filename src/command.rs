@@ -17,6 +17,8 @@ pub mod config_keys;
 pub mod context;
 pub mod describe;
 pub mod fetch;
+pub mod hook;
+pub mod hook_consent;
 pub mod init;
 pub mod install;
 pub mod lock;

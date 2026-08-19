@@ -66,6 +66,20 @@ pub struct UpdateArgs {
     /// detected.
     #[arg(long = "client")]
     pub client: Vec<String>,
+
+    /// Arm hooks from a registry that has no `trust_hooks = true` entry, for
+    /// this invocation only.
+    ///
+    /// The CI escape for C-023's "no TTY never asks": a non-interactive run
+    /// declines every un-granted registry rather than prompting, and this is the
+    /// only way to say yes without a terminal. Never persisted, and deliberately
+    /// a **flag only** — there is no `GRIM_ALLOW_HOOKS`, because the environment
+    /// is routinely repo-carried and a repository must never grant itself trust.
+    ///
+    /// Does **not** turn the feature on: `[options.experimental] hooks` is
+    /// answered first, so this is inert while hooks are gated.
+    #[arg(long)]
+    pub allow_hooks: bool,
 }
 
 /// Run `grim update`.
@@ -148,13 +162,22 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // prune/reap passes below already honoured `--force` for the same
     // "do not destroy hand-edited work" reason. One command, two opposite
     // answers about one file.
+    // S-007's re-prompt half rides the ordinary consent pass: the lock has just
+    // been re-resolved, so a hook whose digest moved arrives here with a fresh
+    // pin — and if its registry is still untrusted the prompt is asked again
+    // before anything can arm. It is deliberately keyed on the registry, not the
+    // digest: per-hook digest approval is the re-prompt habituation the owner
+    // reversed on 2026-08-14, so a **trusted** registry does not re-ask on a
+    // digest change, and an untrusted one cannot arm at any digest.
+    let hook_policy = super::hook_consent::resolve(ctx, &scope, &new_lock, args.allow_hooks)?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
         &args.client,
         &scope.options.clients,
         &scope.options.vendors,
-    ))?;
+    ))?
+    .with_hook_policy(hook_policy);
     let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
     // `--progress auto` stays silent here (update never rendered a bar);
@@ -300,6 +323,16 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         }
     }
 
+    // `update` calls `install_all_with_progress` directly rather than
+    // `install_and_persist`, so it drives hook convergence itself. Deliberately
+    // NOT over `sync_clients`: convergence derives its own client set from the
+    // hook-capable roster, because the dispatch table is replaced wholesale and a
+    // set narrowed to "the clients this run touched" would drop a sibling
+    // client's rows from the union.
+    if let Some(policy) = target.hook_policy() {
+        crate::install::hook_registrar::converge_clients(&state, &scope.workspace, scope.scope, &scope.roots, policy);
+    }
+
     // Build the report before surfacing any failure so it reflects the new
     // lock.
     //
@@ -408,6 +441,7 @@ async fn refresh_dev_installs(
             continue;
         }
         let mut synth = GrimoireLock {
+            hooks: vec![],
             metadata: new_lock.metadata.clone(),
             skills: Vec::new(),
             rules: Vec::new(),
@@ -425,6 +459,13 @@ async fn refresh_dev_installs(
             bundles: Vec::new(),
         };
         match rec.kind {
+            // Unreachable by the recorded decision, not by an accident of
+            // wiring: hooks are not dev-installable from a path in v1
+            // (`command::install`'s decision box — a path source has no
+            // registry, so `trust_hooks` consent cannot be expressed for it),
+            // so no dev install record can carry `ArtifactKind::Hook`.
+            // `refresh_dev_installs` returns `()` and cannot refuse anyway.
+            ArtifactKind::Hook => unreachable!("hook kind: hooks are not dev-installable (see command::install)"),
             ArtifactKind::Skill => synth.skills.push(entry),
             ArtifactKind::Rule => synth.rules.push(entry),
             ArtifactKind::Agent => synth.agents.push(entry),
@@ -538,6 +579,7 @@ mod tests {
 
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,

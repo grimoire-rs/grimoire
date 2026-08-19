@@ -48,6 +48,13 @@ failure modes, migration paths — in
 | Something that must port across clients | Skill — the only type every client hosts |
 | Logic a machine can run rather than prose to read | Hook, or a script inside a skill |
 
+Every row above is *packageable* — grim distributes skills, rules,
+subagents, MCP registrations, and now hooks as artifact kinds. That changes
+distribution, never portability: a hook still needs a lifecycle surface in
+the client to be written at all, so it reaches three clients where a skill
+reaches all of them. Details in
+[references/choosing-types.md](references/choosing-types.md).
+
 ## Root-as-Index Pattern
 
 A root file is a table of contents, not a textbook: state the principle,

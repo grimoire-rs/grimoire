@@ -85,6 +85,7 @@ parse-time alias for `oci`):
 | `include` | no | Glob patterns narrowing what this source **shows** when browsed; unset or `[]` shows everything — see [Browse Filters](#browse-filters) |
 | `exclude` | no | Glob patterns hiding matching repositories from this source's browse; combines with `include` and wins where both match |
 | `insecure` | no | Contact this registry over plain HTTP instead of HTTPS — see [Plain HTTP](#plain-http); `oci` entries only |
+| `trust_hooks` | no | Whether hooks resolved from this registry may arm their clients. A **tri-state with an asymmetry**: in *global* config unset means trusted (configuring a registry there is itself the trust act) and `false` opts out; in *project* config the key may only **restrict** — `false` still opts out, while neither unset nor `true` grants anything, because a file that travels with a repository must never grant trust. Independent of `options.experimental.hooks`, which gates the feature as a whole |
 
 ```toml
 [[registries]]
@@ -416,7 +417,8 @@ route is `action: "unset"` with `fields: []`.
 
 `registry set`'s write report carries an always-present `fields` array — one
 element per field the call wrote, in the frozen `oci, index, default,
-include, exclude, insecure` order, each `{"field":…,"action":"set","value":…}` or
+include, exclude, insecure, trust_hooks` order (append-only — positions
+never move), each `{"field":…,"action":"set","value":…}` or
 `{"field":…,"action":"cleared"}` (a cleared element has no `value` key).
 Every other write verb reports `fields: []`. It describes the write, not a
 diff: a field named with the value it already held still emits its element,
@@ -490,7 +492,7 @@ lock on every change.
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
   grim config registry set local --insecure            # plain HTTP for this entry; --no-insecure turns it back off
-  grim config registry fields                         # per-field metadata (oci/index/default/include/exclude/insecure) — works with no config at all
+  grim config registry fields                         # per-field metadata (oci/index/default/include/exclude/insecure/trust_hooks) — works with no config at all
   ```
 
   `registry set` edits an **existing** entry, applying only the flags it is

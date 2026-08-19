@@ -18,12 +18,23 @@ differences are shape on disk (a folder versus a file) and the `kind` argument
 (`skill`, `rule`, or `agent`) you pass to commands like
 [`grim add`](./commands.md#add).
 
-A fourth kind, the **MCP server**, follows the same declare-and-lock
-pipeline but installs differently: instead of a file, it describes a
-[Model Context Protocol](./mcp-servers.md) server, and `grim install`
-registers it as an entry in each client's own MCP config file rather than
-writing anything of its own. See [MCP Server Artifacts](./mcp-servers.md)
-for the full format and per-client behavior.
+Two more kinds follow the same declare-and-lock pipeline but install
+differently, because neither one is just a file the agent reads.
+
+The **MCP server** describes a [Model Context
+Protocol](./mcp-servers.md) server, and `grim install` registers it as an
+entry in each client's own MCP config file rather than writing anything of
+its own. See [MCP Server Artifacts](./mcp-servers.md) for the full format
+and per-client behavior.
+
+The **hook** binds a handler to a moment in the agent's lifecycle — before
+a tool call, after one, at session start, when the turn stops. It is the
+one kind that makes a client *execute* something on its own schedule, so it
+is also the one kind grim will not activate on a declaration alone: it
+arms only behind an explicit feature flag and a per-registry trust grant,
+and reports as `gated` until both are given. See
+[Hooks](./artifacts.md#hooks) for the manifest format, the tier model, and
+the gates.
 
 ### Rules with a support directory {#rule-support-dir}
 
@@ -104,7 +115,8 @@ Declaring the same dozen skills and rules in every repository does not scale.
 Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
-A **bundle** is a curated set of members — skills, rules, and agents. You
+A **bundle** is a curated set of members — skills, rules, agents, and
+hooks. You
 declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
 **expands** into its members, which are pinned into the lock exactly like a
 direct declaration.
@@ -146,8 +158,9 @@ receives; bundles just make it routine.
 Because a member is keyed by `(kind, name)`, two sources can name the same slot.
 Grimoire resolves that deterministically:
 
-- a **direct** `[skills]`/`[rules]`/`[agents]` declaration always wins over any
-  bundle — this is how you override a single member without forking the bundle;
+- a **direct** `[skills]`/`[rules]`/`[agents]`/`[hooks]` declaration always wins
+  over any bundle — this is how you override a single member without forking the
+  bundle;
 - two bundles that name a member at the **same** identifier coalesce to one
   entry;
 - two bundles that **disagree** fail closed: `grim lock` stops with a conflict

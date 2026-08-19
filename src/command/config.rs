@@ -445,6 +445,15 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
             }
         }
         ConfigKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
+        ConfigKey::ExperimentalHooks => {
+            // `false` is the default and indistinguishable from unset on disk —
+            // the same collapse `show_deprecated` and `tui.group_by_type` use.
+            if options.experimental.hooks {
+                Some("true".to_string())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -500,6 +509,12 @@ fn registry_field_value(rc: &RegistryConfig, field: RegistryField) -> Option<Str
         RegistryField::Default => Some(rc.default.to_string()),
         // Same: a bool with a meaningful `false`, never unset.
         RegistryField::Insecure => Some(rc.insecure.to_string()),
+        // The one registry field with THREE states, and the absent one is not
+        // the same as `false`: absent means "trusted, because the entry
+        // exists", `false` means "opted out". Reported verbatim rather than
+        // collapsed, so `get` exits 1 only for a genuinely absent key and a
+        // written `false` reads back as `false` (plan C-022).
+        RegistryField::TrustHooks => rc.trust_hooks.map(|v| v.to_string()),
     }
 }
 
@@ -689,6 +704,31 @@ fn has_bare_comma(pattern: &str) -> bool {
     false
 }
 
+/// Warn that clearing the feature flag does not itself disarm anything.
+///
+/// **This replaces a refusal, and the reversal is the point.** `config set
+/// options.experimental.hooks false` and `config unset` were both rejected
+/// (65) on the reasoning that a config write cannot run convergence, so the
+/// config would claim the feature was off while every armed hook stayed
+/// armed (plan S-012 / C-010). The refusal was correct about the mechanism
+/// and wrong about the remedy: with `set … false` and `unset` both refused,
+/// a `true` already on disk had **no CLI route back at all**, and the
+/// message named `grim install` — which converges but cannot clear the flag.
+/// So the only supported way out was hand-editing `grimoire.toml`, which is
+/// exactly what a config CLI exists to avoid.
+///
+/// The write is now permitted and the user is told the remaining step. That
+/// keeps the honest half of the original reasoning — **a config write is not
+/// a disarm** — without leaving a one-way door. `grim config` stays a config
+/// editor: giving it authority to converge would hand a config command the
+/// installer's privileges, which is a larger change than the problem needs.
+fn warn_config_write_does_not_disarm(attempted: &str) {
+    tracing::warn!(
+        "`grim config {attempted}` cleared the feature flag, but hooks already armed stay armed \
+         until convergence runs — run `grim install` to disarm them"
+    );
+}
+
 // ── Value setters ─────────────────────────────────────────────────────────────
 
 fn apply_set(
@@ -746,6 +786,21 @@ fn apply_set(
                 let levels = parse_u32(value_str, "options.tui.expand_levels")?;
                 options.tui.expand_levels = Some(levels);
                 Ok(levels.to_string())
+            }
+            // Enabling is a plain write — nothing is armed yet, so there is
+            // nothing to converge. Disabling is **permitted and warns**: a config
+            // write cannot run the installer, and silently leaving hooks armed
+            // while the config says they are off is the failure S-012 names — so
+            // the write is allowed and the remaining step is stated, rather than
+            // refused (see `warn_config_write_does_not_disarm` for why the
+            // earlier refusal was reversed).
+            ConfigKey::ExperimentalHooks => {
+                let enabled = parse_bool(value_str, "options.experimental.hooks")?;
+                if !enabled {
+                    warn_config_write_does_not_disarm("set options.experimental.hooks false");
+                }
+                options.experimental.hooks = enabled;
+                Ok(value_str.to_string())
             }
         },
         ParsedKey::VendorField { vendor } => {
@@ -869,6 +924,15 @@ fn apply_set(
                     set_registry_field(registries, alias, |rc| rc.insecure = b);
                     Ok(value_str.to_string())
                 }
+                // Both written states are meaningful, so neither collapses to
+                // absence the way `insecure = false` does: `false` is the
+                // opt-out and `true` is explicit trust. Removing the key
+                // (back to configured-means-trusted) is `config unset`.
+                RegistryField::TrustHooks => {
+                    let b = parse_bool(value_str, &format!("registry.{alias}.trust_hooks"))?;
+                    set_registry_field(registries, alias, |rc| rc.trust_hooks = Some(b));
+                    Ok(value_str.to_string())
+                }
             }
         }
     }
@@ -902,6 +966,13 @@ fn apply_unset(
                 ConfigKey::TuiGroupByType => options.tui.group_by_type = false,
                 ConfigKey::TuiTreeSeparators => options.tui.tree_separators.clear(),
                 ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
+                // `unset` is the other spelling of "turn hooks off", so it warns
+                // exactly as `set … false` does — clearing the key silently would
+                // disarm nothing while claiming to (S-012).
+                ConfigKey::ExperimentalHooks => {
+                    warn_config_write_does_not_disarm("unset options.experimental.hooks");
+                    options.experimental.hooks = false;
+                }
             }
             Ok(())
         }
@@ -988,6 +1059,16 @@ fn apply_unset(
                     return Err(no_such_registry_for_unset(alias));
                 }
                 set_registry_field(registries, alias, |rc| rc.insecure = false);
+                Ok(())
+            }
+            // Clears the key back to ABSENT, which is trusted — not to
+            // `Some(false)`, which is the opt-out. The two are different states
+            // and `unset` restores the default one (plan C-022).
+            RegistryField::TrustHooks => {
+                if find_registry(registries, alias).is_none() {
+                    return Err(no_such_registry_for_unset(alias));
+                }
+                set_registry_field(registries, alias, |rc| rc.trust_hooks = None);
                 Ok(())
             }
         },
@@ -1462,6 +1543,7 @@ fn run_registry_add(
         clear_all_defaults(&mut registries);
     }
     registries.push(RegistryConfig {
+        trust_hooks: None,
         alias: Some(alias.to_string()),
         oci: (!is_index).then(|| locator.to_string()),
         index: is_index.then(|| locator.to_string()),
@@ -1791,6 +1873,12 @@ fn registry_set_fields(
                 RegistryField::Insecure => insecure.map(|value| RegistryFieldChangeAction::Set {
                     value: RegistryFieldValue::Bool(value),
                 }),
+                // `registry add`/`set` have no `--trust-hooks` flag, so this
+                // verb can never write the field and always reports nothing for
+                // it. The routes that do write it are `config set/unset
+                // registry.<alias>.trust_hooks`, a hand edit, and the trust
+                // prompt's global-config write — none of which build this array.
+                RegistryField::TrustHooks => None,
             };
             action.map(|action| RegistryFieldChange {
                 field: field.field_name(),
@@ -2324,8 +2412,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            7,
-            "--all on empty config must emit exactly the 7 fixed keys"
+            8,
+            "--all on empty config must emit exactly the 8 fixed keys"
         );
         for e in &with_all {
             assert_eq!(
@@ -2561,6 +2649,7 @@ mod tests {
     fn apply_set_clients_rejects_whitespace_segment() {
         use crate::config::declaration::{ConfigOptions, TuiOptions};
         let mut options = ConfigOptions {
+            experimental: Default::default(),
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
@@ -2588,6 +2677,7 @@ mod tests {
     fn fresh_options() -> ConfigOptions {
         use crate::config::declaration::TuiOptions;
         ConfigOptions {
+            experimental: Default::default(),
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
@@ -2934,6 +3024,7 @@ mod tests {
     /// One aliased registry carrying an authored filter on both sides.
     fn filtered_registries() -> Vec<RegistryConfig> {
         vec![RegistryConfig {
+            trust_hooks: None,
             insecure: false,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
@@ -4960,10 +5051,12 @@ mod tests {
         let fields = serde_json::to_value(&w.fields).expect("fields serialize");
 
         // `index` and `insecure` were never named, so neither may appear.
+        // `trust_hooks` is stronger than "not named": this verb has no flag for
+        // it at all, so it can never appear in a `registry set` report.
         let expected_order: Vec<&str> = RegistryField::ALL
             .into_iter()
             .map(RegistryField::field_name)
-            .filter(|name| *name != "index" && *name != "insecure")
+            .filter(|name| *name != "index" && *name != "insecure" && *name != "trust_hooks")
             .collect();
         let emitted: Vec<&str> = fields
             .as_array()

@@ -1,0 +1,22 @@
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:0f3bc887790c9a61aa167ec86e34aa5b2334c5e323ad7ad326707268b3f846d3"
+generated_by = "grim 0.13.0"
+generated_at = "2026-08-17T07:14:44Z"
+
+[[skill]]
+name = "reg-skill"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637"
+
+[[rule]]
+name = "reg-rule"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+
+[[agent]]
+name = "reg-agent"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-agent@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a"
+
+[[mcp]]
+name = "reg-mcp"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-mcp@sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1"

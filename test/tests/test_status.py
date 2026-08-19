@@ -136,12 +136,21 @@ def test_status_item_carries_client_drift_fields(
     result = runner.json("status")
     assert result["checked"] is False, "no --check ⇒ checked is false"
     rows = result["items"]
+    # 14 since the hook kind: `arming` is appended, always-present, and `[]`
+    # for every non-hook kind — the shape below. A hook's arming state is
+    # per-(hook, client), so it cannot be one row-level token; `[]` therefore
+    # means "nothing to report", never "unknown". Appending is permitted under
+    # the additive-only policy; this assertion is the tripwire that makes the
+    # addition a decision rather than a drift, so extend the list and the count
+    # together and never relax it to a subset check.
     assert set(rows[0].keys()) == {
         "kind", "name", "source", "pinned", "state", "outputs",
         "outputs_pending",
         "clients_missing", "clients_extra", "clients_unresolved",
         "deprecated", "replaced_by", "update_available",
-    }, f"status item must carry exactly the 13 frozen fields; got: {sorted(rows[0].keys())}"
+        "arming",
+    }, f"status item must carry exactly the 14 frozen fields; got: {sorted(rows[0].keys())}"
+    assert rows[0]["arming"] == [], "a skill reports no hook arming state"
     assert rows[0]["clients_missing"] == []
     assert rows[0]["clients_extra"] == []
     # Freshly installed into the only configured client — an install would

@@ -47,7 +47,7 @@ pub struct KeySpec {
     pub constraints: Option<ValueConstraints>,
 }
 
-/// The 7 fixed `options.*` config keys, in listing order.
+/// The 8 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -57,13 +57,19 @@ pub enum ConfigKey {
     TuiGroupByType,
     TuiTreeSeparators,
     TuiExpandLevels,
+    ExperimentalHooks,
 }
 
 impl ConfigKey {
     /// Every fixed key, in the order `grim config list` emits them —
     /// pins today's `collect_entries` order: `default_registry`,
-    /// `clients`, `show_deprecated`, then the `tui.*` keys.
-    pub const ALL: [ConfigKey; 7] = [
+    /// `clients`, `show_deprecated`, then the `tui.*` keys, then the
+    /// `experimental.*` keys.
+    ///
+    /// **Append here, never insert**, for the reason spelled out on
+    /// [`RegistryField::ALL`]: this array is the row order of
+    /// `grim config list`.
+    pub const ALL: [ConfigKey; 8] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -71,6 +77,7 @@ impl ConfigKey {
         ConfigKey::TuiGroupByType,
         ConfigKey::TuiTreeSeparators,
         ConfigKey::TuiExpandLevels,
+        ConfigKey::ExperimentalHooks,
     ];
 
     /// This key's static metadata.
@@ -158,6 +165,21 @@ impl ConfigKey {
                            Defaults to `1` (registry roots only); `0` expands the tree fully.",
             constraints: None,
         };
+        const EXPERIMENTAL_HOOKS: KeySpec = KeySpec {
+            key: "options.experimental.hooks",
+            // Literal `false` rather than a `config::defaults` const: the
+            // runtime fallback is `bool::default()` on a plain field, and
+            // `experimental_hooks_spec_matches_derived_default` pins this
+            // against `ExperimentalOptions::default()`.
+            value_type: ValueType::Bool { default: false },
+            title: "Experimental hooks",
+            description: "Controls whether hooks are active — a declared hook resolves, installs, and \
+                           arms its clients. Disabled by default, so a declared hook is reported and \
+                           never armed. Config only — no environment variable overrides this; set it \
+                           with `grim config set options.experimental.hooks true`, in project or \
+                           global config.",
+            constraints: None,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -166,6 +188,7 @@ impl ConfigKey {
             Self::TuiGroupByType => &TUI_GROUP_BY_TYPE,
             Self::TuiTreeSeparators => &TUI_TREE_SEPARATORS,
             Self::TuiExpandLevels => &TUI_EXPAND_LEVELS,
+            Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
         }
     }
 
@@ -177,7 +200,7 @@ impl ConfigKey {
     }
 }
 
-/// The 6 per-registry field names addressable as `registry.<alias>.<field>`.
+/// The 7 per-registry field names addressable as `registry.<alias>.<field>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryField {
     Oci,
@@ -186,11 +209,12 @@ pub enum RegistryField {
     Exclude,
     Default,
     Insecure,
+    TrustHooks,
 }
 
 impl RegistryField {
     /// Every registry field, in `oci, index, default, include, exclude,
-    /// insecure` order.
+    /// insecure, trust_hooks` order.
     ///
     /// **Append here, never insert.** This array is the item order of
     /// `grim config registry fields --format json`, and consumers index it
@@ -201,13 +225,14 @@ impl RegistryField {
     /// shipped index; appending leaves every existing position untouched,
     /// matching the append-only discipline `VENDOR_ROOTS` rows and enum
     /// literals already follow.
-    pub const ALL: [RegistryField; 6] = [
+    pub const ALL: [RegistryField; 7] = [
         RegistryField::Oci,
         RegistryField::Index,
         RegistryField::Default,
         RegistryField::Include,
         RegistryField::Exclude,
         RegistryField::Insecure,
+        RegistryField::TrustHooks,
     ];
 
     /// This field's short name — the last segment of its pattern key
@@ -222,6 +247,7 @@ impl RegistryField {
             Self::Exclude => "exclude",
             Self::Default => "default",
             Self::Insecure => "insecure",
+            Self::TrustHooks => "trust_hooks",
         }
     }
 
@@ -300,6 +326,29 @@ impl RegistryField {
                            entry declares.",
             constraints: None,
         };
+        // The one registry field whose UNSET value is not `false`: in global
+        // config an entry with no `trust_hooks` key is trusted, so the reported
+        // default is `true`. `Bool` (not an `Option`-shaped type) because the
+        // reader asking "what happens if I leave it out" wants the effective
+        // answer; the absent-vs-`false` distinction survives on the value side,
+        // where `registry_field_value` reports `None` for absent. `default:
+        // true` is a statement about GLOBAL config — the description carries
+        // the project-scope asymmetry the flat default cannot express.
+        const TRUST_HOOKS: KeySpec = KeySpec {
+            key: "registry.<alias>.trust_hooks",
+            value_type: ValueType::Bool { default: true },
+            title: "Trust hooks from this registry",
+            description: "Controls whether hooks resolved from this registry may arm their clients. \
+                           In global config, unset means trusted, because configuring a registry there \
+                           is itself the trust act — except for a bare-host entry such as `ghcr.io`, \
+                           which grants nothing unless it carries an explicit `true`, because one host \
+                           serves many unrelated publishers; `false` opts the registry out, and `true` \
+                           is what grim writes when a one-time trust prompt is accepted. In project \
+                           config the key may only restrict — a file that travels with a repository \
+                           never grants trust, so `false` still opts out and neither unset nor `true` \
+                           grants anything.",
+            constraints: None,
+        };
         match self {
             Self::Oci => &OCI,
             Self::Index => &INDEX,
@@ -307,6 +356,7 @@ impl RegistryField {
             Self::Exclude => &EXCLUDE,
             Self::Default => &DEFAULT,
             Self::Insecure => &INSECURE,
+            Self::TrustHooks => &TRUST_HOOKS,
         }
     }
 }
@@ -460,8 +510,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_field_all_has_six_fields_including_include_exclude_and_insecure() {
-        assert_eq!(RegistryField::ALL.len(), 6);
+    fn registry_field_all_has_seven_fields_including_include_exclude_and_insecure() {
+        assert_eq!(RegistryField::ALL.len(), 7);
         for field in [RegistryField::Include, RegistryField::Exclude] {
             assert!(
                 matches!(field.spec().value_type, ValueType::StringList { default: None }),
@@ -529,8 +579,11 @@ mod tests {
     /// A fully-populated `ConfigOptions` — every field set/non-empty/true so
     /// no serde skip fires, including one `[options.vendors]` entry.
     fn fully_populated_options() -> crate::config::declaration::ConfigOptions {
-        use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions, VendorOptions};
+        use crate::config::declaration::{ConfigOptions, DefaultView, ExperimentalOptions, TuiOptions, VendorOptions};
         ConfigOptions {
+            // `true`, not `Default::default()`: a defaulted table serde-skips,
+            // and this fixture exists precisely to defeat every skip.
+            experimental: ExperimentalOptions { hooks: true },
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
             tui: TuiOptions {
@@ -623,6 +676,9 @@ mod tests {
         // addressable field) is removed.
         use crate::config::declaration::RegistryConfig;
         let config = RegistryConfig {
+            // `Some`, not `None`: an absent `trust_hooks` serde-skips, and this
+            // fixture is the one that must defeat every skip.
+            trust_hooks: Some(false),
             insecure: true,
             alias: Some("acme".to_string()),
             oci: Some("ghcr.io/acme".to_string()),
@@ -781,6 +837,7 @@ mod tests {
             .expect("config schema must serialize to JSON");
         let config_options = &schema["$defs"]["ConfigOptions"];
         let tui_options = resolve_ref(&schema, &config_options["properties"]["tui"]);
+        let experimental_options = resolve_ref(&schema, &config_options["properties"]["experimental"]);
         let registry_config = &schema["$defs"]["RegistryConfig"];
 
         for key in ConfigKey::ALL {
@@ -793,6 +850,7 @@ mod tests {
                 ConfigKey::TuiGroupByType => &tui_options["properties"]["group_by_type"],
                 ConfigKey::TuiTreeSeparators => &tui_options["properties"]["tree_separators"],
                 ConfigKey::TuiExpandLevels => &tui_options["properties"]["expand_levels"],
+                ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);
@@ -808,6 +866,7 @@ mod tests {
                 RegistryField::Exclude => &registry_config["properties"]["exclude"],
                 RegistryField::Default => &registry_config["properties"]["default"],
                 RegistryField::Insecure => &registry_config["properties"]["insecure"],
+                RegistryField::TrustHooks => &registry_config["properties"]["trust_hooks"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);

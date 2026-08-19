@@ -34,7 +34,8 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Documentation work | [docs-style.md](./rules/docs-style.md), skill `docs` |
-| Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
+| Security-sensitive change | [arch-threat-model.md](./rules/arch-threat-model.md) (**the trust boundary — read before filing or triaging any finding**), [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
+| Deciding whether a security finding is a defect or a non-goal | [arch-threat-model.md](./rules/arch-threat-model.md) — attackers T1–T5 are in scope, N1–N5 are explicit non-goals (notably **insiders with commit access**); invariants I1–I6 |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Vendor renderer declines / upstream capability gaps | [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) — re-verify upstream before patching a decline; date-stamped watchlist |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
@@ -86,6 +87,7 @@ provisional; the coupling is intended (declared below).
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
+| `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout}.rs`, `src/command/{publish,release}*`, `catalog/**` | + [arch-threat-model.md](./rules/arch-threat-model.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
@@ -122,6 +124,8 @@ Exempt from overlap detection (intended broad coupling):
 | `product-context.md` + `workflow-feature.md` | `.agents/plans/**`, `.agents/adr/**`, `.agents/specs/**`, `.agents/research/**` |
 | `docs-style.md` + `product-context.md` | `docs/**` |
 | `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**` (single provisional binary crate) |
+| `arch-threat-model.md` + `arch-principles.md` + the four `src/**` subsystem rules | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout,publish,release}*` — the security-sensitive subset of `src/**`; the threat model co-fires with them by design, since a boundary question is always also a design question. `src/command/hook*` joined when the dispatcher runtime landed: it executes code a client runs automatically, which is the sharpest edge of the boundary |
+| `arch-threat-model.md` + `quality-security.md` | `catalog/**` (published artifacts — the boundary scopes the checklist) |
 
 ## Skills by task topic
 

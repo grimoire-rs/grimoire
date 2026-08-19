@@ -28,6 +28,7 @@ use crate::oci::ArtifactKind;
 
 use super::client_target::ClientTarget;
 use super::install_error::InstallError;
+use super::path_anchor::AnchorRoots;
 
 /// One or more AI client targets rooted at a workspace.
 #[derive(Debug, Clone)]
@@ -46,6 +47,31 @@ pub struct InstallTarget {
     /// Derived in [`Self::parse`] from the resolved scope's `[options.vendors]`
     /// table — never merged across scopes, never overridable by a flag.
     shared_skills: Vec<ClientTarget>,
+    /// The resolved hook arming policy, or `None` when this target was not
+    /// built by a **mutating** command.
+    ///
+    /// Attached by [`Self::with_hook_policy`] at the mutating boundary, never by
+    /// [`Self::parse`], and the split is load-bearing rather than incidental:
+    ///
+    /// - `parse` cannot derive it. The policy needs
+    ///   `[options.experimental] hooks`, the authored `[[registries]]` of
+    ///   **both** config scopes, the `--allow-hooks` flag, and the
+    ///   invocation's interactivity — four inputs `parse` does not take, and
+    ///   adding them would change the signature at every one of its ~15
+    ///   production call sites, three of which are read-only commands with no
+    ///   use for any of them.
+    /// - **`grim status`, `grim search` and `grim context` therefore hold
+    ///   `None`.** Hook convergence is gated on `Some`, so those three
+    ///   commands cannot arm, cannot reap, and — because the consent prompt
+    ///   lives above this type entirely, in
+    ///   [`crate::command::hook_consent`] — cannot prompt. That is a
+    ///   structural guarantee, not a convention: there is no code path from a
+    ///   read-only command to a terminal question.
+    /// - `None` is also the fail-safe default for a mutating site that forgets
+    ///   to attach one: convergence is skipped, so nothing is armed **and
+    ///   nothing already armed is reaped**. A policy that defaulted to "hooks
+    ///   off" would instead silently disarm every hook the last install armed.
+    hook_policy: Option<crate::hook::policy::HookPolicy>,
 }
 
 impl InstallTarget {
@@ -76,6 +102,7 @@ impl InstallTarget {
             clients,
             generic_fallback: false,
             shared_skills: Vec::new(),
+            hook_policy: None,
         }
     }
 
@@ -156,6 +183,7 @@ impl InstallTarget {
                     clients: vec![ClientTarget::Agents],
                     generic_fallback: true,
                     shared_skills,
+                    hook_policy: None,
                 });
             }
             clients = detected;
@@ -163,6 +191,30 @@ impl InstallTarget {
         let mut target = Self::new(workspace, scope, clients);
         target.shared_skills = shared_skills;
         Ok(target)
+    }
+
+    /// Attach the resolved hook arming policy — **mutating commands only**.
+    ///
+    /// Consuming (`self` in, `Self` out) so it reads as one expression at the
+    /// boundary that resolves both, and so a caller cannot attach a policy to a
+    /// target it has already handed to the installer.
+    ///
+    /// See [`Self::hook_policy`] for why this is not part of
+    /// [`Self::parse`].
+    #[must_use]
+    pub fn with_hook_policy(mut self, policy: crate::hook::policy::HookPolicy) -> Self {
+        self.hook_policy = Some(policy);
+        self
+    }
+
+    /// The resolved hook arming policy, or `None` when no mutating boundary
+    /// attached one.
+    ///
+    /// The single gate on hook convergence
+    /// ([`super::hook_registrar::converge_clients`]): `None` means this
+    /// invocation neither arms nor reaps.
+    pub fn hook_policy(&self) -> Option<&crate::hook::policy::HookPolicy> {
+        self.hook_policy.as_ref()
     }
 
     /// The client targets, in declared order (deduplicated).
@@ -209,7 +261,32 @@ impl InstallTarget {
     /// newly pool-capable, so `[options.vendors.goose].shared_skills = true`
     /// is an accepted config today — and it is this no-op, not a second write
     /// path.
-    pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
+    ///
+    /// # Why this takes `roots`
+    ///
+    /// A hook payload is machine-local at **both** scopes (invariant I1 — see
+    /// [`hook_dispatch::payload_dir`](super::hook_dispatch::payload_dir) for the
+    /// SEC-1 finding that moved it out of the workspace), so its destination is a
+    /// function of `$GRIM_HOME`. That value reaches this seam only through the
+    /// pre-resolved [`AnchorRoots`] — the single place ambient environment is
+    /// read — so it is a parameter rather than an ambient lookup or a fourth
+    /// field on this struct. Every caller already holds the roots: the installer
+    /// to anchor the destination it gets back, `expected_outputs` to compare it
+    /// against the recorded one.
+    ///
+    /// `roots.workspace` is expected to equal [`Self::workspace`] (both come from
+    /// one `ResolvedScope`). This method still reads the workspace from `self` and
+    /// takes only `grim_home` from `roots`, so a fixture that disagrees cannot
+    /// silently move a non-hook destination.
+    pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str, roots: &AnchorRoots) -> PathBuf {
+        // A hook payload never lands in the workspace, at either scope.
+        if kind == ArtifactKind::Hook {
+            return super::hook_dispatch::payload_dir(
+                &roots.grim_home,
+                super::hook_registrar::root_scope_for(&self.workspace, self.scope),
+                name,
+            );
+        }
         if kind == ArtifactKind::Skill && self.shared_skills.contains(&client) {
             return ClientTarget::Agents.path_for(&self.workspace, self.scope, kind, name);
         }
@@ -256,6 +333,23 @@ pub fn detect_clients_or_all(workspace: &Path, scope: ConfigScope) -> Vec<Client
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hermetic anchor roots for the `path_for` assertions below.
+    ///
+    /// `grim_home` is read for exactly one kind — [`ArtifactKind::Hook`], whose
+    /// payload is machine-local (I1) — and is deliberately **not** the workspace,
+    /// so a hook destination can never coincide with a workspace path by
+    /// accident. Every other kind ignores it.
+    fn roots(workspace: &Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: PathBuf::from("/grim"),
+            vendor_roots: Default::default(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        }
+    }
 
     #[test]
     fn new_with_empty_list_keeps_the_all_clients_fallback() {
@@ -436,12 +530,123 @@ mod tests {
         );
     }
 
+    /// ⛔ **The negative the whole policy/consent split exists to guarantee.**
+    ///
+    /// `parse` is the seam `grim status`, `grim search` and `grim context` use as
+    /// well as every mutating command. A hook policy derived *inside* it would
+    /// make those three commands evaluate consent — and, if the prompt rode along,
+    /// make `grim status` ask the user a question. So `parse` must leave the
+    /// policy absent, and hook convergence must be gated on its presence.
+    ///
+    /// This is the easiest thing in the feature to break silently: adding a
+    /// `HookPolicy::default()` to `parse` would compile, pass every other test,
+    /// and quietly give three read-only commands an arming policy.
+    #[test]
+    fn parse_never_attaches_a_hook_policy_so_a_read_only_command_cannot_arm_or_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (flag, cfg) in [
+            (vec![], vec![]),
+            (vec!["claude".to_string()], vec![]),
+            (vec![], vec!["claude,codex".to_string()]),
+        ] {
+            let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &flag, &cfg, &BTreeMap::new()).unwrap();
+            assert!(
+                t.hook_policy().is_none(),
+                "InstallTarget::parse must never derive a hook policy — status/search/context resolve through it"
+            );
+        }
+        // `new` likewise: it is the test-only constructor, and a production caller
+        // reaching it must not get an arming policy by accident either.
+        assert!(
+            InstallTarget::new(tmp.path(), ConfigScope::Project, vec![ClientTarget::Claude])
+                .hook_policy()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn with_hook_policy_is_the_only_way_a_target_gains_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = crate::hook::policy::HookPolicy::new(
+            true,
+            false,
+            crate::hook::trust::Interactivity::NonInteractive,
+            Vec::new(),
+        );
+        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new())
+            .unwrap()
+            .with_hook_policy(policy);
+        assert!(
+            t.hook_policy()
+                .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
+        );
+    }
+
     #[test]
     fn path_for_delegates_to_client() {
         let t = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![ClientTarget::Copilot]);
         assert_eq!(
-            t.path_for(ClientTarget::Copilot, ArtifactKind::Rule, "rust-style"),
+            t.path_for(
+                ClientTarget::Copilot,
+                ArtifactKind::Rule,
+                "rust-style",
+                &roots(Path::new("/w"))
+            ),
             PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
+        );
+    }
+
+    /// ⛔ **SEC-1.** A hook payload never lands in the workspace, at either
+    /// scope, and never depends on which client armed it.
+    ///
+    /// This is the assertion whose *inverse* was pinned as the contract while
+    /// SEC-1 was live: the payload used to be `<ws>/.grimoire/hooks/<name>`, and
+    /// a repository could therefore commit both the payload and the record that
+    /// names it. The workspace-keyed segment is what keeps two workspaces'
+    /// project hooks from colliding under one `$GRIM_HOME`.
+    #[test]
+    fn a_hook_payload_is_machine_local_at_both_scopes() {
+        let here = roots(Path::new("/w"));
+        let project = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let dest = project.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard", &here);
+        assert!(
+            dest.starts_with("/grim"),
+            "a project hook payload must live under $GRIM_HOME — got {}",
+            dest.display()
+        );
+        assert!(
+            !dest.starts_with("/w"),
+            "a repo-resident payload is invariant I1 / SEC-1 — got {}",
+            dest.display()
+        );
+        assert_eq!(
+            dest,
+            PathBuf::from("/grim").join(crate::install::hook_dispatch::payload_relative(
+                crate::install::hook_dispatch::RootScope::Workspace(Path::new("/w")),
+                "shell-guard",
+            ))
+        );
+
+        // Two workspaces, one `$GRIM_HOME`, two directories.
+        let other = InstallTarget::new(Path::new("/other"), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let other_roots = roots(Path::new("/other"));
+        assert_ne!(
+            dest,
+            other.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard", &other_roots),
+            "two workspaces must not share one project payload directory"
+        );
+
+        // Client-independent (S-003): one directory, whoever arms it.
+        assert_eq!(
+            dest,
+            project.path_for(ClientTarget::Codex, ArtifactKind::Hook, "shell-guard", &here)
+        );
+
+        // Global scope keeps the flat `$GRIM_HOME/hooks/<name>` layout.
+        let global = InstallTarget::new(Path::new("/w"), ConfigScope::Global, vec![ClientTarget::Claude]);
+        assert_eq!(
+            global.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard", &here),
+            PathBuf::from("/grim/hooks/shell-guard")
         );
     }
 
@@ -468,17 +673,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x"),
+            t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
             PathBuf::from("/w/.agents/skills/x"),
             "an opted-in client's skills must render into the shared pool"
         );
         assert_eq!(
-            t.path_for(ClientTarget::Cursor, ArtifactKind::Rule, "x"),
+            t.path_for(ClientTarget::Cursor, ArtifactKind::Rule, "x", &roots(Path::new("/w"))),
             PathBuf::from("/w/.cursor/rules/x.mdc"),
             "the opt-in governs skills ONLY — other kinds keep the native layout"
         );
         assert_eq!(
-            t.path_for(ClientTarget::Copilot, ArtifactKind::Skill, "x"),
+            t.path_for(ClientTarget::Copilot, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
             PathBuf::from("/w/.github/skills/x"),
             "a client that did not opt in keeps its native skills dir"
         );
@@ -504,7 +709,10 @@ mod tests {
                 &vendors,
             )
             .unwrap();
-            assert_eq!(t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x"), cursor_skill);
+            assert_eq!(
+                t.path_for(ClientTarget::Cursor, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
+                cursor_skill
+            );
         }
     }
 
@@ -524,7 +732,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            t.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x"),
+            t.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
             PathBuf::from("/w/.claude/skills/x"),
             "a non-pool-capable client must keep its native layout regardless"
         );
@@ -562,8 +770,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                opted.path_for(client, ArtifactKind::Skill, "x"),
-                native.path_for(client, ArtifactKind::Skill, "x"),
+                opted.path_for(client, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
+                native.path_for(client, ArtifactKind::Skill, "x", &roots(Path::new("/w"))),
                 "{name} already pools — opting it in must not move anything"
             );
         }

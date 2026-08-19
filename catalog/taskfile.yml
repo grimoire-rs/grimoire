@@ -26,6 +26,7 @@ tasks:
       - 'rules/**/*'
       - 'agents/**/*'
       - 'mcp/*.toml'
+      - 'hooks/**/*'
       - 'bundles/*.toml'
       - '{{.ROOT_DIR}}/target/release/grim{{exeExt}}'
     cmds:
@@ -54,6 +55,17 @@ tasks:
           [ -e "$m" ] || continue
           echo "==> grim build ${m}"
           "{{.GRIM_BINARY}}" build "$m" --kind mcp
+          found=1
+        done
+        # Hooks are DIRECTORY artifacts (hook.toml + payload), so this loop is
+        # shaped like the skills one, not like the mcp/bundle file loops. The
+        # guard tests for hook.toml rather than SKILL.md — that is also the
+        # file grim's own kind inference keys on, and it checks for it BEFORE
+        # the skill arm, so a directory carrying both is a hook.
+        for d in hooks/*/; do
+          [ -f "${d}hook.toml" ] || continue
+          echo "==> grim build ${d%/}"
+          "{{.GRIM_BINARY}}" build "${d%/}" --kind hook
           found=1
         done
         for b in bundles/*.toml; do
