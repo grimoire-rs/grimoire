@@ -181,6 +181,19 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: created.clone(),
         });
     }
+    // Community rating — shown only when the browse source published one, so
+    // an unrated artifact's pane is unchanged. A count of 0 is never
+    // synthesized for absence; the row simply is not there.
+    if let Some(up) = r.rating {
+        lines.push(DetailLine::MetaEntry {
+            label: "Rating:",
+            value: if up == 1 {
+                "1 upvote".to_string()
+            } else {
+                format!("{up} upvotes")
+            },
+        });
+    }
     if let Some(msg) = &r.deprecated {
         lines.push(DetailLine::MetaEntry {
             label: "Deprecated:",
@@ -483,6 +496,7 @@ mod tests {
             repository_url: None,
             revision: None,
             created: None,
+            rating: None,
             deprecated: deprecated.map(str::to_string),
             latest_tag: "1.0.0".to_string(),
             version: "1.0.0".to_string(),
@@ -624,6 +638,42 @@ mod tests {
             l,
             DetailLine::MetaEntry { label: "Revision:", .. } | DetailLine::MetaEntry { label: "Created:", .. }
         )));
+    }
+
+    #[test]
+    fn detail_lines_show_rating_beside_git_provenance_when_present() {
+        let mut row = tui_row(None);
+        row.revision = Some("abc123def456".to_string());
+        row.created = Some("2026-06-29T12:00:00+00:00".to_string());
+        row.rating = Some(42);
+        let lines = detail_lines(Some(&row));
+        assert_eq!(meta_value(&lines, "Rating:"), Some("42 upvotes"));
+        // Beside `Revision:`/`Created:`, not before them.
+        let pos = |want: &str| {
+            lines
+                .iter()
+                .position(|l| matches!(l, DetailLine::MetaEntry { label, .. } if *label == want))
+        };
+        assert!(pos("Created:") < pos("Rating:"), "Rating follows the provenance rows");
+        // A single vote reads grammatically.
+        row.rating = Some(1);
+        assert_eq!(meta_value(&detail_lines(Some(&row)), "Rating:"), Some("1 upvote"));
+    }
+
+    #[test]
+    fn detail_lines_omit_rating_when_unrated() {
+        // Absent ⇒ no row at all. A `0` here would read as "rated, nobody
+        // voted", which is a different fact than "we have no rating".
+        let row = tui_row(None);
+        assert_eq!(row.rating, None, "the fixture is unrated");
+        let lines = detail_lines(Some(&row));
+        assert_eq!(meta_value(&lines, "Rating:"), None);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| matches!(l, DetailLine::MetaEntry { value, .. } if value == "0")),
+            "no zero-valued meta entry is synthesized for an unrated row"
+        );
     }
 
     #[test]

@@ -54,6 +54,16 @@ pub struct TuiArgs {
     /// The interactive `h` key toggles this live regardless.
     #[arg(long)]
     pub show_deprecated: bool,
+
+    /// Order the browse: `name` (ascending, case-insensitive), `updated`
+    /// (newest first, undated last) or `rating` (most upvotes first, then
+    /// newest, unrated last) — the same orders `grim search --sort` applies.
+    /// Unrated and undated artifacts sort into a bucket of their own at the
+    /// end, never as zero votes or epoch 0. Set, it also replaces the
+    /// relevance ranking the `/` search applies; omitted, the browse groups
+    /// by kind and then by name as it does today.
+    #[arg(long, value_name = "ORDER")]
+    pub sort: Option<crate::catalog::SortMode>,
 }
 
 /// Run `grim tui`.
@@ -146,6 +156,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         // across a project⇄global swap (a filter preference), so `ScopeSwap`
         // is deliberately not given this field.
         show_deprecated: args.show_deprecated || scope.options.show_deprecated,
+        sort: args.sort,
     };
 
     app::run(tui_ctx).await?;
