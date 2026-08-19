@@ -58,6 +58,7 @@ use crate::command::login::LoginArgs;
 use crate::command::logout::LogoutArgs;
 use crate::command::mcp::McpArgs;
 use crate::command::publish::PublishArgs;
+use crate::command::rate::RateArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
 use crate::command::schema::SchemaArgs;
@@ -114,6 +115,8 @@ pub enum Command {
     Uninstall(UninstallArgs),
     /// Search the registry catalog for skills and rules.
     Search(SearchArgs),
+    /// Vote on an artifact through the forge its index publishes ratings from.
+    Rate(RateArgs),
     /// Print an artifact's content without installing it.
     Fetch(FetchArgs),
     /// Report an artifact's metadata (kind, annotations, tags) without

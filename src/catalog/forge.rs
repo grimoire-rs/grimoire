@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::index_announce::AnnounceError;
+use super::rating_provider::{RateContext, RateError};
 
 /// The API flavor of the git host an index repository lives on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -210,6 +211,21 @@ fn ci_candidate(host: &str, env: &CiEnv) -> Option<CiCandidate> {
         });
     }
     None
+}
+
+/// The CI environment's token for `host`, when the CI server host matches
+/// and its forge kind is `kind` — the announce ladder's host-matching rule
+/// (`GITLAB_TOKEN` must never reach a GitHub target), reused by `grim
+/// rate`'s own credential ladder.
+///
+/// Deliberately **not** [`resolve`]: that starts from `GRIM_ANNOUNCE_TOKEN`,
+/// and the vote ladder carries its own, narrower credential rather than
+/// borrowing publishing authority (ADR § API Contract). Only the
+/// host-matched CI contribution is shared.
+pub fn ci_token_for(host: &str, kind: ForgeKind, env: &CiEnv) -> Option<String> {
+    ci_candidate(host, env)
+        .filter(|candidate| candidate.kind == kind)
+        .and_then(|candidate| candidate.token)
 }
 
 /// The conventional API base for a forge kind on `host`. github.com's API
@@ -1360,6 +1376,197 @@ async fn get_json(http: &reqwest::Client, ctx: &ForgeContext, url: &str) -> Resu
 /// enough for a forge's own JSON error message, capped against a forge
 /// returning something large or hostile.
 const STATUS_ERROR_BODY_CAP: usize = 300;
+
+// ---------------------------------------------------------------------------
+// GraphQL — the `grim rate` write path (plan C-005 / C-006 / C-007)
+// ---------------------------------------------------------------------------
+
+/// Attach the mutation credential to `request`, exposing the secret
+/// **exactly once** — this is the only `expose_secret()` call on the vote
+/// path, and the value never leaves the header it is written into.
+///
+/// Exhaustive over [`ForgeKind`] like [`authorize`], and for the same
+/// reason: a kind that falls through a wildcard would send a *mutation*
+/// unauthenticated. [`ForgeKind::Plain`] has no authenticated API at all,
+/// so it hard-refuses rather than trying.
+fn authorize_mutation(
+    kind: ForgeKind,
+    token: &secrecy::SecretString,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::RequestBuilder, RateError> {
+    use secrecy::ExposeSecret as _;
+    match kind {
+        // Both forges accept `Authorization: Bearer` on their GraphQL
+        // endpoints — GitLab's `PRIVATE-TOKEN` is a REST-only header, so
+        // the announce path's split does not apply here.
+        ForgeKind::GitHub | ForgeKind::GitLab => {
+            Ok(request.header("Authorization", format!("Bearer {}", token.expose_secret())))
+        }
+        ForgeKind::Plain => Err(RateError::UnsupportedProvider("plain".to_string())),
+    }
+}
+
+/// POST a GraphQL document and return its `data` object.
+///
+/// Two properties this function exists to hold, both of which a hand-rolled
+/// call site has historically got wrong:
+///
+/// 1. **A populated top-level `errors` array is a hard error, checked
+///    independently of the HTTP status.** GraphQL answers a partly-failed
+///    mutation with `200 OK`, a populated `errors` array and whatever
+///    `data` it managed to produce. Reading that as success is silent data
+///    loss arriving through the one door the transport-level invariants do
+///    not watch — so `errors` is inspected *before* `data` and before the
+///    status.
+/// 2. **Redirects stay disabled.** The client comes from [`client`] →
+///    [`build_client`], whose `Policy::none()` is the documented defence
+///    against a 3xx replaying the `Authorization` header at a cross-host
+///    `Location`. That inheritance is a requirement of this path, not an
+///    incidental.
+///
+/// # Errors
+///
+/// [`RateError::Unavailable`] on a transport failure, a 5xx, a 429 or a
+/// forge secondary rate limit; [`RateError::Unauthorized`] on 401/403;
+/// [`RateError::NotFound`] on 404 or a GraphQL `NOT_FOUND` error;
+/// [`RateError::Graphql`] for any other populated `errors` array, a body
+/// that is not a GraphQL envelope, or an unexpected status.
+pub async fn graphql(
+    http: &reqwest::Client,
+    ctx: &RateContext,
+    document: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, RateError> {
+    let request = authorize_mutation(
+        ctx.kind(),
+        ctx.token(),
+        http.post(ctx.endpoint())
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "query": document, "variables": variables })),
+    )?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| RateError::Unavailable(format!("could not reach {}: {e}", ctx.endpoint())))?;
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .is_some_and(|v| !v.is_empty());
+    let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+
+    // Property 1: `errors` first, before the status and before `data`.
+    if let Some(detail) = graphql_errors(&body) {
+        return Err(detail);
+    }
+    if status.is_success() {
+        return body
+            .get("data")
+            .filter(|d| !d.is_null())
+            .cloned()
+            .ok_or_else(|| RateError::Graphql("the forge returned no GraphQL data envelope".to_string()));
+    }
+    Err(classify_graphql_status(status, retry_after, &body))
+}
+
+/// The [`RateError`] a populated top-level `errors` array maps to, or
+/// `None` when the array is absent or empty.
+///
+/// A `NOT_FOUND` error type is the forge saying the vote subject is gone —
+/// a different condition from a malformed or refused mutation, and the one
+/// the `79` contract line covers.
+fn graphql_errors(body: &serde_json::Value) -> Option<RateError> {
+    let errors = body.get("errors")?.as_array().filter(|e| !e.is_empty())?;
+    // GitHub answers *primary* rate-limit exhaustion — the hourly GraphQL
+    // point budget — with `200` and `errors[].type == "RATE_LIMITED"`, not
+    // with a 403 or a 429, so `classify_graphql_status` never sees it. Left
+    // as a bare `Graphql` it would exit 65 ("your index is wrong") for a
+    // throttle that a wrapper scripting `case $?` retries on 69. Same for a
+    // 200-carried `FORBIDDEN`, which is an auth failure (80), not a data one.
+    // The indexer's sibling implementation already classifies these
+    // (`src/ratings/provider.ts`); this keeps the two from disagreeing.
+    let code = |want: &str| {
+        errors.iter().any(|e| {
+            e.get("type").and_then(serde_json::Value::as_str) == Some(want)
+                || e.get("extensions")
+                    .and_then(|x| x.get("code"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(want)
+        })
+    };
+    let gone = code("NOT_FOUND");
+    let throttled = code("RATE_LIMITED");
+    let forbidden = code("FORBIDDEN");
+    let detail = errors
+        .iter()
+        .filter_map(|e| e.get("message").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let detail = if detail.is_empty() {
+        "the forge reported a GraphQL error with no message".to_string()
+    } else {
+        detail
+    };
+    Some(if gone {
+        RateError::NotFound(format!("the vote subject no longer exists on the forge: {detail}"))
+    } else if throttled {
+        RateError::Unavailable(format!("the forge rate-limited the request, retry later: {detail}"))
+    } else if forbidden {
+        RateError::Unauthorized(format!("the forge refused the credential: {detail}"))
+    } else {
+        RateError::Graphql(format!("the forge rejected the request: {detail}"))
+    })
+}
+
+/// Classify a non-success GraphQL response.
+///
+/// GitHub answers a **secondary rate limit** with `403` plus a
+/// `Retry-After` header or an explicit message — the same status it uses
+/// for a rejected credential. Telling them apart is what keeps a
+/// throttled run at `69` (retry later) instead of `80` (fix your token).
+fn classify_graphql_status(status: reqwest::StatusCode, retry_after: bool, body: &serde_json::Value) -> RateError {
+    let detail = body
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let throttled = retry_after || detail.to_ascii_lowercase().contains("rate limit");
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => RateError::Unauthorized(format!(
+            "the forge rejected the credential (HTTP {status}){}",
+            suffix(&detail)
+        )),
+        reqwest::StatusCode::FORBIDDEN if throttled => RateError::Unavailable(format!(
+            "the forge applied a rate limit (HTTP {status}){}",
+            suffix(&detail)
+        )),
+        reqwest::StatusCode::FORBIDDEN => RateError::Unauthorized(format!(
+            "the credential is not permitted to vote (HTTP {status}){}",
+            suffix(&detail)
+        )),
+        reqwest::StatusCode::NOT_FOUND => RateError::NotFound(format!(
+            "the forge has no such endpoint or subject (HTTP {status}){}",
+            suffix(&detail)
+        )),
+        s if s.is_server_error() || s == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            RateError::Unavailable(format!("the forge is unavailable (HTTP {status}){}", suffix(&detail)))
+        }
+        _ => RateError::Graphql(format!("unexpected forge response (HTTP {status}){}", suffix(&detail))),
+    }
+}
+
+/// Render a forge-supplied detail as a `: …` suffix, capped like
+/// [`status_error`] against a large or hostile body.
+fn suffix(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return String::new();
+    }
+    match detail.char_indices().nth(STATUS_ERROR_BODY_CAP) {
+        Some((end, _)) => format!(": {}… [truncated]", &detail[..end]),
+        None => format!(": {detail}"),
+    }
+}
 
 /// Build the detail string for a non-success `response`: the status plus
 /// (capped) body — the forge's own reason for a create-PR/MR failure lives
@@ -2605,5 +2812,267 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "the short deadline must bound the wait"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // GraphQL envelope — plan C-005 / C-012's `grim rate` half
+    // -----------------------------------------------------------------
+
+    /// The contract's sharpest edge: GraphQL answers a partly-failed
+    /// mutation with `200 OK`, a populated `errors` array and whatever
+    /// `data` it managed to produce. Reading that as success is silent
+    /// data loss, so `errors` decides regardless of the status.
+    #[test]
+    fn a_populated_errors_array_is_a_hard_error_even_beside_data() {
+        let body = serde_json::json!({
+            "data": {"addUpvote": {"subject": {"upvoteCount": 41}}},
+            "errors": [{"message": "Could not resolve to a node"}],
+        });
+        let err = graphql_errors(&body).expect("a populated errors array must fail");
+        assert!(matches!(err, RateError::Graphql(_)), "{err}");
+        assert!(err.to_string().contains("Could not resolve to a node"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_or_empty_errors_array_is_not_an_error() {
+        assert!(graphql_errors(&serde_json::json!({"data": {"x": 1}})).is_none());
+        assert!(graphql_errors(&serde_json::json!({"data": {"x": 1}, "errors": []})).is_none());
+        assert!(graphql_errors(&serde_json::Value::Null).is_none());
+    }
+
+    /// A `NOT_FOUND` error type is the forge saying the vote subject is
+    /// gone, which the exit-code table separates from a refused mutation.
+    #[test]
+    fn a_not_found_graphql_error_is_distinguished_from_a_rejected_one() {
+        let gone = serde_json::json!({
+            "data": serde_json::Value::Null,
+            "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a Discussion"}],
+        });
+        assert!(matches!(graphql_errors(&gone), Some(RateError::NotFound(_))));
+    }
+
+    /// A **primary** rate limit arrives as `200` + `RATE_LIMITED`, so
+    /// `classify_graphql_status` — which handles 403 and 429 — never sees it.
+    ///
+    /// Left unclassified it exits 65 ("your index is wrong") for a transient
+    /// throttle, and a wrapper scripting `case $?` retries on 69 and gives up
+    /// on 65. The indexer's sibling implementation already classifies it;
+    /// this is what stops the two from disagreeing.
+    #[test]
+    fn a_200_carrying_a_rate_limit_is_unavailable_not_a_data_error() {
+        for body in [
+            serde_json::json!({
+                "data": serde_json::Value::Null,
+                "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded for user ID 1"}],
+            }),
+            // The same fact under `extensions.code`, which is where a
+            // spec-conformant server puts it.
+            serde_json::json!({
+                "errors": [{"extensions": {"code": "RATE_LIMITED"}, "message": "throttled"}],
+            }),
+        ] {
+            assert!(
+                matches!(graphql_errors(&body), Some(RateError::Unavailable(_))),
+                "a rate limit must be retryable (69), never a data error (65): {body}"
+            );
+        }
+    }
+
+    /// A `200` carrying `FORBIDDEN` is a refused credential (80), not a
+    /// malformed request (65) — the user must fix a token, not an index.
+    #[test]
+    fn a_200_carrying_forbidden_is_an_auth_failure() {
+        let body = serde_json::json!({
+            "errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}],
+        });
+        assert!(matches!(graphql_errors(&body), Some(RateError::Unauthorized(_))));
+    }
+
+    /// Anything else still falls through to the generic rejection, so the
+    /// classification above cannot silently swallow an unknown error type.
+    #[test]
+    fn an_unrecognised_graphql_error_type_stays_a_data_error() {
+        let body = serde_json::json!({
+            "errors": [{"type": "SOMETHING_NEW", "message": "unknown"}],
+        });
+        assert!(matches!(graphql_errors(&body), Some(RateError::Graphql(_))));
+    }
+
+    #[test]
+    fn a_403_carrying_a_rate_limit_is_unavailable_not_an_auth_failure() {
+        // GitHub answers a secondary rate limit with the same status it
+        // uses for a rejected credential; telling them apart keeps a
+        // throttled run at "retry later" rather than "fix your token".
+        let body = serde_json::json!({"message": "You have exceeded a secondary rate limit"});
+        assert!(matches!(
+            classify_graphql_status(reqwest::StatusCode::FORBIDDEN, false, &body),
+            RateError::Unavailable(_)
+        ));
+        assert!(
+            matches!(
+                classify_graphql_status(reqwest::StatusCode::FORBIDDEN, true, &serde_json::Value::Null),
+                RateError::Unavailable(_)
+            ),
+            "a Retry-After header alone is enough"
+        );
+    }
+
+    #[test]
+    fn graphql_statuses_map_to_their_contracted_classes() {
+        let empty = serde_json::Value::Null;
+        assert!(matches!(
+            classify_graphql_status(reqwest::StatusCode::UNAUTHORIZED, false, &empty),
+            RateError::Unauthorized(_)
+        ));
+        assert!(matches!(
+            classify_graphql_status(reqwest::StatusCode::FORBIDDEN, false, &empty),
+            RateError::Unauthorized(_)
+        ));
+        assert!(matches!(
+            classify_graphql_status(reqwest::StatusCode::NOT_FOUND, false, &empty),
+            RateError::NotFound(_)
+        ));
+        for status in [
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(
+                matches!(
+                    classify_graphql_status(status, false, &empty),
+                    RateError::Unavailable(_)
+                ),
+                "{status}"
+            );
+        }
+    }
+
+    /// The mutation header is the single `expose_secret()` site, and
+    /// `Plain` must hard-refuse rather than send a mutation bare.
+    #[test]
+    fn a_mutation_is_never_sent_unauthenticated_on_a_plain_host() {
+        let http = client().expect("client builds");
+        let token = secrecy::SecretString::from("ghp_x".to_string());
+        assert!(authorize_mutation(ForgeKind::Plain, &token, http.post("https://example.invalid")).is_err());
+        for kind in [ForgeKind::GitHub, ForgeKind::GitLab] {
+            assert!(authorize_mutation(kind, &token, http.post("https://example.invalid")).is_ok());
+        }
+    }
+
+    /// The vote ladder shares the announce ladder's host matching and
+    /// nothing else — in particular not `GRIM_ANNOUNCE_TOKEN`.
+    #[test]
+    fn ci_token_for_is_host_and_kind_matched_and_ignores_the_announce_token() {
+        let env = gitlab_ci_env("gitlab.example.com");
+        assert_eq!(
+            ci_token_for("gitlab.example.com", ForgeKind::GitLab, &env).as_deref(),
+            Some("glpat-x")
+        );
+        assert!(ci_token_for("gitlab.example.com", ForgeKind::GitHub, &env).is_none());
+        assert!(ci_token_for("other.example.com", ForgeKind::GitLab, &env).is_none());
+
+        let announce_only = CiEnv {
+            announce_token: Some("announce".to_string()),
+            ..CiEnv::default()
+        };
+        assert!(ci_token_for("github.com", ForgeKind::GitHub, &announce_only).is_none());
+    }
+
+    /// A one-shot HTTP server answering exactly one request with `status`
+    /// and `body`, returning the URL to point a client at.
+    ///
+    /// Plain HTTP on loopback: the test is about the envelope, and
+    /// [`graphql`] takes its endpoint verbatim, so no TLS is involved.
+    async fn one_shot(status: u16, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            // Read the request head so the client's write completes before
+            // the response is sent.
+            let mut buf = [0_u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+        });
+        format!("http://{addr}/graphql")
+    }
+
+    fn rate_ctx(endpoint: String) -> RateContext {
+        RateContext::new(
+            ForgeKind::GitHub,
+            endpoint,
+            secrecy::SecretString::from("ghp_x".to_string()),
+        )
+    }
+
+    /// The ordering clause, end to end: `errors` is inspected **before**
+    /// the status and before `data`, so a `200 OK` carrying a populated
+    /// `errors` array beside partial `data` is a hard error rather than a
+    /// silently truncated success.
+    #[tokio::test]
+    async fn graphql_fails_a_200_that_carries_errors() {
+        let url = one_shot(
+            200,
+            r#"{"data":{"addUpvote":{"subject":{"upvoteCount":41}}},"errors":[{"message":"boom"}]}"#,
+        )
+        .await;
+        let err = graphql(
+            &client().unwrap(),
+            &rate_ctx(url),
+            "mutation { x }",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("a 200 with errors must not read as success");
+        assert!(matches!(err, RateError::Graphql(_)), "{err}");
+        assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn graphql_returns_the_data_envelope_on_a_clean_200() {
+        let url = one_shot(200, r#"{"data":{"addUpvote":{"subject":{"upvoteCount":42}}}}"#).await;
+        let data = graphql(
+            &client().unwrap(),
+            &rate_ctx(url),
+            "mutation { x }",
+            serde_json::json!({}),
+        )
+        .await
+        .expect("a clean 200 succeeds");
+        assert_eq!(data["addUpvote"]["subject"]["upvoteCount"], 42);
+    }
+
+    #[tokio::test]
+    async fn graphql_maps_a_401_to_an_auth_failure() {
+        let url = one_shot(401, r#"{"message":"Bad credentials"}"#).await;
+        let err = graphql(
+            &client().unwrap(),
+            &rate_ctx(url),
+            "mutation { x }",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("401 must fail");
+        assert!(matches!(err, RateError::Unauthorized(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn graphql_treats_a_missing_data_envelope_as_a_graphql_error() {
+        let url = one_shot(200, r#"{"data":null}"#).await;
+        let err = graphql(
+            &client().unwrap(),
+            &rate_ctx(url),
+            "mutation { x }",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("no data envelope must fail");
+        assert!(matches!(err, RateError::Graphql(_)), "{err}");
     }
 }

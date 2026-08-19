@@ -24,6 +24,7 @@ pub mod login;
 pub mod logout;
 pub mod mcp;
 pub mod publish;
+pub mod rate;
 pub mod release;
 pub mod remove;
 pub mod schema;

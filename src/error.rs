@@ -13,6 +13,7 @@
 use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
 use crate::catalog::index_announce::AnnounceError;
+use crate::catalog::rating_provider::RateError;
 use crate::cli::exit_code::ExitCode;
 use crate::cli::printer::StdoutPipeClosed;
 use crate::command::command_error::CommandError;
@@ -79,6 +80,9 @@ pub enum Error {
 
     #[error(transparent)]
     Announce(#[from] AnnounceError),
+
+    #[error(transparent)]
+    Rate(#[from] RateError),
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -208,6 +212,24 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 // GitHub API); a local I/O fault classifies as I/O. A failed
                 // required fork is a remote-resource fault too — the packages
                 // ARE published; only the cross-repo announce needs a retry.
+                // `grim rate` writes to a forge, so its taxonomy spans the
+                // full range: a flag conflict is usage, an unsupported
+                // provider or a GraphQL error is data, a throttled forge is
+                // unavailable, a missing subject is not-found, a rejected
+                // credential is auth, and `--offline` is deliberate policy.
+                Error::Rate(re) => Classification::new(match re {
+                    RateError::MalformedRef { .. } | RateError::Usage(_) => ExitCode::UsageError,
+                    RateError::NotRated { .. }
+                    | RateError::NoProvider { .. }
+                    | RateError::UnsupportedProvider(_)
+                    | RateError::Graphql(_) => ExitCode::DataError,
+                    RateError::Unavailable(_) => ExitCode::Unavailable,
+                    RateError::NoSuchRef { .. } | RateError::NotFound(_) => ExitCode::NotFound,
+                    RateError::TokenHostMismatch { .. } | RateError::NoCredential(_) | RateError::Unauthorized(_) => {
+                        ExitCode::AuthError
+                    }
+                    RateError::Offline => ExitCode::OfflineBlocked,
+                }),
                 Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
                     AnnounceError::Git { .. }
