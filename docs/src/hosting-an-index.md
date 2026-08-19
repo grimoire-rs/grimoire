@@ -290,6 +290,7 @@ optional — a missing file renders the defaults. The ones worth knowing:
 | `footerNote`, `attribution` | Footer sentence, and the "built with Grimoire" line |
 | `footerLinks` | Extra footer links — `[{ "label": "privacy", "href": "https://…" }]`. Absolute URLs only, none by default. Where the pages behind them are required at all depends on where you are and what the index is for |
 | `customCss` | A CSS file inlined after the default tokens — it wins over them |
+| `ratings` | Turns on [artifact ratings](./ratings.md) — `{provider, container, createBudget, lockThreads}`. Absent means ratings are off, which is the default. Unlike every other key here it is not cosmetic: it also generates a CI job, so re-render the pipeline after changing it. See [Collect Ratings](#ratings) |
 
 Colors, spacing, and the kind badges are CSS custom properties defined
 for light **and** dark, so `customCss` overriding three tokens restyles
@@ -314,6 +315,54 @@ every build, so the deployed site stays current without a scheduled job.
 It is also the only step that goes online — set `"enrich": false` in the
 [`ci` block](#upgrading) and re-render for a pointers-only site that never
 leaves the runner.
+
+## Collect Ratings {#ratings}
+
+A catalog of two hundred packages with no signal at all is a catalog
+nobody browses twice. An index can collect one without hosting anything:
+add a `ratings` block, and the forge your index already lives on becomes
+the vote database — one discussion thread (or work item) per package, and
+the vote is the forge's own upvote or emoji reaction.
+
+```json
+{
+  "ratings": {
+    "provider": "github",
+    "container": "Ratings",
+    "createBudget": 400,
+    "lockThreads": true
+  }
+}
+```
+
+| Key | Effect |
+|---|---|
+| `provider` | `github` or `gitlab`. Required, no default — it selects both the tally's API and the mutation `grim rate` issues |
+| `container` | Where threads live: a GitHub Discussions **category** name, or a GitLab **work item type** (`Issue` or `Task`). Required, no default — a default correct on one forge is wrong on the other |
+| `createBudget` | Threads created per run. Default `400`, under GitHub's 500-per-hour content-creation cap |
+| `lockThreads` | Lock each thread on creation: votes still count, replies are refused. Default `true` |
+
+The block is also read by the CI generator, so re-render after adding it:
+
+```console
+$ npm run ci
+```
+
+That renders a **`ratings` job** — `npx --no grim-indexer ratings`, run
+ahead of the build, writing `.stats.json` into the repository root — plus
+an hourly schedule to run it on and a seed step in the build that carries
+the previously published counts forward when a tally fails or is skipped.
+The build joins `.stats.json` onto the catalog and publishes it as
+`stats.json` beside `all.json`, where grim, the site and the VS Code
+extension read it.
+
+Two values outside the block become **required** once ratings are on, both
+enforced with exit `65` before any forge request: `site` (the tally seeds
+itself from `<site>/stats.json`) and at least one `index-policy.json`
+`trustedBots[]` entry carrying a numeric `id`. The per-forge setup — token
+type and scope, GitHub Enterprise Server, GitLab's schedule and resource
+group, and how to roll the whole thing back — is [Artifact
+Ratings](./ratings.md).
 
 ## Changing the CI {#upgrading}
 

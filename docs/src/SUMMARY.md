@@ -11,6 +11,7 @@
 - [Authentication](./authentication.md)
 - [The Package Index](./package-index.md)
 - [Host Your Own Index](./hosting-an-index.md)
+- [Artifact Ratings](./ratings.md)
 - [Publishing Skills and Rules](./publishing.md)
 - [Publishing from CI](./ci.md)
 - [Self-Hosted GitLab Setup](./self-hosted-gitlab.md)

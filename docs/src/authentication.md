@@ -29,6 +29,21 @@ form — so a credential stored by `docker login` resolves the same way under
 Credentials can also come from the environment for `GRIM_INSECURE_REGISTRIES`
 and other CI setups; see [Configuration](./configuration.md#environment-variables).
 
+### Voting uses a separate, narrower ladder {#resolving-rate}
+
+Everything on this page concerns **registry** credentials. [`grim
+rate`][commands-rate] does not use them, and does not reuse the publishing
+or [announce][announcing] token either: a vote talks to a *forge*, not to a
+registry, and needs a far smaller grant than pushing an artifact does. A
+user who exported a publish token must not find it casting public votes.
+
+Its own ladder is `GRIM_RATE_TOKEN`, then a host-matched CI token, then the
+forge CLI's stored credential (`gh auth token` / `glab auth token`), then a
+refusal with exit `80` naming the ladder. A credential can also be piped in
+with `--token-stdin`, which skips the ladder entirely. The full contract,
+including how a caller declares which host its piped credential belongs to,
+is in [`grim rate`][commands-rate] and [Artifact Ratings][ratings].
+
 ## grim login {#login}
 
 `grim login [registry]` authenticates to a registry and stores the
@@ -156,6 +171,9 @@ stored.
 
 <!-- internal -->
 [registries-config]: ./configuration.md#multiple-registries
+[commands-rate]: ./commands.md#rate
+[ratings]: ./ratings.md
+[announcing]: ./package-index.md#announcing
 
 <!-- external -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

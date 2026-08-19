@@ -85,11 +85,12 @@ provisional; the coupling is intended (declared below).
 | `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
-| `src/install/vendor_*.rs`, `src/oci/mcp.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
+| `src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
 | `docs/**` | [docs-style.md](./rules/docs-style.md) |
+| `docs/src/ratings.md` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) (carries the ratings feature's own upstream forge-version claims) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
 | `.github/workflows/**`, `.github/actions/**`, `.github/dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
