@@ -30,9 +30,9 @@
 
 use clap::Args;
 
-use crate::api::search_report::{SearchEntry, SearchReport, SearchSource};
+use crate::api::search_report::{SearchEntry, SearchRating, SearchReport, SearchSource};
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
-use crate::catalog::{BadgeContext, SearchQuery};
+use crate::catalog::{BadgeContext, SearchQuery, SortKey, SortMode};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
@@ -59,6 +59,16 @@ pub struct SearchArgs {
     /// `include`/`exclude` browse filter — `grim context` shows the active
     /// patterns.
     pub query: Option<String>,
+
+    /// Order the results: `name` (ascending, case-insensitive), `updated`
+    /// (newest first, undated last) or `rating` (most upvotes first, then
+    /// newest, unrated last). Unrated and undated artifacts sort into a
+    /// bucket of their own at the end — never as zero votes or epoch 0.
+    /// Given together with a query this replaces relevance ranking; omitted,
+    /// results keep today's order (relevance when queried, registry order
+    /// otherwise).
+    #[arg(long, value_name = "ORDER")]
+    pub sort: Option<crate::catalog::SortMode>,
 
     /// Force a catalog rebuild even if the cache is fresh.
     #[arg(long)]
@@ -184,7 +194,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         .map(|(source, r)| (r.score(&parsed).unwrap_or(i64::MIN), (source, r)))
         .collect();
 
-    rank_by_relevance(&mut scored, &parsed);
+    order_results(&mut scored, args.sort, &parsed);
 
     let entries: Vec<SearchEntry> = scored
         .into_iter()
@@ -201,6 +211,8 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             version: r.version,
             deprecated: r.deprecated,
             replaced_by: r.replaced_by,
+            // Absence is *unrated*, never `up: 0` — the JSON field stays null.
+            rating: r.rating.map(|x| SearchRating { up: x.up, url: x.url }),
             status: r.badge,
         })
         .collect();
@@ -248,6 +260,38 @@ fn rank_by_relevance<T>(scored: &mut [(i64, T)], query: &SearchQuery) {
         return;
     }
     scored.sort_by(|(a, _), (b, _)| b.cmp(a));
+}
+
+/// Order the flattened rows: an explicit `--sort` mode, else relevance.
+///
+/// The one dispatch, extracted so the *choice* is unit-testable and not only
+/// the two orderings it chooses between. `--sort` **replaces** relevance
+/// rather than composing with it (C-017): composing would let the relevance
+/// score dominate, so `--sort rating` would appear not to sort at all.
+/// Absent the flag nothing about today's ordering changes, which is the
+/// Principle 9 guarantee this function carries.
+fn order_results(
+    scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>,
+    sort: Option<SortMode>,
+    query: &SearchQuery,
+) {
+    match sort {
+        Some(mode) => sort_by_mode(scored, mode),
+        None => rank_by_relevance(scored, query),
+    }
+}
+
+/// Sort the flattened rows by an explicit `--sort` mode, in place.
+///
+/// Delegates the ordering itself to [`crate::catalog::browse_sort`], the one
+/// comparator `grim search`, `grim tui` and the package index's own catalog
+/// page share — three surfaces disagreeing about what "sorted by rating"
+/// means is exactly what a shared comparator prevents. Total in every mode,
+/// so the rendered order does not depend on `sort_by`'s stability.
+fn sort_by_mode(scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>, mode: SortMode) {
+    crate::catalog::browse_sort::sort_rows(scored, mode, |(_, (_, r))| {
+        SortKey::new(r.rating.as_ref().map(|x| x.up), r.created.as_deref(), &r.repo())
+    });
 }
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
@@ -430,6 +474,7 @@ mod tests {
     fn args() -> SearchArgs {
         SearchArgs {
             query: None,
+            sort: None,
             refresh: false,
             show_deprecated: false,
             registry: Vec::new(),
@@ -553,6 +598,162 @@ mod tests {
         rank_by_relevance(&mut scored, &SearchQuery::parse("   "));
         let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
         assert_eq!(order, vec!["z/last", "a/first"]);
+    }
+
+    /// One scored row: a relevance score plus a rated/dated catalog row.
+    /// Everything the sort does not read is left at its resting value.
+    fn scored_row(
+        score: i64,
+        registry: &str,
+        repository: &str,
+        rating: Option<u32>,
+        created: Option<&str>,
+    ) -> (i64, (SearchSource, crate::catalog::CatalogRow)) {
+        let row = crate::catalog::CatalogRow {
+            kind: Some("skill".to_string()),
+            registry: registry.to_string(),
+            repository: repository.to_string(),
+            summary: None,
+            description: None,
+            keywords: Vec::new(),
+            repository_url: None,
+            revision: None,
+            created: created.map(str::to_string),
+            deprecated: None,
+            replaced_by: None,
+            oci: crate::catalog::OciMeta::default(),
+            latest_tag: None,
+            version: None,
+            rating: rating.map(|up| crate::catalog::registry_catalog::RatingSummary {
+                up,
+                target: "t".to_string(),
+                url: "https://example/1".to_string(),
+                provider: None,
+            }),
+            badge: StatusBadge::NotInstalled,
+        };
+        let source = SearchSource {
+            alias: None,
+            locator: registry.to_string(),
+        };
+        (score, (source, row))
+    }
+
+    /// The repository order the command's real dispatch produces for a given
+    /// `--sort` value and query — the same call `run` makes, so a dispatch
+    /// that stopped honouring the flag fails here and not only end-to-end.
+    fn ordered_repos(
+        mut scored: Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>,
+        sort: Option<SortMode>,
+        query: &str,
+    ) -> Vec<String> {
+        order_results(&mut scored, sort, &SearchQuery::parse(query));
+        scored.into_iter().map(|(_, (_, r))| r.repo()).collect()
+    }
+
+    #[test]
+    fn sort_rating_orders_the_whole_table_with_unrated_last_s010() {
+        // S-010 at the command layer: the flag's three-key order reaches the
+        // rendered table, and an unrated row lands in its own bucket at the
+        // bottom rather than tying with a genuine `up: 0`. The WHOLE order is
+        // asserted, including the two rows that tie on upvotes — a comparator
+        // that returned `Equal` there would pass a head-of-list assertion.
+        let rows = vec![
+            scored_row(0, "ghcr.io", "acme/unrated", None, Some("2026-06-01T00:00:00Z")),
+            scored_row(0, "ghcr.io", "acme/zero", Some(0), None),
+            scored_row(0, "ghcr.io", "acme/old-five", Some(5), Some("2020-01-01T00:00:00Z")),
+            scored_row(0, "ghcr.io", "acme/new-five", Some(5), Some("2026-01-01T00:00:00Z")),
+        ];
+        assert_eq!(
+            ordered_repos(rows, Some(SortMode::Rating), ""),
+            vec![
+                "ghcr.io/acme/new-five",
+                "ghcr.io/acme/old-five",
+                "ghcr.io/acme/zero",
+                // Never folded to 0 — it would have sorted level with `zero`.
+                "ghcr.io/acme/unrated",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_overrides_relevance_on_a_non_empty_query_s011() {
+        // S-011: with a query present, `--sort` REPLACES the relevance
+        // ranking. The scores here are deliberately the exact inverse of the
+        // rating order, so a comparator that composed the two — or that ran
+        // after `rank_by_relevance` and relied on `sort_by`'s stability —
+        // would hand back the relevance order instead.
+        let rows = || {
+            vec![
+                scored_row(90, "ghcr.io", "acme/best-match", Some(1), None),
+                scored_row(10, "ghcr.io", "acme/most-upvotes", Some(99), None),
+            ]
+        };
+        assert_eq!(
+            ordered_repos(rows(), Some(SortMode::Rating), "acme"),
+            vec!["ghcr.io/acme/most-upvotes", "ghcr.io/acme/best-match"],
+            "--sort rating must ignore the relevance score entirely"
+        );
+
+        // …and the same input, same query, through the same dispatch without
+        // the flag still ranks by score — so the override is the flag's doing
+        // and not a regression, and neither assertion can pass by agreeing
+        // with the other.
+        assert_eq!(
+            ordered_repos(rows(), None, "acme"),
+            vec!["ghcr.io/acme/best-match", "ghcr.io/acme/most-upvotes"]
+        );
+    }
+
+    #[test]
+    fn absent_sort_leaves_relevance_ranking_unchanged_principle_9() {
+        // Principle 9: `--sort` is a new optional flag, so the flagless run
+        // must be exactly what it is today — relevance descending under a
+        // query, incoming registry order without one. Both arms run through
+        // `order_results`, the dispatch `run` itself calls.
+        let queried = vec![
+            scored_row(10, "reg-a", "weak", None, None),
+            scored_row(90, "reg-b", "strong", None, None),
+        ];
+        let browse = vec![
+            scored_row(0, "reg-z", "last", Some(1), None),
+            scored_row(0, "reg-a", "first", Some(99), None),
+        ];
+        for (rows, query, expected) in [
+            (queried, "review", vec!["reg-b/strong", "reg-a/weak"]),
+            // An empty query keeps the browse listing byte-for-byte as the
+            // registries declared it — the rating would have reordered it.
+            (browse, "   ", vec!["reg-z/last", "reg-a/first"]),
+        ] {
+            assert_eq!(
+                ordered_repos(rows, None, query),
+                expected,
+                "query {query:?} must be untouched by the new flag"
+            );
+        }
+    }
+
+    #[test]
+    fn search_help_documents_the_three_sort_orders() {
+        // The flag's accepted values and its relevance-override behaviour are
+        // the user-visible half of C-017; a user who cannot learn from
+        // `--help` that `--sort` replaces relevance will read a rating sort
+        // that "does nothing" as a bug.
+        let collapsed = search_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        for value in [
+            "- name: Leaf name ascending, case-insensitive",
+            "- updated: Publishing date descending; undated last",
+            "- rating: Upvotes descending, then date descending; unrated last",
+        ] {
+            assert!(
+                collapsed.contains(value),
+                "--sort must offer {value:?} as a documented order; got:\n{collapsed}"
+            );
+        }
+        assert!(
+            collapsed.contains("Given together with a query this replaces relevance ranking"),
+            "--sort must say it overrides relevance; got:\n{collapsed}"
+        );
     }
 
     #[test]
