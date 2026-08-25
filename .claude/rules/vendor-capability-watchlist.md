@@ -30,6 +30,49 @@ regression or a stale doc (it happened: `xhigh` reasoning-effort, Codex
    together), then move/update the row here in the same commit.
 3. Compatibility doctrine applies (AGENTS.md principle 9): additive-only,
    never remove accepted literals, layout moves ship migration + reaper.
+4. Upstream did **not** ship it and someone wants grim to close the gap
+   anyway → classify the request first (next section). The class decides
+   whether it is in scope at all; the tier decides whether it is in scope
+   for that client.
+
+## Compensation classes and support tiers
+
+`KindSupport` says what a client can host. This says how hard grim works to
+close a gap it cannot. Decision recorded in
+[adr_vendor_support_tiers.md](../../.agents/adr/adr_vendor_support_tiers.md);
+the consumer-facing half is `docs/src/clients.md#compensation`.
+
+> **grim renders artifacts. grim does not run at the client's runtime.**
+
+| Class | What it is | Policy |
+|---|---|---|
+| **1 — repair** | grim making its **own** output behave as authored | Always in scope, every client, every tier. Not a feature, sets no precedent. |
+| **2 — compensating render** | A static artifact the vendor already documents and interprets: a config key, an extra generated file, adjusted body text. Deterministic, removed on uninstall, inert if grim vanishes. | Tier 1 only. |
+| **3 — runtime code** | Anything grim must keep alive against someone else's API: plugin, extension, wrapper process, injected script. | **Never.** Any client, any tier. |
+
+Class 3 is refused on maintenance shape, not difficulty. The test: *can a
+client release break grim's contribution without grim being touched, and
+does it break silently?* A plugin fails both.
+
+Class 1 reads like scope creep and is not. grim wrote the files, so grim
+owns their behavior — see grimoire-rs/grimoire#102, where grim's own
+support-directory copy auto-loads as unconditional Claude context.
+
+**Tier 1 (compensating render in scope): `claude`, `codex`, `opencode`,
+`copilot`.** Every other client is Tier 2 — faithful render, gaps declined
+or warned per `KindSupport`, never compensated.
+
+Tier 1 costs a `docs/src/clients.md` matrix row, a dated row below, and
+re-verification when the vendor moves; a client is promoted when someone
+commits to paying that. Tier is a statement about maintainer capacity, not
+about the client — Cursor and Kiro are Tier 2 with `Native` scoped rules,
+fuller support than Tier 1 OpenCode.
+
+**Adding a vendor?** Assign its tier here in the same commit as its matrix
+row. **Adding a grimoire frontmatter field to express intent?** Only when
+two artifacts of the same kind want different answers *and* the author is
+the one who knows which — a field whose value never varies only rots (ADR
+§4).
 
 ## Watchlist
 

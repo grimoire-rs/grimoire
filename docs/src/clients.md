@@ -76,6 +76,38 @@ writing a directory for every client it knows about, an install with no
 `agents` alone. If the declared set holds nothing it can install, the command
 exits `78` and names both ways to select a client.
 
+## What grim will and will not do about a gap {#compensation}
+
+The matrix above says what each client can host. This section says what grim
+does when a client cannot host something — because "the client cannot do this"
+is not, by itself, an answer to whether grim should make it work anyway.
+
+**grim renders artifacts. grim does not run inside your client.** Three
+things follow, and they hold for every client on this page:
+
+- **grim always repairs its own output.** If grim wrote a file, grim owns how
+  that file behaves. Installing a path-scoped rule and getting unconditional
+  context instead is grim's bug, not a client limitation, and it gets fixed —
+  including by registering an entry in a client's own settings file where that
+  is what the client reads.
+- **grim may render around a gap.** Where a client cannot express something an
+  artifact declares, grim can sometimes say it a different way — writing the
+  lost scope into the rule text, or generating an extra file the client already
+  knows how to read. They are ordinary generated files: deterministic,
+  removed when you uninstall, and inert if grim is never run again.
+- **grim will never install a plugin, extension, or any other runtime code
+  into your client.** Several gaps on this page could be closed that way. None
+  will be. Code loaded into a client breaks on that client's schedule, not
+  grim's, and it breaks *quietly* — your rules stop loading, nothing errors,
+  and the agent just gets worse. A declined cell that you can see beats a shim
+  that silently stops working.
+
+Where a gap is not closed, the [Known gaps](#known-gaps) entry below says so
+and points at the upstream issue. Support is only ever added, never withdrawn
+(see [Stability and Versioning](./stability.md)), so a decline today is a
+decline that can become support later without breaking anything you have
+installed.
+
 ## Known gaps {#known-gaps}
 
 Every ◐ and ✗ above traces to a specific, verified upstream limitation. The
