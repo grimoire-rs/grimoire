@@ -139,6 +139,16 @@ Tier 2 yet have `Native` scoped rules — fuller native support than Tier 1
 OpenCode. Tier governs compensation for what a client *lacks*, so a client that
 lacks little needs little.
 
+One carve-out, taken from the price rather than from the principle: a class-2
+render derived **solely from the artifact's own frontmatter** — depending on no
+upstream key, surface or version — is not tier-gated, because there is nothing
+upstream to re-verify and so nothing for Tier 1 to buy. The `paths:` prose
+notice (grimoire-rs/grimoire#103) is exactly that: it restates grim's own
+metadata as body text and reads the same whatever the client ships next. A
+class-2 render that *tracks* a vendor surface — a config key, a generated file
+in the client's own format — remains tier-gated, because tracking is the cost
+the tier exists to bound.
+
 ### 3. Publication split: the boundary is public, the tier list is not
 
 `docs/src/clients.md` gains a `## What grim will and will not do
@@ -236,8 +246,9 @@ capacity into contract, D changes nothing at decision time.
 ### Consequences
 
 **Positive:**
-- grimoire-rs/grimoire#103 resolves by lookup: OpenCode is Tier 1, prose render
-  is class 2, in scope.
+- grimoire-rs/grimoire#103 resolves by lookup: prose render is class 2, and
+  frontmatter-only class-2 renders are not tier-gated, so it lands for both
+  `Degraded`-scoping clients — Tier 1 OpenCode and Tier 2 Junie.
 - grimoire-rs/grimoire#102 is class 1 and was never gated on tier at all.
 - grimoire-rs/grimoire#100's plugin proposal has a written, citable refusal
   reason that is not "we don't want to".
@@ -271,8 +282,11 @@ capacity into contract, D changes nothing at decision time.
 
 ## Follow-ups
 
-- grimoire-rs/grimoire#103 — implement the class-2 prose render for Degraded
-  rule scoping (OpenCode, Kiro).
+- ~~grimoire-rs/grimoire#103 — implement the class-2 prose render for Degraded
+  rule scoping.~~ Landed for OpenCode and Junie, the two `Degraded` clients.
+  Kiro, named here in the first draft, is not one: it is `Native`, writes
+  correct `fileMatch` scoping, and its warning is about upstream inertness
+  (kirodotdev/Kiro#9176), which self-heals without a grim change.
 - Re-check the Tier 1 set when usage telemetry lands
   (grimoire-rs/grimoire#83) — the first evidence-based promotion/demotion
   input grim will have.
@@ -284,3 +298,4 @@ capacity into contract, D changes nothing at decision time.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-08-25 | maintainer | Initial draft |
+| 2026-08-25 | maintainer | Frontmatter-only class-2 renders are not tier-gated (#103); Kiro removed from the #103 follow-up — it is `Native`, not `Degraded` |
