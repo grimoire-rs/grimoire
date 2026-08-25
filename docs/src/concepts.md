@@ -48,6 +48,14 @@ A rule with no support directory is unchanged — it remains the single
 `my-rule.md` file. See [Publishing](./publishing.md#rule-support-dir) for how
 the directory is packed.
 
+One client needs a little help here. [Claude Code][claude-memory] reads
+`.claude/rules/` recursively and treats every unscoped file it finds as
+always-on context, which would load the whole support tree into every session
+instead of the one the index sends it to. So when grim installs a support-dir
+rule for Claude it also registers the directory in `claudeMdExcludes` — the
+files stay on disk and stay readable, only the automatic load goes away. See
+[Claude support-directory exclusion](./vendor-metadata.md#claude-md-excludes).
+
 ## Artifacts as OCI content
 
 Under the hood every skill, rule, or agent is packed into an OCI artifact and
@@ -237,6 +245,7 @@ described in [Configuration](./configuration.md).
 [hub]: https://hub.docker.com
 [dist]: https://distribution.github.io/distribution/
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
+[claude-memory]: https://code.claude.com/docs/en/memory
 [opencode]: https://opencode.ai
 [copilot]: https://github.com/features/copilot
 [codex]: https://developers.openai.com/codex

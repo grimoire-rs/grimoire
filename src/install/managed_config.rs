@@ -34,6 +34,22 @@ use crate::store::atomic_write;
 use super::json_config::with_path;
 use super::json_splice::{self, Splice};
 
+/// `path` rendered as a forward-slash glob string, without a trailing
+/// separator.
+///
+/// Both vendors register a **glob**, not a path, and both clients are Node
+/// tools whose glob engines read `\\` as an escape character rather than a
+/// separator — so a Windows root must still emit `/`. Claude additionally
+/// matches the element it wrote against the element it reads back, so those
+/// two spellings must be byte-identical: derived separately, a drift leaves
+/// an exclusion no uninstall can ever recognize, let alone remove.
+pub fn glob_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// What a sync did to the vendor config.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.

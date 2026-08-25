@@ -2428,7 +2428,13 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     };
 
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    // Snapshot before the mutation loop: the vendor config sync below needs
+    // the outputs these deletes remove, and the records are gone by then.
+    let before = install_state.clone();
     let mut involved_clients: Vec<crate::install::client_target::ClientTarget> = Vec::new();
+    // A mid-loop failure is held here rather than returned: the sync below has
+    // to run over what did get removed before the error surfaces.
+    let mut failure: Option<anyhow::Error> = None;
     for (target_kind, target_name) in &targets {
         for client in install_state
             .get(*target_kind, target_name)
@@ -2444,31 +2450,50 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
                 involved_clients.push(client);
             }
         }
-        let result =
-            crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots, false)
-                .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
-        if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+        match crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots, false) {
             // Persist per member, not once after the loop: a later member's
-            // failure returns early, and a batch-end persist would then throw
+            // failure ends the loop, and a batch-end persist would then throw
             // away the removals already applied — leaving records pointing at
             // files that are gone from disk (status reports them installed,
             // re-install refuses them as modified). The single `persist` seam
             // handles project-scope dir creation, the atomic write, and the
             // conditional legacy-file reap (including the lossy-migration
             // guard that was previously missing here).
-            install_state
-                .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
-                .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+            Ok(result) if result.outcome == crate::install::uninstall::UninstallOutcome::Removed => {
+                if let Err(e) = install_state.persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+                {
+                    failure = Some(anyhow::Error::new(e).context("install-state persist failed"));
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                failure = Some(anyhow::anyhow!("uninstall failed: {e}"));
+                break;
+            }
         }
     }
     // Converge vendor-owned config for every client the removed record
     // carried, mirroring `command::uninstall`. The files and install state are
     // already gone/persisted, so a config-sync failure is warn-only — the
     // delete completed, never a hard failure after the primary action.
+    //
+    // Runs even when the loop above broke out: the members already removed are
+    // persisted, and the removal side of a vendor sync has no convergence
+    // (nothing re-checks a missed deregistration later, and a re-run finds
+    // nothing retired), so returning the error first would strand their
+    // managed config entries permanently.
+    let retired = crate::install::install_state::retired_outputs(&before, &install_state);
     for client in involved_clients {
-        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+        if let Err(e) = client
+            .vendor()
+            .sync_config(&install_state, &ctx.workspace, ctx.scope, &retired)
+        {
             tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
         }
+    }
+    if let Some(e) = failure {
+        return Err(e);
     }
 
     // Undeclare from the config + lock through the `grim uninstall` seam
@@ -2513,6 +2538,9 @@ fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()>
     let _guard = config_guard(ctx)?;
 
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    // Snapshot before the mutation: the sync below needs the outputs this
+    // delete removes, and the record is gone by then.
+    let before = install_state.clone();
     // The clients whose vendor config must be re-synced after the record drops
     // (captured before the record is removed).
     let involved_clients: Vec<ClientTarget> = install_state
@@ -2532,8 +2560,12 @@ fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()>
             .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
             .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
     }
+    let retired = crate::install::install_state::retired_outputs(&before, &install_state);
     for client in involved_clients {
-        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+        if let Err(e) = client
+            .vendor()
+            .sync_config(&install_state, &ctx.workspace, ctx.scope, &retired)
+        {
             tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
         }
     }
@@ -3515,6 +3547,9 @@ async fn perform_member_uninstall(
     let kept = bundle_provides_files(ctx, member_kind, &name);
     if !kept {
         let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+        // Snapshot before the mutation: the sync below needs the outputs this
+        // delete removes, and the record is gone by then.
+        let before = install_state.clone();
         let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
             .get(member_kind, &name)
             .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
@@ -3526,8 +3561,12 @@ async fn perform_member_uninstall(
                 .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
                 .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
         }
+        let retired = crate::install::install_state::retired_outputs(&before, &install_state);
         for client in involved_clients {
-            if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+            if let Err(e) = client
+                .vendor()
+                .sync_config(&install_state, &ctx.workspace, ctx.scope, &retired)
+            {
                 tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
             }
         }

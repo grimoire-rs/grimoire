@@ -521,6 +521,60 @@ through the span-preserving splice engine: only the bytes of the one
 managed element change, so key order, formatting, and JSONC comments all
 survive.
 
+## Claude support-directory exclusion {#claude-md-excludes}
+
+A rule may ship a [sibling support directory](./concepts.md#rule-support-dir),
+and grim installs it beside the index so the index's relative links resolve.
+For [Claude Code][claude-memory-docs] that lands the depth files inside
+`.claude/rules/`, which Claude discovers **recursively** — and a file without
+`paths:` frontmatter is loaded into every session with the same priority as
+`CLAUDE.md`. The material the index is meant to *route to* would arrive
+unconditionally, in every session, forever.
+
+No frontmatter fixes that: no path glob expresses "only when the index sends
+you", which is exactly what a support directory means. So grim manages one
+`claudeMdExcludes` element per support-dir rule — added when the rule
+installs, removed when grim uninstalls it (or a new version of it stops
+shipping a support directory). grim only ever removes an element it wrote
+itself, so your own exclusions in the same `settings.json` are left alone —
+with one accepted exception: an element you hand-wrote in grim's exact
+spelling is indistinguishable from grim's own, so grim adopts it and removes
+it when that rule is uninstalled. A retired rule whose support directory is
+still on disk keeps its element either way.
+
+Exclusion suppresses **auto-load only**. Every file stays on disk and stays
+readable, so the index keeps routing to its depth and its relative links keep
+working. That is the behaviour the rule was authored for; only the
+unconditional load goes away.
+
+The element is per rule, never a blanket `rules/*/**` — organizing your own
+rules into subdirectories is documented Claude behavior and keeps working.
+
+For a **project-scope** install, grim edits `<workspace>/.claude/settings.json`
+and writes the relative glob `**/.claude/rules/<name>/**`. The leading `**/`
+is deliberate: `settings.json` is committed, so one file serves every git
+worktree of the repository, and an absolute path baked for one worktree would
+not match the others.
+
+For a **global-scope** install, grim edits `settings.json` in the Claude
+config root (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) and writes an absolute
+glob rooted there. Claude matches exclusion patterns against absolute paths,
+and a per-machine file needs no portability.
+
+Config editing is conservative, exactly as for the [OpenCode
+registration](#opencode-registration): a `settings.json` that does not parse
+is never rewritten — grim returns a sync error instead — and a file that
+does parse is edited through the span-preserving splice engine, so your
+`permissions`, `hooks`, key order and formatting all survive untouched. If
+you already excluded the directory by hand using the same spelling, grim
+finds it present and leaves it alone.
+
+At global scope, when neither `$CLAUDE_CONFIG_DIR` nor `$HOME` resolves,
+grim skips this sync entirely instead of falling back to a workspace-local
+`settings.json` — an absolute glob rooted in one machine's Claude config
+would be meaningless glued into a repository, so grim writes nothing rather
+than something wrong.
+
 ## Drift detection for rendered files {#drift}
 
 A rendered `SKILL.md` and a transformed rule are both recorded as

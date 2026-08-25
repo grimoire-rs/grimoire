@@ -10,6 +10,7 @@
 //! installed where; [`installer`] coordinates the per-artifact pass with
 //! the local-modification refusal.
 
+pub mod claude_config;
 pub mod client_target;
 pub mod content_hash;
 pub mod expected_outputs;
@@ -60,8 +61,6 @@ pub use install_error::{InstallError, InstallErrorKind};
 pub use install_state::{InstallRecord, InstallState};
 #[allow(unused_imports)]
 pub use installer::{ArtifactInstall, InstallIntent, InstallOutcome, install_all, install_all_with_progress};
-#[allow(unused_imports)]
-pub use managed_config::{ArraySync, sync_managed_element};
 #[allow(unused_imports)]
 pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 #[allow(unused_imports)]

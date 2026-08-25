@@ -17,6 +17,7 @@ use crate::config::scope::ConfigScope;
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
+use super::claude_config;
 use super::render::{self, RenderError, RenderedDoc};
 use super::vendor::{FieldType, KnownField, Vendor, env_dir, home_dir};
 
@@ -219,7 +220,7 @@ impl Vendor for ClaudeVendor {
     }
 
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        scope_root(workspace, scope).join("rules").join(format!("{name}.md"))
+        rules_dir(&scope_root(workspace, scope)).join(format!("{name}.md"))
     }
 
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
@@ -238,6 +239,20 @@ impl Vendor for ClaudeVendor {
                 Some(user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir())?.join(".claude.json"))
             }
         }
+    }
+
+    /// Register/deregister the `claudeMdExcludes` entry for every rule
+    /// that installed a support directory — grim's own copy of that tree
+    /// into `rules/` would otherwise auto-load as unconditional context
+    /// (grimoire-rs/grimoire#102). See [`claude_config`].
+    fn sync_config(
+        &self,
+        state: &super::install_state::InstallState,
+        workspace: &Path,
+        scope: ConfigScope,
+        retired: &[super::install_state::ClientOutput],
+    ) -> std::io::Result<()> {
+        claude_config::sync_for_state(state, workspace, scope, retired)
     }
 
     fn mcp_entry(
@@ -331,13 +346,31 @@ impl Vendor for ClaudeVendor {
 /// native user-level config root Claude Code actually discovers (falling
 /// back to the workspace layout when neither `$CLAUDE_CONFIG_DIR` nor
 /// `$HOME` resolves).
-fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
+pub(crate) fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".claude"),
         ConfigScope::Global => {
             global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).unwrap_or_else(|| workspace.join(".claude"))
         }
     }
+}
+
+/// The `rules/` directory under an already-resolved Claude layout `root`.
+///
+/// The one place that segment is spelled. [`claude_config`] names the very
+/// same directory inside every `claudeMdExcludes` element it writes, and
+/// probes it once more to *decline* removing the exclusion of a support tree
+/// still on disk. So a segment move reaching only one of the two makes every
+/// element written before the move **unremovable** — removal recomputes the
+/// spelling and matches it exactly, and the suppressor would then be probing
+/// a directory nothing was ever written to. (The risk is the inverse of the
+/// old filesystem-owned reaper's: unremovable, not over-removed.)
+/// `claude_config`'s own pin test states the same thing from the other side.
+/// Takes a resolved root rather than `(workspace, scope)` because the two
+/// callers resolve it differently: rendering falls back to the workspace,
+/// the config sync refuses to (see `claude_config::scope_root`).
+pub(crate) fn rules_dir(root: &Path) -> PathBuf {
+    root.join("rules")
 }
 
 /// Claude Code's user-level config root. `$CLAUDE_CONFIG_DIR` replaces the

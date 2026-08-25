@@ -32,7 +32,6 @@ use crate::api::artifact_status::UpdateAction;
 use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::install::client_target::ClientTarget;
 use crate::install::installer::{InstallIntent, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans, reap_dropped_clients};
@@ -156,6 +155,11 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &scope.options.vendors,
     ))?;
     let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
+    // Snapshot before any mutation: the vendor config sync below needs the
+    // outputs this run retires — pruned orphans, reaped dropped clients, and
+    // a re-materialized rule whose new version dropped its support directory
+    // — none of which the post-mutation state can still name.
+    let state_before = state.clone();
     let materializer = DefaultMaterializer;
     // `--progress auto` stays silent here (update never rendered a bar);
     // `--progress json` emits the NDJSON events on stderr.
@@ -259,39 +263,28 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // record set after the pre-prune write above.
     persist_state(&state)?;
 
-    // Converge vendor-owned config on the new state (covers both fresh
-    // installs and pruned orphans in one pass) for every involved client.
-    // A pruned orphan may have been recorded for clients *outside* this
-    // run's `--client` selection — union them in, or a managed config
-    // entry (e.g. OpenCode's `instructions` glob) outlives its files.
-    let mut sync_clients: Vec<ClientTarget> = target.clients().to_vec();
-    for orphan in pruned.iter().filter(|p| p.outcome == PruneOutcome::Pruned) {
-        for client in &orphan.clients {
-            if let Ok(client) = client.parse::<ClientTarget>()
-                && !sync_clients.contains(&client)
-            {
-                sync_clients.push(client);
-            }
-        }
-    }
-    // A reaped dropped client is, by definition, outside `target.clients()`;
-    // union it in too so any managed config entry it owned (an MCP
-    // registration, OpenCode's `instructions` glob) is reconciled against the
-    // now-shrunken state rather than left dangling.
-    for r in &reaped {
-        for client in r.reaped.iter() {
-            if let Ok(client) = client.parse::<ClientTarget>()
-                && !sync_clients.contains(&client)
-            {
-                sync_clients.push(client);
-            }
-        }
-    }
+    // Converge vendor-owned config on the new state (covers fresh installs,
+    // pruned orphans and reaped dropped clients in one pass) for every
+    // involved client. `target.clients()` alone is not that set: a pruned
+    // orphan, a reaped dropped client, and a recorded client
+    // `preserved_recorded_clients` carried along on a pin change are all
+    // outside this run's `--client` selection, yet each can retire an output
+    // whose managed config entry (an MCP registration, OpenCode's
+    // `instructions` glob, Claude's `claudeMdExcludes` element) would
+    // otherwise outlive its files. `retired` names every one of them — it is
+    // computed from the pre-mutation snapshot, so it subsumes the per-pass
+    // unions this used to build by hand — and the removal side has no
+    // convergence, so a miss is permanent rather than self-healing.
+    let retired = crate::install::install_state::retired_outputs(&state_before, &state);
+    let sync_clients = crate::install::install_state::sync_client_set(target.clients(), &retired);
     // The artifacts and install state are already persisted, so a config-sync
     // failure (an unparseable / unreadable vendor config) is warn-only: the
     // update succeeds, registration is skipped, never a hard command failure.
     for client in sync_clients {
-        if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
+        if let Err(e) = client
+            .vendor()
+            .sync_config(&state, &scope.workspace, scope.scope, &retired)
+        {
             tracing::warn!(
                 client = %client,
                 error = %e,

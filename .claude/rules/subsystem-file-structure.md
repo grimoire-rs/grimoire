@@ -75,7 +75,34 @@ Per-client rule transforms:
   own-namespace Claude keys lift per registry (empty today — unknown ones
   warn + drop), foreign vendor keys drop silently, plain keys survive.
   Written `generated: true`; if cleaned frontmatter is empty, the block
-  is omitted entirely.
+  is omitted entirely. A rule that ships a **support directory**
+  additionally registers `**/.claude/rules/<name>/**` (absolute at global
+  scope) in `claudeMdExcludes` — `<workspace>/.claude/settings.json` at
+  project scope, `<claude_root>/settings.json` at global, where
+  `<claude_root>` is `$CLAUDE_CONFIG_DIR` else `$HOME/.claude` with **no
+  workspace fallback**: unlike the rule-render path (which falls back to
+  `<workspace>/.claude` when neither resolves), the sync is skipped
+  entirely rather than writing a machine-absolute glob into a stray
+  `settings.json` inside the repo. Claude discovers
+  `rules/` recursively and auto-loads every unscoped file, so grim's own
+  verbatim copy would otherwise be unconditional context. Managed like
+  OpenCode's `instructions` glob and through the same driver
+  (`managed_config.rs`) — added while the rule's output is recorded, removed
+  when that output is **retired**, never a blanket `rules/*/**`. Removal is
+  record-driven, never a filesystem probe for ownership: `sync_config` is handed the
+  outputs the operation removed (`install_state::retired_outputs`), so grim
+  can only ever remove an element it computed from a record it wrote — a
+  consumer's own hand-written exclusion in the same git-tracked
+  `settings.json` is untouchable, **except** one written in grim's exact
+  spelling, which grim cannot tell from its own: it is adopted on install
+  and removed when that rule is uninstalled (accepted, documented in the
+  module doc). The filesystem is read once on the removal side, only to
+  **decline**: a retired name whose support directory is still on disk keeps
+  its element, so the three paths that drop a record while leaving the tree
+  in place (an output resolving outside its anchor root, in `uninstall` or
+  `reap_dropped_clients`; a shared footprint a surviving sibling still
+  references) cannot strip the exclusion off a live tree. See
+  `claude_config.rs`.
 - **OpenCode**: frontmatter is stripped; the file written is a provenance
   comment followed by the rule body. Marked `generated: true`. Loading is
   wired through a managed glob entry in `opencode.json` (or `opencode.jsonc`
@@ -97,7 +124,11 @@ Per-client rule transforms:
 
 Support directory files are copied verbatim for every rule-supporting
 client (Claude, OpenCode, Copilot, Cursor, Kiro). Only the index is ever
-transformed.
+transformed. The copy itself is never adjusted per client — where a client
+would mis-read it, grim compensates in that client's own config (Claude, via
+`claudeMdExcludes` above). **Whether the other four over-load a support tree
+the same way is unaudited**; Kiro `steering/` has no per-file scoping at all
+and is the likeliest repeat.
 
 ### MCP servers {#install-layout-mcp}
 

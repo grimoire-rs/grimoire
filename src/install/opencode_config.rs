@@ -57,14 +57,7 @@ const INSTRUCTIONS_KEY: &str = "instructions";
 pub fn managed_entry(workspace: &Path, scope: ConfigScope) -> String {
     match scope {
         ConfigScope::Project => MANAGED_PROJECT_GLOB.to_string(),
-        // OpenCode (a Node/JS tool) reads `instructions` entries as globs;
-        // JS glob engines treat `\` as an escape character, not a
-        // separator, so the entry must stay forward-slash even when
-        // `workspace` and the native join produce backslashes on Windows.
-        ConfigScope::Global => workspace
-            .join(MANAGED_PROJECT_GLOB)
-            .to_string_lossy()
-            .replace('\\', "/"),
+        ConfigScope::Global => managed_config::glob_path(&workspace.join(MANAGED_PROJECT_GLOB)),
     }
 }
 

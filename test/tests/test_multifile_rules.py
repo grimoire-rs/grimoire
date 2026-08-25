@@ -11,6 +11,7 @@ and are removed together.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.helpers import write_config
@@ -128,4 +129,67 @@ def test_rerelease_is_idempotent(
     second = runner.json("release", str(index), f"{repo}:1.0.0")
     assert first["manifest_digest"] == second["manifest_digest"], (
         "re-releasing an identical multi-file rule must yield the same digest"
+    )
+
+
+def test_support_dir_is_excluded_from_claude_auto_load(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The support tree lands, but never as unconditional Claude context.
+
+    Claude Code discovers ``.claude/rules/`` recursively and loads any file
+    without ``paths:`` frontmatter into every session, so grim's own copy of
+    the support directory would drown the consumer's context. grim registers
+    the directory in ``claudeMdExcludes`` instead — auto-load suppressed,
+    files still on disk so the index's relative links resolve
+    (grimoire-rs/grimoire#102).
+    """
+    index = _local_multifile_rule(project_dir)
+    repo = f"{registry}/{unique_repo}/my-rule"
+    release_runner = grim_at(project_dir)
+    release_runner.json("release", str(index), f"{repo}:1.0.0")
+
+    # Install into a clean workspace, separate from the release source dir
+    # above (which still holds its own my-rule.md/my-rule/) and with
+    # .claude/ pre-created to force Claude as the target client, matching
+    # test_release_install_lands_index_and_support_dir's consumer/ pattern.
+    write_dir = project_dir / "consumer"
+    write_dir.mkdir()
+    (write_dir / ".claude").mkdir()
+    runner = grim_at(write_dir)
+    write_config(write_dir, rules={"my-rule": f"{repo}:1.0.0"})
+    runner.run("lock", check=False)
+    runner.json("install")
+
+    settings = write_dir / ".claude/settings.json"
+    assert settings.is_file(), "installing a support-dir rule registers the exclusion"
+    assert json.loads(settings.read_text())["claudeMdExcludes"] == [
+        "**/.claude/rules/my-rule/**"
+    ]
+    # Suppressing auto-load must not remove anything from disk.
+    assert (write_dir / ".claude/rules/my-rule/examples.md").is_file()
+
+    runner.json("uninstall", "rule", "my-rule")
+    assert "claudeMdExcludes" not in json.loads(settings.read_text()), (
+        "the emptied managed key is dropped, never left as []"
+    )
+
+
+def test_single_file_rule_registers_no_exclusion(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A rule with no support directory is the index Claude should load."""
+    index = project_dir / "plain.md"
+    _write(index, "---\npaths: ['**/*.rs']\n---\n# plain\nbody\n")
+    repo = f"{registry}/{unique_repo}/plain"
+    runner = grim_at(project_dir)
+    runner.json("release", str(index), f"{repo}:1.0.0")
+
+    write_config(project_dir, rules={"plain": f"{repo}:1.0.0"})
+    runner.run("lock", check=False)
+    runner.json("install")
+
+    assert (project_dir / ".claude/rules/plain.md").is_file()
+    assert not (project_dir / ".claude/settings.json").exists(), (
+        "nothing to exclude, so no settings file is created"
     )

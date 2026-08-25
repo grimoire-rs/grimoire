@@ -63,7 +63,10 @@ rules/
 Both pack into one layer and install side by side (`rules/my-rule.md` +
 `rules/my-rule/…`), so the index's relative links resolve on the
 consumer. Support files are copied verbatim for every client — only the
-index is ever transformed ([support directories][support-dir]). The
+index is ever transformed ([support directories][support-dir]). Claude Code
+would auto-load that tree as unconditional context, so grim also excludes the
+directory in the consumer's Claude settings; the files stay readable, only
+the automatic load goes ([Claude support-directory exclusion][claude-excl]). The
 [well-known assets][well-known] convention applies here too: a
 `README.md` or `logo.png`/`logo.svg` inside the support directory is
 where catalog UIs look for a readme or icon.
@@ -139,6 +142,8 @@ Prefer `&str` over `String` parameters...
 - [Rule schema and examples][rules-ref] — the authoritative field table.
 - [Catalog metadata for rules][pub-rule] — where summary/keywords go.
 - [Rules with a support directory][support-dir] — packing semantics.
+- [Claude support-directory exclusion][claude-excl] — why the tree does
+  not auto-load, and what grim writes to keep it that way.
 - [Rule-level vendor keys][rule-keys] — per-client transform detail.
 - [Client compatibility][clients] — which clients host rules, and why the
   rest decline.
@@ -146,6 +151,7 @@ Prefer `&str` over `String` parameters...
 [rules-ref]: https://grimoire.rs/artifacts.html#rules
 [pub-rule]: https://grimoire.rs/publishing.html#metadata-rule
 [support-dir]: https://grimoire.rs/publishing.html#rule-support-dir
+[claude-excl]: https://grimoire.rs/vendor-metadata.html#claude-md-excludes
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
 [clients]: https://grimoire.rs/clients.html
 [rule-vendor-ex]: https://grimoire.rs/vendor-metadata.html#rule-authoring-example

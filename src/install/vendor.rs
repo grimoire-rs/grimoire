@@ -34,7 +34,7 @@ use crate::oci::ArtifactKind;
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
-use super::install_state::InstallState;
+use super::install_state::{ClientOutput, InstallState};
 use super::render::{RenderError, RenderedDoc};
 
 /// The native YAML type a known namespaced field converts to.
@@ -370,11 +370,28 @@ pub trait Vendor {
     /// Called after install/update/uninstall mutated `state` for every
     /// involved vendor. Default: no-op.
     ///
+    /// `retired` carries the [`ClientOutput`]s the triggering operation
+    /// removed from the state — every client's, not just this vendor's;
+    /// [`super::install_state::retired_outputs`] computes it once per
+    /// command from a pre-mutation snapshot. `state` alone cannot answer
+    /// "what went away": an uninstalled artifact's record, and its name with
+    /// it, is already gone by the time the sync runs, so a vendor that must
+    /// **deregister** something needs the removal evidence handed to it
+    /// rather than guessed from the filesystem. Empty on a pure install; a
+    /// vendor whose managed config is a pure function of `state` (OpenCode's
+    /// single `instructions` glob) ignores it.
+    ///
     /// # Errors
     ///
     /// An I/O failure editing the vendor config (the operation that
     /// triggered the sync still completed; callers surface the error).
-    fn sync_config(&self, _state: &InstallState, _workspace: &Path, _scope: ConfigScope) -> io::Result<()> {
+    fn sync_config(
+        &self,
+        _state: &InstallState,
+        _workspace: &Path,
+        _scope: ConfigScope,
+        _retired: &[ClientOutput],
+    ) -> io::Result<()> {
         Ok(())
     }
 }
