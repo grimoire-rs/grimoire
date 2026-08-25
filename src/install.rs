@@ -18,6 +18,7 @@ pub mod install_state;
 pub mod installer;
 pub mod json_config;
 pub mod json_splice;
+pub mod managed_config;
 pub mod materializer;
 pub mod mcp_config;
 pub mod opencode_config;
@@ -60,9 +61,11 @@ pub use install_state::{InstallRecord, InstallState};
 #[allow(unused_imports)]
 pub use installer::{ArtifactInstall, InstallIntent, InstallOutcome, install_all, install_all_with_progress};
 #[allow(unused_imports)]
+pub use managed_config::{ArraySync, sync_managed_element};
+#[allow(unused_imports)]
 pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 #[allow(unused_imports)]
-pub use opencode_config::{InstructionsSync, sync_managed_instruction};
+pub use opencode_config::sync_managed_instruction;
 #[allow(unused_imports)]
 pub use path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor};
 #[allow(unused_imports)]

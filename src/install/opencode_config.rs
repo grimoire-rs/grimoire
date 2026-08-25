@@ -40,31 +40,16 @@ use std::path::{Path, PathBuf};
 use crate::config::scope::ConfigScope;
 use crate::install::install_state::InstallState;
 use crate::oci::ArtifactKind;
-use crate::store::atomic_write;
 
 use super::client_target::ClientTarget;
-use super::json_config::{prefer_jsonc, with_path};
-use super::json_splice::{self, Splice};
+use super::json_config::prefer_jsonc;
+use super::managed_config::{self, ArraySync};
 
 /// The workspace-relative glob grim manages for project-scope installs.
 pub const MANAGED_PROJECT_GLOB: &str = ".opencode/rules/*.md";
 
 /// The root config key holding OpenCode's instruction paths / globs / URLs.
 const INSTRUCTIONS_KEY: &str = "instructions";
-
-/// What a sync did to the vendor config.
-///
-/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstructionsSync {
-    /// The managed glob was appended to `instructions`.
-    Added,
-    /// The managed glob was removed (and an emptied `instructions` key
-    /// dropped).
-    Removed,
-    /// The config already matched the desired state — no write.
-    Unchanged,
-}
 
 /// The managed `instructions` entry for an install scope rooted at
 /// `workspace`: workspace-relative for a project config (which sits at
@@ -165,7 +150,7 @@ fn global_config_path(
 ///
 /// An I/O failure reading/writing the config, or `InvalidData` when the
 /// existing config cannot be parsed (grim refuses to clobber it).
-pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope) -> io::Result<InstructionsSync> {
+pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope) -> io::Result<ArraySync> {
     let opencode = ClientTarget::OpenCode.to_string();
     let want = state
         .iter_records()
@@ -183,87 +168,24 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
     // $XDG_CONFIG_HOME, or $HOME): skip the sync rather than invent a
     // CWD-relative path — the same degradation as the install paths.
     let Some(config_path) = config_path_for_scope(workspace, scope) else {
-        return Ok(InstructionsSync::Unchanged);
+        return Ok(ArraySync::Unchanged);
     };
     let entry = managed_entry(workspace, scope);
     sync_managed_instruction(&config_path, &entry, want)
 }
 
 /// Idempotently add (`want = true`) or remove (`want = false`) the managed
-/// `entry` in the `instructions` array of the config at `config_path`.
+/// `entry` in OpenCode's `instructions` array.
 ///
-/// - Adding creates the file (`{"instructions": [entry]}`) when absent.
-/// - Removing an entry from an absent/never-registered config is a no-op.
-/// - Other config keys and other `instructions` entries are preserved.
-///
-/// Removal (`want == false`) is tolerant: an absent, unparseable, or
-/// wrong-typed (`instructions` not an array) config has nothing grim-managed
-/// to remove, so it converges as [`InstructionsSync::Unchanged`] rather than
-/// failing. Adding (`want == true`) stays strict — grim never rewrites a file
-/// it cannot parse or whose `instructions` is an unexpected type.
+/// The whole behaviour — file creation on add, the emptied-key drop, and
+/// the strict-add / tolerant-remove asymmetry — lives in
+/// [`managed_config::sync_managed_element`]; this only binds the key.
 ///
 /// # Errors
 ///
-/// An I/O failure, or — **only when adding** (`want == true`) — `InvalidData`
-/// when the existing content is not a JSON/JSONC object, or its `instructions`
-/// key is not an array (grim never clobbers an unknown-schema file).
-/// [`json_splice::remove_array_element`] driven to convergence.
-///
-/// That primitive removes one matching element per call. Grim's own upsert is
-/// idempotent so it never writes a duplicate, but a hand-edited config can
-/// hold the managed glob twice — and leaving the second one behind would keep
-/// OpenCode pointed at a rules directory the uninstall just emptied. The
-/// emptied-array case takes the whole key with it, so the loop terminates on
-/// the following `Unchanged`.
-fn remove_every_managed_element(raw: &str, entry: &str) -> io::Result<Splice> {
-    let mut removed: Option<String> = None;
-    loop {
-        let current = removed.as_deref().unwrap_or(raw);
-        match json_splice::remove_array_element(current, INSTRUCTIONS_KEY, entry)? {
-            Splice::Changed(next) => removed = Some(next),
-            Splice::Unchanged => break,
-        }
-    }
-    Ok(removed.map_or(Splice::Unchanged, Splice::Changed))
-}
-
-pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> io::Result<InstructionsSync> {
-    // A missing file reads as empty text — the splice engine's own
-    // "no document yet" case, which emits the minimal skeleton on add and
-    // is a no-op on remove.
-    let raw = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(with_path(config_path, e)),
-    };
-
-    let spliced = if want {
-        json_splice::upsert_array_element(&raw, INSTRUCTIONS_KEY, entry)
-    } else {
-        remove_every_managed_element(&raw, entry)
-    };
-    let spliced = match spliced {
-        Ok(splice) => splice,
-        // Removal is tolerant (`want == false`): a config grim cannot parse —
-        // or whose `instructions` is not an array — has nothing grim-managed
-        // to remove, so converge as `Unchanged` rather than fail a command
-        // whose primary action already ran. Adding stays strict (never
-        // rewrite an unknown-schema file).
-        Err(_) if !want => return Ok(InstructionsSync::Unchanged),
-        Err(e) => return Err(with_path(config_path, e)),
-    };
-
-    match spliced {
-        Splice::Unchanged => Ok(InstructionsSync::Unchanged),
-        Splice::Changed(text) => {
-            atomic_write(config_path, text.as_bytes()).map_err(|e| with_path(config_path, e))?;
-            Ok(if want {
-                InstructionsSync::Added
-            } else {
-                InstructionsSync::Removed
-            })
-        }
-    }
+/// See [`managed_config::sync_managed_element`].
+pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> io::Result<ArraySync> {
+    managed_config::sync_managed_element(config_path, INSTRUCTIONS_KEY, entry, want)
 }
 
 #[cfg(test)]
@@ -284,7 +206,7 @@ mod tests {
         .unwrap();
 
         let synced = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
-        assert_eq!(synced, InstructionsSync::Removed);
+        assert_eq!(synced, ArraySync::Removed);
         let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(
             doc["instructions"],
@@ -299,12 +221,12 @@ mod tests {
         let cfg = tmp.path().join("opencode.json");
 
         let first = sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap();
-        assert_eq!(first, InstructionsSync::Added);
+        assert_eq!(first, ArraySync::Added);
         let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(doc["instructions"][0], ".opencode/rules/*.md");
 
         let second = sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap();
-        assert_eq!(second, InstructionsSync::Unchanged);
+        assert_eq!(second, ArraySync::Unchanged);
     }
 
     /// Regression: the managed `instructions` entry is spliced in place, so
@@ -332,7 +254,7 @@ mod tests {
 
         assert_eq!(
             sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap(),
-            InstructionsSync::Added
+            ArraySync::Added
         );
         let added = std::fs::read_to_string(&cfg).unwrap();
         assert!(added.contains("// which model to use"), "comment preserved: {added}");
@@ -354,7 +276,7 @@ mod tests {
         // the strongest span-preservation invariant.
         assert_eq!(
             sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap(),
-            InstructionsSync::Removed
+            ArraySync::Removed
         );
         assert_eq!(
             std::fs::read_to_string(&cfg).unwrap(),
@@ -374,7 +296,7 @@ mod tests {
         .unwrap();
 
         let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
-        assert_eq!(out, InstructionsSync::Removed);
+        assert_eq!(out, ArraySync::Removed);
         let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(doc["model"], "anthropic/claude", "unrelated keys preserved");
         assert_eq!(doc["instructions"], serde_json::json!(["CONTRIBUTING.md"]));
@@ -387,14 +309,14 @@ mod tests {
         std::fs::write(&cfg, r#"{"instructions": [".opencode/rules/*.md"]}"#).unwrap();
 
         let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
-        assert_eq!(out, InstructionsSync::Removed);
+        assert_eq!(out, ArraySync::Removed);
         let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert!(doc.get("instructions").is_none(), "emptied key dropped");
 
         // Remove against a config that never existed: converges, no file.
         let missing = tmp.path().join("never.json");
         let out = sync_managed_instruction(&missing, "x", false).unwrap();
-        assert_eq!(out, InstructionsSync::Unchanged);
+        assert_eq!(out, ArraySync::Unchanged);
         assert!(!missing.exists());
     }
 
@@ -408,7 +330,7 @@ mod tests {
         )
         .unwrap();
         let out = sync_managed_instruction(&cfg, "g", true).unwrap();
-        assert_eq!(out, InstructionsSync::Added);
+        assert_eq!(out, ArraySync::Added);
         // The written file is still JSONC — its comments and trailing commas
         // survive the splice — so it is read back through the JSONC-tolerant
         // parser, not plain `serde_json::from_str`.
@@ -443,7 +365,7 @@ mod tests {
         std::fs::write(&cfg, garbage).unwrap();
 
         let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
-        assert_eq!(out, InstructionsSync::Unchanged);
+        assert_eq!(out, ArraySync::Unchanged);
         assert_eq!(
             std::fs::read_to_string(&cfg).unwrap(),
             garbage,
@@ -461,7 +383,7 @@ mod tests {
         std::fs::write(&cfg, body).unwrap();
 
         let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
-        assert_eq!(out, InstructionsSync::Unchanged);
+        assert_eq!(out, ArraySync::Unchanged);
         assert_eq!(
             std::fs::read_to_string(&cfg).unwrap(),
             body,
@@ -585,7 +507,7 @@ mod tests {
         // No opencode rule yet ⇒ no write.
         assert_eq!(
             sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
-            InstructionsSync::Unchanged
+            ArraySync::Unchanged
         );
         assert!(!ws.join("opencode.json").exists());
 
@@ -609,13 +531,13 @@ mod tests {
         });
         assert_eq!(
             sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
-            InstructionsSync::Added
+            ArraySync::Added
         );
 
         state.remove(ArtifactKind::Rule, "r");
         assert_eq!(
             sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
-            InstructionsSync::Removed
+            ArraySync::Removed
         );
     }
 
