@@ -137,6 +137,17 @@ scope fails until it is removed. The same value through `grim config set`
 is refused earlier, at 65. Only a verified pool reader may be opted in —
 grim never writes where nothing reads.
 
+## When grim Declines, It Stays Declined
+
+A `✗` or `◐` on the [client compatibility matrix][clients] is grim
+refusing to write what a client cannot faithfully host — not a bug to
+route around. grim always repairs its own output, and it may render around
+a gap where the client already reads a static surface, but it will never
+install a plugin, extension, or other runtime code into a client to close
+one. Do not build one on grim's behalf either: it breaks on the client's
+release schedule, and it breaks silently. See [what grim will and will not
+do][compensation] for the boundary and the per-gap rationale.
+
 ## Integrity Gates
 
 grim never silently overwrites or deletes work you did locally:
@@ -240,6 +251,8 @@ Exit 80 is the registry rejecting your credential. Things to know:
   errors.
 
 [commands]: https://grimoire.rs/commands.html
+[clients]: https://grimoire.rs/clients.html
+[compensation]: https://grimoire.rs/clients.html#compensation
 [auth]: https://grimoire.rs/authentication.html
 [config]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
