@@ -147,6 +147,59 @@ def test_global_install_claude_rule_lands_in_home_dot_claude(
     assert "Rust style" in content
 
 
+def test_global_install_claude_support_dir_rule_registers_absolute_glob(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A globally-installed Claude rule with a support directory registers
+    the ABSOLUTE ``claudeMdExcludes`` glob in ``$HOME/.claude/settings.json``
+    (the machine-absolute form), not the ``**/``-prefixed project form.
+
+    Project scope writes a worktree-portable relative glob into a committed
+    ``<workspace>/.claude/settings.json`` (grimoire-rs/grimoire#102); global
+    scope has no worktree to be portable across and a per-machine settings
+    file, so it roots the glob at the resolved global rules dir instead.
+    Only an acceptance test can prove the two independently-resolved paths
+    (the rules dir grim writes into, and the settings file grim edits)
+    actually agree at global scope — a Rust unit test would have to resolve
+    the real ``$HOME`` to exercise this wiring.
+    """
+    repo = f"{unique_repo}/my-rule"
+    ru = make_artifact(
+        repo,
+        "rule",
+        {
+            "my-rule.md": "---\npaths: ['**/*.rs']\n---\n# my-rule\nSee [examples](./my-rule/examples.md).\n",
+            "my-rule/examples.md": "# Examples\nworked example\n",
+        },
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    # Claude must be *detected* globally for the default target set to
+    # include it; without any marker grim resolves to the generic `agents`
+    # client (skills-only pool).
+    (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
+    runner.json("lock", "--global")
+
+    install_rows = runner.json("install", "--global")["items"]
+    assert install_rows[0]["status"] == "installed"
+
+    # The support file still lands on disk beside the index.
+    assert (runner.home / ".claude/rules/my-rule/examples.md").is_file()
+
+    settings = runner.home / ".claude/settings.json"
+    assert settings.is_file(), "a global support-dir rule registers the exclusion"
+    assert json.loads(settings.read_text())["claudeMdExcludes"] == [
+        f"{runner.home}/.claude/rules/my-rule/**"
+    ], "global scope must write the absolute glob, not the project **/ form"
+
+    uninstall_rows = runner.json("uninstall", "--global", "rule", "my-rule")
+    assert uninstall_rows["status"] == "uninstalled"
+    assert "claudeMdExcludes" not in json.loads(settings.read_text()), (
+        "the emptied managed key is dropped, never left as []"
+    )
+
+
 def test_global_install_opencode_skill_lands_in_xdg_config(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:

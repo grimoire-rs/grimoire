@@ -98,6 +98,9 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let mut abandoned_entries = Vec::new();
     if !held_by_bundle {
         let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
+        // Snapshot before the mutation: the vendor config sync below needs the
+        // outputs this uninstall removes, and the record is gone by then.
+        let before = state.clone();
         let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
             .get(kind, &args.name)
             .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
@@ -132,8 +135,12 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         // last OpenCode rule is gone). The files and install state are already
         // gone/persisted, so a config-sync failure is warn-only — the uninstall
         // succeeds, never a hard failure after the primary action.
+        let retired = crate::install::install_state::retired_outputs(&before, &state);
         for client in involved_clients {
-            if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
+            if let Err(e) = client
+                .vendor()
+                .sync_config(&state, &scope.workspace, scope.scope, &retired)
+            {
                 tracing::warn!(
                     client = %client,
                     error = %e,

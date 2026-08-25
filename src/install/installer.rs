@@ -361,6 +361,16 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
     refuse_uninstallable_fallback(lock, target, state, roots)?;
 
+    // Pre-mutation snapshot for the config sync below. An install is mostly
+    // additive, but not purely: a rule whose new version DROPPED its support
+    // directory replaces its own record, retiring the output that named the
+    // directory `install_one`'s `cleanup` deletes on the swap (the removal is
+    // unconditional on `cleanup`, precisely so a dropped support dir is
+    // reaped; `reap_moved_outputs` never sees it — its guard 2 `continue`s
+    // because the index target is unchanged). Passing an empty set here would
+    // leave that rule's `claudeMdExcludes` element behind forever.
+    let before = state.clone();
+
     // Path sources resolve against the config file's directory.
     let anchor = config_path.parent().unwrap_or_else(|| Path::new("."));
     let outcomes = install_all_with_progress(
@@ -391,8 +401,14 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     // Converge vendor-owned config (e.g. OpenCode's managed `instructions`
     // glob) for every involved client. The artifacts and state are already
     // persisted, so a sync failure is warn-only, never a hard command error.
-    for client in target.clients() {
-        if let Err(e) = client.vendor().sync_config(state, workspace, scope) {
+    // Not `target.clients()`: `preserved_recorded_clients` carries a recorded,
+    // un-drifted client along on a pin change even when `--client` excluded
+    // it, so a rule whose new version dropped its support directory can have
+    // that directory deleted for a client this run never selected. See
+    // `sync_client_set` for why a miss there is permanent.
+    let retired = crate::install::install_state::retired_outputs(&before, state);
+    for client in crate::install::install_state::sync_client_set(target.clients(), &retired) {
+        if let Err(e) = client.vendor().sync_config(state, workspace, scope, &retired) {
             tracing::warn!(
                 client = %client,
                 error = %e,

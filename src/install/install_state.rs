@@ -994,6 +994,62 @@ impl InstallState {
     }
 }
 
+/// The outputs `before` recorded that `after` no longer does — the set an
+/// operation between the two snapshots **retired**.
+///
+/// The reversible config-registration seam ([`super::vendor::Vendor::sync_config`])
+/// converges on post-mutation state, which cannot answer "what went away":
+/// an uninstalled rule's record — and its name with it — is already gone by
+/// the time the sync runs. Diffing the two snapshots answers it exactly, for
+/// every operation shape, without a state-schema change: a dropped record, an
+/// output reaped from a surviving record, and a re-install whose new version
+/// dropped its support directory all surface here, and a pure install
+/// surfaces nothing.
+///
+/// An output is retired when the post-state's record for the same
+/// `(kind, name)` does not hold it **verbatim**. A re-install at a new pin
+/// therefore reports the old output as retired even though the client still
+/// has one; consumers that care must intersect with what the new state wants
+/// (see [`super::claude_config`]).
+pub fn retired_outputs(before: &InstallState, after: &InstallState) -> Vec<ClientOutput> {
+    before
+        .iter_records()
+        .flat_map(|rec| {
+            let survivor = after.get(rec.kind, &rec.name);
+            rec.outputs
+                .iter()
+                .filter(move |out| !survivor.is_some_and(|now| now.outputs.contains(out)))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The clients whose vendor config must be converged after an operation:
+/// everything `selected` for the run, plus every client an output in
+/// `retired` names.
+///
+/// `selected` alone is not that set. A recorded client outside the run's
+/// `--client` selection can still lose an output — `installer`'s
+/// `preserved_recorded_clients` carries one along on a pin change, and
+/// `update`'s prune / dropped-client reap act on clients the run never
+/// targeted. Whether that matters is a per-vendor question, but the removal
+/// side has **no convergence**: nothing re-checks a missed deregistration on
+/// a later run, and `retired` is per-operation, so a re-run finds nothing to
+/// retire. A client left out here keeps its stale registration forever.
+///
+/// Order is `selected` first, then first-appearance order of the retired
+/// additions, so the sync order stays stable. An unparsable/legacy client
+/// string is skipped — it names no vendor to sync.
+pub fn sync_client_set(selected: &[ClientTarget], retired: &[ClientOutput]) -> Vec<ClientTarget> {
+    let mut set = selected.to_vec();
+    for client in retired.iter().filter_map(|out| out.client.parse::<ClientTarget>().ok()) {
+        if !set.contains(&client) {
+            set.push(client);
+        }
+    }
+    set
+}
+
 /// Failure persisting install state through [`InstallState::persist`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -1292,6 +1348,87 @@ mod tests {
             dev: false,
             outputs: vec![client_output_workspace("claude", name, kind)],
         }
+    }
+
+    // ── retired_outputs: what an operation removed ──────────────────────
+
+    /// The four shapes `sync_config`'s removal side depends on. `retired_outputs`
+    /// is the only thing that can answer "what went away" once a mutation has
+    /// landed, so each shape is pinned here rather than only through its
+    /// vendor consumer.
+    #[test]
+    fn retired_outputs_reports_every_shape_of_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        // A record that is dropped whole (uninstall, or a pruned orphan).
+        let dropped = record("dropped", ArtifactKind::Rule);
+        // A record that survives while ONE of its outputs is reaped.
+        let mut shrinking = record("shrinking", ArtifactKind::Skill);
+        shrinking
+            .outputs
+            .push(client_output_workspace("opencode", "shrinking", ArtifactKind::Skill));
+        // A record that survives while its output is REPLACED (a new pin, or a
+        // version that dropped its support directory).
+        let replaced = record("replaced", ArtifactKind::Rule);
+        let mut rerecorded = replaced.clone();
+        rerecorded.outputs[0].content_hash = Algorithm::Sha256.hash(b"v2");
+
+        let mut before = InstallState::empty(&path);
+        before.record(dropped.clone());
+        before.record(shrinking.clone());
+        before.record(replaced.clone());
+
+        let mut after = InstallState::empty(&path);
+        let mut kept = shrinking.clone();
+        kept.outputs.retain(|o| o.client == "claude");
+        after.record(kept);
+        after.record(rerecorded);
+        // …plus one record that is purely new: an install retires nothing.
+        after.record(record("fresh", ArtifactKind::Skill));
+
+        let retired = retired_outputs(&before, &after);
+
+        assert_eq!(
+            retired,
+            // Record order is the state map's `(kind, name)` order.
+            vec![
+                shrinking.outputs[1].clone(),
+                dropped.outputs[0].clone(),
+                replaced.outputs[0].clone(),
+            ],
+            "a dropped record, a replaced output, and a reaped sibling are all retired; \
+             a surviving verbatim output and a freshly added record are not"
+        );
+
+        assert!(
+            retired_outputs(&after, &after).is_empty(),
+            "an unchanged state retires nothing"
+        );
+    }
+
+    /// A client can lose an output without being selected for the run
+    /// (`preserved_recorded_clients` on a pin change, `update`'s prune and
+    /// dropped-client reap), and the removal side never self-heals — so the
+    /// sync set has to be the union, not the selection.
+    #[test]
+    fn sync_client_set_unions_every_retired_clients_vendor() {
+        let unselected = client_output_workspace("opencode", "r", ArtifactKind::Rule);
+        let selected = client_output_workspace("claude", "r", ArtifactKind::Rule);
+        let mut legacy = unselected.clone();
+        legacy.client = "no-such-client".to_string();
+
+        assert_eq!(
+            sync_client_set(&[ClientTarget::Claude], &[selected, unselected, legacy]),
+            vec![ClientTarget::Claude, ClientTarget::OpenCode],
+            "a retired output's client joins the set even when the run never selected it;              an already-selected one is not duplicated and an unparsable one names no vendor"
+        );
+
+        assert_eq!(
+            sync_client_set(&[ClientTarget::Claude], &[]),
+            vec![ClientTarget::Claude],
+            "a pure install retires nothing and syncs exactly what it targeted"
+        );
     }
 
     // ── F7: path hash constrained to SHA-256 on the wire ────────────────

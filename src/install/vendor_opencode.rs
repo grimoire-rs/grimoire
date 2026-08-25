@@ -18,7 +18,7 @@ use crate::oci::ArtifactKind;
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
-use super::install_state::InstallState;
+use super::install_state::{ClientOutput, InstallState};
 use super::opencode_config;
 use super::render::{self, RenderError, RenderedDoc};
 use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, provenance, xdg_config_dir};
@@ -300,7 +300,17 @@ impl Vendor for OpenCodeVendor {
         Ok(Some(RenderedDoc { document, warnings }))
     }
 
-    fn sync_config(&self, state: &InstallState, workspace: &Path, scope: ConfigScope) -> io::Result<()> {
+    // The managed `instructions` glob is a single fixed value keyed off
+    // `state` alone (present iff any OpenCode rule is recorded), so there is
+    // nothing a removal set could tell this vendor that the post-state does
+    // not already say — `retired` is ignored.
+    fn sync_config(
+        &self,
+        state: &InstallState,
+        workspace: &Path,
+        scope: ConfigScope,
+        _retired: &[ClientOutput],
+    ) -> io::Result<()> {
         let outcome = opencode_config::sync_for_state(state, workspace, scope)?;
         tracing::debug!("opencode instructions sync: {outcome:?}");
         Ok(())
