@@ -330,6 +330,9 @@ def test_junie_project_rule_installs_with_paths_dropped_and_warns(
     assert "paths:" not in text, (
         f"Junie reads the file verbatim — canonical frontmatter must not leak: {text!r}"
     )
+    assert "> Applies only when working on files matching `**/*.rs`." in text, (
+        f"the dropped scope must be restated as prose so the rule self-gates: {text!r}"
+    )
     assert "path scoping" in result.stderr, (
         f"dropping `paths` must be warned, not silent; got: {result.stderr!r}"
     )

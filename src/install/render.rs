@@ -25,6 +25,7 @@
 //! yields byte-identical output, so rendered files can be
 //! integrity-hashed like any generated file.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
@@ -335,6 +336,44 @@ pub fn project_rule(fm: &RuleFrontmatter, vendor: &dyn Vendor) -> Result<RulePro
         warnings,
         had_tool_keys,
     })
+}
+
+/// The scope a `Degraded`-scoping client cannot express, said in prose so the
+/// model self-gates on it instead of applying the rule everywhere.
+///
+/// A class-2 compensating render (`adr_vendor_support_tiers`): ordinary body
+/// text, deterministic, and gone when the artifact is uninstalled. Empty
+/// `paths` yields an empty string; otherwise a blockquote line plus the blank
+/// line that keeps the author's body starting cleanly.
+pub fn scope_notice(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let globs: Vec<String> = paths.iter().map(|p| format!("`{}`", code_span_safe(p))).collect();
+    format!(
+        "> Applies only when working on files matching {}.\n\n",
+        globs.join(", ")
+    )
+}
+
+/// Neutralize a publisher-supplied glob for the markdown code span it is
+/// about to sit in: a backtick would close the span early and let the rest of
+/// the value render as live markdown, and a control character (newline
+/// included) would break the notice out of its single line. Both collapse to
+/// a space.
+///
+/// Deliberately *not* `vendor::single_line`, which HTML-escapes `<`/`>` —
+/// right inside an HTML comment, wrong inside a code span.
+fn code_span_safe(glob: &str) -> Cow<'_, str> {
+    if glob.chars().any(|c| c.is_control() || c == '`') {
+        Cow::Owned(
+            glob.chars()
+                .map(|c| if c.is_control() || c == '`' { ' ' } else { c })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(glob)
+    }
 }
 
 /// The generic projection of an agent's metadata map for one vendor.
@@ -1573,5 +1612,39 @@ metadata:
         let warnings = validate_rule_metadata(&legacy.frontmatter).expect("valid");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("author it inside 'metadata'"));
+    }
+
+    // ── scope_notice: the class-2 compensating render ──
+
+    #[test]
+    fn scope_notice_states_every_glob_and_ends_with_a_blank_line() {
+        assert_eq!(
+            scope_notice(&["**/*.rs".to_string()]),
+            "> Applies only when working on files matching `**/*.rs`.\n\n"
+        );
+        assert_eq!(
+            scope_notice(&["**/*.rs".to_string(), "**/*.toml".to_string()]),
+            "> Applies only when working on files matching `**/*.rs`, `**/*.toml`.\n\n"
+        );
+    }
+
+    #[test]
+    fn scope_notice_is_empty_for_an_unscoped_rule() {
+        assert_eq!(scope_notice(&[]), "", "nothing scoped ⇒ nothing to restate");
+    }
+
+    #[test]
+    fn scope_notice_neutralizes_a_glob_that_would_escape_its_code_span() {
+        // A publisher-supplied path cannot close the span and continue as
+        // live markdown, nor break the notice onto a second line.
+        let out = scope_notice(&["a`b\nc".to_string()]);
+        assert_eq!(out, "> Applies only when working on files matching `a b c`.\n\n");
+        assert_eq!(out.trim_end().lines().count(), 1, "one line, not two: {out:?}");
+    }
+
+    #[test]
+    fn scope_notice_is_deterministic() {
+        let paths = ["**/*.rs".to_string(), "b/**".to_string()];
+        assert_eq!(scope_notice(&paths), scope_notice(&paths));
     }
 }

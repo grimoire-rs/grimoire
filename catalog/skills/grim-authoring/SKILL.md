@@ -42,8 +42,9 @@ the summary below is a planning aid that the next client can age:
   a skill is the portable choice. One scope caveat: OpenClaw is
   global-scope-only, so a *project* install for it writes nothing.
 - **Rules** are native for Claude Code, Copilot, Cursor, and Kiro;
-  degraded for OpenCode and Junie (the file installs, its path scoping
-  does not); and **declined** by everyone else — grim warns, skips, and
+  degraded for OpenCode and Junie (the file installs and grim restates the
+  scope as prose in the body, but nothing enforces it); and **declined**
+  by everyone else — grim warns, skips, and
   writes no file. Most of the fleet cannot scope instructions: when the
   audience is broad, a skill reaches clients a rule never will.
 - **Agents** install for Claude Code, OpenCode, Copilot, Codex, Cursor,
