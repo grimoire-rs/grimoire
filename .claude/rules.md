@@ -34,7 +34,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Documentation work | [docs-style.md](./rules/docs-style.md), skill `docs` |
-| Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
+| Security-sensitive change | [adr_artifact_trust_model.md](../.agents/adr/adr_artifact_trust_model.md) **first** — the trust boundary and what is out of scope; then [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Vendor renderer declines / upstream capability gaps | [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) — re-verify upstream before patching a decline; date-stamped watchlist |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
