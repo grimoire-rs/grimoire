@@ -296,9 +296,14 @@ in `grim search`, the TUI, and on `grim add`; an empty or whitespace
 value means not deprecated. A sixth, `replaced-by`, names the successor
 artifact (authored independently of `deprecated`) — surfaced as
 `replaced_by` in `grim search` / `grim describe --format json`; the value
-must parse as a reference or the release fails with exit 65. You author
-them all in the source file itself, so a release always publishes what the
-file says. Two invariants hold for every kind:
+must parse as a reference or the release fails with exit 65. Four more
+describe provenance and docs: `authors`, `vendor`, `homepage`, and
+`documentation`, each **derived when omitted** (vendor from the release
+repository's namespace, homepage from `repository`, documentation from
+`<repository>#readme`; authors only under `--git`).
+
+You author them all in the source file itself, so a release always
+publishes what the file says. Two invariants hold for every kind:
 
 - `keywords` is a single comma-separated **string** (`rust,lint`), never
   a YAML/TOML list — an OCI annotation value is a string.
@@ -306,8 +311,15 @@ file says. Two invariants hold for every kind:
   release with exit 65.
 
 *Where* the fields live differs by kind (skill/agent: the frontmatter
-`metadata` map; rule: top-level frontmatter; bundle: top-level TOML) —
-see [the per-kind examples][metadata].
+`metadata` map; rule: top-level frontmatter; bundle and mcp: top-level
+TOML) — see [the per-kind examples][metadata].
+
+Not editing every artifact: each field has a matching flag on `build`,
+`release`, and `publish` (`--license`, `--repository`, `--authors`,
+`--vendor`, `--url`, `--documentation`), and `publish.toml` takes a
+top-level `[metadata]` table plus per-entry overrides. Both are gap-fillers
+— precedence is **artifact frontmatter > flag > per-entry `[metadata]` >
+top-level `[metadata]` > derived**, merged field by field.
 
 ## Description Companion {#description-companion}
 
@@ -351,6 +363,14 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
 - There is no separate publish command for it — re-running `grim publish`
   after a docs-only edit re-points the companion; the artifacts themselves
   skip-existing as usual.
+- **Support channels.** A `[description.support]` sub-table publishes
+  `issues` / `chat` / `contact` / `security` as `com.grimoire.support.*`
+  annotations on the companion manifest, read back as `grim describe`'s
+  `support` object. They ride the *companion* rather than a version's
+  manifest precisely because the companion tag is mutable: change a link,
+  re-run `grim publish`, and every already-published version reports the new
+  one — no re-release. Fans out and overrides per entry exactly like the rest
+  of `[description]`.
 - The companion's tag namespace is machine-owned: `grim release` /
   `grim publish` reject a user-supplied tag colliding with the reserved
   `__grimoire` namespace as a usage error (exit 64), before any network

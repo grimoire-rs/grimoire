@@ -83,16 +83,16 @@ overrides it.
 ## The Metadata-Location Asymmetry
 
 Where catalog metadata (`summary`, `keywords`, `repository`, `deprecated`,
-`replaced-by`) is authored differs by kind. This is the #1 authoring
-confusion — misplaced keys are not errors, they just silently never reach
-the catalog:
+`replaced-by`, `authors`, `vendor`, `homepage`, `documentation`) is authored
+differs by kind. This is the #1 authoring confusion — misplaced keys are not
+errors, they just silently never reach the catalog:
 
-| Kind | `summary` / `keywords` / `repository` / `deprecated` / `replaced-by` live… |
+| Kind | Catalog metadata keys live… |
 |---|---|
 | Skill | inside the `metadata:` map of `SKILL.md` frontmatter |
 | Agent | inside the `metadata:` map of the agent frontmatter |
 | Rule | at the **top level** of the rule frontmatter (not in `metadata`) |
-| MCP server | as **top-level TOML keys**, above the `[server]` table (`replaced-by` not read for MCP) |
+| MCP server | as **top-level TOML keys**, above the `[server]` table |
 | Bundle | as **top-level TOML keys**, above the member tables |
 
 In every kind, `keywords` is one comma-separated string and `repository`
@@ -103,11 +103,24 @@ annotation. `replaced-by` names the successor artifact, authored
 independently of `deprecated`; its value must parse as a reference or the
 release fails with 65 — detail in [Publishing][publishing].
 
+`authors` / `vendor` / `homepage` / `documentation` are optional and
+**derived when omitted** — vendor from the release repository's namespace,
+homepage from `repository`, documentation from `<repository>#readme`. Put a
+team name or alias in `authors`, never a personal mailbox: a manifest is
+readable by anyone who can pull the artifact. A skill's top-level
+`compatibility` is published too, as `com.grimoire.compatibility`.
+
+Repository-level support channels (`issues` / `chat` / `contact` /
+`security`) are **not** artifact metadata — they are authored as
+`[description.support]` in `publish.toml` and ride the mutable description
+companion, so changing a link needs no re-release.
+
 ## Companion: Content Craft
 
-This skill covers grim **packaging and validation** only — including opt-in
-git provenance at build/release time (`--git`); confirm flags with
-`grim release --help`. For the craft of
+This skill covers grim **packaging and validation** only — including build
+provenance, which is embedded by default at build/release time (`--git`
+additionally discloses the `origin` remote and commit author; `--no-git`
+suppresses everything derived); confirm flags with `grim release --help`. For the craft of
 the content itself — progressive disclosure, context budgets, description
 triggering, choosing skill vs rule vs agent — read the companion skill
 `ai-config-authoring` at

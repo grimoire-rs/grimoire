@@ -59,6 +59,11 @@ This is grim's own descriptor, published as `mcp/grim` — see
 | `license` | no | string | SPDX-style identifier (`org.opencontainers.image.licenses`) |
 | `repository` | no | string | HTTPS source URL, same [validation](./publishing.md#metadata-repository) as every other kind (`org.opencontainers.image.source`) |
 | `deprecated` | no | string | [Deprecation notice](./publishing.md#metadata-deprecated) (`com.grimoire.deprecated`) |
+| `replaced-by` | no | string | Reference [naming the successor](./publishing.md#metadata-replaced-by) (`com.grimoire.replaced-by`) |
+| `authors` | no | string | [Who maintains it](./publishing.md#metadata-descriptive) (`org.opencontainers.image.authors`) |
+| `vendor` | no | string | [Distributing organization](./publishing.md#metadata-descriptive) (`org.opencontainers.image.vendor`) |
+| `homepage` | no | string | [Project home page](./publishing.md#metadata-descriptive) (`org.opencontainers.image.url`) |
+| `documentation` | no | string | [Documentation URL](./publishing.md#metadata-descriptive) (`org.opencontainers.image.documentation`) |
 | `server` | yes | table | The launch/connection definition, see [below](#server-table) |
 
 Any field outside this table — at the top level or inside `[server]` —

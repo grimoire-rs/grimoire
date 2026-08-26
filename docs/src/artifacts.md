@@ -496,18 +496,36 @@ serves several clients
 ## Catalog annotations {#annotations}
 
 On the wire, catalog metadata travels as OCI manifest annotations. grim
-emits standard [OCI image-spec annotation][oci-annotations] keys plus two
-Grimoire-specific ones, sourced per kind as follows:
+emits standard [OCI image-spec annotation][oci-annotations] keys plus a few
+Grimoire-specific ones.
+
+Where a kind keeps a field differs — skills and agents use the `metadata` map,
+rules put it at the top level of their frontmatter, bundles and MCP
+descriptors at the top level of their TOML. "authored" below means whichever
+of those applies.
 
 | Annotation | Source | Emitted |
 |------------|--------|---------|
 | `org.opencontainers.image.title` | artifact name | always |
 | `org.opencontainers.image.description` | `description` field, or derived from the rule body | always |
 | `org.opencontainers.image.version` | release version | always |
-| `org.opencontainers.image.licenses` | skill top-level `license`; agent `metadata.license`; rule top-level `license`; bundle `license`; mcp top-level `license` | when present |
-| `org.opencontainers.image.source` | authored `repository` HTTPS URL (skill/agent `metadata.repository`; rule top-level `repository`; bundle `repository`; mcp top-level `repository`); falls back to the tagless release ref | always on release |
-| `com.grimoire.summary` | skill/agent `metadata.summary`; rule top-level `summary`; bundle `summary`; mcp top-level `summary` | when present |
-| `com.grimoire.keywords` | skill/agent `metadata.keywords`; rule top-level `keywords`; bundle `keywords`; mcp top-level `keywords` | when present |
+| `org.opencontainers.image.licenses` | authored `license` | when present |
+| `org.opencontainers.image.source` | authored `repository` HTTPS URL; then the git `origin` remote under [`--git`](./publishing.md#git-disclosure); falls back to the tagless release ref | always on release |
+| `org.opencontainers.image.revision` | the `HEAD` commit SHA | [by default](./publishing.md#git-provenance), inside a repository |
+| `org.opencontainers.image.created` | the commit date, else `SOURCE_DATE_EPOCH` | [by default](./publishing.md#git-provenance), when either is available |
+| `org.opencontainers.image.authors` | authored `authors`; then the commit author's name under [`--git`](./publishing.md#git-disclosure) | when present |
+| `org.opencontainers.image.vendor` | authored `vendor`; else the release repository's namespace | when present or derivable |
+| `org.opencontainers.image.url` | authored `homepage`; else the authored `repository` | when present or derivable |
+| `org.opencontainers.image.documentation` | authored `documentation`; else `<repository>#readme` | when present or derivable |
+| `com.grimoire.summary` | authored `summary` | when present |
+| `com.grimoire.keywords` | authored `keywords` | when present |
+| `com.grimoire.compatibility` | a skill's top-level `compatibility` | when present (skills only) |
+| `com.grimoire.deprecated` | authored `deprecated` | when non-empty |
+| `com.grimoire.replaced-by` | authored `replaced-by` | when non-empty |
+
+Every authored value can also be supplied by a
+[flag or a `publish.toml` table](./publishing.md#metadata-flags), which fill a
+gap without ever overriding what the artifact file says about itself.
 
 An authored `repository` must be an `https://` URL — anything else fails
 the publish (exit 65). Readers distinguish a real repository URL from the
@@ -515,8 +533,16 @@ legacy release-ref fallback by that `https://` prefix; on registries that
 honor the key (e.g. [ghcr.io][ghcr-source-label]) the source annotation
 also links the package back to its repository.
 
-`org.opencontainers.image.created` is deliberately omitted so re-releasing
-identical content stays byte-identical (idempotent re-release).
+**Nothing in this map is read from the clock.** `…image.created` is a commit
+date or a fixed `SOURCE_DATE_EPOCH` instant, so re-releasing identical content
+from the same commit stays byte-identical (idempotent re-release). A wall-clock
+timestamp would break that guarantee, and grim never writes one.
+
+Repository-level support channels
+(`com.grimoire.support.{issues,chat,contact,security}`) are **not** in this
+map: they live on the mutable
+[description companion](./publishing.md#description-support) so they can be
+updated without re-releasing every published version.
 
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification
