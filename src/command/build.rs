@@ -19,7 +19,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
 use crate::oci::annotations::{annotations_for_agent, annotations_for_rule, annotations_for_skill};
-use crate::oci::git_provenance::GitProvenance;
+use crate::oci::git_provenance::{GitMode, GitProvenance};
 use crate::skill::rule_frontmatter::RuleFrontmatter;
 use crate::skill::{
     pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file, validate_skill_dir,
@@ -35,11 +35,25 @@ pub struct BuildArgs {
     #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
     pub kind: Option<String>,
 
-    /// Embed git provenance (commit revision, commit date, and the `origin`
-    /// remote) from the artifact's working tree as OCI annotations. Requires
-    /// `git` and a repository; a non-git path fails (65).
-    #[arg(long)]
+    /// Require git provenance and additionally embed the `origin` remote as
+    /// `org.opencontainers.image.source`. Revision and date are derived
+    /// anyway; this asserts they are available (a non-git path fails, 65) and
+    /// opts into disclosing the remote URL.
+    #[arg(long, overrides_with = "no_git")]
     pub git: bool,
+
+    /// Suppress every derived provenance annotation (revision, date, and the
+    /// `origin` remote). Use when the manifest must not disclose anything
+    /// about where it was built.
+    #[arg(long, overrides_with = "git")]
+    pub no_git: bool,
+}
+
+impl BuildArgs {
+    /// The provenance mode these flags select.
+    pub fn git_mode(&self) -> GitMode {
+        GitMode::from_flags(self.git, self.no_git)
+    }
 }
 
 /// The validated + packed artifact, shared by `build` and `release`.
@@ -187,21 +201,20 @@ pub fn validate_and_pack(
     }
 }
 
-/// Derive git provenance for `path` when `--git` is set, mapping any failure
+/// Derive build provenance for `path` under `mode`, mapping a `--git` failure
 /// to a path-attributed data error (65, via `SkillErrorKind::GitProvenance`).
-/// `Ok(None)` when `--git` is not requested — the default, byte-deterministic
-/// path. Shared by `build` and `release` so the failure semantics are one
-/// source of truth.
-pub async fn derive_git_provenance(path: &Path, enabled: bool) -> anyhow::Result<Option<GitProvenance>> {
-    if !enabled {
-        return Ok(None);
-    }
-    match GitProvenance::derive(path).await {
-        Ok(provenance) => Ok(Some(provenance)),
-        Err(e) => Err(anyhow::Error::from(crate::error::Error::from(
-            crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::GitProvenance(e)),
-        ))),
-    }
+///
+/// Only [`GitMode::Force`] can fail: the user asked for provenance, so not
+/// getting it is an error rather than a silent omission. [`GitMode::Auto`]
+/// degrades to whatever is available and [`GitMode::Off`] to nothing. Shared
+/// by `build` and `release` so the failure semantics are one source of truth.
+pub async fn derive_git_provenance(path: &Path, mode: GitMode) -> anyhow::Result<Option<GitProvenance>> {
+    GitProvenance::resolve(path, mode).await.map_err(|e| {
+        anyhow::Error::from(crate::error::Error::from(crate::skill::SkillError::new(
+            path,
+            crate::skill::SkillErrorKind::GitProvenance(e),
+        )))
+    })
 }
 
 /// Wrap a metadata-validation failure as a path-attributed `SkillError`
@@ -374,7 +387,7 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
     if kind == ArtifactKind::Bundle {
         // A bundle build emits no annotations, but the `--git` "never a silent
         // skip" contract still applies: a non-git path with `--git` fails (65).
-        derive_git_provenance(&args.path, args.git).await?;
+        derive_git_provenance(&args.path, args.git_mode()).await?;
         let (name, members, _metadata) = read_bundle_members(&args.path)?;
         let manifest = crate::oci::bundle::BundleManifest::new(members);
         let layer = manifest
@@ -387,7 +400,7 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
     }
 
     if kind == ArtifactKind::Mcp {
-        let git = derive_git_provenance(&args.path, args.git).await?;
+        let git = derive_git_provenance(&args.path, args.git_mode()).await?;
         let (name, descriptor) = read_mcp_descriptor(&args.path)?;
         let layer = super::grim(descriptor.to_layer_bytes().map_err(|e| {
             crate::skill::SkillError::new(&args.path, crate::skill::SkillErrorKind::MetadataInvalid(Box::new(e)))
@@ -403,7 +416,7 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
     // source — `release` recomputes annotations with the real version.
     // `--git` is honored here too so the preflight reflects the published
     // annotation set (and fails early on a non-git path).
-    let git = derive_git_provenance(&args.path, args.git).await?;
+    let git = derive_git_provenance(&args.path, args.git_mode()).await?;
     let packed = validate_and_pack(&args.path, kind, "0.0.0-build", None, git.as_ref())?;
     let layer_digest = crate::oci::Algorithm::Sha256.hash(&packed.tar).to_string();
     let report = BuildReport::new(

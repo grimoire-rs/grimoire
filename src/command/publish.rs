@@ -89,11 +89,19 @@ pub struct PublishArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Embed git provenance (commit revision, commit date, and the `origin`
-    /// remote) as OCI annotations on every published entry. Forwarded to each
-    /// `release`; requires `git` and a repository (a non-git path fails, 65).
-    #[arg(long)]
+    /// Require git provenance and additionally embed the `origin` remote as
+    /// `org.opencontainers.image.source` on every published entry. Revision
+    /// and date are derived anyway; this asserts they are available (a non-git
+    /// path fails, 65) and opts into disclosing the remote URL. Forwarded to
+    /// each `release`.
+    #[arg(long, overrides_with = "no_git")]
     pub git: bool,
+
+    /// Suppress every derived provenance annotation (revision, date, and the
+    /// `origin` remote) on every published entry. Use when the manifests must
+    /// not disclose anything about where they were built.
+    #[arg(long, overrides_with = "git")]
+    pub no_git: bool,
 
     /// After a fully successful publish, announce the published packages to
     /// a package-index git repository: write metadata pointers on a topic
@@ -272,6 +280,48 @@ pub struct DescriptionSpec {
     /// the whole manifest. Ignored on a per-entry table (opt out an entry with
     /// `description = false` instead).
     pub publish: Option<bool>,
+
+    /// Repository support channels published as annotations on the companion
+    /// manifest. Repository-level and mutable: changing a link and re-running
+    /// `grim publish` updates it for every already-released version, with no
+    /// re-release and no version bump.
+    #[serde(default)]
+    pub support: Option<SupportSpec>,
+}
+
+/// The `[description.support]` table — where to reach whoever maintains the
+/// repository.
+///
+/// Field names follow CycloneDX's `externalReferences` vocabulary; each maps
+/// to one `com.grimoire.support.*` annotation on the companion manifest. All
+/// optional; a table setting nothing publishes nothing.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSpec {
+    /// Where to file a ticket (`issue-tracker`).
+    pub issues: Option<String>,
+
+    /// A chat channel or room invite (`chat`).
+    pub chat: Option<String>,
+
+    /// General maintainer contact. Prefer a team alias over a personal
+    /// mailbox — a manifest is readable by anyone who can pull it (`support`).
+    pub contact: Option<String>,
+
+    /// Where to report a vulnerability (`security-contact`).
+    pub security: Option<String>,
+}
+
+impl SupportSpec {
+    /// Project into the wire-side [`SupportLinks`].
+    fn links(&self) -> crate::oci::description::SupportLinks {
+        crate::oci::description::SupportLinks {
+            issues: self.issues.clone(),
+            chat: self.chat.clone(),
+            contact: self.contact.clone(),
+            security: self.security.clone(),
+        }
+    }
 }
 
 /// A per-entry `description` in a kind sub-table: either a bool
@@ -480,6 +530,8 @@ pub(crate) struct PlannedDescription {
     pub repository: String,
     /// The resolved `(packed_name, absolute_source_path)` mapping, non-empty.
     pub files: Vec<(String, PathBuf)>,
+    /// Repository support channels stamped on the companion manifest.
+    pub support: crate::oci::description::SupportLinks,
 }
 
 /// A [`PlannedDescription`] with its companion layer already read, bounds-
@@ -498,6 +550,8 @@ pub(crate) struct PackedDescription {
     pub files: Vec<(String, PathBuf)>,
     /// The deterministic tar layer bytes ready for the post-loop tag push.
     pub tar: Vec<u8>,
+    /// Repository support channels stamped on the companion manifest.
+    pub support: crate::oci::description::SupportLinks,
 }
 
 /// Strict `X.Y.Z` semver check: no prerelease, no build metadata, no
@@ -1011,6 +1065,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             skip_existing,
             pin: planned.pin,
             git: args.git,
+            no_git: args.no_git,
             // Forward the run-level cascade choice verbatim; release computes
             // the tag set. A channel tag never cascades regardless.
             cascade: args.cascade,
@@ -1168,7 +1223,7 @@ async fn push_one_description(
         None => repo,
     };
     let access = super::access_seam(ctx)?;
-    super::grim(crate::oci::description::push_description_companion(access.as_ref(), &repo, &pd.tar).await)
+    super::grim(crate::oci::description::push_description_companion(access.as_ref(), &repo, &pd.tar, &pd.support).await)
 }
 
 /// Execute the `--announce` step: derive one metadata pointer per planned
@@ -1871,6 +1926,14 @@ const DESC_CHANGELOG: &str = "CHANGELOG.md";
 ///
 /// Data error (65) when an explicit `readme`/`logo`/`changelog` path is
 /// missing, or when an explicit `[description]` table resolves to no files.
+/// The support channels a `[description]` table declares, empty when it
+/// declares none. One place so the top-level and per-entry paths cannot drift.
+fn support_links(spec: Option<&DescriptionSpec>) -> crate::oci::description::SupportLinks {
+    spec.and_then(|s| s.support.as_ref())
+        .map(SupportSpec::links)
+        .unwrap_or_default()
+}
+
 fn plan_descriptions(
     manifest: &PublishManifest,
     entries: &[PlannedEntry],
@@ -1889,16 +1952,24 @@ fn plan_descriptions(
         }
     };
 
+    // Support channels follow the files: the top-level table fans out, a
+    // per-entry override table replaces it wholesale (never merges — a partial
+    // merge would silently keep a contact the entry deliberately dropped).
+    let top_level_support = support_links(manifest.description.as_ref());
+
     let mut planned: Vec<PlannedDescription> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for entry in entries {
-        let files = match entry_description(manifest, entry.kind, &entry.name) {
+        let resolved = match entry_description(manifest, entry.kind, &entry.name) {
             Some(EntryDescription::Enabled(false)) => None,
-            Some(EntryDescription::Enabled(true)) => top_level.clone(),
-            Some(EntryDescription::Spec(spec)) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
-            None => top_level.clone(),
+            Some(EntryDescription::Enabled(true)) => top_level.clone().map(|f| (f, top_level_support.clone())),
+            Some(EntryDescription::Spec(spec)) => Some((
+                resolve_description_spec(spec, manifest_dir, manifest_path)?,
+                support_links(Some(spec)),
+            )),
+            None => top_level.clone().map(|f| (f, top_level_support.clone())),
         };
-        let Some(files) = files else { continue };
+        let Some((files, support)) = resolved else { continue };
         // The repository is the entry reference minus its tag. The rightmost
         // `:` is the tag separator (a registry port keeps its own earlier `:`).
         let repository = entry
@@ -1907,7 +1978,11 @@ fn plan_descriptions(
             .map(|(repo, _)| repo.to_string())
             .unwrap_or_else(|| entry.reference.clone());
         if seen.insert(repository.clone()) {
-            planned.push(PlannedDescription { repository, files });
+            planned.push(PlannedDescription {
+                repository,
+                files,
+                support,
+            });
         }
     }
     Ok(planned)
@@ -1938,6 +2013,7 @@ fn pack_planned_descriptions(planned: &[PlannedDescription]) -> anyhow::Result<V
             let tar = super::grim(crate::skill::pack_description_files(&pd.files))?;
             Ok(PackedDescription {
                 repository: pd.repository.clone(),
+                support: pd.support.clone(),
                 files: pd.files.clone(),
                 tar,
             })
@@ -3887,6 +3963,7 @@ mod tests {
             dry_run,
             force,
             git: false,
+            no_git: false,
             announce: false,
             announce_repo: None,
             push_registry: None,
@@ -4045,6 +4122,7 @@ mod tests {
             dry_run: false,
             force: false,
             git: false,
+            no_git: false,
             announce: false,
             announce_repo: None,
             push_registry: None,
@@ -4478,6 +4556,7 @@ mod tests {
             changelog: Some(PathBuf::from("docs/CHANGES.md")),
             include: vec!["img/*.png".to_string()],
             publish: None,
+            support: None,
         };
         let files = resolve_description_spec(&spec, dir, Path::new("publish.toml")).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -4494,6 +4573,7 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
+            support: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -4509,6 +4589,7 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
+            support: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -4808,6 +4889,7 @@ mod tests {
             changelog: None,
             include: vec!["../**/*.env".to_string()],
             publish: None,
+            support: None,
         };
         let err = resolve_description_spec(&spec, &dir, Path::new("publish.toml"))
             .expect_err("an include glob that escapes the manifest tree must be a containment error");
@@ -4829,6 +4911,7 @@ mod tests {
         let planned = vec![PlannedDescription {
             repository: "localhost:5000/acme/skills/demo".to_string(),
             files: vec![("README.md".to_string(), dir.join("README.md"))],
+            support: Default::default(),
         }];
         let packed = pack_planned_descriptions(&planned).expect("a valid companion packs");
         assert_eq!(packed.len(), 1, "one planned companion ⇒ one packed companion");
@@ -4888,6 +4971,7 @@ mod tests {
         let planned = vec![PlannedDescription {
             repository: "localhost:5000/acme/skills/demo".to_string(),
             files: vec![("README.md".to_string(), PathBuf::from("/nonexistent/does-not-exist.md"))],
+            support: Default::default(),
         }];
         assert!(
             pack_planned_descriptions(&planned).is_err(),

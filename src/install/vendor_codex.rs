@@ -637,6 +637,11 @@ mod tests {
             license: None,
             repository: None,
             deprecated: None,
+            replaced_by: None,
+            authors: None,
+            vendor: None,
+            homepage: None,
+            documentation: None,
             server: crate::oci::mcp::McpServer {
                 transport: crate::oci::mcp::McpTransport::Stdio,
                 command: Some("grim".to_string()),
@@ -661,6 +666,11 @@ mod tests {
             license: None,
             repository: None,
             deprecated: None,
+            replaced_by: None,
+            authors: None,
+            vendor: None,
+            homepage: None,
+            documentation: None,
             server: crate::oci::mcp::McpServer {
                 transport: crate::oci::mcp::McpTransport::Http,
                 command: None,

@@ -603,6 +603,37 @@ fn companion_reference(scope: &FetchScope, reference: &str) -> anyhow::Result<Id
     Ok(id.clone_with_tag(crate::oci::description::DESC_TAG))
 }
 
+/// Read the support channels off a repository's companion manifest.
+///
+/// Best-effort by construction: any failure — a companion that vanished
+/// between the tag listing and this call, a transport fault, an offline cache
+/// miss — yields empty channels rather than failing the describe. Support
+/// links are optional metadata; a describe that errors because an extra could
+/// not be read would be worse than one that reports nothing for it.
+///
+/// Costs one manifest resolve + fetch, and is only ever called when the tag
+/// listing already showed a companion exists.
+async fn companion_support(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    id: &Identifier,
+) -> crate::oci::description::SupportLinks {
+    let empty = crate::oci::description::SupportLinks::default;
+    let Ok(companion) = companion_reference(scope, &id.without_tag().to_string()) else {
+        return empty();
+    };
+    let Ok(Some(digest)) = access.resolve_digest(&companion, Operation::Query).await else {
+        return empty();
+    };
+    let Ok(pinned) = PinnedIdentifier::try_from(companion.clone_with_digest(digest)) else {
+        return empty();
+    };
+    match access.fetch_manifest(&pinned).await {
+        Ok(Some(manifest)) => crate::oci::description::SupportLinks::from_annotations(&manifest.annotations),
+        _ => empty(),
+    }
+}
+
 /// Fetch the repository description companion at `reference`'s reserved
 /// `__grimoire` tag, shaping every member inline. When `out` is `Some`, the
 /// companion tree is also unpacked into that directory through install's
@@ -807,10 +838,21 @@ pub struct DescribeReport {
     /// `org.opencontainers.image.source`, kept only when it is an HTTPS
     /// repository URL (same guard as `grim search`).
     pub repository: Option<String>,
-    /// `org.opencontainers.image.revision` (the `--git` publish opt-in).
+    /// `org.opencontainers.image.revision` — the publishing commit SHA.
     pub revision: Option<String>,
-    /// `org.opencontainers.image.created` (the `--git` publish opt-in).
+    /// `org.opencontainers.image.created` — the publishing commit date.
     pub created: Option<String>,
+    /// `org.opencontainers.image.authors` — who maintains the artifact.
+    pub authors: Option<String>,
+    /// `org.opencontainers.image.vendor` — the distributing organization.
+    pub vendor: Option<String>,
+    /// `org.opencontainers.image.url` — the project home page.
+    pub url: Option<String>,
+    /// `org.opencontainers.image.documentation` — where the docs live.
+    pub documentation: Option<String>,
+    /// `com.grimoire.compatibility` — the skill's authored editor/runtime
+    /// hint. Always `null` for every other kind, which has no such field.
+    pub compatibility: Option<String>,
     /// `com.grimoire.keywords` split on commas (trimmed, empties dropped);
     /// `[]` when none.
     pub keywords: Vec<String>,
@@ -822,6 +864,14 @@ pub struct DescribeReport {
     pub tags: Vec<String>,
     /// The verbatim manifest annotation map.
     pub annotations: BTreeMap<String, String>,
+    /// Repository support channels, read from the description companion's
+    /// manifest rather than this version's.
+    ///
+    /// Repository-level and mutable: the same values answer for every version
+    /// in the repository, and a `grim publish` re-run changes them without a
+    /// re-release. Every field `null` when the repository publishes no
+    /// companion, or when the companion carries no support keys.
+    pub support: crate::oci::description::SupportLinks,
 }
 
 /// Resolve `reference` and read its manifest-level metadata — kind, curated
@@ -884,6 +934,17 @@ pub async fn describe_artifact(
     let get = |k: &str| a.get(k).cloned();
     let keywords = crate::oci::annotations::keywords_from_annotations(a);
 
+    // Support channels live on the companion manifest, not this one — they
+    // describe the repository, not the version. Only fetched when the tag
+    // listing already proved a companion exists, so a repository without one
+    // costs nothing, and a failure degrades to "no channels" rather than
+    // failing a describe over optional metadata.
+    let support = if has_description {
+        companion_support(scope, access, &id).await
+    } else {
+        crate::oci::description::SupportLinks::default()
+    };
+
     Ok(DescribeReport {
         reference: id.to_string(),
         digest: pinned.strip_advisory().digest().to_string(),
@@ -900,7 +961,13 @@ pub async fn describe_artifact(
         repository: get("org.opencontainers.image.source").filter(|s| s.starts_with("https://")),
         revision: get("org.opencontainers.image.revision"),
         created: get("org.opencontainers.image.created"),
+        authors: get("org.opencontainers.image.authors"),
+        vendor: get("org.opencontainers.image.vendor"),
+        url: get("org.opencontainers.image.url"),
+        documentation: get("org.opencontainers.image.documentation"),
+        compatibility: get(crate::oci::annotations::COMPATIBILITY_ANNOTATION),
         keywords,
+        support,
         deprecated: crate::oci::annotations::deprecation_message(a),
         replaced_by: crate::oci::annotations::replacement_ref(a),
         tags,

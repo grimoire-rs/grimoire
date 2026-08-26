@@ -91,9 +91,9 @@ pub struct SearchEntry {
     /// The HTTPS source-repository URL from the catalog read-back guard,
     /// if any. JSON-only — never shown as its own plain-table column.
     pub repository: Option<String>,
-    /// The publishing commit revision (`--git` opt-in), if any. JSON-only.
+    /// The publishing commit revision, if any. JSON-only.
     pub revision: Option<String>,
-    /// The publishing commit date (RFC3339, `--git` opt-in), if any. JSON-only.
+    /// The publishing commit date (RFC3339), if any. JSON-only.
     pub created: Option<String>,
     /// The representative tag the metadata was read from (may be the moving
     /// `latest` pointer). Kept in JSON for fidelity; the plain table shows

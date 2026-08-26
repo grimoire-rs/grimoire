@@ -80,14 +80,18 @@ pub struct ReleaseArgs {
     #[arg(long, overrides_with = "cascade")]
     pub no_cascade: bool,
 
-    /// Embed git provenance (commit revision, commit date, and the `origin`
-    /// remote) from the artifact's working tree as OCI annotations. Off by
-    /// default so re-release stays byte-deterministic; with `--git` a
-    /// re-release from a different commit changes the digest and is refused
-    /// unless `--force`. Requires `git` and a repository (a non-git path
-    /// fails, 65).
-    #[arg(long)]
+    /// Require git provenance and additionally embed the `origin` remote as
+    /// `org.opencontainers.image.source`. Revision and date are derived
+    /// anyway; this asserts they are available (a non-git path fails, 65) and
+    /// opts into disclosing the remote URL.
+    #[arg(long, overrides_with = "no_git")]
     pub git: bool,
+
+    /// Suppress every derived provenance annotation (revision, date, and the
+    /// `origin` remote). Use when the manifest must not disclose anything
+    /// about where it was built.
+    #[arg(long, overrides_with = "git")]
+    pub no_git: bool,
 
     /// Push to this registry endpoint (`host[/prefix]`) instead of the
     /// reference's registry, while every baked and reported name — the
@@ -98,6 +102,13 @@ pub struct ReleaseArgs {
     /// behavior). A malformed value is a data error (65).
     #[arg(long, value_name = "HOST[/PREFIX]")]
     pub push_registry: Option<String>,
+}
+
+impl ReleaseArgs {
+    /// The provenance mode these flags select.
+    pub fn git_mode(&self) -> crate::oci::git_provenance::GitMode {
+        crate::oci::git_provenance::GitMode::from_flags(self.git, self.no_git)
+    }
 }
 
 /// The resolved `--push-registry` endpoint: network operations target
@@ -212,9 +223,9 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         return release_mcp(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
     }
 
-    // `--git` (opt-in): derive provenance once before packing; a non-git path
+    // Derive provenance once before packing. Under `--git` a non-git path
     // fails here (65), before anything is pushed.
-    let git = derive_git_provenance(&args.path, args.git).await?;
+    let git = derive_git_provenance(&args.path, args.git_mode()).await?;
     let packed = validate_and_pack(&args.path, kind, &version, Some(&source), git.as_ref())?;
 
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
@@ -297,12 +308,12 @@ async fn release_bundle(
     let push_repo = push.map_or_else(|| repo.clone(), |p| p.rewrite(repo));
     let pushed_to = push.map(|p| p.rewrite(id).to_string());
 
-    // `--git` (opt-in): derive provenance FIRST so a non-git path fails here
+    // Derive provenance FIRST so a `--git` run on a non-git path fails here
     // (65) before any registry work — no network side effects (the
     // --skip-existing lookup, the --pin member resolution) on a path that
     // cannot satisfy --git. Mirrors the skill/rule path in `run`, where derive
     // precedes every registry call.
-    let git = derive_git_provenance(&args.path, args.git).await?;
+    let git = derive_git_provenance(&args.path, args.git_mode()).await?;
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
@@ -410,7 +421,7 @@ async fn release_mcp(
 
     // `--git` first: a non-git path fails (65) before any registry work —
     // same ordering rationale as `release_bundle`.
-    let git = derive_git_provenance(&args.path, args.git).await?;
+    let git = derive_git_provenance(&args.path, args.git_mode()).await?;
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
@@ -631,11 +642,10 @@ fn preview_manifest_digest(manifest: &OciManifest) -> String {
         key.push_str(&format!("{}|{}|{}\n", d.digest, d.media_type, d.size));
     }
     for (k, v) in &manifest.annotations {
-        // Every annotation feeds the preview. `org.opencontainers.image.created`
-        // is only set under `--git`, where it is the per-commit date (not a
-        // wall-clock time), so it is deterministic for identical content and the
-        // dry-run preview matches the pushed digest. Without `--git` the key is
-        // absent entirely.
+        // Every annotation feeds the preview. That is safe because none of
+        // them is read from the clock: `org.opencontainers.image.created` is
+        // the commit date (or a `SOURCE_DATE_EPOCH` instant), so the preview
+        // is stable for identical content and matches the pushed digest.
         key.push_str(&format!("{k}={v}\n"));
     }
     Algorithm::Sha256.hash(key.as_bytes()).to_string()
@@ -974,6 +984,7 @@ mod tests {
             cascade: false,
             no_cascade: false,
             git: false,
+            no_git: false,
             push_registry: push_registry.map(str::to_string),
         }
     }

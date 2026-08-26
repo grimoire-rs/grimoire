@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""`--git` provenance acceptance tests (issue #17).
+"""Build-provenance acceptance tests (issues #17, #106).
 
-`grim build`/`release`/`publish --git` embed the publishing commit as the
-standard OCI annotations `org.opencontainers.image.{revision,created,source}`.
-The flag is opt-in; a non-git path is a hard data error (65).
+`grim build`/`release`/`publish` embed the publishing commit as the standard
+OCI annotations `org.opencontainers.image.{revision,created}` **by default** —
+every value is a function of the commit, not the clock, so re-release stays
+idempotent.
+
+Two flags bound that default. `--git` makes derivation mandatory (a non-git
+path is a hard data error, 65) and additionally discloses the `origin` remote
+as `…image.source`. `--no-git` suppresses all three, for a manifest that must
+say nothing about where it was built.
 """
 from __future__ import annotations
 
@@ -68,18 +74,22 @@ def test_build_git_fails_outside_repo(grim_at, project_dir: Path) -> None:
 
 
 def test_build_git_succeeds_in_repo(grim_at, project_dir: Path) -> None:
-    """`grim build --git` inside a repo succeeds and counts the extra
-    provenance annotations."""
+    """Inside a repo, provenance is derived by default and `--no-git` is what
+    removes it."""
     skill = _local_skill(project_dir)
     _init_repo(project_dir)
     runner = grim_at(project_dir)
 
-    plain = runner.json("build", str(skill))
+    default = runner.json("build", str(skill))
+    suppressed = runner.json("build", str(skill), "--no-git")
     with_git = runner.json("build", str(skill), "--git")
     assert with_git["status"] == "built"
     # revision + created (no remote configured ⇒ no extra source) = +2.
-    assert with_git["annotation_count"] >= plain["annotation_count"] + 2, (
-        f"--git must add provenance annotations: {plain} vs {with_git}"
+    assert default["annotation_count"] >= suppressed["annotation_count"] + 2, (
+        f"the default must derive provenance: {suppressed} vs {default}"
+    )
+    assert with_git["annotation_count"] >= default["annotation_count"], (
+        f"--git must not derive less than the default: {default} vs {with_git}"
     )
 
 
@@ -110,15 +120,28 @@ def test_release_git_embeds_revision_and_created(
     assert annotations.get("org.opencontainers.image.source") == (
         "https://github.com/acme/code-review"
     ), annotations
+    # The commit author rides the same explicit opt-in — name only, never the
+    # address (%an, not %ae): an email in a public manifest is harvestable.
+    assert annotations.get("org.opencontainers.image.authors") == "Test", annotations
+    assert "@" not in (annotations.get("org.opencontainers.image.authors") or ""), (
+        f"an author email must never reach an annotation: {annotations}"
+    )
 
 
-def test_release_without_git_omits_provenance(
+def test_release_default_derives_provenance_but_withholds_the_remote(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """A plain release (no `--git`) carries neither provenance annotation —
-    the default stays byte-deterministic."""
+    """A plain release derives revision and date, and must NOT disclose the
+    `origin` remote.
+
+    The SHA and the commit date describe the content; the remote names the
+    forge host and repository path the build came from. Publishing that by
+    default would leak internal infrastructure to everyone who can pull, so it
+    stays behind the explicit `--git` opt-in.
+    """
     skill = _local_skill(project_dir)
     _init_repo(project_dir, remote="git@github.com:acme/code-review.git")
+    head = _git(project_dir, "rev-parse", "HEAD")
 
     repo = f"{registry}/{unique_repo}/plain"
     repo_path = f"{unique_repo}/plain"
@@ -128,8 +151,40 @@ def test_release_without_git_omits_provenance(
     assert out["pushed"] is True
 
     annotations = fetch_manifest(repo_path, "1.0.0").get("annotations") or {}
-    assert "org.opencontainers.image.revision" not in annotations, annotations
-    assert "org.opencontainers.image.created" not in annotations, annotations
+    assert annotations.get("org.opencontainers.image.revision") == head, annotations
+    assert annotations.get("org.opencontainers.image.created"), annotations
+    source = annotations.get("org.opencontainers.image.source")
+    assert source != "https://github.com/acme/code-review", (
+        f"the origin remote must not reach an annotation without --git: {annotations}"
+    )
+    assert annotations.get("org.opencontainers.image.authors") is None, (
+        f"the commit author must not reach an annotation without --git: {annotations}"
+    )
+
+
+def test_release_no_git_suppresses_every_derived_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`--no-git` is the disclosure kill switch: nothing derived is published,
+    even from inside a repository with a remote."""
+    skill = _local_skill(project_dir)
+    _init_repo(project_dir, remote="git@github.com:acme/code-review.git")
+
+    repo = f"{registry}/{unique_repo}/nogit"
+    repo_path = f"{unique_repo}/nogit"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", str(skill), f"{repo}:1.0.0", "--no-git")
+    assert out["pushed"] is True
+
+    annotations = fetch_manifest(repo_path, "1.0.0").get("annotations") or {}
+    for key in ("revision", "created", "authors"):
+        assert f"org.opencontainers.image.{key}" not in annotations, (
+            f"--no-git must publish no {key}: {annotations}"
+        )
+    assert annotations.get("org.opencontainers.image.source") != (
+        "https://github.com/acme/code-review"
+    ), annotations
 
 
 def test_release_git_dirty_marks_revision(

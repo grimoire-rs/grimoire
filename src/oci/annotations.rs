@@ -15,26 +15,38 @@
 //! descriptor is the OCI empty type (`adr_oci_empty_config_compat.md`). The
 //! `artifactType` (see [`crate::oci::ArtifactKind::artifact_type`]) is still
 //! resolved on the READ path as the first tier, to type artifacts published
-//! before this change. The mapping is
-//! **fully deterministic by default**: `org.opencontainers.image.created` is
-//! intentionally omitted because a *wall-clock* timestamp would make a
-//! re-release of identical content produce a different manifest digest,
-//! breaking the idempotent-release contract (reproducible-build practice
-//! drops volatile timestamps for the same reason). Rules have no
-//! description frontmatter, so the title/description are derived from the
-//! rule name and body with a sane default.
+//! before this change. Rules have no description frontmatter, so the
+//! title/description are derived from the rule name and body with a sane
+//! default.
 //!
-//! The opt-in `--git` flag ([`GitProvenance`]) is the one exception: it stamps
-//! `org.opencontainers.image.revision` (commit SHA, `-dirty`-suffixed) and
-//! `…created` (the *per-commit* date, not a build time, so re-release from the
-//! same commit is still idempotent). See `adr_git_provenance_annotations.md`.
+//! ## Determinism
+//!
+//! The map is **fully deterministic**: every value is a function of the
+//! artifact's content, its authored metadata, or the commit it was built
+//! from. Nothing is read from the clock. That is what makes a re-release of
+//! identical content produce the same manifest digest, which the exact-version
+//! overwrite guard in [`crate::command::release`] depends on. A *wall-clock*
+//! `created` would break it, so one is never written — reproducible-build
+//! practice drops volatile timestamps for the same reason.
+//!
+//! [`GitProvenance`] supplies `org.opencontainers.image.revision` (commit SHA,
+//! `-dirty`-suffixed) and `…created` (the per-commit date, or a
+//! `SOURCE_DATE_EPOCH` instant outside a repository). Both are derived by
+//! default; `--no-git` suppresses them. See
+//! [`crate::oci::git_provenance::GitMode`].
 //!
 //! `org.opencontainers.image.source` carries the authored `repository`
 //! metadata value (an HTTPS URL to the artifact's source repository — the
 //! OCI-spec meaning of the key) when present, then a git-derived `origin`
-//! remote (only under `--git`), falling back to the tagless release reference
+//! remote, falling back to the tagless release reference
 //! (`registry/repository`) for continuity. Consumers distinguish a real
 //! source URL from the release-ref fallback by the `https://` prefix.
+//!
+//! **The git-derived tier only ever fires under `--git`.** Unlike the SHA and
+//! the date, a remote URL names the forge host and repository path the build
+//! came from, so `GitProvenance::resolve` clears it in every other mode — the
+//! precedence chain below is unchanged, its git tier is simply empty. Do not
+//! re-add the disclosure by deriving a remote here.
 
 use std::collections::BTreeMap;
 
@@ -52,14 +64,15 @@ use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
 struct SourceInputs<'a> {
     /// The authored `repository` metadata value (highest precedence).
     authored: Option<&'a str>,
-    /// Git provenance from the `--git` opt-in (contributes its `source_url`).
+    /// Derived build provenance. Contributes its `source_url` only under
+    /// `--git`; `GitProvenance::resolve` clears it in every other mode.
     git: Option<&'a GitProvenance>,
     /// The release-ref fallback (lowest precedence, for continuity).
     fallback: Option<&'a str>,
 }
 
 /// Resolve `org.opencontainers.image.source`: an authored `repository` value
-/// wins, then a git-derived HTTPS remote (the `--git` opt-in), then the
+/// wins, then a git-derived HTTPS remote (populated only under `--git`), then the
 /// release-ref `fallback`. Shared by all four builders so the precedence is
 /// one source of truth — authored metadata is never shadowed by git.
 fn source_annotation(inputs: SourceInputs<'_>) -> Option<String> {
@@ -70,17 +83,119 @@ fn source_annotation(inputs: SourceInputs<'_>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Stamp the git provenance annotations (`org.opencontainers.image.revision`
-/// and `…created`) when `--git` supplied them. A no-op otherwise, which is
-/// why an ordinary release stays byte-deterministic (no wall-clock `created`).
-/// The commit date is per-commit, so a re-release from the same commit keeps
-/// the same digest — see `adr_git_provenance_annotations.md`.
+/// Authored values for the descriptive `org.opencontainers.image.*` keys that
+/// every kind carries, collected per kind from wherever that kind keeps its
+/// catalog metadata.
+///
+/// A named struct rather than four positional `Option<&str>` args: they are
+/// all the same type, so a transposed pair would type-check cleanly and
+/// publish a homepage as a vendor name.
+#[derive(Default)]
+pub struct DescriptiveInputs<'a> {
+    /// `org.opencontainers.image.authors` — who maintains the artifact. Prefer
+    /// a team name or alias over a person's mailbox: a manifest is public to
+    /// everyone who can pull the artifact.
+    pub authors: Option<&'a str>,
+    /// `org.opencontainers.image.vendor` — the distributing organization.
+    pub vendor: Option<&'a str>,
+    /// `org.opencontainers.image.url` — the project home page (authored as
+    /// `homepage`, the npm/Cargo spelling).
+    pub url: Option<&'a str>,
+    /// `org.opencontainers.image.documentation` — where the docs live.
+    pub documentation: Option<&'a str>,
+}
+
+/// Stamp the descriptive annotations, deriving the ones a publisher did not
+/// author from values already in hand.
+///
+/// `repository` is the **authored** source URL (never the git-derived one, and
+/// never the release-ref fallback) and `fallback_source` is the tagless
+/// release reference. Derivations, each applying only when the key was not
+/// authored:
+///
+/// | Key | Derived from |
+/// |---|---|
+/// | `url` | the authored `repository` — a project's repo is its home page until it says otherwise |
+/// | `documentation` | the authored `repository` plus `#readme` |
+/// | `vendor` | the first path segment of the release repository (`ghcr.io/acme/skills/x` → `acme`) |
+///
+/// `authors` is **never derived**. The only automatic source would be the
+/// commit author, and a person's name is not something to publish into every
+/// manifest by default — it is carried under `--git` alongside the other
+/// disclosure-sensitive values, or authored explicitly.
+fn insert_descriptive(
+    a: &mut BTreeMap<String, String>,
+    authored: &DescriptiveInputs<'_>,
+    git: Option<&GitProvenance>,
+    repository: Option<&str>,
+    fallback_source: Option<&str>,
+) {
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(v) = value.filter(|v| !v.trim().is_empty()) {
+            a.insert(format!("org.opencontainers.image.{key}"), v.trim().to_string());
+        }
+    };
+    put(
+        "authors",
+        authored
+            .authors
+            .map(str::to_string)
+            .or_else(|| git.and_then(|g| g.authors.clone())),
+    );
+    put(
+        "vendor",
+        authored
+            .vendor
+            .map(str::to_string)
+            .or_else(|| fallback_source.and_then(vendor_from_reference)),
+    );
+    put("url", authored.url.or(repository).map(str::to_string));
+    put(
+        "documentation",
+        authored
+            .documentation
+            .map(str::to_string)
+            .or_else(|| repository.map(|r| format!("{}#readme", r.trim_end_matches('/')))),
+    );
+}
+
+/// The distributing organization implied by a tagless release reference: the
+/// first path segment after the registry host (`ghcr.io/acme/skills/x` →
+/// `acme`).
+///
+/// `None` when the reference carries no path segment beyond the host, so a
+/// bare `registry/name` never publishes the artifact's own name as its vendor.
+fn vendor_from_reference(reference: &str) -> Option<String> {
+    let (_host, path) = reference.split_once('/')?;
+    let (namespace, rest) = path.split_once('/')?;
+    // A single trailing segment IS the artifact name, not a namespace.
+    (!namespace.is_empty() && !rest.is_empty()).then(|| namespace.to_string())
+}
+
+/// Stamp the provenance annotations (`org.opencontainers.image.revision` and
+/// `…created`) when [`GitProvenance::resolve`] produced any.
+///
+/// Every value here is a function of the commit (or of `SOURCE_DATE_EPOCH`),
+/// never of the clock, so a re-release of identical content from the same
+/// commit keeps the same digest and stays an idempotent no-op. `revision` is
+/// absent when the timestamp came from `SOURCE_DATE_EPOCH` — there is no
+/// commit to name.
 fn insert_git_provenance(a: &mut BTreeMap<String, String>, git: Option<&GitProvenance>) {
     if let Some(g) = git {
-        a.insert("org.opencontainers.image.revision".to_string(), g.revision.clone());
+        if let Some(revision) = &g.revision {
+            a.insert("org.opencontainers.image.revision".to_string(), revision.clone());
+        }
         a.insert("org.opencontainers.image.created".to_string(), g.created.clone());
     }
 }
+
+/// Annotation key carrying a skill's authored `compatibility` hint.
+///
+/// Free-text editor/runtime requirement (`claude>=2`), authored as the
+/// top-level `compatibility` frontmatter key. Skills only — no other kind has
+/// the field. Mirrored onto the manifest so a consumer can read it without
+/// downloading and parsing the layer.
+pub const COMPATIBILITY_ANNOTATION: &str = "com.grimoire.compatibility";
 
 /// Annotation key carrying a publisher-authored deprecation notice.
 ///
@@ -275,15 +390,32 @@ pub fn annotations_for_skill(
     }) {
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // `org.opencontainers.image.created` is OMITTED by default (a wall-clock
-    // timestamp would break the idempotent-re-release contract); the `--git`
-    // opt-in below stamps a deterministic per-commit date instead.
+    // `org.opencontainers.image.created` never comes from the clock — only
+    // from the commit date or `SOURCE_DATE_EPOCH` — so the map stays a pure
+    // function of its inputs and re-release stays idempotent.
     insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: fm.metadata.get("authors").map(String::as_str),
+            vendor: fm.metadata.get("vendor").map(String::as_str),
+            url: fm.metadata.get("homepage").map(String::as_str),
+            documentation: fm.metadata.get("documentation").map(String::as_str),
+        },
+        git,
+        fm.metadata.get("repository").map(String::as_str),
+        fallback_source,
+    );
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert(KEYWORDS_ANNOTATION.to_string(), kw.clone());
     }
     if let Some(summary) = fm.metadata.get("summary") {
         a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
+    }
+    // Authored top-level (not in `metadata`), and skill-only — no other kind
+    // has the field.
+    if let Some(compatibility) = fm.compatibility.as_deref().and_then(normalize_deprecated) {
+        a.insert(COMPATIBILITY_ANNOTATION.to_string(), compatibility);
     }
     if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
@@ -327,9 +459,25 @@ pub fn annotations_for_rule(
     }) {
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // Omitted by default for idempotent re-release; `--git` stamps it — see
-    // `annotations_for_skill`.
+    // Deterministic `created`/`revision` — see `annotations_for_skill`.
     insert_git_provenance(&mut a, git);
+    let authors = string_from_extra(fm, "authors");
+    let vendor = string_from_extra(fm, "vendor");
+    let url = string_from_extra(fm, "homepage");
+    let documentation = string_from_extra(fm, "documentation");
+    let repository = string_from_extra(fm, "repository");
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: authors.as_deref(),
+            vendor: vendor.as_deref(),
+            url: url.as_deref(),
+            documentation: documentation.as_deref(),
+        },
+        git,
+        repository.as_deref(),
+        fallback_source,
+    );
     if let Some(kw) = string_from_extra(fm, "keywords") {
         a.insert(KEYWORDS_ANNOTATION.to_string(), kw);
     }
@@ -383,9 +531,20 @@ pub fn annotations_for_agent(
     }) {
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
-    // Omitted `created` by default for idempotent re-release; `--git` stamps it
-    // — see `annotations_for_skill`.
+    // Deterministic `created`/`revision` — see `annotations_for_skill`.
     insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: fm.metadata.get("authors").map(String::as_str),
+            vendor: fm.metadata.get("vendor").map(String::as_str),
+            url: fm.metadata.get("homepage").map(String::as_str),
+            documentation: fm.metadata.get("documentation").map(String::as_str),
+        },
+        git,
+        fm.metadata.get("repository").map(String::as_str),
+        fallback_source,
+    );
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert(KEYWORDS_ANNOTATION.to_string(), kw.clone());
     }
@@ -440,6 +599,18 @@ pub fn annotations_for_bundle(
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
     insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: metadata.authors.as_deref(),
+            vendor: metadata.vendor.as_deref(),
+            url: metadata.homepage.as_deref(),
+            documentation: metadata.documentation.as_deref(),
+        },
+        git,
+        metadata.repository.as_deref(),
+        fallback_source,
+    );
     if let Some(summary) = &metadata.summary {
         a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
@@ -489,6 +660,18 @@ pub fn annotations_for_mcp(
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
     insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: descriptor.authors.as_deref(),
+            vendor: descriptor.vendor.as_deref(),
+            url: descriptor.homepage.as_deref(),
+            documentation: descriptor.documentation.as_deref(),
+        },
+        git,
+        descriptor.repository.as_deref(),
+        fallback_source,
+    );
     if let Some(summary) = &descriptor.summary {
         a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
     }
@@ -497,6 +680,9 @@ pub fn annotations_for_mcp(
     }
     if let Some(deprecated) = descriptor.deprecated.as_deref().and_then(normalize_deprecated) {
         a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
+    if let Some(replaced_by) = descriptor.replaced_by.as_deref().and_then(normalize_deprecated) {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
     a
 }
@@ -791,7 +977,7 @@ mod tests {
             license: None,
             repository: None,
             deprecated: None,
-            replaced_by: None,
+            ..BundleMetadata::default()
         };
         let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata, None);
         assert_eq!(a["org.opencontainers.image.title"], "python-stack");
@@ -1099,14 +1285,157 @@ mod tests {
         assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/stack");
     }
 
-    // ── git provenance (--git opt-in) ─────────────────────────────────
+    // ── build provenance (revision / created / source) ────────────────
 
     fn git_prov(source: Option<&str>) -> GitProvenance {
         GitProvenance {
-            revision: "abc123def456-dirty".to_string(),
+            revision: Some("abc123def456-dirty".to_string()),
             created: "2026-06-29T12:00:00+00:00".to_string(),
             source_url: source.map(str::to_string),
+            authors: Some("A Committer".to_string()),
         }
+    }
+
+    /// Provenance as `GitMode::Auto` produces it outside a git repository:
+    /// a `SOURCE_DATE_EPOCH` date and nothing else.
+    fn epoch_prov() -> GitProvenance {
+        GitProvenance {
+            revision: None,
+            created: "2026-06-29T12:00:00Z".to_string(),
+            source_url: None,
+            authors: None,
+        }
+    }
+
+    // ── descriptive annotations (authors / vendor / url / documentation) ──
+
+    #[test]
+    fn skill_compatibility_is_mirrored_onto_the_manifest() {
+        let mut fm = skill_fm();
+        fm.compatibility = Some("claude>=2".to_string());
+        let a = annotations_for_skill(&fm, "1.2.3", None, None);
+        assert_eq!(a[COMPATIBILITY_ANNOTATION], "claude>=2");
+
+        // Blank is not a compatibility claim.
+        fm.compatibility = Some("   ".to_string());
+        let a = annotations_for_skill(&fm, "1.2.3", None, None);
+        assert!(!a.contains_key(COMPATIBILITY_ANNOTATION));
+    }
+
+    #[test]
+    fn mcp_emits_replaced_by_like_every_other_kind() {
+        // The only kind of five that could not name a successor.
+        let toml = "description = \"d\"\nreplaced-by = \"ghcr.io/acme/mcp/successor\"\n\n\
+                    [server]\ntransport = \"stdio\"\ncommand = \"grim\"\n";
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(toml).expect("replaced-by must parse");
+        let a = annotations_for_mcp("acme-search", &d, "1.0.0", None, None);
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/mcp/successor");
+    }
+
+    #[test]
+    fn descriptive_keys_derive_from_the_authored_repository_and_release_ref() {
+        let mut fm = skill_fm();
+        fm.metadata
+            .insert("repository".to_string(), "https://github.com/acme/tools".to_string());
+        let a = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/acme/skills/tools"), None);
+        assert_eq!(
+            a["org.opencontainers.image.url"], "https://github.com/acme/tools",
+            "a project's repository is its home page until it says otherwise"
+        );
+        assert_eq!(
+            a["org.opencontainers.image.documentation"],
+            "https://github.com/acme/tools#readme"
+        );
+        assert_eq!(
+            a["org.opencontainers.image.vendor"], "acme",
+            "the release repository's namespace names the distributor"
+        );
+        assert!(
+            !a.contains_key("org.opencontainers.image.authors"),
+            "authors is never derived — a person's name is not published by default"
+        );
+    }
+
+    #[test]
+    fn authored_descriptive_keys_win_over_every_derivation() {
+        let mut fm = skill_fm();
+        for (k, v) in [
+            ("repository", "https://github.com/acme/tools"),
+            ("authors", "Platform Team <platform@example.com>"),
+            ("vendor", "Acme Corporation"),
+            ("homepage", "https://acme.example/tools"),
+            ("documentation", "https://docs.acme.example/tools"),
+        ] {
+            fm.metadata.insert(k.to_string(), v.to_string());
+        }
+        let a = annotations_for_skill(&fm, "1.2.3", Some("ghcr.io/other/skills/tools"), None);
+        assert_eq!(
+            a["org.opencontainers.image.authors"],
+            "Platform Team <platform@example.com>"
+        );
+        assert_eq!(
+            a["org.opencontainers.image.vendor"], "Acme Corporation",
+            "an authored vendor must not be shadowed by the registry namespace"
+        );
+        assert_eq!(a["org.opencontainers.image.url"], "https://acme.example/tools");
+        assert_eq!(
+            a["org.opencontainers.image.documentation"],
+            "https://docs.acme.example/tools"
+        );
+    }
+
+    #[test]
+    fn descriptive_keys_stay_absent_with_nothing_to_author_or_derive() {
+        // No authored repository ⇒ no url/documentation to invent. The map
+        // must not grow empty-valued keys.
+        let a = annotations_for_skill(&skill_fm(), "1.2.3", None, None);
+        for key in ["authors", "url", "documentation", "vendor"] {
+            assert!(
+                !a.contains_key(&format!("org.opencontainers.image.{key}")),
+                "{key} must be absent rather than empty"
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_is_not_derived_from_a_namespaceless_reference() {
+        // `registry/name` has no namespace — deriving one would publish the
+        // artifact's own name as its distributor.
+        assert_eq!(vendor_from_reference("ghcr.io/tools"), None);
+        assert_eq!(vendor_from_reference("localhost:5000/tools"), None);
+        assert_eq!(vendor_from_reference("nohost"), None);
+        assert_eq!(vendor_from_reference("ghcr.io/acme/tools").as_deref(), Some("acme"));
+        assert_eq!(
+            vendor_from_reference("ghcr.io/acme/skills/tools").as_deref(),
+            Some("acme"),
+            "only the first segment after the host is the namespace"
+        );
+    }
+
+    #[test]
+    fn git_supplies_authors_only_when_not_authored() {
+        let a = annotations_for_skill(&skill_fm(), "1.2.3", None, Some(&git_prov(None)));
+        assert_eq!(
+            a["org.opencontainers.image.authors"], "A Committer",
+            "--git provenance fills authors when the publisher did not"
+        );
+
+        let mut fm = skill_fm();
+        fm.metadata.insert("authors".to_string(), "Platform Team".to_string());
+        let a = annotations_for_skill(&fm, "1.2.3", None, Some(&git_prov(None)));
+        assert_eq!(a["org.opencontainers.image.authors"], "Platform Team");
+    }
+
+    #[test]
+    fn epoch_only_provenance_stamps_created_without_revision() {
+        // `SOURCE_DATE_EPOCH` names an instant, not a commit — emitting a
+        // `revision` here would be inventing one.
+        let a = annotations_for_skill(&skill_fm(), "1.2.3", None, Some(&epoch_prov()));
+        assert_eq!(a["org.opencontainers.image.created"], "2026-06-29T12:00:00Z");
+        assert!(
+            !a.contains_key("org.opencontainers.image.revision"),
+            "an epoch-only timestamp must not fabricate a revision"
+        );
     }
 
     #[test]
