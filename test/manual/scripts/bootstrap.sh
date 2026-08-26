@@ -195,6 +195,22 @@ release2 "$CATALOG/rules/security-baseline.md" rules security-baseline 1.0.0
 #    so the subpath here is the multi-segment `playbooks/ci/release`.
 release "$CATALOG/skills/cut-release" "playbooks/ci/release" cut-release 1.0.0
 
+# 7a. ANNOTATION SHOWCASE via `grim publish` (catalog/publish.toml).
+#     `grim release` cannot author a description companion, and the companion
+#     is where the repository's mutable support channels live — so the one
+#     artifact that exercises the full annotation set is published with the
+#     batch command instead. --force because the rig re-seeds from the top:
+#     publish otherwise SKIPS an already-published exact version, and an edited
+#     SKILL.md would silently never reach the registry. The companion tag is
+#     re-pointed either way, so editing only [description.support] and
+#     re-running this script updates every version's answer with no digest
+#     churn on the artifact itself.
+log "publish support-desk:1.0.0 (annotations + description companion)"
+"$GRIM" publish \
+    --manifest "$CATALOG/publish.toml" \
+    --registry "$REGISTRY/$NS" \
+    --force
+
 # 8. GLOBAL CONFIG (two [[registries]] via the `grim config` command).
 #    Writes $GRIM_HOME/grimoire.toml so `grim search --global` / `grim tui
 #    --global` browse BOTH registries from anywhere — no need to cd into
@@ -207,7 +223,7 @@ rm -f "$GRIM_HOME/grimoire.toml"
 "$GRIM" config --global registry add primary --oci "$REGISTRY/$NS" --default
 "$GRIM" config --global registry add tools --oci "$REGISTRY2/$NS2"
 
-log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*; deep-fold solo package at $REGISTRY/$NS/playbooks/ci/release/cut-release"
+log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; annotation showcase at $REGISTRY/$NS/skills/support-desk; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*; deep-fold solo package at $REGISTRY/$NS/playbooks/ci/release/cut-release"
 cat >&2 <<EOF
 
 Next:

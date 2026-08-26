@@ -1,0 +1,35 @@
+#:schema https://grimoire.rs/schemas/grim-publish.schema.json
+#
+# Batch-publish manifest for the rig's annotation showcase.
+#
+# bootstrap.sh runs this with `--registry localhost:5050/grimoire`, so the
+# single entry lands at localhost:5050/grimoire/skills/support-desk. It is a
+# deliberately separate publish from the `grim release` version matrix above
+# it: `release` cannot author a description companion, and the companion is
+# where the mutable support channels live.
+registry = "localhost:5050"
+
+# Catalog-wide descriptive metadata. Every field here is a *fallback* — the
+# support-desk SKILL.md authors its own, so what actually reaches the manifest
+# is the frontmatter's. Change one side and re-publish to watch the precedence
+# rung take effect.
+[metadata]
+license = "Apache-2.0"
+repository = "https://github.com/grimoire-rs/grimoire"
+authors = "Grimoire Manual Rig"
+vendor = "Grimoire Manual Rig"
+
+# Repository-level, mutable: these ride the __grimoire companion tag, not any
+# version's manifest. Edit a link, re-run bootstrap.sh, and every published
+# version reports the new value with no version bump and no digest churn.
+[description]
+readme = "skills/support-desk/README.md"
+
+[description.support]
+issues   = "https://github.com/grimoire-rs/grimoire/issues"
+chat     = "https://teams.microsoft.com/l/channel/manual-rig"
+contact  = "ai-platform@example.invalid"
+security = "https://example.invalid/security"
+
+[skills.support-desk]
+version = "1.0.0"
