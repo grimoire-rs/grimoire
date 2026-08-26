@@ -6,6 +6,11 @@ owes is shipped; this is what `~/dev/grimoire-indexer` needs to do to receive
 it. Nothing here is blocking — the index keeps working untouched, it just
 carries less than it now could.
 
+**Delivered.** The actionable copy lives in the indexer's own repo at
+`~/dev/grimoire-indexer/.agents/handover_grim_annotation_fields.md` — it adds
+the renderer/fixture steps that only that repo knows about. This file is the
+grim-side record; that one is the work item.
+
 ## What grim publishes now
 
 Build provenance (`org.opencontainers.image.{revision,created}`) is derived on
@@ -75,6 +80,17 @@ both are optional. Packages re-announce on their next publish; a backfill pass
 over `enrich/` would populate the rest sooner.
 
 Spec rows are already in `docs/src/package-index.md`.
+
+## Testing the visualization
+
+The manual rig now publishes an artifact carrying the full set, including
+support channels: `test/manual/scripts/bootstrap.sh`, then scenario 9 in
+`test/manual/README.md`. It walks every read surface and demonstrates changing
+a support link without changing the artifact digest — the case the indexer's
+digest-keyed enrich skip has to handle.
+
+Where each field belongs on a page is settled the same way grim settles it —
+see `docs/src/publishing.md#metadata-surfaces`.
 
 ## Verification
 

@@ -22,13 +22,14 @@ project, and a `teardown.sh`.
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
 | `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
+| `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion, `[description.support]` channels (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
 | `project/grimoire.toml` | Ready-made single-registry consumer project (floating `:1` tags) |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
-| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset + deep-fold solo package, write the global two-registry config |
+| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global two-registry config |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops both registries) |
 | `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset) |
@@ -52,6 +53,7 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0, 2.0.0 |
 | skill | `localhost:5050/grimoire/skills/architecture-guide` | 1.0.0 |
 | skill | `localhost:5050/grimoire/skills/old-reviewer` | 1.0.0 (deprecated — drives the deprecation surface) |
+| skill | `localhost:5050/grimoire/skills/support-desk` | 1.0.0 (annotation showcase — published with `grim publish`, carries a description companion) |
 | skill | `localhost:5050/grimoire/playbooks/ci/release/cut-release` | 1.0.0 (deep solo path — drives the tree-fold demo) |
 | rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0, 1.1.0 |
 | rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
@@ -490,6 +492,72 @@ grim --global install
 GRIM_OFFLINE=1 grim search        # serves cached catalog, exit 0
 GRIM_OFFLINE=1 grim install       # warm blob cache succeeds; cold -> exit 81
 ```
+
+### 9. Annotations, provenance, and support channels
+
+`support-desk` is the one artifact published with `grim publish` rather than
+`grim release`, because only the batch command authors a **description
+companion** — and the companion is where the repository's support channels
+live. Everything else on it is authored in its `SKILL.md`.
+
+```sh
+# Every curated field at once. `revision`/`created` are derived from the
+# publishing commit with NO flag: default-on since #106.
+grim describe localhost:5050/grimoire/skills/support-desk --format json |
+  jq '{license, created, revision, authors, vendor, url, documentation,
+       compatibility, support}'
+```
+
+Expect `authors: "Grimoire Platform Team"` (the SKILL.md value, **not** the
+`[metadata]` fallback in `publish.toml` — frontmatter outranks it), and a
+populated four-field `support` object.
+
+```sh
+grim describe localhost:5050/grimoire/skills/hello-world --format json |
+  jq '{authors, vendor, support}'      # vendor derived ("grimoire"), support all null
+```
+
+**Browse surfaces carry less, on purpose:**
+
+```sh
+grim search support-desk --format json | jq '.items[0].oci'
+grim tui                              # enter on support-desk
+```
+
+The TUI detail pane gains `License:`, `Authors:`, `URL:`, `Documentation:`,
+`Vendor:`, `Compatibility:`, `Revision:`, and `Created:` rows. It shows **no**
+support channels — the browse catalog is disk-cached, and a cached contact
+link is a link that has since moved. `grim describe` is the live surface for
+those.
+
+**The mutability demo** — the point of putting support on the companion:
+
+```sh
+grim describe localhost:5050/grimoire/skills/support-desk --format json | jq -r '.digest'
+$EDITOR test/manual/catalog/publish.toml      # change [description.support].chat
+test/manual/scripts/bootstrap.sh              # re-seed
+grim describe localhost:5050/grimoire/skills/support-desk --format json |
+  jq '{digest, support}'
+```
+
+The `support.chat` value changes; the artifact `digest` does **not**. No
+version bump, no re-release, and every already-published tag reports the new
+link.
+
+**The provenance disclosure guard:**
+
+```sh
+# Default: revision + created present, but NO source URL and NO commit author.
+grim build test/manual/catalog/skills/hello-world --format json
+
+# --no-git suppresses every derived value; --git in a non-repo exits 65.
+grim build test/manual/catalog/skills/hello-world --no-git --format json
+(cd /tmp && grim build "$OLDPWD/test/manual/catalog/skills/hello-world" --git); echo "exit=$?"
+```
+
+`--git` is what opts *in* to publishing the `origin` remote and the commit
+author's name — the two values that name internal infrastructure and a
+person. Neither is ever derived by default.
 
 ## Teardown
 
