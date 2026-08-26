@@ -50,6 +50,45 @@ def test_error_document_on_missing_config(
     assert result.stderr.strip(), "human-readable chain still on stderr"
 
 
+def test_error_document_hints_at_an_unrecognized_key(
+    grim_at, project_dir: Path
+) -> None:
+    """A key grim does not know carries a guidance line on BOTH channels.
+
+    Every grim-owned format parses with ``deny_unknown_fields``, so serde's
+    bare ``unknown field`` is the one failure a user cannot act on without
+    knowing that policy — the hint names the two real causes (a typo, or a
+    file written by a newer grim).
+    """
+    (project_dir / "grimoire.toml").write_text('[skills]\n\n[future_table]\nx = "y"\n')
+    runner = grim_at(project_dir)
+
+    plain = runner.run("status", check=False)
+    assert plain.returncode != 0
+    assert "upgrade grim" in plain.stderr, (
+        f"the human chain must carry the guidance line: {plain.stderr}"
+    )
+
+    result = runner.run("--format", "json", "status", check=False)
+    doc = json.loads(result.stdout)
+    assert "upgrade grim" in doc["error"]["hint"], (
+        f"the error document must carry the same guidance: {doc}"
+    )
+
+
+def test_error_document_omits_hint_for_an_ordinary_failure(
+    grim_at, project_dir: Path
+) -> None:
+    """`hint` is omit-when-absent, like `reason` — never an empty string."""
+    runner = grim_at(project_dir)
+    missing = project_dir / "no-such-grimoire.toml"
+    result = runner.run(
+        "--format", "json", "--config", str(missing), "status", check=False
+    )
+    doc = json.loads(result.stdout)
+    assert "hint" not in doc["error"], f"no unknown key ⇒ no hint key: {doc}"
+
+
 def test_error_document_on_usage_error(
     grim_at, project_dir: Path
 ) -> None:

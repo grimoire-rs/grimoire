@@ -561,6 +561,32 @@ forceable drift refusals *and* the non-forceable `anchor-escape` containment
 refusal, so an exit-code check would offer an override that cannot work.
 `--force` never bypasses containment.
 
+### The optional `hint` field {#error-hint}
+
+Every grim-owned format parses with `deny_unknown_fields`
+([forward compatibility][stability-forward]), so a file written by a newer
+grim is rejected rather than silently misread. When the rendered chain
+names a key or value this build does not recognize, the document carries a
+`hint` alongside the message, and the same line prints on stderr:
+
+```json
+{
+  "error": {
+    "code": "config",
+    "exit": 78,
+    "message": "/abs/path/grimoire.toml: invalid TOML: unknown field `future_table`",
+    "hint": "hint: grim 0.13.0 does not recognize that key or value — check for a typo, or upgrade grim if the file was written by a newer version"
+  }
+}
+```
+
+Omit-when-absent, exactly like `reason`: an ordinary failure carries no
+`hint` key at all. The text is human guidance and **not** a contract —
+it names both real causes because they are indistinguishable from the
+parse error alone. Programmatic dispatch stays on `code` and `exit`;
+there is deliberately no `reason` slug for this case, since it drives
+no `retryable` / `forceable` semantics.
+
 ## Null and additive policy {#null-policy}
 
 Optional report fields are **always present**: a field that does not
@@ -693,6 +719,7 @@ can ship in a minor release.
 [stability-frozen]: ./stability.md#frozen
 [stability-additive]: ./stability.md#frozen-additive-fields
 [stability-unstable]: ./stability.md#unstable
+[stability-forward]: ./stability.md#limitations-forward-compat
 [browse-filters]: ./configuration.md#browse-filters
 
 <!-- external -->

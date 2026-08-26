@@ -243,6 +243,32 @@ pub fn classify(err: &anyhow::Error) -> Classification {
     Classification::new(ExitCode::Failure)
 }
 
+/// The guidance line appended to an error chain that names a key or value
+/// grim does not recognise.
+///
+/// Every grim-owned format parses with `deny_unknown_fields` and closed
+/// enums (`docs/src/stability.md` — the hard-reject stance is deliberate),
+/// so serde's bare `unknown field \`x\`` is the one failure a user cannot
+/// act on without knowing that policy. The two real causes — a typo, and a
+/// file written by a newer grim — are indistinguishable from the message
+/// alone, so the hint names both rather than guessing.
+///
+/// Detection is on serde's own wording, which is why this sits at the
+/// rendering boundary instead of in each parser: one place covers the lock,
+/// `grimoire.toml`, the global config, a publish manifest, an MCP
+/// descriptor, install state, a bundle source, and a bundle's members layer
+/// — including the layer naming a member kind this build has no variant for.
+pub fn unknown_key_hint(message: &str) -> Option<String> {
+    if !message.contains("unknown field") && !message.contains("unknown variant") {
+        return None;
+    }
+    Some(format!(
+        "hint: grim {} does not recognize that key or value — check for a typo, \
+         or upgrade grim if the file was written by a newer version",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 /// Maps an error chain to a process exit code.
 ///
 /// Thin wrapper over [`classify`] for callers that only need the exit
@@ -1093,5 +1119,30 @@ mod tests {
         // Smoke: the Digest type stays reachable through the error module's
         // re-export path used by callers building pinned identifiers.
         let _ = Digest::Sha256("a".repeat(64));
+    }
+
+    #[test]
+    fn unknown_key_hint_fires_on_an_unknown_field() {
+        let hint = unknown_key_hint("bundle.toml: TOML parse error\nunknown field `mcp`, expected one of `skills`")
+            .expect("serde's unknown-field wording must produce the guidance line");
+        assert!(hint.contains("typo"), "{hint}");
+        assert!(hint.contains("upgrade grim"), "{hint}");
+        assert!(
+            hint.contains(env!("CARGO_PKG_VERSION")),
+            "the running version is named: {hint}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_hint_fires_on_an_unknown_variant() {
+        // The forward-compat case: a published bundle names a member kind
+        // this build has no `ArtifactKind` variant for.
+        assert!(unknown_key_hint("invalid bundle: unknown variant `workflow`, expected one of `skill`").is_some());
+    }
+
+    #[test]
+    fn unknown_key_hint_stays_silent_on_an_unrelated_error() {
+        assert!(unknown_key_hint("bundle not found").is_none());
+        assert!(unknown_key_hint("invalid bundle: missing field `id`").is_none());
     }
 }

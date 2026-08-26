@@ -174,6 +174,7 @@ fn main() -> std::process::ExitCode {
                 ExitCode::Failure,
                 &format!("failed to start async runtime: {err}"),
                 None,
+                None,
             );
             return ExitCode::Failure.into();
         }
@@ -194,9 +195,17 @@ fn main() -> std::process::ExitCode {
             // stderr (a `tracing::error!` here would duplicate the line —
             // the default filter also writes to stderr). Best-effort: a
             // closed stderr must not itself panic this error path.
-            let _ = writeln!(io::stderr(), "{err:#}");
+            let chain = format!("{err:#}");
+            let _ = writeln!(io::stderr(), "{chain}");
+            // A second line, only when the chain names something grim does
+            // not recognise: serde's bare `unknown field` says nothing about
+            // the hard-reject policy behind it (`crate::error::unknown_key_hint`).
+            let hint = crate::error::unknown_key_hint(&chain);
+            if let Some(hint) = &hint {
+                let _ = writeln!(io::stderr(), "{hint}");
+            }
             let classification = classify(&err);
-            emit_error_document(format, classification.exit, &format!("{err:#}"), classification.reason);
+            emit_error_document(format, classification.exit, &chain, classification.reason, hint);
             classification.exit.into()
         }
     }
@@ -226,11 +235,17 @@ fn parse_cli(color: ColorMode) -> Result<Cli, clap::Error> {
 /// would interleave; a consumer parses stdout and treats a top-level
 /// `error` key as the error document (see `docs/src/json-interface.md`).
 /// Plain mode emits nothing here (the human chain is already on stderr).
-fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reason: Option<ErrorReason>) {
+fn emit_error_document(
+    format: OutputFormat,
+    code: ExitCode,
+    message: &str,
+    reason: Option<ErrorReason>,
+    hint: Option<String>,
+) {
     if format != OutputFormat::Json {
         return;
     }
-    if let Ok(rendered) = serde_json::to_string_pretty(&error_document(code, message, reason)) {
+    if let Ok(rendered) = serde_json::to_string_pretty(&error_document(code, message, reason, hint)) {
         // Best-effort: this is already the error path, and the reader may
         // have closed stdout (the same dead-pipe hazard the stderr write
         // above guards against).
@@ -245,16 +260,29 @@ fn emit_error_document(format: OutputFormat, code: ExitCode, message: &str, reas
 /// (no key) from an unclassified error (still no key — the same, by
 /// design: reasons are purely additive over the existing `code`/`exit`).
 ///
+/// `hint` is the same shape: present only when the chain names a key or
+/// value this build does not know (`crate::error::unknown_key_hint`), and
+/// omitted otherwise — human guidance, deliberately not an `ErrorReason`
+/// slug, since it drives no `retryable`/`forceable` semantics.
+///
 /// `retryable` and `forceable` are likewise omit-when-absent: present and
 /// `true` only when `reason` is both present and [`ErrorReason::retryable`] /
 /// [`ErrorReason::forceable`] — never a bare `false`, so a consumer's
 /// presence check alone answers the question.
-fn error_document(code: ExitCode, message: &str, reason: Option<ErrorReason>) -> serde_json::Value {
+fn error_document(
+    code: ExitCode,
+    message: &str,
+    reason: Option<ErrorReason>,
+    hint: Option<String>,
+) -> serde_json::Value {
     let mut error = serde_json::json!({
         "code": code.slug(),
         "exit": code as u8,
         "message": message,
     });
+    if let Some(hint) = hint {
+        error["hint"] = serde_json::Value::String(hint);
+    }
     if let Some(reason) = reason {
         error["reason"] = serde_json::Value::String(reason.to_string());
         if reason.retryable() {
@@ -303,7 +331,7 @@ mod tests {
 
     #[test]
     fn error_document_omits_reason_when_absent() {
-        let doc = error_document(ExitCode::DataError, "boom", None);
+        let doc = error_document(ExitCode::DataError, "boom", None, None);
         let error = &doc["error"];
         assert_eq!(error["code"], "data");
         assert_eq!(error["exit"], 65);
@@ -313,13 +341,18 @@ mod tests {
 
     #[test]
     fn error_document_carries_reason_when_present() {
-        let doc = error_document(ExitCode::DataError, "boom", Some(crate::error::ErrorReason::StaleLock));
+        let doc = error_document(
+            ExitCode::DataError,
+            "boom",
+            Some(crate::error::ErrorReason::StaleLock),
+            None,
+        );
         assert_eq!(doc["error"]["reason"], "stale-lock");
     }
 
     #[test]
     fn error_document_omits_retryable_when_reason_is_none() {
-        let doc = error_document(ExitCode::DataError, "boom", None);
+        let doc = error_document(ExitCode::DataError, "boom", None, None);
         assert!(
             doc["error"].get("retryable").is_none(),
             "no reason ⇒ no retryable key: {doc}"
@@ -330,7 +363,12 @@ mod tests {
     fn error_document_omits_retryable_for_non_retryable_reason() {
         // stale-lock is a documented reason but not retryable — the field
         // must stay absent, not `false`.
-        let doc = error_document(ExitCode::DataError, "boom", Some(crate::error::ErrorReason::StaleLock));
+        let doc = error_document(
+            ExitCode::DataError,
+            "boom",
+            Some(crate::error::ErrorReason::StaleLock),
+            None,
+        );
         assert!(
             doc["error"].get("retryable").is_none(),
             "stale-lock is not retryable: {doc}"
@@ -339,7 +377,12 @@ mod tests {
 
     #[test]
     fn error_document_carries_retryable_true_for_locked() {
-        let doc = error_document(ExitCode::TempFail, "boom", Some(crate::error::ErrorReason::Locked));
+        let doc = error_document(
+            ExitCode::TempFail,
+            "boom",
+            Some(crate::error::ErrorReason::Locked),
+            None,
+        );
         assert_eq!(doc["error"]["reason"], "locked");
         assert_eq!(doc["error"]["retryable"], true);
     }
@@ -353,6 +396,7 @@ mod tests {
             ExitCode::DataError,
             "installed artifact was modified locally",
             Some(crate::error::ErrorReason::LocalModified),
+            None,
         );
         assert_eq!(doc["error"]["reason"], "modified");
         assert_eq!(doc["error"]["forceable"], true);
@@ -364,6 +408,7 @@ mod tests {
             ExitCode::DataError,
             "destination exists and is not tracked",
             Some(crate::error::ErrorReason::UntrackedDestination),
+            None,
         );
         assert_eq!(doc["error"]["reason"], "untracked-destination");
         assert_eq!(doc["error"]["forceable"], true);
@@ -378,6 +423,7 @@ mod tests {
             ExitCode::DataError,
             "resolved path escapes its anchor root (anchor: claude-root)",
             Some(crate::error::ErrorReason::AnchorEscape),
+            None,
         );
         assert_eq!(doc["error"]["reason"], "anchor-escape");
         assert!(
@@ -388,10 +434,32 @@ mod tests {
 
     #[test]
     fn error_document_omits_forceable_when_reason_is_none() {
-        let doc = error_document(ExitCode::DataError, "boom", None);
+        let doc = error_document(ExitCode::DataError, "boom", None, None);
         assert!(
             doc["error"].get("forceable").is_none(),
             "no reason ⇒ no forceable key: {doc}"
         );
+    }
+
+    #[test]
+    fn error_document_carries_hint_when_present() {
+        let doc = error_document(
+            ExitCode::ConfigError,
+            "unknown field `mcp`",
+            None,
+            crate::error::unknown_key_hint("unknown field `mcp`"),
+        );
+        assert!(
+            doc["error"]["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("upgrade grim")),
+            "an unrecognized key must carry the guidance line: {doc}"
+        );
+    }
+
+    #[test]
+    fn error_document_omits_hint_when_absent() {
+        let doc = error_document(ExitCode::DataError, "boom", None, None);
+        assert!(doc["error"].get("hint").is_none(), "no hint ⇒ no key: {doc}");
     }
 }

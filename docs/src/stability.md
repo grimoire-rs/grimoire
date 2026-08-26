@@ -314,6 +314,13 @@ where that matters in practice: a project that adopts a browse filter is
 unreadable by any `grim` build that predates it, the same trade the lock
 and install-state already make.
 
+Across all of these the *stance* is unchanged — a hard reject, never a
+silent drop — but the message now says so: whenever a rendered error names
+a key or value this build does not recognize, grim appends a guidance line
+naming its own version and the two possible causes, a typo or a file
+written by a newer grim. Under `--format json` the same text rides the
+error document's optional [`hint` field][json-hint].
+
 The **catalog cache** (`$GRIM_HOME/catalog/<hash>.json`) parses the same
 strict way, and it is the one place where that strictness used to be worse
 than a rebuild. Its `CatalogEntry` carries `deny_unknown_fields`, so a
@@ -427,6 +434,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [publishing-release]: ./publishing.md#release
 [vendor-metadata]: ./vendor-metadata.md
 [path-sources]: ./concepts.md#references-tags-and-digests
+[json-hint]: ./json-interface.md#error-hint
 
 <!-- external -->
 [gnu-make]: https://www.gnu.org/software/make/manual/make.html

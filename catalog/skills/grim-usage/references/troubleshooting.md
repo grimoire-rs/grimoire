@@ -53,6 +53,12 @@ from the working directory), and `locked` (exit 75 — another grim
 process holds the config-file lock). New reasons are additive — treat an
 unknown one as absent.
 
+A failure that names a key or value grim does not recognize also carries a
+`hint` string (and prints the same line on stderr): grim's formats reject
+an unknown key rather than dropping it, so the usual causes are a typo or
+a file written by a newer grim. `hint` is omit-when-absent like `reason`,
+and its text is guidance, not a contract — keep dispatching on `code`.
+
 A reason also carries two optional sibling booleans, each present only as
 `true` and otherwise absent entirely (never a bare `false`):
 `retryable` — a plain re-run is expected to succeed once the transient
