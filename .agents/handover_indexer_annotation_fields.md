@@ -6,10 +6,18 @@ owes is shipped; this is what `~/dev/grimoire-indexer` needs to do to receive
 it. Nothing here is blocking — the index keeps working untouched, it just
 carries less than it now could.
 
-**Delivered.** The actionable copy lives in the indexer's own repo at
-`~/dev/grimoire-indexer/.agents/handover_grim_annotation_fields.md` — it adds
-the renderer/fixture steps that only that repo knows about. This file is the
-grim-side record; that one is the work item.
+**Delivered.** The actionable copies live in the consumer repos, each adding
+the wiring only that repo knows about:
+
+- `~/dev/grimoire-indexer/.agents/handover_grim_annotation_fields.md` —
+  `mapMeta`'s key list, `CatalogPackage`, the committed renderer fixture.
+- `~/dev/grimoire-vscode/.agents/handover_grim_annotation_fields.md` —
+  `DescribeResult`/`DetailsVM`, the rail panels, and why the details cache
+  already handles a mutable support link (it keys on the companion digest).
+
+This file is the grim-side record; those are the work items. Both consumers get
+the same warning: these are additive nullable JSON fields, so they need
+read-site guards, never a version gate.
 
 ## What grim publishes now
 
