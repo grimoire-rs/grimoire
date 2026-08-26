@@ -171,7 +171,15 @@ impl GitProvenance {
     /// for another reason (a permission or resource failure); and
     /// [`GitProvenanceError::CommandFailed`] when a required query exits
     /// non-zero (not a repository, no commits).
-    pub async fn derive(path: &Path) -> Result<Self, GitProvenanceError> {
+    ///
+    /// **Private on purpose.** What this returns is *unscoped* — it carries the
+    /// `origin` remote and the commit author's name whatever the caller asked
+    /// for. Only [`Self::resolve`] may hand a `GitProvenance` outside this
+    /// module, because only `resolve` runs [`Self::scoped_to`]. Making this
+    /// `pub` would leave the disclosure rule enforced by convention rather than
+    /// by the module boundary, which is precisely what
+    /// `adr_default_provenance_and_support_channels.md` § 2 promises it is not.
+    async fn derive(path: &Path) -> Result<Self, GitProvenanceError> {
         let dir = working_dir(path);
 
         let revision_sha = git(&dir, &["rev-parse", "HEAD"]).await?;
@@ -415,6 +423,43 @@ fn https_from_authority_and_path(authority_and_path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn auto_mode_never_yields_the_remote_or_the_author() {
+        // The disclosure rule, exercised through the ONLY door out of this
+        // module. `derive` is private precisely so this is the whole surface:
+        // if `resolve` clears them, nothing else can hand them out.
+        let cwd = std::env::current_dir().expect("a working directory");
+        for mode in [GitMode::Auto, GitMode::Off] {
+            let Ok(Some(p)) = GitProvenance::resolve(&cwd, mode).await else {
+                continue;
+            };
+            assert!(p.source_url.is_none(), "{mode:?} leaked the origin remote: {p:?}");
+            assert!(p.authors.is_none(), "{mode:?} leaked the commit author: {p:?}");
+        }
+    }
+
+    #[test]
+    fn scoped_to_clears_both_disclosures_outside_force() {
+        let full = || GitProvenance {
+            revision: Some("abc1234".to_string()),
+            created: "2026-08-27T00:00:00+00:00".to_string(),
+            source_url: Some("https://internal.forge.example/team/repo".to_string()),
+            authors: Some("A Person".to_string()),
+        };
+        for mode in [GitMode::Auto, GitMode::Off] {
+            let scoped = full().scoped_to(mode);
+            assert!(scoped.source_url.is_none(), "{mode:?} kept the remote");
+            assert!(scoped.authors.is_none(), "{mode:?} kept the author");
+            // What DOES describe the content survives, or the default path
+            // would publish nothing at all.
+            assert_eq!(scoped.revision.as_deref(), Some("abc1234"));
+            assert_eq!(scoped.created, "2026-08-27T00:00:00+00:00");
+        }
+        let forced = full().scoped_to(GitMode::Force);
+        assert!(forced.source_url.is_some(), "--git is the opt-in that publishes them");
+        assert!(forced.authors.is_some());
+    }
 
     #[test]
     fn normalize_https_strips_dot_git() {
