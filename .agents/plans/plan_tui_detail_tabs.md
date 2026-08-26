@@ -4,8 +4,8 @@
 
 - **Plan:** plan_tui_detail_tabs
 - **Active phase:** 5 — Docs (complete)
-- **Step:** /hex-execute → review-fix loop
-- **Last update:** 2026-08-27 (after fda6b85: review round 1 in flight)
+- **Step:** finalized
+- **Last update:** 2026-08-27 (after 8051285: finalized, 17 commits → 11, `task verify` green)
 
 ---
 
@@ -123,52 +123,52 @@ TUI has no exit code beyond its own clean quit.
 
 ### Phase 1: Companion fetch seam
 
-- [ ] **Step 1.1:** `src/tui/companion.rs` — cache types.
+- [x] **Step 1.1:** `src/tui/companion.rs` — cache types.
   - `pub enum CompanionCache { Loading, Ready(Companion), Offline, Absent }`
   - `pub struct Companion { support: SupportLinks, readme: Option<String>, changelog: Option<String> }`
   - `Absent` is a successful describe reporting `has_description == false` **and**
     no support links — a positive answer, distinct from `Offline`.
-- [ ] **Step 1.2:** `src/tui/companion_fetch.rs` — background tasks, modelled on
+- [x] **Step 1.2:** `src/tui/companion_fetch.rs` — background tasks, modelled on
   `bundle_member_fetch.rs`. `COMPANION_CONCURRENCY = 2` (two round trips per
   task, heavier than a bundle member fetch).
-- [ ] **Step 1.3:** `TuiAction::LoadCompanion { repo }` + `state.companions`.
-- [ ] **Step 1.4:** `app::drain_companion_fetches`, wired into the tick drain
+- [x] **Step 1.3:** `TuiAction::LoadCompanion { repo }` + `state.companions`.
+- [x] **Step 1.4:** `app::drain_companion_fetches`, wired into the tick drain
   beside `drain_bundle_member_checks`.
 
 ### Phase 2: Tab state and input
 
-- [ ] **Step 2.1:** `DetailTab { Overview, Readme, Changelog }` in `detail.rs`;
+- [x] **Step 2.1:** `DetailTab { Overview, Readme, Changelog }` in `detail.rs`;
   `state.detail_tab` plus a per-tab scroll offset so switching tabs does not
   carry an offset from a longer body.
-- [ ] **Step 2.2:** `TuiInput::NextTab` / `PrevTab`, `KeyCode::Tab` / `BackTab`.
+- [x] **Step 2.2:** `TuiInput::NextTab` / `PrevTab`, `KeyCode::Tab` / `BackTab`.
 - [x] **Step 2.3:** ~~`available_tabs`~~ `DetailTab::ALL` + `DetailTab::is_live` —
   every row offers all three; liveness drives the greyed label only, never
   selectability. Cycling covers the fixed set.
 
 ### Phase 3: Rendering
 
-- [ ] **Step 3.1:** New `DetailLine` variants: `Heading`, `Bullet`, `Code`, `Rule`,
+- [x] **Step 3.1:** New `DetailLine` variants: `Heading`, `Bullet`, `Code`, `Rule`,
   `Link { label, url }`, `Notice`.
-- [ ] **Step 3.2:** `src/tui/markdown.rs` — `to_detail_lines(&str) -> Vec<DetailLine>`.
+- [x] **Step 3.2:** `src/tui/markdown.rs` — `to_detail_lines(&str) -> Vec<DetailLine>`.
   Pure, no dependency, unit-tested against fixtures.
-- [ ] **Step 3.3:** Tab strip in `render.rs`; `viewport` loses a row when shown.
-- [ ] **Step 3.4:** Support section in Overview; `o`-style open is out of scope,
+- [x] **Step 3.3:** Tab strip in `render.rs`; `viewport` loses a row when shown.
+- [x] **Step 3.4:** Support section in Overview; `o`-style open is out of scope,
   links render as text.
 
 ### Phase 4: Verification
 
-- [ ] Unit tests per module (see Testing Strategy).
-- [ ] Acceptance test: the manual rig's `support-desk` is the fixture with a
+- [x] Unit tests per module (see Testing Strategy).
+- [x] Acceptance test: the manual rig's `support-desk` is the fixture with a
   companion; `hello-world` is the fixture without one.
-- [ ] `task verify`.
+- [x] `task verify`.
 
 ### Phase 5: Docs
 
-- [ ] `docs/src/commands.md` — the `tui` section's detail-pane paragraph and the
+- [x] `docs/src/commands.md` — the `tui` section's detail-pane paragraph and the
   keybinding table.
-- [ ] Help overlay (`draw_help`) — the new binding.
-- [ ] `test/manual/README.md` scenario 9 — the TUI half is currently one sentence.
-- [ ] Catalog drift review: `docs/src/commands.md` is a trigger
+- [x] Help overlay (`draw_help`) — the new binding.
+- [x] `test/manual/README.md` scenario 9 — the TUI half is currently one sentence.
+- [x] Catalog drift review: `docs/src/commands.md` is a trigger
   (`catalog/README.md`).
 
 ## Files to Modify
@@ -243,6 +243,7 @@ never carry support.
 | Date | Update |
 |---|---|
 | 2026-08-26 | Plan written from a read of the three reused seams |
+| 2026-08-27 | Second `/hex-review` round: the panel's own reports landed after the first fixes and carried four more Block findings, all fixed. (1) A `Local` row's `repo` is a bare artifact name with no registry, so the idle tick expanded it against the *default* registry — a guaranteed miss and a local name sent to a public registry as a repository path; both predicates now skip `RowSource::Local`. (2) `drain_companion_fetches` returned `()` and its call was bare, so a landed README sat invisible until the next keypress — it now returns `bool` and gates a redraw. (3) `bump_generation` on a *failed* refresh stranded an in-flight entry at `Loading` forever, because the `Err` arm never reaches `set_rows`; the cache is now cleared beside the bump. (4) The in-flight guard now owns result delivery and frees its dedup slot before sending, which closes the panic strand, the closed-semaphore strand, and the send-before-free race at once. Plus: `companions` is pruned on `merge_catalog_rows` like `bundle_members`, and the module doc's "two round trips" (the stated basis for the concurrency cap) was actually five. |
 | 2026-08-27 | `/hex-review` high tier, 6-worker panel. Two Block findings, both fixed: (1) `companion_to_fetch` returned `Some` for a `Failed` entry while the caller was the 200 ms idle poll — a registry request storm for as long as the cursor rested on a failing row; split into `companion_to_fetch` (auto, uncached only) and `companion_to_retry` (explicit `enter`). (2) The companion path bypassed `sanitize_member_label`, which the tree already mandates for every registry-supplied string reaching a terminal — markdown bodies, support values, the curated `image.*` annotations, and failure notices are now all stripped at construction (not at paint, which would desync the scroll bound). Added UTF-8 boundary and termination tests for the hand-rolled markdown parser; no panic found. |
 | 2026-08-27 | Second review pass: dropped `Mode::Detail` entirely (`esc` now quits on the first press); moved the strip into the block's top border and the key hint into the bottom border; moved the companion trigger from `enter` to the event loop's idle poll, which was the root cause of "every panel says not available"; Overview now names the reason when a support fetch fails, instead of silently omitting the section; notice text shortened to `not available`. |
 | 2026-08-27 | Review feedback: the content-conditional strip was replaced by a fixed three-tab strip with greyed-out empty tabs (see the revised Key Decisions row); the strip restyled to the catalog list's own selection idiom (background block, no underline, no separator glyphs) after underlines read poorly; the rig gained a `CHANGELOG.md` so the third tab is testable at all. |
