@@ -109,9 +109,9 @@ pub struct CatalogRow {
     pub keywords: Vec<String>,
     /// The HTTPS source-repository URL, if any.
     pub repository_url: Option<String>,
-    /// The publishing commit revision (`--git` opt-in), if any.
+    /// The publishing commit revision, if any.
     pub revision: Option<String>,
-    /// The publishing commit date (RFC3339, `--git` opt-in), if any.
+    /// The publishing commit date (RFC3339), if any.
     pub created: Option<String>,
     /// The publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the search / TUI deprecation highlight.

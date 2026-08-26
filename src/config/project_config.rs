@@ -723,6 +723,18 @@ pub struct BundleMetadata {
     /// successor artifact; emitted only when present, independent of
     /// [`Self::deprecated`].
     pub replaced_by: Option<String>,
+    /// Maintainer contact → `org.opencontainers.image.authors`. Prefer a team
+    /// name or alias: a manifest is readable by anyone who can pull it.
+    pub authors: Option<String>,
+    /// Distributing organization → `org.opencontainers.image.vendor`. Derived
+    /// from the release repository's namespace when absent.
+    pub vendor: Option<String>,
+    /// Project home page → `org.opencontainers.image.url`. Falls back to
+    /// [`Self::repository`] when absent.
+    pub homepage: Option<String>,
+    /// Documentation URL → `org.opencontainers.image.documentation`. Falls
+    /// back to `<repository>#readme` when absent.
+    pub documentation: Option<String>,
 }
 
 /// A parsed bundle source: validated members plus catalog metadata.
@@ -789,6 +801,14 @@ struct RawBundleSource {
     deprecated: Option<String>,
     #[serde(default, rename = "replaced-by")]
     replaced_by: Option<String>,
+    #[serde(default)]
+    authors: Option<String>,
+    #[serde(default)]
+    vendor: Option<String>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    documentation: Option<String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_member_map`]
@@ -814,6 +834,10 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
             repository: raw.repository,
             deprecated: raw.deprecated,
             replaced_by: raw.replaced_by,
+            authors: raw.authors,
+            vendor: raw.vendor,
+            homepage: raw.homepage,
+            documentation: raw.documentation,
         },
     })
 }

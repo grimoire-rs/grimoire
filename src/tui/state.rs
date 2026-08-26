@@ -173,10 +173,11 @@ pub struct TuiRow {
     /// HTTPS source-repository URL (already vetted by the catalog's
     /// `https://` read-back guard); target of the `o` open action.
     pub repository_url: Option<String>,
-    /// Publishing commit revision (`--git` opt-in), shown in the detail pane.
+    /// Publishing commit revision, shown in the detail pane. Absent when the
+    /// artifact was published outside a git repository or with `--no-git`.
     /// `None` when the artifact was not released with git provenance.
     pub revision: Option<String>,
-    /// Publishing commit date (RFC3339, `--git` opt-in), shown in the detail
+    /// Publishing commit date (RFC3339), shown in the detail
     /// pane. `None` when the artifact carries no git provenance.
     pub created: Option<String>,
     /// Upvote count from the index's `stats.json` sidecar, shown in the detail

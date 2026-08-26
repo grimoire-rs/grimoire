@@ -73,15 +73,86 @@ pub fn validate_user_tag(tag: &str) -> Result<(), ReleaseError> {
     Ok(())
 }
 
+/// Annotation key prefix for the repository's support channels.
+///
+/// The four keys below live on the **companion** manifest, not on a version's
+/// artifact manifest, because they answer "who maintains this repository and
+/// where do I reach them" — a property of the repository that changes over
+/// time, not of any one release. Putting them on a version would freeze a
+/// contact into every published tag, so a moved chat channel would leave every
+/// already-released version pointing at a dead link forever, fixable only by
+/// re-releasing history. The companion tag is mutable by design, so a
+/// `grim publish` re-run updates the answer for every version at once.
+///
+/// This is a deliberate, scoped exception to `adr_description_companion.md`'s
+/// "no metadata in the companion" rule, which was written against *versioned*
+/// metadata (summary/keywords/license). Those still belong on the artifact
+/// manifest and must not migrate here — the dividing line is the ADR's own:
+/// versioned metadata on the manifest, repository-level facts on the
+/// companion.
+pub const SUPPORT_PREFIX: &str = "com.grimoire.support.";
+
+/// Repository-level support channels, published on the companion manifest.
+///
+/// The field names follow [CycloneDX's `externalReferences` type
+/// vocabulary](https://cyclonedx.org/docs/1.5/json/) — the established naming
+/// for exactly these channels — but stay **flat string keys** rather than
+/// CycloneDX's list-of-objects. An OCI annotation value is a string, so a list
+/// would have to be JSON- or YAML-in-a-string (Artifact Hub's approach), which
+/// buys extensibility at the cost of an untrusted parser on the read path for
+/// what is three or four links. A new channel is one more key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SupportLinks {
+    /// Where to file a ticket (`issue-tracker`).
+    pub issues: Option<String>,
+    /// A chat channel or room invite (`chat`).
+    pub chat: Option<String>,
+    /// General maintainer contact — prefer a team alias over a personal
+    /// mailbox, since a manifest is readable by anyone who can pull (`support`).
+    pub contact: Option<String>,
+    /// Where to report a vulnerability (`security-contact`).
+    pub security: Option<String>,
+}
+
+impl SupportLinks {
+    /// The `(suffix, value)` pairs to publish, skipping absent and
+    /// whitespace-only values so a blank authored string never becomes an
+    /// empty annotation.
+    fn entries(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("issues", self.issues.as_deref()),
+            ("chat", self.chat.as_deref()),
+            ("contact", self.contact.as_deref()),
+            ("security", self.security.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| (k, v)))
+    }
+
+    /// Read the support channels back off a companion manifest's annotation
+    /// map. Every field `None` when the manifest carries none of the keys.
+    pub fn from_annotations(annotations: &std::collections::BTreeMap<String, String>) -> Self {
+        let get = |suffix: &str| annotations.get(&format!("{SUPPORT_PREFIX}{suffix}")).cloned();
+        Self {
+            issues: get("issues"),
+            chat: get("chat"),
+            contact: get("contact"),
+            security: get("security"),
+        }
+    }
+}
+
 /// Publish the description companion `tar` to `repo`'s reserved [`DESC_TAG`].
 ///
 /// Pushes the layer blob, a single-layer manifest marked
 /// `com.grimoire.kind: desc` (the sole discriminator — no custom
 /// `artifactType` / config media type reaches the wire, which GitLab
-/// rejects), then re-points the mutable `__grimoire` tag at it. Deterministic
-/// packing makes an unchanged republish a CAS no-op (identical layer digest ⇒
-/// identical manifest digest ⇒ tag re-point is idempotent). Returns the
-/// pushed manifest digest.
+/// rejects) and carrying `support`'s channels, then re-points the mutable
+/// `__grimoire` tag at it. Deterministic packing makes an unchanged republish
+/// a CAS no-op (identical layer digest ⇒ identical manifest digest ⇒ tag
+/// re-point is idempotent) — and because the support annotations are
+/// authored, not derived, they do not disturb that. Returns the pushed
+/// manifest digest.
 ///
 /// # Errors
 ///
@@ -90,12 +161,17 @@ pub async fn push_description_companion(
     access: &dyn OciAccess,
     repo: &Identifier,
     tar: &[u8],
+    support: &SupportLinks,
 ) -> Result<Digest, AccessError> {
     let layer_digest = Algorithm::Sha256.hash(tar);
     // `desc` is not an [`crate::oci::ArtifactKind`], so `kind_from_manifest`
     // returns `None` and no artifact surface mistakes the companion for an
     // installable artifact.
-    let annotations = std::iter::once((KIND_ANNOTATION.to_string(), DESC_KIND.to_string())).collect();
+    let mut annotations: std::collections::BTreeMap<String, String> =
+        std::iter::once((KIND_ANNOTATION.to_string(), DESC_KIND.to_string())).collect();
+    for (suffix, value) in support.entries() {
+        annotations.insert(format!("{SUPPORT_PREFIX}{suffix}"), value.to_string());
+    }
     let manifest = OciManifest {
         // `push_manifest` builds its own on-wire manifest and stamps the OCI
         // manifest media type itself — this field is discarded on push, so
@@ -148,6 +224,45 @@ mod tests {
         assert!(validate_user_tag("latest").is_ok());
         assert!(validate_user_tag("canary").is_ok());
         assert!(validate_user_tag("__grimoirefoo").is_ok(), "no dot, not the exact tag");
+    }
+
+    #[test]
+    fn support_links_round_trip_through_annotations() {
+        let links = SupportLinks {
+            issues: Some("https://forge.example/team/repo/issues".to_string()),
+            chat: Some("https://chat.example/room/ai-platform".to_string()),
+            contact: Some("ai-platform@example.com".to_string()),
+            security: None,
+        };
+        let mut annotations = std::collections::BTreeMap::new();
+        for (suffix, value) in links.entries() {
+            annotations.insert(format!("{SUPPORT_PREFIX}{suffix}"), value.to_string());
+        }
+        assert_eq!(SupportLinks::from_annotations(&annotations), links);
+    }
+
+    #[test]
+    fn blank_support_values_publish_no_annotation() {
+        // A `contact = ""` in publish.toml must not become an empty
+        // annotation a consumer would render as a broken link.
+        let links = SupportLinks {
+            issues: Some("   ".to_string()),
+            chat: Some(String::new()),
+            contact: Some("  ai-platform@example.com  ".to_string()),
+            security: None,
+        };
+        let entries: Vec<_> = links.entries().collect();
+        assert_eq!(
+            entries,
+            vec![("contact", "ai-platform@example.com")],
+            "only the non-blank channel publishes, and it publishes trimmed"
+        );
+    }
+
+    #[test]
+    fn absent_support_reads_back_empty_not_missing() {
+        let empty = SupportLinks::from_annotations(&std::collections::BTreeMap::new());
+        assert_eq!(empty, SupportLinks::default());
     }
 
     #[test]

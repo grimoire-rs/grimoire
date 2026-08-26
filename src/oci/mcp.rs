@@ -156,6 +156,24 @@ pub struct McpDescriptor {
     /// Optional deprecation notice (`com.grimoire.deprecated`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<String>,
+    /// Optional successor reference (`com.grimoire.replaced-by`). Independent
+    /// of [`Self::deprecated`], matching every other artifact kind.
+    #[serde(default, rename = "replaced-by", skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
+    /// Optional maintainer contact (`org.opencontainers.image.authors`).
+    /// Prefer a team name or alias over a person's mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<String>,
+    /// Optional distributing organization (`org.opencontainers.image.vendor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// Optional project home page (`org.opencontainers.image.url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    /// Optional documentation URL
+    /// (`org.opencontainers.image.documentation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
     /// The server definition.
     pub server: McpServer,
 }
