@@ -22,7 +22,7 @@ project, and a `teardown.sh`.
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
 | `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
-| `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion, `[description.support]` channels (committed) |
+| `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion (README + CHANGELOG), `[description.support]` channels (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
@@ -98,18 +98,18 @@ grim tui                          # interactive (requires a TTY)
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` | move selection (scroll the detail pane while it is open) |
-| `pgup`/`pgdn` | scroll the detail pane from any mode (no focus needed) |
+| `↑`/`↓` | move selection — the detail pane always follows it |
+| `pgup`/`pgdn` | scroll the detail pane from anywhere (there is no focus to take) |
 | `t` | toggle between tree view and flat list view |
 | `→` | expand the selected group in tree view |
 | `←` | collapse the selected group in tree view |
-| `Enter` on group | fold/unfold group (on a leaf: open detail pane) |
+| `Enter` on group | fold/unfold group (on a leaf: fetch its companion immediately, skipping the idle-settle wait) |
 | `space` | mark/unmark the selected row; on a group: mark all descendant leaves |
 | `a` / `c` | mark all visible / clear marks |
 | `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked); on a group with no marks: acts on the whole subtree |
 | `o` | open the selected entry's repository URL in the browser |
 | `g` | toggle scope (project ⇄ global) — title shows the active scope |
-| `/` | search; `enter` browse detail (`j`/`k` also scroll there); `r` refresh catalog; `q` quit |
+| `/` | search; `tab` switches detail panel (`j`/`k` scroll it); `r` refresh catalog; `q` quit — `esc` quits on the first press |
 
 Try: mark a couple with `space`, press `i` (batch install), watch the
 state glyphs flip to green; `d` to batch-uninstall; `g` to see the same
@@ -118,7 +118,8 @@ catalog against the global scope's state. Tamper a file
 then refresh — it shows `✱ modified`; delete the dir and it shows
 `✘ integrity-missing`.
 
-The detail pane (`enter`) shows the centered identifier, a `Summary:` /
+The detail pane is always live for the selection. It shows the centered
+identifier, a `Summary:` /
 `Description:` section, and a `Metadata:` block (version + status stay on
 the catalog row). Most rig artifacts carry an authored `repository` URL
 (`https://github.com/grimoire-samples/…`, emitted as the
@@ -521,14 +522,49 @@ grim describe localhost:5050/grimoire/skills/hello-world --format json |
 
 ```sh
 grim search support-desk --format json | jq '.items[0].oci'
+```
+
+The `grim search` row carries every version-scoped field but **no** support
+channels: the browse catalog is disk-cached, and a cached contact link is one
+that may already have moved.
+
+The TUI is different, because it fetches the companion live once the selection
+settles (or immediately on `enter`):
+
+```sh
 grim tui                              # enter on support-desk
 ```
 
-The TUI detail pane gains `License:`, `Authors:`, `URL:`, `Documentation:`,
-`Vendor:`, `Compatibility:`, `Revision:`, and `Created:` rows. It shows **no**
-support channels — the browse catalog is disk-cached, and a cached contact
-link is a link that has since moved. `grim describe` is the live surface for
-those.
+Arrow onto `support-desk` and **wait a beat** — the companion fetch fires when
+the selection holds still, not on a keypress. The detail pane gains `License:`,
+`Authors:`, `URL:`, `Documentation:`, `Vendor:`, `Compatibility:`, `Revision:`,
+and `Created:` rows, plus a `Support:` section with all four channels. The
+panel strip lives in the pane's top border:
+
+```
+──Overview──Readme──Changelog─────────────────────
+```
+
+`tab` / `shift-tab` cycle it; `support-desk` publishes both documents, so all
+three labels are lit.
+
+Compare with `hello-world`, which publishes no companion at all: the strip is
+**still there** with all three labels — `Readme` and `Changelog` greyed — and
+landing on one reads `not available`. That is the point of the fixed strip:
+`tab` does the same thing on every row, and the pane never resizes as a fetch
+lands.
+
+`esc` quits on the first press from anywhere — there is no detail focus to
+back out of first.
+
+Worth checking by hand, since none of it is reachable from an acceptance test:
+
+- `GRIM_OFFLINE=1 grim tui` — every catalog field intact, and the `Support:`
+  section reads `not available — offline` rather than silently vanishing.
+- A narrow terminal (the stacked layout) — the strip must not break the split.
+- `r` after editing `skills/support-desk/README.md` and re-running
+  `bootstrap.sh` — the Readme tab must show the new text, since the companion
+  cache is cleared by a catalog reload.
 
 **The mutability demo** — the point of putting support on the companion:
 

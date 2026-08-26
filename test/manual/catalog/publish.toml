@@ -23,7 +23,8 @@ vendor = "Grimoire Manual Rig"
 # version's manifest. Edit a link, re-run bootstrap.sh, and every published
 # version reports the new value with no version bump and no digest churn.
 [description]
-readme = "skills/support-desk/README.md"
+readme    = "skills/support-desk/README.md"
+changelog = "skills/support-desk/CHANGELOG.md"
 
 [description.support]
 issues   = "https://github.com/grimoire-rs/grimoire/issues"

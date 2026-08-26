@@ -278,6 +278,8 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // offline is gated inside the LoadBundleMembers arm below.
     let (mut bundle_checker, mut bundle_rx) =
         super::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
+    let (mut companion_fetcher, mut companion_rx) =
+        super::companion_fetch::CompanionFetcher::new(Arc::clone(&ctx.access));
 
     loop {
         // Reap finished background tasks so panics surface (deliberately
@@ -293,6 +295,10 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
         // Drain bundle-member fetch results similarly.
+        companion_fetcher.reap_finished();
+        if drain_companion_fetches(&mut state, &mut companion_rx, companion_fetcher.generation()) {
+            terminal.draw(|f| draw(f, &frame(&state)))?;
+        }
         if drain_bundle_member_checks(&ctx, &mut state, &mut bundle_rx, bundle_checker.generation()) {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
@@ -300,6 +306,15 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
         // Poll so a slow terminal does not spin; on timeout, loop back to
         // drain again (so results surface within ~200ms even while idle).
         if !event::poll(Duration::from_millis(200))? {
+            // The timeout IS the debounce. A selection that has held still for
+            // a poll interval is one the reader is looking at, so fetch its
+            // companion — arrowing through the catalog never fires it, and no
+            // separate coalesce window is needed. Requiring `enter` instead
+            // meant the pane showed "not available" on every tab until the
+            // reader guessed a key that changed nothing else.
+            if request_companion(&ctx, &mut state, &mut companion_fetcher) {
+                terminal.draw(|f| draw(f, &frame(&state)))?;
+            }
             continue;
         }
         let ev = event::read()?;
@@ -345,6 +360,16 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 // was already cleared by reload_into → set_rows above, so no
                 // redundant clear is needed here.
                 bundle_checker.bump_generation();
+                companion_fetcher.bump_generation();
+                // The companion cache is cleared HERE rather than relying on
+                // `set_rows`. A refresh that fails never reaches `set_rows`
+                // (`reload_into` takes its `Err` arm and degrades to the
+                // existing rows), so the bump above would discard an in-flight
+                // result while its `Loading` placeholder survived — and a
+                // `Loading` entry is settled to both fetch predicates, so that
+                // row's companion would never load again for the session.
+                // Clearing beside the bump keeps the two in step on every path.
+                state.companions.clear();
                 // Re-arm the background checks against the freshly-loaded
                 // rows (the `r` key is an explicit "check again" too).
                 arm_background_checks(&ctx, &state, &mut checker);
@@ -464,6 +489,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+            TuiAction::LoadCompanion { repo } => {
+                spawn_companion(&ctx, &mut state, &mut companion_fetcher, repo);
             }
             TuiAction::LoadVersions { row } => {
                 load_versions(&ctx, &mut state, row).await;
@@ -596,6 +624,13 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // must be discarded (stale generation) — bump to ensure that.
                     bundle_checker.bump_generation();
                     state.bundle_members.clear();
+                    // The companion cache is deliberately NOT touched here. It
+                    // is keyed by bare repo, and a companion belongs to the
+                    // repository rather than the scope, so every entry stays
+                    // correct across a toggle. The generation is not bumped
+                    // either: discarding an in-flight result would strand its
+                    // `Loading` placeholder, which `companion_to_fetch` treats
+                    // as settled and would never retry.
                     // Lifecycle (D3b): clear expanded_bundles alongside bundle_members
                     // so no stale expand state leaks across a scope toggle.
                     state.expanded_bundles.clear();
@@ -866,6 +901,111 @@ fn drain_checks(
     }
     changed
 }
+/// The browse scope a companion fetch describes against.
+///
+/// Rebuilt per fetch from the live [`TuiContext`] rather than resolved once,
+/// so a scope toggle — which swaps `registries` and `primary_registry` — is
+/// picked up without a second resolve path to keep in sync.
+fn companion_scope(ctx: &TuiContext) -> crate::fetch::FetchScope {
+    crate::fetch::FetchScope {
+        registries: ctx.registries.clone(),
+        short_id_default: ctx.primary_registry.clone(),
+        scope: ctx.scope,
+        warnings: Vec::new(),
+    }
+}
+
+/// Ask for the selected row's companion if it still needs one.
+///
+/// Returns whether anything changed, so the caller can redraw — inserting the
+/// `Loading` placeholder is itself visible in the pane.
+fn request_companion(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    fetcher: &mut super::companion_fetch::CompanionFetcher,
+) -> bool {
+    let Some(repo) = state.companion_to_fetch() else {
+        return false;
+    };
+    spawn_companion(ctx, state, fetcher, repo);
+    true
+}
+
+/// Mark `repo` as loading and start its fetch, or record why it cannot run.
+fn spawn_companion(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    fetcher: &mut super::companion_fetch::CompanionFetcher,
+    repo: String,
+) {
+    use super::companion::CompanionCache;
+    if ctx.offline {
+        // Offline is a *positive* answer, not a fault: the pane keeps its
+        // Overview and names the cause, rather than a bare "unavailable".
+        state
+            .companions
+            .insert(repo, CompanionCache::Failed("offline".to_string()));
+        return;
+    }
+    state.companions.insert(repo.clone(), CompanionCache::Loading);
+    fetcher.spawn_fetch(repo, companion_scope(ctx));
+}
+
+/// Drain finished companion fetches into `state.companions`. Returns `true`
+/// when anything changed, so the caller redraws.
+///
+/// The return value is load-bearing, not cosmetic. Nothing else repaints when a
+/// fetch lands: the idle tick that started it returns `false` on every
+/// subsequent pass (the entry is no longer uncached), so a README that arrived
+/// would sit in memory, invisible, until the next keypress or resize.
+///
+/// Stale results (a generation older than the fetcher's current one, after a
+/// refresh) are dropped without touching the cache. A `Ready` answer that
+/// published nothing lands as `Absent`, not `Ready`: the pane then shows
+/// exactly what it showed before the fetch, and both fetch predicates treat it
+/// as settled.
+fn drain_companion_fetches(
+    state: &mut TuiState,
+    rx: &mut tokio::sync::mpsc::Receiver<super::companion_fetch::CompanionMsg>,
+    generation: u64,
+) -> bool {
+    use super::companion::CompanionCache;
+    use super::companion_fetch::CompanionMsg;
+
+    let mut changed = false;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            CompanionMsg::Ready {
+                repo,
+                companion,
+                generation: g,
+            } => {
+                if g != generation {
+                    continue;
+                }
+                let entry = if companion.is_empty() {
+                    CompanionCache::Absent
+                } else {
+                    CompanionCache::Ready(companion)
+                };
+                state.companions.insert(repo, entry);
+                changed = true;
+            }
+            CompanionMsg::Failed {
+                repo,
+                reason,
+                generation: g,
+            } => {
+                if g != generation {
+                    continue;
+                }
+                state.companions.insert(repo, CompanionCache::Failed(reason));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
 
 /// Drain every pending [`BundleMembersMsg`] non-blockingly and apply it to
 /// `state.bundle_members`. Returns `true` when anything changed (so the
@@ -1043,6 +1183,10 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
         KeyCode::Enter => TuiInput::Enter,
         KeyCode::Esc => TuiInput::Esc,
         KeyCode::Backspace => TuiInput::Backspace,
+        // Tab was unbound; it now cycles the detail pane's tabs. `BackTab` is
+        // what crossterm reports for Shift-Tab.
+        KeyCode::Tab => TuiInput::NextTab,
+        KeyCode::BackTab => TuiInput::PrevTab,
         KeyCode::Char(c) => TuiInput::Char(c),
         _ => return None,
     })
@@ -3784,7 +3928,10 @@ mod tests {
         assert_eq!(map_key(mk(KeyCode::Esc)), Some(TuiInput::Esc));
         assert_eq!(map_key(mk(KeyCode::Backspace)), Some(TuiInput::Backspace));
         assert_eq!(map_key(mk(KeyCode::Char('i'))), Some(TuiInput::Char('i')));
-        assert_eq!(map_key(mk(KeyCode::Tab)), None);
+        // Tab was deliberately unbound until the detail pane gained tabs; it
+        // now cycles them, and Shift-Tab (crossterm's `BackTab`) cycles back.
+        assert_eq!(map_key(mk(KeyCode::Tab)), Some(TuiInput::NextTab));
+        assert_eq!(map_key(mk(KeyCode::BackTab)), Some(TuiInput::PrevTab));
     }
 
     // Step 3.5: `map_key` must map Left → Collapse and Right → Expand.

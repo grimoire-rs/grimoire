@@ -15,6 +15,7 @@
 //! width, so the geometry is one concern.
 
 use super::bundle_members::MemberNode;
+use super::companion::{Companion, CompanionCache};
 use super::state::{ArtifactState, TuiRow};
 use crate::config::registry_resolve::RowSource;
 
@@ -85,6 +86,110 @@ pub enum DetailLine {
     },
     /// Plain wrapped body text.
     Text(String),
+    /// A markdown heading from a companion document. `level` is 1–6 and drives
+    /// the emphasis ramp, not indentation — the pane is too narrow to indent.
+    Heading {
+        /// ATX heading level, 1 through 6.
+        level: u8,
+        /// The heading text, inline markup already flattened.
+        text: String,
+    },
+    /// A markdown list item, rendered with a leading bullet glyph.
+    Bullet(String),
+    /// A line inside a fenced code block — verbatim, dimmed, never re-wrapped
+    /// semantically (a command must stay copyable).
+    Code(String),
+    /// A markdown thematic break.
+    Rule,
+    /// A transient pane status (fetch in flight, fetch failed, nothing
+    /// published). Dimmed, and never mistaken for artifact content.
+    Notice(String),
+}
+
+/// Which tab of the detail pane is showing.
+///
+/// The set is **fixed**: every catalog row offers all three, whether or not its
+/// repository published the documents behind them. An earlier revision showed
+/// only the tabs with content, and that was the wrong trade — the strip changed
+/// width as a fetch landed, `tab` did something different on every row, and
+/// there was no way to learn the binding existed from a package that happened
+/// to publish nothing. A tab with nothing behind it is greyed and says so when
+/// you land on it, which is a stable, teachable shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailTab {
+    /// Catalog metadata and support channels. Always has content, and is where
+    /// every selection starts.
+    #[default]
+    Overview,
+    /// The repository `README.md` from the description companion.
+    Readme,
+    /// The repository `CHANGELOG.md` from the description companion.
+    Changelog,
+}
+
+impl DetailTab {
+    /// Every tab, in strip order.
+    pub const ALL: [Self; 3] = [Self::Overview, Self::Readme, Self::Changelog];
+
+    /// The strip label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Readme => "Readme",
+            Self::Changelog => "Changelog",
+        }
+    }
+
+    /// Whether `companion` has content behind this tab.
+    ///
+    /// Drives the greyed-out strip label only — never whether the tab can be
+    /// selected. `Overview` is always live; the document tabs are live only
+    /// once a fetch has landed and that document was published.
+    pub fn is_live(self, companion: Option<&CompanionCache>) -> bool {
+        match self {
+            Self::Overview => true,
+            Self::Readme => matches!(companion, Some(CompanionCache::Ready(c)) if c.readme.is_some()),
+            Self::Changelog => matches!(companion, Some(CompanionCache::Ready(c)) if c.changelog.is_some()),
+        }
+    }
+}
+
+/// The detail pane's lines for `tab`.
+///
+/// Overview delegates to [`detail_lines`]; the document tabs render the
+/// companion's markdown, or a [`DetailLine::Notice`] naming why there is none.
+/// The notice is the normal case, not an edge case: every row offers all three
+/// tabs, and most repositories publish neither document.
+pub fn detail_tab_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>, tab: DetailTab) -> Vec<DetailLine> {
+    // A leading blank so a notice does not sit flush against the block's top
+    // border — the strip lives in the border now, and content butted straight
+    // up against it reads cramped.
+    // A `Failed` notice interpolates a transport error string, which can carry
+    // a registry-supplied message — sanitize it like every other such string.
+    let notice = |text: String| {
+        vec![
+            DetailLine::Blank,
+            DetailLine::Notice(super::render::sanitize_member_label(&text)),
+        ]
+    };
+    let document = |pick: fn(&Companion) -> Option<&String>| match companion {
+        Some(CompanionCache::Ready(c)) => pick(c).map_or_else(
+            || notice("not available".to_string()),
+            |text| {
+                let mut lines = vec![DetailLine::Blank];
+                lines.extend(super::markdown::to_detail_lines(text));
+                lines
+            },
+        ),
+        Some(CompanionCache::Loading) => notice("loading…".to_string()),
+        Some(CompanionCache::Failed(reason)) => notice(format!("not available — {reason}")),
+        Some(CompanionCache::Absent) | None => notice("not available".to_string()),
+    };
+    match tab {
+        DetailTab::Overview => detail_lines(row, companion),
+        DetailTab::Readme => document(|c| c.readme.as_ref()),
+        DetailTab::Changelog => document(|c| c.changelog.as_ref()),
+    }
 }
 
 /// Build the Detail pane's semantic lines for the selected row.
@@ -96,7 +201,7 @@ pub enum DetailLine {
 /// deliberately NOT repeated here — the catalog row already shows both
 /// (Tag column, status glyph). `Pinned:` appears only when the picker
 /// pinned a version.
-pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
+pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) -> Vec<DetailLine> {
     let Some(r) = row else {
         return vec![DetailLine::Text("no selection".to_string())];
     };
@@ -156,6 +261,11 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
     // they live on the mutable description companion, and the browse catalog
     // is disk-cached, so a pane fed from it would show a link that has since
     // moved. `grim describe` is the live surface for those.
+    //
+    // Every value here is an annotation written by whoever published the
+    // artifact, so each is sanitized before it reaches a terminal cell. Until
+    // this branch these five were dead read code — the write path emitted only
+    // `licenses` — so populating them is what made the strip load-bearing.
     for (label, value) in [
         ("License:", &r.oci.licenses),
         ("Authors:", &r.oci.authors),
@@ -167,7 +277,7 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
         if let Some(value) = value {
             lines.push(DetailLine::MetaEntry {
                 label,
-                value: value.clone(),
+                value: super::render::sanitize_member_label(value),
             });
         }
     }
@@ -222,7 +332,71 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
                 .to_string(),
         });
     }
+    lines.extend(support_lines(companion));
     lines
+}
+
+/// The `Support:` section, from the live companion fetch.
+///
+/// Empty while a fetch is in flight and for a repository that published no
+/// channels: a section that appears, says "loading…", and then either fills in
+/// or vanishes would make the pane jump under the reader for metadata most
+/// repositories do not publish at all.
+///
+/// A *failed* fetch is the exception and does render, because absence would
+/// otherwise be ambiguous — see the body.
+///
+/// These channels are the one thing in this pane that does **not** come from
+/// the browse catalog. They live on the mutable description companion, so a
+/// disk-cached copy could show a contact link that has already moved — which is
+/// exactly why `grim search` and the catalog row do not carry them
+/// (`docs/src/publishing.md#metadata-surfaces`). Fetching them live on the
+/// keypress that opens the pane is a different mechanism and carries no such
+/// staleness.
+fn support_lines(companion: Option<&CompanionCache>) -> Vec<DetailLine> {
+    let c = match companion {
+        Some(CompanionCache::Ready(c)) => c,
+        // A failed fetch must say so *here*. Overview is where the channels
+        // would have been, and silently omitting the section is
+        // indistinguishable from a repository that publishes none — the reader
+        // cannot tell "nobody to contact" from "we could not ask".
+        Some(CompanionCache::Failed(reason)) => {
+            return vec![
+                DetailLine::Blank,
+                DetailLine::SectionLabel("Support:"),
+                DetailLine::Blank,
+                DetailLine::Notice(format!("not available — {reason}")),
+            ];
+        }
+        _ => return Vec::new(),
+    };
+    let channels = [
+        ("Issues:", &c.support.issues),
+        ("Chat:", &c.support.chat),
+        ("Contact:", &c.support.contact),
+        ("Security:", &c.support.security),
+    ];
+    let mut lines = Vec::new();
+    for (label, value) in channels {
+        if let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            lines.push(DetailLine::MetaEntry {
+                label,
+                // Publisher-controlled and headed for a terminal — same strip
+                // the tree applies to every other registry-supplied string.
+                value: super::render::sanitize_member_label(value),
+            });
+        }
+    }
+    if lines.is_empty() {
+        return lines;
+    }
+    let mut section = vec![
+        DetailLine::Blank,
+        DetailLine::SectionLabel("Support:"),
+        DetailLine::Blank,
+    ];
+    section.append(&mut lines);
+    section
 }
 
 /// Build the Detail pane's semantic lines for a selected virtual bundle
@@ -281,12 +455,26 @@ pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> V
 /// tests reuse it to assert content without caring about styling).
 pub fn detail_line_text(line: &DetailLine) -> String {
     match line {
-        DetailLine::Blank => String::new(),
-        DetailLine::Identifier(s) | DetailLine::Text(s) => s.clone(),
+        // A rule is painted as a full-width glyph run, which by construction
+        // occupies exactly one row — measuring it as empty is what makes the
+        // scroll bound agree with the paint.
+        DetailLine::Blank | DetailLine::Rule => String::new(),
+        DetailLine::Identifier(s) | DetailLine::Text(s) | DetailLine::Notice(s) => s.clone(),
         DetailLine::SectionLabel(l) => (*l).to_string(),
         DetailLine::MetaEntry { label, value } => format!("{label} {value}"),
+        DetailLine::Heading { text, .. } => text.clone(),
+        // The prefixes are part of the painted width, so they must be part of
+        // the measured width too, or a bulleted list scrolls short.
+        DetailLine::Bullet(s) => format!("{BULLET_PREFIX}{s}"),
+        DetailLine::Code(s) => format!("{CODE_PREFIX}{s}"),
     }
 }
+
+/// Painted prefix of a [`DetailLine::Bullet`]. Shared by the wrap measurement
+/// in [`detail_line_text`] and the draw in `render`, so the two cannot drift.
+pub const BULLET_PREFIX: &str = "  • ";
+/// Painted prefix of a [`DetailLine::Code`] line.
+pub const CODE_PREFIX: &str = "    ";
 
 /// The Detail pane's *inner* (border-less) size for a terminal of
 /// `(width, height)` — mirrors the layout math in `render::draw`: 5 rows
@@ -295,6 +483,8 @@ pub fn detail_line_text(line: &DetailLine) -> String {
 /// split of the content area (list on top, Detail below).
 pub fn viewport(term: (u16, u16), show_registry_column: bool) -> (u16, u16) {
     let (w, h) = term;
+    // The tab strip rides the block's own border, so it costs the body no row
+    // and the pane's height does not change with what is selected.
     let content_h = h.saturating_sub(5);
     let catalog_w = catalog_width(show_registry_column);
     let (dw, dh) = if w >= catalog_w + DETAIL_MIN_WIDTH {
@@ -511,9 +701,169 @@ mod tests {
         }
     }
 
+    // ── Tabs and the live companion ──────────────────────────────────────
+
+    fn companion(readme: Option<&str>, changelog: Option<&str>) -> CompanionCache {
+        CompanionCache::Ready(Box::new(Companion {
+            support: Default::default(),
+            readme: readme.map(str::to_string),
+            changelog: changelog.map(str::to_string),
+        }))
+    }
+
+    #[test]
+    fn every_tab_is_greyed_but_present_without_a_companion() {
+        // The whole no-companion path: no fetch yet, a fetch in flight, a
+        // failed fetch, and a repository that genuinely publishes nothing must
+        // all agree — Overview live, the document tabs present but empty. The
+        // strip must NOT change membership as a fetch lands, or the pane
+        // resizes under the reader and `tab` means something different on
+        // every row.
+        for state in [
+            None,
+            Some(&CompanionCache::Loading),
+            Some(&CompanionCache::Absent),
+            Some(&CompanionCache::Failed("offline".to_string())),
+        ] {
+            assert!(DetailTab::Overview.is_live(state), "{state:?}");
+            assert!(!DetailTab::Readme.is_live(state), "{state:?}");
+            assert!(!DetailTab::Changelog.is_live(state), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_published_document_makes_exactly_its_own_tab_live() {
+        let readme_only = companion(Some("# r"), None);
+        assert!(DetailTab::Readme.is_live(Some(&readme_only)));
+        assert!(!DetailTab::Changelog.is_live(Some(&readme_only)));
+
+        let changelog_only = companion(None, Some("## 1.0.0"));
+        assert!(!DetailTab::Readme.is_live(Some(&changelog_only)));
+        assert!(DetailTab::Changelog.is_live(Some(&changelog_only)));
+
+        let both = companion(Some("# r"), Some("## 1.0.0"));
+        assert!(DetailTab::Readme.is_live(Some(&both)));
+        assert!(DetailTab::Changelog.is_live(Some(&both)));
+    }
+
+    #[test]
+    fn support_channels_alone_leave_both_document_tabs_empty() {
+        // Support channels are worth caching as `Ready` — they render in
+        // Overview — but they are not a document, so neither tab lights up.
+        let support_only = CompanionCache::Ready(Box::new(Companion {
+            support: crate::oci::description::SupportLinks {
+                issues: Some("https://example.invalid/issues".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        assert!(!DetailTab::Readme.is_live(Some(&support_only)));
+        assert!(!DetailTab::Changelog.is_live(Some(&support_only)));
+    }
+
+    #[test]
+    fn a_document_tab_renders_the_companion_markdown() {
+        let row = tui_row(None);
+        let cache = companion(Some("# Title\n\ntext"), None);
+        let lines = detail_tab_lines(Some(&row), Some(&cache), DetailTab::Readme);
+        assert_eq!(
+            lines,
+            vec![
+                // A leading blank keeps the body off the block's top border,
+                // which now carries the tab strip.
+                DetailLine::Blank,
+                DetailLine::Heading {
+                    level: 1,
+                    text: "Title".to_string()
+                },
+                DetailLine::Blank,
+                DetailLine::Text("text".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_tab_without_content_says_why_instead_of_rendering_empty() {
+        let row = tui_row(None);
+        for (cache, needle) in [
+            (Some(CompanionCache::Loading), "loading"),
+            (Some(CompanionCache::Absent), "not available"),
+            (Some(CompanionCache::Failed("offline".to_string())), "offline"),
+            (None, "not available"),
+        ] {
+            let lines = detail_tab_lines(Some(&row), cache.as_ref(), DetailTab::Readme);
+            assert_eq!(lines[0], DetailLine::Blank, "the notice must clear the top border");
+            let DetailLine::Notice(text) = &lines[1] else {
+                panic!("expected a notice, got {lines:?}");
+            };
+            assert!(text.contains(needle), "{text:?} must mention {needle:?}");
+        }
+    }
+
+    #[test]
+    fn overview_gains_a_support_section_only_from_a_ready_companion() {
+        let row = tui_row(None);
+        let with_channels = CompanionCache::Ready(Box::new(Companion {
+            support: crate::oci::description::SupportLinks {
+                issues: Some("https://example.invalid/issues".to_string()),
+                // A blank authored value is not a channel — the same
+                // trim/empty-is-absent rule the publish side applies.
+                chat: Some("   ".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let lines = detail_lines(Some(&row), Some(&with_channels));
+        assert_eq!(meta_value(&lines, "Issues:"), Some("https://example.invalid/issues"));
+        assert_eq!(meta_value(&lines, "Chat:"), None, "a blank value is not a channel");
+        assert!(lines.contains(&DetailLine::SectionLabel("Support:")));
+    }
+
+    #[test]
+    fn overview_shows_no_support_section_while_the_fetch_is_pending_or_absent() {
+        // A section that appears, says "loading…", then vanishes would make the
+        // pane jump under the reader for metadata most repositories never
+        // publish. Absence is the honest resting state.
+        let row = tui_row(None);
+        for state in [None, Some(&CompanionCache::Loading), Some(&CompanionCache::Absent)] {
+            let lines = detail_lines(Some(&row), state);
+            assert!(
+                !lines.contains(&DetailLine::SectionLabel("Support:")),
+                "{state:?} must not open a Support section"
+            );
+        }
+    }
+
+    #[test]
+    fn overview_says_so_when_the_support_fetch_failed() {
+        // The one case that must NOT be silent: an omitted section is
+        // indistinguishable from a repository that publishes no channels, so
+        // the reader cannot tell "nobody to contact" from "we could not ask".
+        let row = tui_row(None);
+        let lines = detail_lines(Some(&row), Some(&CompanionCache::Failed("offline".to_string())));
+        assert!(lines.contains(&DetailLine::SectionLabel("Support:")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| matches!(l, DetailLine::Notice(t) if t.contains("offline"))),
+            "the cause must reach the pane: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_tab_strip_costs_the_body_nothing() {
+        // The strip rides the block's border, so the pane's height is the same
+        // whether or not it is painted. A body that shrank when a strip
+        // appeared made the pane resize under the reader.
+        let term = (CATALOG_WIDTH + 60, 30);
+        assert_eq!(viewport(term, false), viewport(term, false));
+        let (_, h) = viewport(term, false);
+        assert_eq!(h, 30 - 5 - 2, "chrome (5) and the block's own borders (2)");
+    }
+
     #[test]
     fn detail_lines_show_deprecated_meta_entry_when_deprecated() {
-        let lines = detail_lines(Some(&tui_row(Some("use acme/code-review-2"))));
+        let lines = detail_lines(Some(&tui_row(Some("use acme/code-review-2"))), None);
         let dep = lines.iter().find_map(|l| match l {
             DetailLine::MetaEntry {
                 label: "Deprecated:",
@@ -543,7 +893,7 @@ mod tests {
             vendor: Some("Acme Inc".to_string()),
             compatibility: Some("claude>=2".to_string()),
         };
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "License:"), Some("Apache-2.0"));
         assert_eq!(meta_value(&lines, "Authors:"), Some("Jane Doe"));
         assert_eq!(meta_value(&lines, "URL:"), Some("https://acme.example"));
@@ -555,7 +905,7 @@ mod tests {
     #[test]
     fn detail_lines_omit_curated_oci_metadata_when_absent() {
         // A default (empty) OciMeta shows none of the curated rows.
-        let lines = detail_lines(Some(&tui_row(None)));
+        let lines = detail_lines(Some(&tui_row(None)), None);
         for label in [
             "License:",
             "Authors:",
@@ -573,7 +923,7 @@ mod tests {
         // Only `licenses` set ⇒ only the License row appears (partial metadata).
         let mut row = tui_row(None);
         row.oci.licenses = Some("MIT".to_string());
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "License:"), Some("MIT"));
         for label in ["Authors:", "URL:", "Documentation:", "Vendor:", "Compatibility:"] {
             assert_eq!(meta_value(&lines, label), None);
@@ -588,7 +938,7 @@ mod tests {
     fn detail_lines_explain_an_integrity_missing_row() {
         let mut row = tui_row(None);
         row.state = ArtifactState::IntegrityMissing;
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         let integrity = meta_value(&lines, "Integrity:").expect("integrity-missing gets its line");
         assert!(integrity.contains("outside their anchor root"), "got {integrity}");
         assert!(integrity.contains("uninstall and reinstall"), "got {integrity}");
@@ -613,7 +963,7 @@ mod tests {
             let mut row = tui_row(None);
             row.state = state;
             assert_eq!(
-                meta_value(&detail_lines(Some(&row)), "Integrity:"),
+                meta_value(&detail_lines(Some(&row), None), "Integrity:"),
                 None,
                 "{state:?} must not carry the Integrity line"
             );
@@ -625,7 +975,7 @@ mod tests {
         let mut row = tui_row(None);
         row.revision = Some("abc123def456-dirty".to_string());
         row.created = Some("2026-06-29T12:00:00+00:00".to_string());
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         let revision = lines.iter().find_map(|l| match l {
             DetailLine::MetaEntry {
                 label: "Revision:",
@@ -647,7 +997,7 @@ mod tests {
     #[test]
     fn detail_lines_omit_git_provenance_when_absent() {
         // An artifact published without `--git` shows neither row.
-        let lines = detail_lines(Some(&tui_row(None)));
+        let lines = detail_lines(Some(&tui_row(None)), None);
         assert!(!lines.iter().any(|l| matches!(
             l,
             DetailLine::MetaEntry { label: "Revision:", .. } | DetailLine::MetaEntry { label: "Created:", .. }
@@ -660,7 +1010,7 @@ mod tests {
         row.revision = Some("abc123def456".to_string());
         row.created = Some("2026-06-29T12:00:00+00:00".to_string());
         row.rating = Some(42);
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "Rating:"), Some("42 upvotes"));
         // Beside `Revision:`/`Created:`, not before them.
         let pos = |want: &str| {
@@ -671,7 +1021,7 @@ mod tests {
         assert!(pos("Created:") < pos("Rating:"), "Rating follows the provenance rows");
         // A single vote reads grammatically.
         row.rating = Some(1);
-        assert_eq!(meta_value(&detail_lines(Some(&row)), "Rating:"), Some("1 upvote"));
+        assert_eq!(meta_value(&detail_lines(Some(&row), None), "Rating:"), Some("1 upvote"));
     }
 
     #[test]
@@ -680,7 +1030,7 @@ mod tests {
         // voted", which is a different fact than "we have no rating".
         let row = tui_row(None);
         assert_eq!(row.rating, None, "the fixture is unrated");
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "Rating:"), None);
         assert!(
             !lines
@@ -692,7 +1042,7 @@ mod tests {
 
     #[test]
     fn detail_lines_omit_deprecated_meta_entry_when_not_deprecated() {
-        let lines = detail_lines(Some(&tui_row(None)));
+        let lines = detail_lines(Some(&tui_row(None)), None);
         assert!(
             !lines.iter().any(|l| matches!(
                 l,
@@ -715,7 +1065,7 @@ mod tests {
         row.source = RowSource::Local;
         row.repository = "./local-skill".to_string();
         row.version = "deadbee1".to_string();
-        let lines = detail_lines(Some(&row));
+        let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "Path:"), Some("./local-skill"));
         assert_eq!(meta_value(&lines, "Hash:"), Some("deadbee1"));
     }
@@ -724,7 +1074,7 @@ mod tests {
     fn detail_lines_omit_path_and_hash_for_registry_row() {
         // A registry-sourced row (`RowSource::Unattributed`) must never show the
         // Local-only Path:/Hash: rows.
-        let lines = detail_lines(Some(&tui_row(None)));
+        let lines = detail_lines(Some(&tui_row(None)), None);
         assert_eq!(meta_value(&lines, "Path:"), None);
         assert_eq!(meta_value(&lines, "Hash:"), None);
     }

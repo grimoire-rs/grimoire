@@ -88,8 +88,6 @@ pub enum Mode {
     List,
     /// Editing the search box; character keys edit the query.
     Search,
-    /// Viewing the selected row's detail pane.
-    Detail,
     /// Viewing the keybinding help overlay.
     Help,
     /// Choosing a specific version for the selected row from a popup.
@@ -383,6 +381,26 @@ pub struct TuiState {
     /// - Pruned on `merge_catalog_rows` (same bundle-rows-only prune).
     /// - Cleared on scope toggle in `app.rs`.
     pub expanded_bundles: BTreeSet<String>,
+    /// Ephemeral per-repository cache for description companions — the README,
+    /// CHANGELOG, and support channels the detail pane's document tabs render.
+    ///
+    /// Keyed by bare `repo`, **not** by `(scope, repo)` like `bundle_members`:
+    /// a companion belongs to the repository, so the same answer is correct on
+    /// both sides of a scope toggle and re-fetching after one would be waste.
+    ///
+    /// Lifecycle:
+    /// - Cleared wholesale on `set_rows` (full catalog reload), so `r` is a
+    ///   genuine refresh of the documents too.
+    /// - A `Failed` entry IS retried on the next `enter`: unlike a bundle
+    ///   member fetch, the common cause is a transient network fault and the
+    ///   trigger is one keypress, so there is no retry storm to guard against.
+    pub companions: HashMap<String, super::companion::CompanionCache>,
+    /// Which detail-pane tab is showing.
+    ///
+    /// Reset to [`DetailTab::Overview`] whenever the selection changes — a tab
+    /// index carried onto a different artifact would land on a document that
+    /// artifact does not publish.
+    pub detail_tab: super::detail::DetailTab,
     /// Per-registry health summary (C6).
     ///
     /// Aggregated from [`crate::catalog::catalog_service::CatalogResults`] on
@@ -442,6 +460,8 @@ impl Default for TuiState {
             registry_order: Vec::new(),
             bundle_members: HashMap::new(),
             expanded_bundles: BTreeSet::new(),
+            companions: HashMap::new(),
+            detail_tab: super::detail::DetailTab::Overview,
             registry_health: RegistryHealth::default(),
             registry_locators: Vec::new(),
             registry_labels: BTreeMap::new(),
@@ -533,6 +553,12 @@ impl TuiState {
         // Lifecycle (D3b): expanded_bundles mirrors bundle_members — clear
         // together so no stale expand state remains after a catalog reload.
         self.expanded_bundles.clear();
+        // `r` is a genuine refresh of the documents too — a README edited and
+        // republished must show up without restarting the session. The
+        // companion tag is mutable by design, so this cache is the one that
+        // most needs a refresh to actually clear it.
+        self.companions.clear();
+        self.detail_tab = super::detail::DetailTab::Overview;
     }
 
     /// Reconcile a freshly-refreshed catalog row set into the current screen
@@ -599,6 +625,14 @@ impl TuiState {
         // member list + expand state; repos that vanished are pruned).
         let saved_bundle_members = std::mem::take(&mut self.bundle_members);
         let saved_expanded_bundles = std::mem::take(&mut self.expanded_bundles);
+        // Companions are pruned on the same principle, against every live repo
+        // rather than only the bundle rows — a companion belongs to any
+        // repository, not just a bundle. Without this the cache only ever grows:
+        // its trigger is the idle tick, so browsing a large catalog caches two
+        // decompressed documents per row and nothing evicts them until a full
+        // reload. `bundle_members` was self-limiting because expanding a bundle
+        // is a deliberate act; resting a cursor is not.
+        let saved_companions = std::mem::take(&mut self.companions);
 
         // The single kind-sort + filter choke point; clears marks and resets
         // selection, both of which we restore by repo key below.
@@ -633,6 +667,14 @@ impl TuiState {
             for key in saved_expanded_bundles {
                 if live_repos.contains(key.as_str()) {
                     self.expanded_bundles.insert(key);
+                }
+            }
+        }
+        if !saved_companions.is_empty() {
+            let live_any: std::collections::HashSet<&str> = self.rows.iter().map(|r| r.repo.as_str()).collect();
+            for (repo, cache) in saved_companions {
+                if live_any.contains(repo.as_str()) {
+                    self.companions.insert(repo, cache);
                 }
             }
         }
@@ -885,7 +927,7 @@ impl TuiState {
     /// selection so it stays in range. Resets the detail scroll — the
     /// selection may now point at a different row.
     pub fn apply_query(&mut self, query: impl Into<String>) {
-        self.detail_scroll = 0;
+        self.reset_detail_view();
         self.query = query.into();
         self.recompute_filter();
         // View-aware clamp: in tree mode `selected` indexes the flattened
@@ -915,7 +957,7 @@ impl TuiState {
     /// filtered view and re-clamps the selection so the cursor stays in range
     /// as rows appear or disappear.
     pub fn toggle_hide_deprecated(&mut self) {
-        self.detail_scroll = 0;
+        self.reset_detail_view();
         self.hide_deprecated = !self.hide_deprecated;
         self.recompute_filter();
         self.clamp_tree_selection_to(self.display_len());
@@ -937,7 +979,7 @@ impl TuiState {
     /// wraps, never out of range). Resets the detail scroll — the pane now
     /// shows a different row.
     pub fn move_selection(&mut self, delta: i64) {
-        self.detail_scroll = 0;
+        self.reset_detail_view();
         let len = self.display_len();
         if len == 0 {
             self.selected = 0;
@@ -948,16 +990,137 @@ impl TuiState {
         self.selected = next as usize;
     }
 
+    /// The repository whose companion the **automatic** trigger should fetch.
+    ///
+    /// Only an entirely uncached row qualifies. Every settled state —
+    /// `Loading`, `Ready`, `Absent`, and crucially `Failed` — answers `None`.
+    ///
+    /// `Failed` is terminal here because the automatic caller is the event
+    /// loop's idle poll, which fires roughly five times a second for as long
+    /// as the cursor rests on a row. Re-fetching a failed entry from there is
+    /// a request storm against the registry: fetch fails, cache flips back to
+    /// `Failed`, next poll fetches again, forever. Retrying a failure is
+    /// [`Self::companion_to_retry`]'s job, on an explicit keypress.
+    pub fn companion_to_fetch(&self) -> Option<String> {
+        let repo = self.fetchable_repo()?;
+        match self.companions.get(&repo) {
+            None => Some(repo),
+            Some(_) => None,
+        }
+    }
+
+    /// The selected row's repository, when it is one a registry could answer
+    /// for.
+    ///
+    /// A `Local` row is declared by path and has no repository at all: its
+    /// `repo` field holds the bare artifact name with an empty registry. Asking
+    /// `describe` about that expands the short id against the *default*
+    /// registry, so a locally-declared `my-skill` would be requested as
+    /// `ghcr.io/grimoire-rs/my-skill` — a guaranteed miss, and a local artifact
+    /// name sent to a public registry as a repository path. Neither is
+    /// something resting the cursor on a row should do.
+    fn fetchable_repo(&self) -> Option<String> {
+        let row = self.selected_row()?;
+        (row.source != RowSource::Local).then(|| row.repo.clone())
+    }
+
+    /// The repository whose companion an **explicit** `enter` should fetch.
+    ///
+    /// Same as [`Self::companion_to_fetch`], plus a `Failed` entry: a person
+    /// pressing a key is asking for exactly one retry, and the usual cause of
+    /// a failure is a transient fault worth one more attempt. The rate is
+    /// bounded by how fast someone can press a key, so there is no storm.
+    pub fn companion_to_retry(&self) -> Option<String> {
+        let repo = self.fetchable_repo()?;
+        match self.companions.get(&repo) {
+            None | Some(super::companion::CompanionCache::Failed(_)) => Some(repo),
+            Some(_) => None,
+        }
+    }
+
+    /// The companion cache slot for the selected row, if any.
+    ///
+    /// `None` covers both "nothing fetched yet" and "the selection is not a
+    /// catalog row" (a tree group, a virtual bundle member), which render the
+    /// same way: Overview only, no strip.
+    pub fn detail_companion(&self) -> Option<&super::companion::CompanionCache> {
+        self.selected_row().and_then(|r| self.companions.get(&r.repo))
+    }
+
+    /// Whether the detail pane paints its tab strip.
+    ///
+    /// Keyed on the *row type*, never on what a fetch found: a catalog row
+    /// always gets the strip, a tree group or a virtual bundle member never
+    /// does (neither has a repository companion to show). That keeps the pane's
+    /// height stable while a fetch is in flight — the earlier
+    /// content-conditional strip made the pane resize under the reader.
+    pub fn show_detail_tabs(&self) -> bool {
+        self.selected_row().is_some()
+    }
+
+    /// Every tab with a flag for whether content sits behind it, in strip
+    /// order. Empty when no strip is painted.
+    pub fn detail_tabs(&self) -> Vec<(super::detail::DetailTab, bool)> {
+        if !self.show_detail_tabs() {
+            return Vec::new();
+        }
+        let companion = self.detail_companion();
+        super::detail::DetailTab::ALL
+            .into_iter()
+            .map(|t| (t, t.is_live(companion)))
+            .collect()
+    }
+
+    /// The lines of the pane as it currently stands — the active tab's content
+    /// for the current selection. The single input to both the scroll bound and
+    /// the paint, so the two cannot disagree about how tall the pane is.
+    pub fn active_detail_lines(&self) -> Vec<super::detail::DetailLine> {
+        super::detail::detail_tab_lines(self.selected_row(), self.detail_companion(), self.detail_tab)
+    }
+
+    /// The detail viewport for `size`. The tab strip rides the block border, so
+    /// it takes nothing from the body — this is a thin wrapper kept so every
+    /// scroll bound resolves the registry-column width one way.
+    pub fn detail_viewport(&self, size: (u16, u16)) -> (u16, u16) {
+        super::detail::viewport(size, self.show_registry_column())
+    }
+
+    /// Move to the next (`+1`) or previous (`-1`) tab, wrapping.
+    ///
+    /// Cycles the **fixed** set, including tabs with nothing behind them —
+    /// landing on an empty Readme and reading "not published for this
+    /// repository" is a clearer answer than the key silently doing nothing, and
+    /// it means `tab` behaves identically on every row.
+    ///
+    /// The scroll offset resets: an offset carried from a long README onto a
+    /// short Overview would land the reader past the end of the content.
+    pub fn cycle_detail_tab(&mut self, delta: i64) {
+        if !self.show_detail_tabs() {
+            return;
+        }
+        let tabs = super::detail::DetailTab::ALL;
+        let at = tabs.iter().position(|t| *t == self.detail_tab).unwrap_or(0);
+        // `rem_euclid` so a backward step from the first tab wraps to the last
+        // rather than panicking on a negative index.
+        let next = (at as i64 + delta).rem_euclid(tabs.len() as i64);
+        self.detail_tab = tabs[usize::try_from(next).unwrap_or(0)];
+        self.detail_scroll = 0;
+    }
+
+    /// Drop back to Overview and rewind the scroll — called whenever the
+    /// selection changes, since a tab is a property of the artifact being read.
+    pub fn reset_detail_view(&mut self) {
+        self.detail_tab = super::detail::DetailTab::Overview;
+        self.detail_scroll = 0;
+    }
+
     /// Scroll the detail pane by `delta` rows, clamped at both ends: 0 at
     /// the top, and the content's post-wrap height minus the viewport at
     /// the bottom — scrolling stops when the last content row reaches the
     /// pane's bottom edge, mirroring the top saturation.
     pub fn scroll_detail(&mut self, delta: i64) {
-        let lines = super::detail::detail_lines(self.selected_row());
-        let max = super::detail::scroll_max(
-            &lines,
-            super::detail::viewport(self.term_size, self.show_registry_column()),
-        );
+        let lines = self.active_detail_lines();
+        let max = super::detail::scroll_max(&lines, self.detail_viewport(self.term_size));
         let next = (i64::from(self.detail_scroll) + delta).clamp(0, i64::from(max));
         // `next` is in `[0, max]`, both u16-representable.
         self.detail_scroll = u16::try_from(next).unwrap_or(0);
@@ -967,8 +1130,8 @@ impl TuiState {
     /// the detail scroll — a grown pane may shrink the scroll range.
     pub fn set_term_size(&mut self, size: (u16, u16)) {
         self.term_size = size;
-        let lines = super::detail::detail_lines(self.selected_row());
-        let max = super::detail::scroll_max(&lines, super::detail::viewport(size, self.show_registry_column()));
+        let lines = self.active_detail_lines();
+        let max = super::detail::scroll_max(&lines, self.detail_viewport(size));
         self.detail_scroll = self.detail_scroll.min(max);
     }
 
@@ -1410,20 +1573,27 @@ impl TuiState {
         }
     }
 
-    /// Enter the detail pane for the current selection, starting at the
-    /// top. A no-op when there is no selectable row.
+    /// Rewind the detail pane to the top for the current selection. A no-op
+    /// when there is no selectable row.
+    ///
+    /// There is no detail *mode*: the pane is always visible and every key that
+    /// drives it — `j`/`k`, `pgup`/`pgdn`, `tab` — works from the list. A focus
+    /// state that changed nothing but a border colour, and cost a second `esc`
+    /// to leave before `esc` could quit, was ceremony rather than navigation.
+    /// The tab is deliberately NOT reset: `enter` on a row already being read
+    /// must not throw away the tab the reader chose. Every *selection* change
+    /// resets it, which is the case that matters.
     pub fn enter_detail(&mut self) {
         if self.selected_row().is_some() {
             self.detail_scroll = 0;
-            self.mode = Mode::Detail;
         }
     }
 
-    /// Enter the detail pane when the cursor is on a `DisplayRow::Member`.
+    /// Rewind the detail pane when the cursor is on a `DisplayRow::Member`.
     ///
-    /// `enter_detail` cannot be reused here because `selected_row()` returns
-    /// `None` for member rows (members are virtual — they have no backing
-    /// `TuiRow` index). This helper checks the flattened tree directly.
+    /// [`Self::enter_detail`] cannot be reused here because `selected_row()`
+    /// returns `None` for member rows (members are virtual — they have no
+    /// backing `TuiRow` index). This helper checks the flattened tree directly.
     pub fn enter_member_detail(&mut self) {
         if self.view_mode != crate::tui::state::ViewMode::Tree {
             return;
@@ -1434,7 +1604,6 @@ impl TuiState {
             Some(crate::tui::tree::DisplayRow::Member { .. })
         ) {
             self.detail_scroll = 0;
-            self.mode = Mode::Detail;
         }
     }
 
@@ -1982,10 +2151,12 @@ mod tests {
         assert_eq!(s.mode, Mode::Search);
         s.back();
         assert_eq!(s.mode, Mode::List);
+        // `enter` rewinds the pane but enters no mode — there is no detail
+        // focus, so `esc` never has to unwind one before it can quit.
+        s.detail_scroll = 5;
         s.enter_detail();
-        assert_eq!(s.mode, Mode::Detail);
-        s.back();
         assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.detail_scroll, 0);
     }
 
     #[test]
@@ -2487,6 +2658,218 @@ mod tests {
         assert_eq!(s.selected_row().unwrap().repo, "acme/code-review");
     }
 
+    // ── Detail tabs and the companion cache ──────────────────────────────
+
+    fn ready_companion() -> super::super::companion::CompanionCache {
+        super::super::companion::CompanionCache::Ready(Box::new(super::super::companion::Companion {
+            readme: Some("# readme".to_string()),
+            changelog: Some("## 1.0.0".to_string()),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn cycling_wraps_in_both_directions_and_rewinds_the_scroll() {
+        use super::super::detail::DetailTab;
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+        s.companions.insert(repo, ready_companion());
+        s.detail_scroll = 7;
+
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Readme);
+        assert_eq!(s.detail_scroll, 0, "an offset from another tab would land past the end");
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Changelog);
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Overview, "forward from the last wraps");
+        // Backward from the first must wrap rather than index negatively.
+        s.cycle_detail_tab(-1);
+        assert_eq!(s.detail_tab, DetailTab::Changelog);
+    }
+
+    #[test]
+    fn cycling_works_on_every_catalog_row_even_with_nothing_published() {
+        use super::super::detail::DetailTab;
+        let mut s = seeded();
+        // No companion at all — the document tabs are empty, but `tab` must
+        // still move: landing on an empty Readme that says why beats a key that
+        // silently does nothing on most of the catalog.
+        assert!(s.companions.is_empty());
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Readme);
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Changelog);
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Overview);
+    }
+
+    #[test]
+    fn a_catalog_row_always_offers_all_three_tabs() {
+        use super::super::detail::DetailTab;
+        let s = seeded();
+        assert!(s.show_detail_tabs());
+        let tabs = s.detail_tabs();
+        assert_eq!(
+            tabs.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            DetailTab::ALL.to_vec(),
+            "the strip's membership is fixed — it must not depend on a fetch"
+        );
+        // Only Overview has content before anything is fetched.
+        assert_eq!(
+            tabs.iter().map(|(_, live)| *live).collect::<Vec<_>>(),
+            vec![true, false, false]
+        );
+    }
+
+    #[test]
+    fn an_empty_catalog_paints_no_strip_and_cycling_is_inert() {
+        use super::super::detail::DetailTab;
+        let mut s = TuiState::new();
+        assert!(!s.show_detail_tabs(), "no row selected ⇒ no strip");
+        assert!(s.detail_tabs().is_empty());
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Overview);
+    }
+
+    #[test]
+    fn moving_the_selection_returns_to_overview() {
+        use super::super::detail::DetailTab;
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+        s.companions.insert(repo, ready_companion());
+        s.cycle_detail_tab(1);
+        assert_eq!(s.detail_tab, DetailTab::Readme);
+        // The next artifact may publish no README at all, so a carried tab
+        // index would land on a document that does not exist.
+        s.move_selection(1);
+        assert_eq!(s.detail_tab, DetailTab::Overview);
+    }
+
+    #[test]
+    fn the_automatic_trigger_only_ever_fetches_an_uncached_row() {
+        use super::super::companion::CompanionCache;
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+
+        assert_eq!(s.companion_to_fetch(), Some(repo.clone()), "uncached \u{21d2} fetch");
+
+        for settled in [
+            CompanionCache::Loading,
+            CompanionCache::Absent,
+            ready_companion(),
+            CompanionCache::Failed("offline".to_string()),
+        ] {
+            s.companions.insert(repo.clone(), settled.clone());
+            assert_eq!(s.companion_to_fetch(), None, "{settled:?} must not re-fetch");
+        }
+    }
+
+    #[test]
+    fn a_local_row_is_never_asked_about_over_the_network() {
+        // A path-declared artifact has no repository: its `repo` is the bare
+        // name with an empty registry. Handing that to `describe` expands the
+        // short id against the DEFAULT registry, so a local `alpha` would be
+        // requested as `<default>/alpha` — a guaranteed miss, and a local
+        // artifact name sent to a public registry as a repository path. The
+        // idle tick must never do that just because a cursor came to rest.
+        let mut s = seeded();
+        s.rows[0].source = RowSource::Local;
+        s.recompute_filter();
+        s.selected = 0;
+        assert!(matches!(s.selected_row().map(|r| &r.source), Some(RowSource::Local)));
+        assert_eq!(s.companion_to_fetch(), None, "the idle tick must skip a local row");
+        assert_eq!(s.companion_to_retry(), None, "so must an explicit enter");
+        assert!(s.companions.is_empty());
+    }
+
+    #[test]
+    fn a_merge_prunes_companions_for_repositories_that_vanished() {
+        use super::super::companion::CompanionCache;
+        // The cache's trigger is the idle tick, so browsing caches an entry per
+        // row rested on — unlike `bundle_members`, whose deliberate-expansion
+        // trigger kept it self-limiting. Without a prune it only ever grows.
+        let mut s = seeded();
+        s.companions.insert("r/alpha".to_string(), ready_companion());
+        s.companions.insert("r/gone".to_string(), CompanionCache::Absent);
+
+        s.merge_catalog_rows(vec![
+            row("r/alpha", "first thing", &["rust"], ArtifactState::Installed),
+            row("r/beta", "second thing", &["python"], ArtifactState::NotInstalled),
+        ]);
+
+        assert!(s.companions.contains_key("r/alpha"), "a surviving repo keeps its cache");
+        assert!(!s.companions.contains_key("r/gone"), "a vanished repo is pruned");
+    }
+
+    #[test]
+    fn a_failed_companion_never_storms_the_registry_from_the_idle_poll() {
+        use super::super::companion::CompanionCache;
+        // REGRESSION. `companion_to_fetch` is called from the event loop's
+        // 200 ms poll timeout, so it runs ~5x/s for as long as the cursor rests
+        // on a row. It once returned `Some` for a `Failed` entry, which made a
+        // single failing repository a permanent request storm: fetch fails
+        // -> cache flips to `Failed` -> next poll fetches again -> forever.
+        // Retrying a failure belongs to the keypress path, which is bounded by
+        // how fast a person can press a key.
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+        s.companions
+            .insert(repo.clone(), CompanionCache::Failed("connection refused".to_string()));
+
+        for tick in 0..50 {
+            assert_eq!(
+                s.companion_to_fetch(),
+                None,
+                "idle poll #{tick} re-fetched a failed companion"
+            );
+        }
+        // The explicit path still offers exactly that retry.
+        assert_eq!(s.companion_to_retry(), Some(repo));
+    }
+
+    #[test]
+    fn the_explicit_trigger_retries_only_a_failure_not_a_settled_answer() {
+        use super::super::companion::CompanionCache;
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+
+        assert_eq!(s.companion_to_retry(), Some(repo.clone()), "uncached \u{21d2} fetch");
+
+        s.companions
+            .insert(repo.clone(), CompanionCache::Failed("offline".to_string()));
+        assert_eq!(
+            s.companion_to_retry(),
+            Some(repo.clone()),
+            "a failure is worth one retry"
+        );
+
+        // A settled answer is never re-asked, however hard the key is pressed:
+        // `Absent` is a positive "publishes nothing", and `Loading` would
+        // duplicate an in-flight task.
+        for settled in [CompanionCache::Loading, CompanionCache::Absent, ready_companion()] {
+            s.companions.insert(repo.clone(), settled.clone());
+            assert_eq!(s.companion_to_retry(), None, "{settled:?} must not re-fetch");
+        }
+    }
+
+    #[test]
+    fn a_catalog_reload_drops_every_cached_companion() {
+        use super::super::detail::DetailTab;
+        let mut s = seeded();
+        let repo = s.selected_row().expect("a seeded row").repo.clone();
+        s.companions.insert(repo, ready_companion());
+        s.cycle_detail_tab(1);
+
+        // The companion tag is mutable by design, so `r` has to actually clear
+        // this cache — otherwise a republished README never shows up without
+        // restarting the session.
+        let rows = s.rows.clone();
+        s.set_rows(rows);
+        assert!(s.companions.is_empty());
+        assert_eq!(s.detail_tab, DetailTab::Overview);
+    }
+
     #[test]
     fn detail_scroll_saturates_at_zero_and_resets_on_context_change() {
         let mut s = seeded();
@@ -2516,8 +2899,11 @@ mod tests {
     fn detail_scroll_clamps_at_content_end_and_reclamps_on_resize() {
         let mut s = seeded();
         let max = super::super::detail::scroll_max(
-            super::super::detail::detail_lines(s.selected_row()).as_slice(),
-            super::super::detail::viewport(s.term_size, s.show_registry_column()),
+            super::super::detail::detail_lines(s.selected_row(), None).as_slice(),
+            // Through the state's own accessor: a catalog row always paints the
+            // tab strip, so a hand-built viewport that forgets it computes a
+            // bound one row off what `scroll_detail` actually clamps to.
+            s.detail_viewport(s.term_size),
         );
         assert!(max > 0, "fixture content must overflow the default viewport");
         // Scrolling far past the end stops exactly at the content bottom.

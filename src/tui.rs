@@ -19,6 +19,12 @@
 //! tested, while its spawn helpers — the only impure surface besides
 //! [`app`] — run the bounded background tasks.
 //!
+//! [`companion`] / [`companion_fetch`] add the detail pane's live
+//! repository-companion read: the README, CHANGELOG, and support channels
+//! that the disk-cached browse catalog cannot carry — the docs because they
+//! are layer content rather than annotations, the channels because they are
+//! repository-level and mutable.
+//!
 //! [`init_dialog`] is the missing-config init prompt: a small popup-style
 //! modal session (confirm + registry input) that runs before the main
 //! browser when the scope has no `grimoire.toml` yet. Its state machine
@@ -28,10 +34,13 @@
 pub mod app;
 pub mod bundle_member_fetch;
 pub mod bundle_members;
+pub mod companion;
+pub mod companion_fetch;
 pub mod detail;
 pub mod event;
 pub mod init_dialog;
 pub mod install_progress;
+pub mod markdown;
 pub mod render;
 pub mod state;
 pub mod terminal_guard;

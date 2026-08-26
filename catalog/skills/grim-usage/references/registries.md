@@ -672,7 +672,19 @@ resolved scope's `options.show_deprecated`.
 
 `grim tui` browses your declared registries' catalogs interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
-detail pane per entry. Press `t` to toggle between the flat list and a
+detail pane per entry. That pane is always live for the selection — there is no
+focus to enter, so `esc` quits on the first press. It carries a fixed
+three-panel strip in its top border: `tab` / `shift-tab` cycle
+`Overview` / `Readme` / `Changelog` on every row, and a panel the repository
+did not publish is greyed and reads `not available` rather than disappearing.
+grim fetches the entry's
+[description companion](publish.md#description-companion) once per repository
+per session as soon as the selection holds still, filling the document panels
+and adding a `Support:` section to Overview with the repository's issue
+tracker, chat, contact, and security links. Those channels are deliberately
+absent from `grim search` and from the cached catalog row — they are
+repository-level and mutable, so only a live read is trustworthy. Press `t` to
+toggle between the flat list and a
 grouped collapsible tree view; the tree's opening mode, opening depth, and
 path-splitting characters are configurable via `[options.tui]` in
 `grimoire.toml` (`default_view`, `group_by_type`, `tree_separators`,
