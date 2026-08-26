@@ -380,18 +380,29 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
 Confirm the current schema with `grim schema --kind publish` and flags
 with `grim publish --help`.
 
-## Git Provenance
+## Build Provenance
 
-`build`, `release`, and `publish` take an opt-in `--git` flag that stamps the
-publishing commit (revision, commit date, and the `origin` remote) onto the
-manifest as standard OCI annotations, surfaced in the TUI detail pane and
-`grim search --format json`. It is off by default so an ordinary re-release
-stays idempotent; with `--git` a re-release from a different commit changes
-the digest. A repo with no `origin` (or no HTTPS-resolvable remote) still
-succeeds — revision and commit date are stamped and the source is just
-omitted; only a non-git path or a missing `git` fails (exit 65). Confirm the
-flag with `grim release --help` and see the [publishing guide][publishing]
-for the trade-off.
+`build`, `release`, and `publish` stamp the publishing commit (revision and
+commit date) onto the manifest as standard OCI annotations **by default**,
+surfaced in the TUI detail pane, `grim describe`, and `grim search --format
+json`. Re-release stays idempotent because neither value comes from the clock:
+`created` is the commit's own date, or a `SOURCE_DATE_EPOCH` instant outside a
+repository. Re-releasing the same version from a *different* commit does
+change the digest and needs `--force`.
+
+Two flags bound that default:
+
+- `--git` *requires* provenance — a non-git path or a missing `git` fails
+  (exit 65) — and additionally publishes the `origin` remote as the source
+  annotation and the commit author's **name** (never their email). Those name
+  the forge host and a person rather than the artifact, so they stay opt-in.
+- `--no-git` suppresses every derived annotation, for publishing where the
+  manifest must disclose nothing about the build.
+
+A repo with no `origin` (or no HTTPS-resolvable remote) still succeeds under
+`--git` — revision and date are stamped and the source is just omitted.
+Confirm the flags with `grim release --help` and see the
+[publishing guide][publishing].
 
 ## Authentication
 

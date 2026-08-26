@@ -46,14 +46,22 @@ reaches a registry:
 - **Immutability gate.** An exact-version tag that already exists and
   points at different bytes refuses to move. `--force` overrides —
   use it only to deliberately rewrite history. Re-releasing *identical*
-  bytes is idempotent and always fine — *unless* you pass `--git` (see
-  below), where only a re-release from the **same** commit stays idempotent.
-- **Git provenance is opt-in (`--git`).** `grim build`/`release`/`publish`
-  accept `--git`, which stamps the source commit, commit date, and
-  `origin` remote onto the manifest as OCI annotations. It is off by
-  default to keep re-release byte-deterministic: with `--git`, a re-release
-  from a *different* commit changes the digest and is refused unless
-  `--force`. Confirm the exact behavior with `grim release --help`.
+  bytes from the **same commit** is idempotent and always fine; from a
+  *different* commit the provenance differs, so the digest does too and the
+  release is refused unless `--force` (or `--no-git`, see below).
+- **Build provenance is on by default.** `grim build`/`release`/`publish`
+  stamp the source commit and its date onto the manifest as OCI annotations.
+  Neither value comes from the clock — `created` is the commit's own date, or
+  a `SOURCE_DATE_EPOCH` instant outside a repository — which is what keeps
+  re-release byte-deterministic.
+  - `--git` additionally *requires* provenance (a non-git path then fails,
+    65) and discloses the `origin` remote and the commit author's name.
+    Those two name infrastructure and a person rather than the artifact, so
+    they are never published without asking.
+  - `--no-git` suppresses every derived annotation — for a manifest that must
+    say nothing about where it was built.
+
+  Confirm the exact behavior with `grim release --help`.
 - **Bundles: `--pin`** resolves every floating member to a digest at
   release time for a self-contained, reproducible bundle
   ([pinning][pin]).
@@ -150,7 +158,7 @@ Symptom → cause → fix:
 | Bad vendor literal (bool/enum/int/float) | Known `<vendor>.<field>` key with an invalid string | Use the registry's accepted literals — see [vendor-metadata.md](vendor-metadata.md) |
 | Invalid version / missing tag | Release ref has no tag or a malformed version | Release as `repo:X.Y.Z` |
 | Tag exists | Exact-version tag points at different bytes | Bump the version; `--force` only for deliberate rewrites |
-| `--git` on a non-git path | `--git` passed to build/release on an artifact path not inside a git repository, or no `git` on the host | Build/release an artifact that lives inside a git repo (with `git` installed), or drop `--git` (confirm with `grim release --help`) |
+| `--git` on a non-git path | `--git` passed to build/release on an artifact path not inside a git repository, or no `git` on the host | Build/release an artifact that lives inside a git repo (with `git` installed), or drop `--git` — the default already derives what it can and never fails (confirm with `grim release --help`) |
 | Entry has no version | `publish.toml` entry with no per-entry `version`, no top-level `version`, no `--version` | Set the top-level `version` (or the entry's own) |
 | Companion path missing / escapes | Explicit `[description]` path that does not exist, resolves to zero files, or reaches outside the manifest dir (`..`, absolute, symlink) | Move the file inside the manifest directory; copy root-level assets in before publishing |
 
