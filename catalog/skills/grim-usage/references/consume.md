@@ -378,9 +378,9 @@ Both come from the containment guard — see
 ## Bundles
 
 A bundle is a curated set of members. Declare it once and it **expands**
-into its members — skills, rules, and agents, plus MCP servers when a
-published bundle carries one — at lock time, each pinned like a direct
-declaration and tagged with the bundle as its provenance:
+into its members — skills, rules, agents, and MCP servers — at lock time,
+each pinned like a direct declaration and tagged with the bundle as its
+provenance:
 
 ```sh
 grim add --kind bundle ghcr.io/acme/python-stack:1

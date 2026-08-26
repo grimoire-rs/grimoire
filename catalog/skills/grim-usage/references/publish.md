@@ -267,7 +267,7 @@ for the hosted URLs.
 
 ## Bundles
 
-A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]`
+A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]` / `[mcp]`
 tables list members by reference — the same shape as a `grimoire.toml`.
 Build and release it like any artifact:
 

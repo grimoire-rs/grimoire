@@ -3,6 +3,7 @@
 """Bundle acceptance tests: expansion, conflict policy, provenance, publish."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.assertions import assert_dir_exists, assert_not_exists, assert_path_exists
@@ -761,6 +762,58 @@ def test_release_bundle_with_agent_member(
     agent_row = next((r for r in rows if r["kind"] == "agent" and r["name"] == "reviewer"), None)
     assert agent_row is not None, "the authored [agents] member must expand into the lock"
     assert agent_row["source"].startswith("bundle:")
+
+
+_MCP_DESCRIPTOR = """\
+description = "A stdio server for bundle-member tests."
+
+[server]
+transport = "stdio"
+command = "grim"
+args = ["mcp"]
+"""
+
+
+def test_release_bundle_with_mcp_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # An AUTHORED bundle (.toml with an [mcp] table) released through
+    # `grim release` must carry the descriptor onto the wire and register it
+    # in the consumer's MCP config. Regression: the [mcp] table did not exist
+    # on the bundle source, so a descriptor could not be bundled at all even
+    # though every consumer path treats an mcp member as first-class. The
+    # wire-level make_bundle helper bypasses the authoring path and would not
+    # catch the missing table.
+    sk = _member_skill(unique_repo, "code-review")
+    descriptor = project_dir / "srv.toml"
+    descriptor.write_text(_MCP_DESCRIPTOR)
+    mcp_ref = f"{registry}/{unique_repo}/mcp/srv:1.0.0"
+    runner = grim_at(project_dir)
+    runner.run("release", str(descriptor), mcp_ref, "--kind", "mcp")
+
+    bundle_src = project_dir / "stack.toml"
+    bundle_src.write_text(
+        f'[skills]\ncode-review = "{sk.fq}"\n\n[mcp]\nsrv = "{mcp_ref}"\n'
+    )
+    runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/stack:1.0.0")
+
+    consumer = project_dir / "consumer"
+    # `.claude/` marks the workspace as a detected Claude project, so the
+    # client set is a stable ["claude"] with a real MCP surface (`.mcp.json`).
+    (consumer / ".claude").mkdir(parents=True)
+    write_config(consumer, bundles={"stack": f"{REGISTRY_HOST}/{unique_repo}/stack:1.0.0"})
+    crunner = grim_at(consumer)
+    crunner.run("lock")
+
+    rows = crunner.json("status")["items"]
+    mcp_row = next((r for r in rows if r["kind"] == "mcp" and r["name"] == "srv"), None)
+    assert mcp_row is not None, "the authored [mcp] member must expand into the lock"
+    assert mcp_row["source"].startswith("bundle:")
+
+    crunner.run("install")
+    cfg = consumer / ".mcp.json"
+    assert cfg.is_file(), "the bundle's mcp member must be registered"
+    assert json.loads(cfg.read_text())["mcpServers"]["srv"]["command"] == "grim"
 
 
 def test_update_prunes_dropped_bundle_member(

@@ -111,7 +111,7 @@ immutable digest). A bare reference defaults to `:latest`.
 A third form skips the registry: a **local path** — `./skills/x`,
 `../shared/rule.md`, or an absolute path — names a directory or file on
 disk directly. The discriminant is used everywhere a reference is accepted
-(`grim add`, `grim install`, a `[skills]`/`[rules]`/`[agents]`/`[bundles]`
+(`grim add`, `grim install`, a `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[bundles]`
 value): a value starting with `./` or `../`, or an absolute path, is a
 local path source; anything else is an OCI reference. See
 [references/consume.md](references/consume.md#declaring) for how it is

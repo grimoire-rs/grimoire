@@ -159,11 +159,6 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - `oauth` on `stdio`/`ws`, `cwd` on a remote, `headers_helper` on stdio,
   or a non-https `auth_server_metadata_url` → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
-- No `[mcp]` table in a bundle source: a bundle `.toml` carries
-  `[skills]`/`[rules]`/`[agents]` tables only, so you cannot author a
-  bundle that ships a descriptor — declare it directly. The members
-  *format* accepts an `mcp` member and grim installs one correctly; only
-  the authoring side is missing.
 
 The required `description` field is the descriptor's prose and becomes the
 OCI `description` annotation. What the layer cannot carry is an *in-tree*

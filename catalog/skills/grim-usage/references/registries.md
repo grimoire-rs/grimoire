@@ -456,7 +456,8 @@ filters][browse-filters].
 config`, so you rarely hand-edit the file. It covers **settings**
 (`[options]`, `[options.tui]`, `[options.vendors.<name>]`) and **named
 registries** (`[[registries]]`) —
-but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[bundles]`),
+but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[mcp]` /
+`[bundles]`),
 which stay under `grim add` / `grim remove` because those must re-resolve the
 lock on every change.
 

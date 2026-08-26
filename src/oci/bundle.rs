@@ -38,14 +38,9 @@ pub const MAX_BUNDLE_MEMBERS: usize = 512;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BundleMember {
-    /// The member kind: `skill`, `rule`, `agent`, or `mcp`. A nested
-    /// `bundle` is rejected at expansion time (no recursion in v1).
-    ///
-    /// Authoring lags the format: a bundle source has `[skills]`,
-    /// `[rules]` and `[agents]` tables and no `[mcp]` one, so `grim build`
-    /// cannot emit an `mcp` member. A published layer that carries one
-    /// resolves, locks, installs and evicts like any other member
-    /// (acceptance test `test_add_bundle_installs_its_mcp_member`).
+    /// The member kind: `skill`, `rule`, `agent`, or `mcp` — one per
+    /// member table of the bundle source. A nested `bundle` is rejected at
+    /// expansion time (no recursion in v1).
     pub kind: ArtifactKind,
     /// The config binding name the member installs under.
     pub name: String,

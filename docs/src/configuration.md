@@ -3,7 +3,8 @@
 Grimoire keeps configuration in two small files and a handful of environment
 variables. Settings (`[options]`, `[options.tui]`) and named registries
 (`[[registries]]`) are managed through [`grim config`][grim-config]; declarations
-(`[skills]`, `[rules]`, `[agents]`, `[bundles]`) stay under [`grim add`][grim-add]
+(`[skills]`, `[rules]`, `[agents]`, [`[mcp]`](./mcp-servers.md#consuming),
+`[bundles]`) stay under [`grim add`][grim-add]
 and [`grim remove`][grim-remove]. You can also hand-edit either file directly,
 but note that **any `grim` write — `grim config`, `grim add`, `grim remove` — uses a
 lossy serializer: comments are removed** on every write, and so is any key whose

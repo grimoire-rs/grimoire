@@ -727,9 +727,9 @@ pub struct BundleMetadata {
 
 /// A parsed bundle source: validated members plus catalog metadata.
 ///
-/// The source is `grimoire.toml`-shaped — its `[skills]`/`[rules]`/`[agents]`
-/// tables are the members — with optional top-level
-/// `summary`/`keywords`/`description`.
+/// The source is `grimoire.toml`-shaped — its
+/// `[skills]`/`[rules]`/`[agents]`/`[mcp]` tables are the members — with
+/// optional top-level `summary`/`keywords`/`description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleSource {
     /// Skill members, name → validated member reference (absolute or
@@ -739,6 +739,9 @@ pub struct BundleSource {
     pub rules: BTreeMap<String, MemberRef>,
     /// Agent members, name → validated member reference.
     pub agents: BTreeMap<String, MemberRef>,
+    /// MCP server members, name → validated member reference. The name is
+    /// the key the descriptor registers under in each client's MCP config.
+    pub mcp: BTreeMap<String, MemberRef>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -771,6 +774,8 @@ struct RawBundleSource {
     #[serde(default)]
     agents: BTreeMap<String, String>,
     #[serde(default)]
+    mcp: BTreeMap<String, String>,
+    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     keywords: Option<String>,
@@ -795,10 +800,12 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
     let skills = parse_member_map(&raw.skills, &path)?;
     let rules = parse_member_map(&raw.rules, &path)?;
     let agents = parse_member_map(&raw.agents, &path)?;
+    let mcp = parse_member_map(&raw.mcp, &path)?;
     Ok(BundleSource {
         skills,
         rules,
         agents,
+        mcp,
         metadata: BundleMetadata {
             summary: raw.summary,
             keywords: raw.keywords,

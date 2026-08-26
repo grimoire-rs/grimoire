@@ -32,12 +32,12 @@ tables — not in any nested map:
 | `replaced-by` | Successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
 
 The bundle source parser is **strict** (`deny_unknown_fields`): any key
-outside this set and the three member tables is a hard parse error.
+outside this set and the four member tables is a hard parse error.
 Unlike skill/rule frontmatter, a typo'd bundle key cannot slip through.
 
 ## Member Tables
 
-Three optional tables, each mapping a **config binding name** (the name
+Four optional tables, each mapping a **config binding name** (the name
 the member installs under when a consumer adds the bundle) to a
 fully-qualified reference:
 
@@ -48,7 +48,13 @@ code-reviewer = "registry.example.com/grimoire/skills/code-reviewer:1"
 rust-style = "registry.example.com/grimoire/rules/rust-style:1"
 [agents]
 reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b..."
+[mcp]
+docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
 ```
+
+An `[mcp]` member is a published MCP server descriptor: it materializes no
+files, and its binding name is the key the server registers under in each
+client's MCP config.
 
 References are fully qualified — `registry/repo:tag` or
 `registry/repo@sha256:…` — or **deployment-relative**: a leading `./`
@@ -110,6 +116,8 @@ repository = "https://github.com/acme/starter-pack"
 code-reviewer = "ghcr.io/acme/code-reviewer:1"
 [rules]
 rust-style = "ghcr.io/acme/rust-style:2"
+[mcp]
+docs-search = "ghcr.io/acme/mcp/docs-search:1"
 ```
 
 ## Validation Pitfalls

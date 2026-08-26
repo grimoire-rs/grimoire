@@ -66,7 +66,7 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
         Ok(ArtifactKind::Skill)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
         // A `.toml` source file lists bundle members
-        // ([skills]/[rules]/[agents]).
+        // ([skills]/[rules]/[agents]/[mcp]).
         Ok(ArtifactKind::Bundle)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         Ok(ArtifactKind::Rule)
@@ -327,6 +327,13 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    for (name, id) in &source.mcp {
+        members.push(BundleMember {
+            kind: ArtifactKind::Mcp,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
@@ -431,12 +438,15 @@ mod tests {
     fn read_bundle_members_covers_every_member_table() {
         // Regression: the [agents] table was parsed by BundleSource but
         // silently dropped here — an authored bundle published without its
-        // agent members.
+        // agent members. [mcp] was the same bug one step earlier: the table
+        // did not exist at all, so a descriptor could not be bundled even
+        // though every consumer treats an mcp member as first-class.
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("stack.toml");
         write(
             &f,
-            "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n[agents]\nrv = \"ghcr.io/acme/rv:1\"\n",
+            "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n\
+             [agents]\nrv = \"ghcr.io/acme/rv:1\"\n\n[mcp]\nsrv = \"ghcr.io/acme/mcp/srv:1\"\n",
         );
         let (name, members, _meta) = read_bundle_members(&f).unwrap();
         assert_eq!(name, "stack");
@@ -447,8 +457,9 @@ mod tests {
                 (ArtifactKind::Skill, "cr"),
                 (ArtifactKind::Rule, "rs"),
                 (ArtifactKind::Agent, "rv"),
+                (ArtifactKind::Mcp, "srv"),
             ],
-            "every member table maps onto the wire, agents included"
+            "every member table maps onto the wire, agents and mcp included"
         );
     }
 

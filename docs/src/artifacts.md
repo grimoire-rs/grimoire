@@ -393,6 +393,7 @@ Top-level keys and member tables:
 | `[skills]` | no | name → ref table | Skill members |
 | `[rules]` | no | name → ref table | Rule members |
 | `[agents]` | no | name → ref table | Agent members |
+| `[mcp]` | no | name → ref table | MCP server members; the name is the key the server registers under in each client's MCP config |
 
 Each member entry maps the **config binding name** (the name the member is
 declared under when the bundle is added) to a fully-qualified reference —
@@ -405,12 +406,6 @@ Limits enforced at parse time: at most 512 members per bundle, and the
 members document is capped at 512 KiB. Nested bundles are invalid — a
 member's kind may be `skill`, `rule`, `agent`, or `mcp`, and a `bundle`
 member is rejected at expansion.
-
-The tables above are the **authoring** surface, and they carry no `[mcp]`
-table: `grim build` cannot emit an MCP member today. The members format
-itself accepts one, and a published bundle carrying an `mcp` member
-resolves, locks, installs, and is evicted like any other member — the gap
-is in authoring, not in the format or the install path.
 
 ### Deployment-relative members {#bundle-relative-refs}
 
@@ -459,6 +454,9 @@ rust-style = "registry.example.com/grimoire/rules/rust-style:1"
 
 [agents]
 reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b…"
+
+[mcp]
+docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
 ```
 
 ## Vendor extensions {#vendor-extensions}

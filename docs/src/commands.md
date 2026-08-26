@@ -86,7 +86,7 @@ grim init --registry ghcr.io/acme
 
 `grim config` reads and writes `grimoire.toml`, modeled on [`git config`][git-config]. Before it existed, querying a setting or scripting a config change required hand-editing TOML and relying on the next command run to catch typos.
 
-The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations — the `[skills]`, `[rules]`, `[agents]`, and `[bundles]` tables — remain under [`grim add`](#add) and [`grim remove`](#remove), which must re-resolve the lockfile on every change.
+The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations — the `[skills]`, `[rules]`, `[agents]`, `[mcp]`, and `[bundles]` tables — remain under [`grim add`](#add) and [`grim remove`](#remove), which must re-resolve the lockfile on every change.
 
 Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
 
