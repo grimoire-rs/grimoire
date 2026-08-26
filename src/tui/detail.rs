@@ -149,16 +149,20 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: r.version.clone(),
         });
     }
-    // Curated `org.opencontainers.image.*` metadata — each row shown only when
-    // the artifact carries that annotation, so an ordinary artifact's pane is
-    // unchanged. grim emits `licenses` (skills) today; the rest surface for OCI
-    // artifacts that carry the standard keys.
+    // Curated manifest metadata — each row shown only when the artifact
+    // carries that annotation, so an artifact published without it keeps an
+    // unchanged pane. All of these are version-scoped and reach the browse
+    // catalog with the manifest. The repository's *support* channels do not:
+    // they live on the mutable description companion, and the browse catalog
+    // is disk-cached, so a pane fed from it would show a link that has since
+    // moved. `grim describe` is the live surface for those.
     for (label, value) in [
         ("License:", &r.oci.licenses),
         ("Authors:", &r.oci.authors),
         ("URL:", &r.oci.url),
         ("Documentation:", &r.oci.documentation),
         ("Vendor:", &r.oci.vendor),
+        ("Compatibility:", &r.oci.compatibility),
     ] {
         if let Some(value) = value {
             lines.push(DetailLine::MetaEntry {
@@ -167,8 +171,9 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             });
         }
     }
-    // Git provenance (`--git` publish opt-in) — shown only when present so an
-    // ordinary artifact's detail pane is unchanged.
+    // Build provenance — derived by default from the publishing commit, so
+    // most artifacts now carry it; still shown only when present, since
+    // `--no-git` and a non-repository build both suppress it.
     if let Some(revision) = &r.revision {
         lines.push(DetailLine::MetaEntry {
             label: "Revision:",
@@ -536,6 +541,7 @@ mod tests {
             url: Some("https://acme.example".to_string()),
             documentation: Some("https://docs.acme.example".to_string()),
             vendor: Some("Acme Inc".to_string()),
+            compatibility: Some("claude>=2".to_string()),
         };
         let lines = detail_lines(Some(&row));
         assert_eq!(meta_value(&lines, "License:"), Some("Apache-2.0"));
@@ -543,13 +549,21 @@ mod tests {
         assert_eq!(meta_value(&lines, "URL:"), Some("https://acme.example"));
         assert_eq!(meta_value(&lines, "Documentation:"), Some("https://docs.acme.example"));
         assert_eq!(meta_value(&lines, "Vendor:"), Some("Acme Inc"));
+        assert_eq!(meta_value(&lines, "Compatibility:"), Some("claude>=2"));
     }
 
     #[test]
     fn detail_lines_omit_curated_oci_metadata_when_absent() {
         // A default (empty) OciMeta shows none of the curated rows.
         let lines = detail_lines(Some(&tui_row(None)));
-        for label in ["License:", "Authors:", "URL:", "Documentation:", "Vendor:"] {
+        for label in [
+            "License:",
+            "Authors:",
+            "URL:",
+            "Documentation:",
+            "Vendor:",
+            "Compatibility:",
+        ] {
             assert_eq!(meta_value(&lines, label), None, "{label} must be absent when unset");
         }
     }
@@ -561,7 +575,7 @@ mod tests {
         row.oci.licenses = Some("MIT".to_string());
         let lines = detail_lines(Some(&row));
         assert_eq!(meta_value(&lines, "License:"), Some("MIT"));
-        for label in ["Authors:", "URL:", "Documentation:", "Vendor:"] {
+        for label in ["Authors:", "URL:", "Documentation:", "Vendor:", "Compatibility:"] {
             assert_eq!(meta_value(&lines, label), None);
         }
     }

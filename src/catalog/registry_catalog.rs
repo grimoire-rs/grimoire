@@ -72,13 +72,21 @@ pub enum CatalogVersion {
     V1 = 1,
 }
 
-/// Curated `org.opencontainers.image.*` annotations surfaced in the TUI
-/// detail pane, beyond the ones already carried as first-class
-/// [`CatalogEntry`] fields (title/description/version/source/revision/created).
+/// Curated manifest annotations surfaced in the TUI detail pane, beyond the
+/// ones already carried as first-class [`CatalogEntry`] fields
+/// (title/description/version/source/revision/created).
 ///
 /// Read straight off `manifest.annotations`; every field is `None` when its
-/// annotation is absent. grim itself only emits `licenses` today (skills), so
-/// the other four populate for OCI artifacts that carry the standard keys.
+/// annotation is absent. grim emits all of these itself — `licenses`,
+/// `authors`, `vendor`, `url`, and `documentation` from authored metadata or
+/// derivation, `compatibility` from a skill's frontmatter — and a foreign OCI
+/// artifact carrying the standard `image.*` keys populates the first five too.
+///
+/// Everything here is **version-scoped**: it describes the manifest being
+/// browsed. Repository-level mutable metadata (the support channels on the
+/// description companion) is deliberately absent — the browse catalog is
+/// disk-cached, which would freeze a link whose whole point is that it moves.
+/// `grim describe` reads those live.
 ///
 /// No `deny_unknown_fields`: a future grim may add a curated key, and an older
 /// binary should tolerate reading it from a shared cache rather than reject the
@@ -100,11 +108,15 @@ pub struct OciMeta {
     /// `org.opencontainers.image.vendor`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
+    /// `com.grimoire.compatibility` — a skill's authored editor/runtime hint.
+    /// Always `None` for every other kind, which has no such field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<String>,
 }
 
 impl OciMeta {
-    /// Read the curated `org.opencontainers.image.*` keys off a manifest's
-    /// annotation map. Absent keys stay `None`.
+    /// Read the curated keys off a manifest's annotation map. Absent keys
+    /// stay `None`.
     fn from_annotations(annotations: &BTreeMap<String, String>) -> Self {
         let get = |k: &str| annotations.get(k).cloned();
         Self {
@@ -113,6 +125,7 @@ impl OciMeta {
             url: get("org.opencontainers.image.url"),
             documentation: get("org.opencontainers.image.documentation"),
             vendor: get("org.opencontainers.image.vendor"),
+            compatibility: get(crate::oci::annotations::COMPATIBILITY_ANNOTATION),
         }
     }
 
@@ -124,6 +137,7 @@ impl OciMeta {
             && self.url.is_none()
             && self.documentation.is_none()
             && self.vendor.is_none()
+            && self.compatibility.is_none()
     }
 }
 

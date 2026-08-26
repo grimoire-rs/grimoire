@@ -370,7 +370,9 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
   manifest precisely because the companion tag is mutable: change a link,
   re-run `grim publish`, and every already-published version reports the new
   one — no re-release. Fans out and overrides per entry exactly like the rest
-  of `[description]`.
+  of `[description]`. `grim describe` is the **only** read surface for them:
+  `grim search` and the TUI read a disk-cached catalog, and a cached contact
+  link is one that may already have moved.
 - The companion's tag namespace is machine-owned: `grim release` /
   `grim publish` reject a user-supplied tag colliding with the reserved
   `__grimoire` namespace as a usage error (exit 64), before any network

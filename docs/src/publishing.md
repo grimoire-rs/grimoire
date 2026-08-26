@@ -478,6 +478,36 @@ written into the file is the more specific statement about it.
 For a whole catalog, `publish.toml` carries the same set as a
 [`[metadata]` table](#batch-publish-metadata) so you state it once.
 
+### Where each field surfaces {#metadata-surfaces}
+
+Metadata is only worth authoring if something reads it back. Three surfaces do,
+and they do not carry the same set — the difference is whether a value is
+version-scoped and whether the surface is allowed to cache it.
+
+| Field | `grim describe` | `grim search` / [TUI](./commands.md#tui) | Index [`all.json`](./package-index.md) |
+|---|---|---|---|
+| `license` | ✅ | ✅ | ✅ |
+| `created`, `revision` | ✅ | ✅ | `created` only |
+| `authors`, `vendor`, `url`, `documentation` | ✅ | registry browse only | ❌ |
+| `compatibility` | ✅ | registry browse only | ❌ |
+| [`support.*`](#description-support) | ✅ | ❌ | ❌ |
+
+- **`grim describe` is the complete surface.** It resolves the reference to a
+  manifest live, so it reports every key, including the support channels off
+  the [description companion](#description-support).
+- **Browse is version-scoped and cached.** `grim search` and the TUI detail
+  pane read a disk-cached catalog. Everything above the `support` row belongs
+  to the manifest being browsed, so caching it is correct. Support channels are
+  repository-level and *mutable* — caching one would show a link that has since
+  moved, which is exactly what putting them on the companion was meant to
+  avoid. An [index-backed](./package-index.md) row is thinner still: the index
+  is a phone book, so it carries `license` and `created` and resolves the rest
+  from the registry at install time.
+- **Downstream tooling reads `describe`.** The
+  [`--format json`](./json-interface.md) payload is the integration point — an
+  index site or an editor extension runs `grim describe <ref> --format json`
+  per package and gets the full set, rather than scraping the browse row.
+
 ### Deprecating a package {#metadata-deprecated}
 
 `deprecated` retires a package without unpublishing it. Author a short
