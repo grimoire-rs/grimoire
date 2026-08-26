@@ -1299,12 +1299,19 @@ beyond the globals.
 
 ```
 {ref, digest, kind, name, title, description, has_description, summary,
- version, license, repository, revision, created, keywords, deprecated,
- replaced_by, tags, annotations}
+ version, license, repository, revision, created, authors, vendor, url,
+ documentation, compatibility, support, keywords, deprecated, replaced_by,
+ tags, annotations}
 ```
 
 `kind` is `null` for a foreign / non-Grimoire manifest (describe never
-hard-errors on one). `has_description` is an always-present boolean —
+hard-errors on one). `support` is an object `{issues, chat, contact,
+security}` carrying the repository's
+[support channels](./publishing.md#description-support); it is read from the
+description companion's manifest — one extra fetch, and only when
+`has_description` is already true — so a repository without a companion costs
+nothing and reports four `null`s. `compatibility` is a skill's authored
+editor/runtime hint and is `null` for every other kind. `has_description` is an always-present boolean —
 whether the repository carries a [description
 companion](./publishing.md#description-companion) — derived from the tag
 listing describe already fetches, at zero extra network cost, so a
@@ -1557,10 +1564,14 @@ file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
 authors. `--kind <skill|rule|agent|bundle|mcp>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
-mcp` — a bare `.toml` packs as a bundle. `--git` embeds
-[git provenance](./publishing.md#git-provenance) (commit revision, commit
-date, and the `origin` remote) so the preflight reflects what a release would
-stamp.
+mcp` — a bare `.toml` packs as a bundle. [Build provenance](./publishing.md#git-provenance) (commit revision and
+date) is embedded by default so the preflight reflects what a release would
+stamp; `--git` additionally requires it and
+[discloses](./publishing.md#git-disclosure) the `origin` remote and commit
+author, and `--no-git` suppresses all of it. The metadata flags
+(`--license`, `--repository`, `--authors`, `--vendor`, `--url`,
+`--documentation`) fill [annotations](./publishing.md#metadata-flags) the
+artifact file does not author.
 
 ## grim release {#release}
 
@@ -1583,10 +1594,15 @@ for manifest-driven publishers that re-run blanket releases and only want
 bumped versions pushed. A `.toml` path publishes a
 [bundle](./concepts.md#bundles) by default, or an
 [MCP server](./mcp-servers.md) with `--kind mcp`; `--pin` (bundles only)
-freezes floating members to digests. `--git` embeds
-[git provenance](./publishing.md#git-provenance) (commit revision, date,
-and `origin` remote) as OCI annotations; it is off by default so an
-ordinary re-release stays idempotent. `--push-registry <host[/prefix]>`
+freezes floating members to digests. [Build provenance](./publishing.md#git-provenance) (commit revision and
+date) is embedded by default and stays idempotent because neither value comes
+from the clock; `--git` additionally requires it and
+[discloses](./publishing.md#git-disclosure) the `origin` remote and commit
+author (a non-git path then fails, 65), while `--no-git` suppresses every
+derived annotation. The metadata flags (`--license`, `--repository`,
+`--authors`, `--vendor`, `--url`, `--documentation`) fill
+[annotations](./publishing.md#metadata-flags) the artifact file does not
+author. `--push-registry <host[/prefix]>`
 pushes to a different endpoint while every baked and reported name — the
 source-annotation fallback, pinned bundle member ids, the report `ref` —
 keeps the reference's registry (the canonical pull name); a malformed
@@ -1639,8 +1655,12 @@ exit 65 at validation, before any push. The manifest's `version_prefix`
 `--cascade` combined with a channel value exits 65. Like every publish, a
 channel value skips-existing by default and needs `--force` to move.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
-`--git` embeds [git provenance](./publishing.md#git-provenance) on every
-published entry (forwarded to each `release`); a non-git path fails (65).
+`--git` requires [build provenance](./publishing.md#git-provenance) on every
+published entry and discloses the `origin` remote and commit author (a non-git
+path fails, 65); `--no-git` suppresses every derived annotation. The metadata
+flags (`--license`, `--repository`, `--authors`, `--vendor`, `--url`,
+`--documentation`) override the manifest's
+[`[metadata]` tables](./publishing.md#batch-publish-metadata) for the run.
 `--announce` announces the published packages to a
 [package index](./package-index.md) git repository after the pushes —
 `--announce-repo <url>` picks the index repository (default

@@ -90,9 +90,12 @@ full reference is `--help` plus the docs site linked below.
 > true`). A `replaced-by` successor reference, when the publisher named
 > one, surfaces in `grim search` / `grim describe`. See [Publishing][publishing].
 >
-> **Git provenance:** `build`, `release`, and `publish` can embed
-> the publishing commit, date, and origin as OCI annotations via opt-in
-> `--git`; confirm with `grim release --help`.
+> **Build provenance:** `build`, `release`, and `publish` embed the
+> publishing commit and its date as OCI annotations **by default** (never a
+> wall-clock time, so re-release stays idempotent). `--git` additionally
+> requires them and discloses the `origin` remote and commit author;
+> `--no-git` suppresses every derived annotation. Confirm with
+> `grim release --help`.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global`,
 > `--config`, `--registry`, `--offline`, `--log-level`, and `--color

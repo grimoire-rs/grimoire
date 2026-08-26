@@ -175,6 +175,52 @@ a dry run still containment- and size-checks every companion and packs it into
 its layer, so a bad companion fails the dry run — only the registry push is
 skipped, and either way zero registry mutations occur.
 
+### Support channels {#description-support}
+
+Who maintains this repository, and where do I reach them? That answer belongs
+to the *repository*, not to any one version — and it changes. A
+`[description.support]` table publishes it alongside the companion:
+
+```toml
+[description]
+readme = "README.md"
+
+[description.support]
+issues   = "https://github.com/acme/skills/issues"
+chat     = "https://teams.microsoft.com/l/channel/…"
+contact  = "ai-platform@example.com"
+security = "https://acme.example/security"
+```
+
+All four are optional; the field names follow
+[CycloneDX's external-reference vocabulary](https://cyclonedx.org/docs/1.5/json/)
+(`issue-tracker`, `chat`, `support`, `security-contact`).
+
+**These ride the companion, not the artifact manifest, and that is the point.**
+The companion tag is mutable: move your chat channel, change the table, re-run
+`grim publish`, and *every already-published version* reports the new link. On
+a version's manifest the old link would be frozen into every tag you ever
+pushed, fixable only by re-releasing history.
+
+Read them back with [`grim describe`](./commands.md#describe), which reports a
+`support` object with all four fields (`null` where unset). It costs no extra
+work for a repository that publishes no companion.
+
+Like the rest of `[description]`, a top-level table
+[fans out](#description-fanout) to every entry in the manifest and a per-entry
+table overrides it — so a repository owned by a different team names its own
+contact:
+
+```toml
+[skills.legacy-helper.description]
+readme = "skills/legacy-helper/README.md"
+[skills.legacy-helper.description.support]
+contact = "archive-team@example.com"
+```
+
+**Prefer a team alias to a personal mailbox.** A manifest is readable by
+anyone who can pull from the repository.
+
 ### Read it back {#description-read}
 
 Read the companion with
@@ -225,7 +271,7 @@ not as a guarantee the registry upholds.
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
 every match in a table. To make a result legible and findable, an artifact
-carries seven pieces of catalog metadata, all optional:
+carries catalog metadata, all of it optional:
 
 | Field | Annotation | Purpose |
 |-------|-----------|---------|
@@ -234,8 +280,16 @@ carries seven pieces of catalog metadata, all optional:
 | `description` | `org.opencontainers.image.description` | The full description. |
 | `license` | `org.opencontainers.image.licenses` | SPDX-style license identifier (e.g. `Apache-2.0`). |
 | `repository` | `org.opencontainers.image.source` | HTTPS URL of the artifact's source repository ([details](#metadata-repository)). |
+| `authors` | `org.opencontainers.image.authors` | Who maintains the artifact ([details](#metadata-descriptive)). |
+| `vendor` | `org.opencontainers.image.vendor` | The distributing organization ([details](#metadata-descriptive)). |
+| `homepage` | `org.opencontainers.image.url` | The project home page ([details](#metadata-descriptive)). |
+| `documentation` | `org.opencontainers.image.documentation` | Where the documentation lives ([details](#metadata-descriptive)). |
 | `deprecated` | `com.grimoire.deprecated` | A deprecation notice; marks the package deprecated and flags it everywhere ([details](#metadata-deprecated)). |
 | `replaced-by` | `com.grimoire.replaced-by` | A reference naming the successor artifact ([details](#metadata-replaced-by)). |
+
+A skill's top-level `compatibility` field is published too, as
+`com.grimoire.compatibility`, so a consumer can read the requirement without
+downloading the artifact.
 
 `grim search` shows the `summary` in place of the `description`, truncated to
 fit the terminal; the full description stays in `--format json` and in piped
@@ -318,6 +372,10 @@ transport = "http"
 url = "https://mcp.acme.internal/search"
 ```
 
+A descriptor accepts the same optional keys as every other kind — `license`,
+`authors`, `vendor`, `homepage`, `documentation`, `deprecated`, and
+`replaced-by`.
+
 [`grim build`](./commands.md#build) and [`grim release`](./commands.md#release)
 require `--kind mcp` for an MCP descriptor: its `.toml` shape is
 bundle-shaped by default, and grim only nudges toward `--kind mcp` once it
@@ -369,6 +427,56 @@ behavior and stamps the tagless release reference there instead. The
 [TUI](./commands.md#tui) shows the URL in the detail pane and opens it
 with the `o` key; `grim search --format json` exposes it as the
 `repository` field.
+
+### Who maintains it, and where to read more {#metadata-descriptive}
+
+Four more fields describe the artifact's provenance and its documentation.
+Each is optional, and each is **derived when you leave it out**, so most
+artifacts get sensible values for free:
+
+| Field | Annotation | Derived from, when unset |
+|---|---|---|
+| `authors` | `…image.authors` | the commit author's name — but only under [`--git`](#git-disclosure) |
+| `vendor` | `…image.vendor` | the release repository's namespace: `ghcr.io/acme/skills/tools` → `acme` |
+| `homepage` | `…image.url` | the authored `repository` URL |
+| `documentation` | `…image.documentation` | `<repository>#readme` |
+
+```yaml
+# code-review/SKILL.md
+metadata:
+  repository: https://github.com/acme/code-review
+  authors: Platform Team
+  vendor: Acme Corporation
+  homepage: https://acme.example/code-review
+  documentation: https://docs.acme.example/code-review
+```
+
+A reference with no namespace (`registry/name`) derives no vendor — publishing
+the artifact's own name as its distributor would be worse than leaving the key
+out.
+
+**Prefer a team name or an alias in `authors`.** A manifest is readable by
+anyone who can pull the artifact, so a personal mailbox published there is
+harvestable. That is also why the `--git` derivation uses the commit author's
+name and never their email address.
+
+### Setting metadata without editing every artifact {#metadata-flags}
+
+Every field above has a matching flag on `grim build`, `grim release`, and
+`grim publish` — `--license`, `--repository`, `--authors`, `--vendor`,
+`--url`, `--documentation`:
+
+```sh
+grim release ./code-review ghcr.io/acme/code-review:1.2.3 \
+  --license Apache-2.0 --authors "Platform Team"
+```
+
+A flag fills a gap; it never overrides the artifact. If `SKILL.md` authors a
+`license`, that value wins and the flag is ignored for that artifact — a value
+written into the file is the more specific statement about it.
+
+For a whole catalog, `publish.toml` carries the same set as a
+[`[metadata]` table](#batch-publish-metadata) so you state it once.
 
 ### Deprecating a package {#metadata-deprecated}
 
@@ -497,59 +605,94 @@ An exact-version tag is immutable by default: if `1.2.3` already exists and
 points at different bytes, the release refuses rather than rewrite history.
 Pass `--force` only when you deliberately mean to move it.
 
-## Git provenance {#git-provenance}
+## Build provenance {#git-provenance}
 
 A published artifact rarely records which commit it was built from. Without
 that link, tracing a registry tag back to the source — for an audit, a
 rebuild, or a "why did this change" investigation — means guessing from
 timestamps.
 
-The opt-in `--git` flag closes that gap. Pass it to `grim build`,
-`grim release`, or `grim publish` and grim reads the artifact's git working
-tree and stamps three standard OCI annotations onto the manifest:
+grim closes that gap **by default**. `grim build`, `grim release`, and
+`grim publish` read the artifact's git working tree and stamp two standard OCI
+annotations onto the manifest:
 
 | Annotation | Value |
 |---|---|
 | `org.opencontainers.image.revision` | the `HEAD` commit SHA, suffixed `-dirty` when tracked files differ from `HEAD` |
-| `org.opencontainers.image.created` | the commit date (RFC3339) — the *commit's* date, not a build clock |
-| `org.opencontainers.image.source` | the `origin` remote, normalized to an `https://` URL — **conditional**: the git-derived URL is **not used** when you authored a [`repository`](#metadata-repository) value (the authored URL wins) or the repo has no HTTPS-resolvable remote. The annotation itself is still emitted from the usual fallback (authored `repository`, else the tagless release reference) |
+| `org.opencontainers.image.created` | the commit date (RFC3339) — the *commit's* date, never a build clock |
+
+Outside a git repository, `created` falls back to
+[`SOURCE_DATE_EPOCH`](https://reproducible-builds.org/docs/source-date-epoch/)
+when that variable is set — the same fixed-timestamp convention container
+builders use — and is omitted otherwise. Nothing here fails a publish: a
+source tarball with no repository and no `SOURCE_DATE_EPOCH` simply carries no
+provenance.
+
+### What stays behind `--git` {#git-disclosure}
+
+Two further values are derived only when you pass `--git`:
+
+| Annotation | Value |
+|---|---|
+| `org.opencontainers.image.source` | the `origin` remote, normalized to an `https://` URL — used only when you did not author a [`repository`](#metadata-repository) value, which always wins |
+| `org.opencontainers.image.authors` | the commit author's **name** (`%an`), never their email address |
+
+They are separated from the two above on purpose. A commit SHA and a commit
+date describe the artifact's *content*. An `origin` remote names the **forge
+host and repository path** your build ran against, and an author name
+identifies a **person**. Publishing either to a registry makes it readable by
+everyone who can pull the artifact, so grim never does it unless you ask:
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --git
 ```
 
-The git remote only fills `source` when you did **not** author a
-[`repository`](#metadata-repository) value — an authored URL always wins, so
-the two never collide. Any credentials embedded in the remote
-(`https://token@host/...`) are stripped before the URL is written, so a token
-in your `origin` URL never reaches the annotation. A path that is not inside a
-git repository (or a host with no `git`) fails the release with exit 65 rather
-than silently dropping the provenance you asked for.
+`--git` also makes derivation **mandatory**: a path that is not inside a git
+repository, or a host with no `git`, fails with exit 65 rather than silently
+dropping the provenance you asked for.
 
-There is a third outcome between those two. A repository with **no `origin`
-remote** — or one whose remote does not resolve to an HTTPS URL (an SSH-only
-host grim cannot rewrite, a `file://` remote, a bare local path) — is **not**
-an error: `revision` and `created` are still stamped, and `source` is simply
-omitted (falling back to whatever the authored `repository` or the tagless
-release reference supplies). Only an absent repository or a missing `git`
-fails.
+Any credentials embedded in the remote (`https://token@host/...`) are stripped
+before the URL is written, so a token in your `origin` URL never reaches the
+annotation. A repository with **no `origin` remote** — or one whose remote does
+not resolve to an HTTPS URL (an SSH-only host grim cannot rewrite, a `file://`
+remote, a bare local path) — is **not** an error: `revision` and `created` are
+still stamped and `source` falls back to the authored `repository` or the
+tagless release reference.
 
-### Why it is opt-in {#git-idempotent}
+### Publishing nothing about the build: `--no-git` {#git-suppress}
 
-By default a re-release of identical content produces the same manifest
-digest, so re-running a release is a harmless no-op (the
-[overwrite guard](#dry-runs-and-overwrites) recognizes it). Embedding the
-commit ties the digest to that commit: a re-release from a *different* commit
-now changes the digest and is refused unless you pass `--force`. That is the
-correct behavior — the provenance genuinely changed — but it is why git
-provenance is something you ask for, not a silent default. The commit *date*
-(not a wall-clock build time) keeps a re-release from the **same** commit
-fully idempotent.
+`--no-git` suppresses every derived annotation — revision, date, remote, and
+author alike — even inside a repository with a remote configured:
+
+```sh
+grim release ./code-review ghcr.io/acme/code-review:1.2.3 --no-git
+```
+
+Use it when the manifest must say nothing about where it was built: publishing
+an internally-developed artifact to a public registry, or shipping to a
+customer-facing catalog from an internal forge. `--git` and `--no-git`
+override each other, so the last one on the command line wins.
+
+### Re-release stays idempotent {#git-idempotent}
+
+A re-release of identical content produces the same manifest digest, so
+re-running a release is a harmless no-op (the
+[overwrite guard](#dry-runs-and-overwrites) recognizes it). That holds with
+provenance on by default because **no derived value is read from the clock**:
+`created` is the commit's own date, so releasing the same commit twice yields
+byte-identical annotations.
+
+The one consequence to know about: re-releasing the *same version* from a
+**different commit** now changes the digest and is refused unless you pass
+`--force`. That is the correct behavior — the provenance genuinely changed —
+and `--no-git` opts out of it entirely if you need a digest that depends on
+content alone.
 
 Every read surface shows the provenance back: the [TUI](./commands.md#tui)
-detail pane adds `Revision:` and `Created:` rows, and
+detail pane adds `Revision:` and `Created:` rows,
 [`grim search --format json`](./commands.md#search) exposes `revision` and
-`created` fields.
+`created` fields, and [`grim describe`](./commands.md#describe) reports both
+plus `authors`.
 
 ## Publishing bundles {#bundles}
 
@@ -706,6 +849,45 @@ so a supporting editor autocompletes keys and flags a typo before you ever run
 `grim publish`. The schema is generated from grim's own manifest parser — see
 [Editor schema support](./configuration.md#editor-schema) for both schema URLs
 and [`grim schema`](./commands.md#schema) to print one locally.
+
+### Catalog-wide metadata {#batch-publish-metadata}
+
+A catalog whose packages share a license and a maintainer shouldn't repeat
+them in every artifact file. An optional top-level `[metadata]` table applies
+to every entry, and a per-entry table overrides it field by field:
+
+```toml
+registry = "ghcr.io"
+
+[metadata]                          # applies to every entry
+license = "Apache-2.0"
+repository = "https://github.com/acme/skills"
+authors = "Platform Team"
+vendor = "Acme Corporation"
+# url = "https://acme.example"      # defaults to `repository`
+# documentation = "…"               # defaults to `<repository>#readme`
+
+[skills.grim-usage]
+version = "0.1.1"
+
+[skills.legacy-helper]
+version = "0.9.0"
+[skills.legacy-helper.metadata]     # this one is someone else's
+authors = "Archive Team"            # license/repository/vendor still inherit
+```
+
+The table is a **convenience layer only** — it does nothing the
+[flags](#metadata-flags) cannot, and it never overrides what an artifact says
+about itself. The full order, each rung filling only what the one above left
+unset:
+
+```
+artifact frontmatter > --flag > per-entry [metadata] > top-level [metadata] > derived
+```
+
+Merging is field by field, not wholesale: the `[skills.legacy-helper.metadata]`
+table above changes only `authors` and still inherits the catalog's license,
+repository, and vendor.
 
 ### Repository namespace {#batch-publish-namespace}
 
