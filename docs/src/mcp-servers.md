@@ -363,8 +363,12 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 - **No `${VAR:-default}` support.** Only [Claude Code][claude-code-mcp-docs]
   supports inline defaults natively; v1 rejects the syntax entirely
   rather than honor it inconsistently across clients.
-- **MCP descriptors cannot be bundle members yet.** A [bundle](./concepts.md#bundles)
-  accepts skill, rule, and agent members only.
+- **`grim build` cannot author a bundle that ships a descriptor yet.** An
+  MCP descriptor *is* a valid [bundle member](./artifacts.md#bundles) —
+  grim resolves, locks, registers, and evicts one exactly like a skill
+  member when a published bundle carries it. What is missing is the
+  authoring table: a bundle `.toml` has `[skills]`, `[rules]`, and
+  `[agents]` and no `[mcp]`, so grim cannot publish such a bundle itself.
 - **No per-vendor override keys.** Unlike a skill's or agent's
   `<vendor>.<field>` [metadata extensions](./vendor-metadata.md), an MCP
   descriptor has no escape hatch for a capability only one client

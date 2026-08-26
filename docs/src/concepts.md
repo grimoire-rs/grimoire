@@ -112,7 +112,9 @@ Declaring the same dozen skills and rules in every repository does not scale.
 Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
-A **bundle** is a curated set of members — skills, rules, and agents. You
+A **bundle** is a curated set of members — skills, rules, and agents
+([the three a bundle source can declare](./artifacts.md#bundles); the
+members format also carries MCP servers). You
 declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
 **expands** into its members, which are pinned into the lock exactly like a
 direct declaration.

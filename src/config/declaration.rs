@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The declared set of skills, rules, agents, and bundles, with a
+//! The declared set of skills, rules, agents, MCP servers, and bundles,
+//! with a
 //! lazily-cached canonical declaration hash.
 //!
 //! Adapted from the OCX `ProjectConfig` cache pattern: the
@@ -124,9 +125,9 @@ pub struct TuiOptions {
     /// rewritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_view: Option<DefaultView>,
-    /// Controls whether a type-level group (skill, rule, agent, or bundle)
-    /// appears between the registry root and path segments in tree view.
-    /// Disabled by default.
+    /// Controls whether a type-level group (skill, rule, agent, mcp, or
+    /// bundle) appears between the registry root and path segments in tree
+    /// view. Disabled by default.
     #[serde(default)]
     pub group_by_type: bool,
     /// Sets the characters that split the repository path into nested

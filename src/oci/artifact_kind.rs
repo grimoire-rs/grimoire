@@ -39,7 +39,8 @@ pub enum ArtifactKind {
     /// `tools`) define an AI agent; the body is the system prompt.
     /// Projected per client at install time.
     Agent,
-    /// A bundle: a curated set of skill/rule/agent members, declared in
+    /// A bundle: a curated set of members (`skill`, `rule`, `agent` or
+    /// `mcp`), declared in
     /// `[bundles]` and expanded into its members at resolve time. A bundle
     /// is never materialized or written to the lock itself — only the
     /// members it expands to are.

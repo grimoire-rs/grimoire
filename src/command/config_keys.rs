@@ -128,7 +128,7 @@ impl ConfigKey {
                 default: defaults::GROUP_BY_TYPE,
             },
             title: "Group by type",
-            description: "Controls whether a type-level group (skill, rule, agent, or bundle) appears \
+            description: "Controls whether a type-level group (skill, rule, agent, mcp, or bundle) appears \
                            between the registry root and path segments in tree view. Disabled by default.",
             constraints: None,
         };

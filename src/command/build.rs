@@ -65,7 +65,8 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
     if path.is_dir() && path.join("SKILL.md").is_file() {
         Ok(ArtifactKind::Skill)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
-        // A `.toml` source file lists bundle members ([skills]/[rules]).
+        // A `.toml` source file lists bundle members
+        // ([skills]/[rules]/[agents]).
         Ok(ArtifactKind::Bundle)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         Ok(ArtifactKind::Rule)

@@ -4,7 +4,7 @@
 //! The bundle artifact format.
 //!
 //! A bundle is a standard single-layer OCI artifact whose layer blob is a
-//! JSON document listing the skill/rule members it groups. It is typed
+//! JSON document listing the members it groups. It is typed
 //! `bundle` on the wire like any other Grimoire artifact (the
 //! `com.grimoire.kind` annotation; legacy readers may still see the
 //! pre-empty-config `artifactType` `application/vnd.grimoire.bundle.v1`).
@@ -34,12 +34,18 @@ pub const BUNDLE_LAYER_SIZE_LIMIT: u64 = 512 * 1024;
 /// of resolution tasks.
 pub const MAX_BUNDLE_MEMBERS: usize = 512;
 
-/// One member of a bundle: a skill or rule reference.
+/// One member of a bundle: a reference to another artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BundleMember {
-    /// The member kind. Only `skill` and `rule` are valid; a nested
+    /// The member kind: `skill`, `rule`, `agent`, or `mcp`. A nested
     /// `bundle` is rejected at expansion time (no recursion in v1).
+    ///
+    /// Authoring lags the format: a bundle source has `[skills]`,
+    /// `[rules]` and `[agents]` tables and no `[mcp]` one, so `grim build`
+    /// cannot emit an `mcp` member. A published layer that carries one
+    /// resolves, locks, installs and evicts like any other member
+    /// (acceptance test `test_add_bundle_installs_its_mcp_member`).
     pub kind: ArtifactKind,
     /// The config binding name the member installs under.
     pub name: String,

@@ -159,12 +159,16 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - `oauth` on `stdio`/`ws`, `cwd` on a remote, `headers_helper` on stdio,
   or a non-https `auth_server_metadata_url` → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
-- Not a bundle member: bundles carry only `[skills]`/`[rules]`/`[agents]`
-  tables — MCP descriptors cannot be listed in one; declare them directly.
+- No `[mcp]` table in a bundle source: a bundle `.toml` carries
+  `[skills]`/`[rules]`/`[agents]` tables only, so you cannot author a
+  bundle that ships a descriptor — declare it directly. The members
+  *format* accepts an `mcp` member and grim installs one correctly; only
+  the authoring side is missing.
 
-An MCP descriptor's layer is a single JSON document — it carries no
-in-tree README. For a readme/logo/changelog on the *repository*, publish
-a description companion — see
+The required `description` field is the descriptor's prose and becomes the
+OCI `description` annotation. What the layer cannot carry is an *in-tree*
+README: it is a single JSON document, not a file tree. Ship a
+readme/logo/changelog on the repository as a description companion — see
 [release-checklist.md](release-checklist.md#description-companion).
 
 [emit-matrix]: https://grimoire.rs/mcp-servers.html#emit-matrix

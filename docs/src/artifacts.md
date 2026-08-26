@@ -403,7 +403,14 @@ re-resolve on `grim update`; digest pins never move
 
 Limits enforced at parse time: at most 512 members per bundle, and the
 members document is capped at 512 KiB. Nested bundles are invalid — a
-bundle member must be a skill, rule, or agent.
+member's kind may be `skill`, `rule`, `agent`, or `mcp`, and a `bundle`
+member is rejected at expansion.
+
+The tables above are the **authoring** surface, and they carry no `[mcp]`
+table: `grim build` cannot emit an MCP member today. The members format
+itself accepts one, and a published bundle carrying an `mcp` member
+resolves, locks, installs, and is evicted like any other member — the gap
+is in authoring, not in the format or the install path.
 
 ### Deployment-relative members {#bundle-relative-refs}
 
