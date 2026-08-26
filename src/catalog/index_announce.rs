@@ -59,6 +59,13 @@ pub struct AnnouncePackage {
     pub deprecated: Option<String>,
     /// Successor reference. `None` ⇒ omitted.
     pub replaced_by: Option<String>,
+    /// SPDX license expression. Written into the pointer so a browse against
+    /// an index-backed registry can show it without a manifest fetch per
+    /// entry. `None` ⇒ omitted.
+    pub license: Option<String>,
+    /// Publishing commit date (RFC3339), for a browse-time recency signal.
+    /// `None` ⇒ omitted.
+    pub created: Option<String>,
 }
 
 /// The announce request: where, as whom, and what.
@@ -416,6 +423,10 @@ pub struct PointerMetadata {
     pub deprecated: Option<String>,
     /// `com.grimoire.replaced-by`.
     pub replaced_by: Option<String>,
+    /// `org.opencontainers.image.licenses`.
+    pub license: Option<String>,
+    /// `org.opencontainers.image.created`.
+    pub created: Option<String>,
 }
 
 /// Read the pointer metadata (description, HTTPS source URL, keywords,
@@ -468,6 +479,8 @@ pub async fn pointer_metadata(
         // pointer must never become a second source of truth for these.
         deprecated: crate::oci::annotations::deprecation_message(&manifest.annotations),
         replaced_by: crate::oci::annotations::replacement_ref(&manifest.annotations),
+        license: manifest.annotations.get("org.opencontainers.image.licenses").cloned(),
+        created: manifest.annotations.get("org.opencontainers.image.created").cloned(),
     }
 }
 
@@ -506,6 +519,12 @@ fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64, forge: F
     }
     if let Some(replaced_by) = &pkg.replaced_by {
         value["replaced_by"] = serde_json::Value::String(replaced_by.clone());
+    }
+    if let Some(license) = &pkg.license {
+        value["license"] = serde_json::Value::String(license.clone());
+    }
+    if let Some(created) = &pkg.created {
+        value["created"] = serde_json::Value::String(created.clone());
     }
     let mut out = serde_json::to_string_pretty(&value).unwrap_or_default();
     out.push('\n');
@@ -654,6 +673,8 @@ mod tests {
             summary: None,
             deprecated: None,
             replaced_by: None,
+            license: None,
+            created: None,
         }
     }
 
@@ -701,6 +722,25 @@ mod tests {
             serde_json::from_str(&metadata_json(&p, "acme", 42, ForgeKind::GitHub)).expect("valid JSON");
         assert_eq!(value["deprecated"], "use new-skill instead");
         assert_eq!(value["replaced_by"], "ghcr.io/acme/skills/new-skill");
+    }
+
+    #[test]
+    fn pointer_carries_license_and_created_when_the_manifest_did() {
+        // Without these on the pointer a browse row can never show a license
+        // or a recency signal — the phone book is the only browse-time source.
+        let mut p = pkg("dated");
+        p.license = Some("Apache-2.0".to_string());
+        p.created = Some("2026-06-29T12:00:00+00:00".to_string());
+        let value: serde_json::Value = serde_json::from_str(&metadata_json(&p, "acme", 42, ForgeKind::GitHub)).unwrap();
+        assert_eq!(value["license"], "Apache-2.0");
+        assert_eq!(value["created"], "2026-06-29T12:00:00+00:00");
+
+        // Omit-empty: an artifact without them writes a byte-identical
+        // pointer to a pre-#106 one.
+        let value: serde_json::Value =
+            serde_json::from_str(&metadata_json(&pkg("plain"), "acme", 42, ForgeKind::GitHub)).unwrap();
+        assert!(value.get("license").is_none());
+        assert!(value.get("created").is_none());
     }
 
     #[test]

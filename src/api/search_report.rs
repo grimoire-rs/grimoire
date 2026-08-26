@@ -114,6 +114,12 @@ pub struct SearchEntry {
     /// artifact; `None` means *unrated* — never a zero-vote record. JSON-only
     /// — never shown as its own plain-table column.
     pub rating: Option<SearchRating>,
+    /// The curated `org.opencontainers.image.*` metadata (licenses, authors,
+    /// url, documentation, vendor) the manifest carried. JSON-only — the same
+    /// object the TUI detail pane renders. Every field `null` when the
+    /// manifest carried none of them, and absent entirely from an index-backed
+    /// row (the phone book carries no annotations).
+    pub oci: crate::catalog::registry_catalog::OciMeta,
     /// How the repository relates to the current scope.
     pub status: StatusBadge,
 }
@@ -125,7 +131,7 @@ impl Serialize for SearchEntry {
         // Field count below is asserted by
         // `json_carries_replaced_by_plain_table_does_not` — adding a field
         // here requires bumping both, or the test fails.
-        let mut s = serializer.serialize_struct("SearchEntry", 14)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 15)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("source", &self.source)?;
@@ -139,6 +145,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("deprecated", &self.deprecated)?;
         s.serialize_field("replaced_by", &self.replaced_by)?;
         s.serialize_field("rating", &self.rating)?;
+        s.serialize_field("oci", &self.oci)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
     }
@@ -257,6 +264,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status,
         }
     }
@@ -313,6 +321,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -340,6 +349,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -364,6 +374,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -389,6 +400,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -416,6 +428,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -441,6 +454,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            oci: Default::default(),
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -547,10 +561,10 @@ mod tests {
         SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 14-field object still round-trips. This count is linked to
+        // The full 15-field object still round-trips. This count is linked to
         // the manual `Serialize for SearchEntry` impl's serialize_struct count
         // — the two must move together.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 14);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
@@ -585,9 +599,9 @@ mod tests {
         let rating = v["items"][0]["rating"].as_object().expect("rating is an object");
         assert_eq!(rating.len(), 2, "rating carries `up` and `url` only: {rating:?}");
         assert!(!rating.contains_key("target"), "the opaque target is not emitted");
-        // The full 14-field object still round-trips (see the count assertion
+        // The full 15-field object still round-trips (see the count assertion
         // in `json_carries_replaced_by_plain_table_does_not`).
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 14);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
 
         // Unrated ⇒ explicit null, key always present — and never `0`, which
         // would read as "rated, nobody voted".

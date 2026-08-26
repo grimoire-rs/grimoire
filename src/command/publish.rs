@@ -103,6 +103,11 @@ pub struct PublishArgs {
     #[arg(long, overrides_with = "git")]
     pub no_git: bool,
 
+    /// Metadata for annotations no artifact file and no manifest table
+    /// authors. Wins over both `[metadata]` tiers.
+    #[command(flatten)]
+    pub metadata: super::build::MetadataArgs,
+
     /// After a fully successful publish, announce the published packages to
     /// a package-index git repository: write metadata pointers on a topic
     /// branch, push, and open the pull/merge request via the forge API
@@ -289,6 +294,58 @@ pub struct DescriptionSpec {
     pub support: Option<SupportSpec>,
 }
 
+/// The `[metadata]` table — annotation values applied to every entry that does
+/// not author one in its own file.
+///
+/// A pure convenience layer over the `grim release` flags of the same names:
+/// declaring it here means a catalog states its license, maintainer, and
+/// vendor once instead of repeating them in every artifact. It never adds a
+/// capability the flags lack, and it never overrides what an artifact file
+/// says about itself.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataSpec {
+    /// SPDX license expression (e.g. `Apache-2.0`).
+    pub license: Option<String>,
+
+    /// HTTPS source-repository URL.
+    pub repository: Option<String>,
+
+    /// Maintainer contact. Prefer a team name or alias over a personal
+    /// mailbox — a manifest is readable by anyone who can pull it.
+    pub authors: Option<String>,
+
+    /// Distributing organization. Defaults to the release repository's
+    /// namespace.
+    pub vendor: Option<String>,
+
+    /// Project home page. Defaults to the repository URL.
+    pub url: Option<String>,
+
+    /// Documentation URL. Defaults to `<repository>#readme`.
+    pub documentation: Option<String>,
+}
+
+impl MetadataSpec {
+    /// Fold this spec under `over`, which wins field by field.
+    ///
+    /// Used twice per entry to build the tier chain
+    /// **flag > per-entry > top-level**, each rung filling only what the one
+    /// above left unset. Field-by-field rather than wholesale replacement:
+    /// setting a per-entry `authors` should not silently drop the catalog-wide
+    /// `license`.
+    fn under(&self, over: crate::oci::annotations::MetadataDefaults) -> crate::oci::annotations::MetadataDefaults {
+        crate::oci::annotations::MetadataDefaults {
+            license: over.license.or_else(|| self.license.clone()),
+            repository: over.repository.or_else(|| self.repository.clone()),
+            authors: over.authors.or_else(|| self.authors.clone()),
+            vendor: over.vendor.or_else(|| self.vendor.clone()),
+            homepage: over.homepage.or_else(|| self.url.clone()),
+            documentation: over.documentation.or_else(|| self.documentation.clone()),
+        }
+    }
+}
+
 /// The `[description.support]` table — where to reach whoever maintains the
 /// repository.
 ///
@@ -416,6 +473,12 @@ pub struct PublishEntrySpec {
     #[serde(default)]
     pub pin: bool,
 
+    /// Per-entry annotation defaults, overriding the manifest's top-level
+    /// `[metadata]` field by field. Still below whatever the artifact file
+    /// authors.
+    #[serde(default)]
+    pub metadata: Option<MetadataSpec>,
+
     /// Per-entry description companion: `false` opts this entry out of the
     /// top-level `[description]` fan-out; a `[<kind>.<name>.description]` table
     /// overrides it with the entry's own [`DescriptionSpec`]. Absent = inherit
@@ -498,6 +561,12 @@ pub struct PublishManifest {
     /// `logo.*`) and publishes a companion when any is found.
     #[serde(default)]
     pub description: Option<DescriptionSpec>,
+
+    /// Annotation defaults applied to every entry that does not author the
+    /// value in its own file. A per-entry `[<kind>.<name>.metadata]` table
+    /// overrides field by field; a `grim publish` flag overrides both.
+    #[serde(default)]
+    pub metadata: Option<MetadataSpec>,
 }
 
 /// One planned publish operation, ready to be handed to `release::run`.
@@ -1066,6 +1135,12 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             pin: planned.pin,
             git: args.git,
             no_git: args.no_git,
+            metadata: super::build::MetadataArgs::from_defaults(entry_metadata_defaults(
+                &manifest,
+                args,
+                planned.kind,
+                &planned.name,
+            )),
             // Forward the run-level cascade choice verbatim; release computes
             // the tag set. A channel tag never cascades regardless.
             cascade: args.cascade,
@@ -1337,6 +1412,8 @@ async fn run_announce(
             summary: meta.summary,
             deprecated: meta.deprecated,
             replaced_by: meta.replaced_by,
+            license: meta.license,
+            created: meta.created,
         });
     }
 
@@ -2035,6 +2112,37 @@ fn entry_description<'a>(
         ArtifactKind::Mcp => &manifest.mcp,
     };
     table.get(name).and_then(|s| s.description.as_ref())
+}
+
+/// The metadata tiers for one entry, merged into the defaults `release` will
+/// apply: **flag > per-entry `[<kind>.<name>.metadata]` > top-level
+/// `[metadata]`**, each rung filling only what the one above left unset.
+///
+/// The artifact file's own frontmatter still wins over all three — that fold
+/// happens inside the annotation builders, which is the only place that can
+/// see it.
+fn entry_metadata_defaults(
+    manifest: &PublishManifest,
+    args: &PublishArgs,
+    kind: ArtifactKind,
+    name: &str,
+) -> crate::oci::annotations::MetadataDefaults {
+    let table = match kind {
+        ArtifactKind::Skill => &manifest.skills,
+        ArtifactKind::Rule => &manifest.rules,
+        ArtifactKind::Agent => &manifest.agents,
+        ArtifactKind::Bundle => &manifest.bundles,
+        ArtifactKind::Mcp => &manifest.mcp,
+    };
+    let flags = args.metadata.defaults();
+    let with_entry = match table.get(name).and_then(|s| s.metadata.as_ref()) {
+        Some(spec) => spec.under(flags),
+        None => flags,
+    };
+    match &manifest.metadata {
+        Some(spec) => spec.under(with_entry),
+        None => with_entry,
+    }
 }
 
 /// Resolve a [`DescriptionSpec`] into a sorted, deduplicated
@@ -2792,6 +2900,7 @@ mod tests {
             repository: repository.map(str::to_string),
             pin: false,
             description: None,
+            metadata: None,
         }
     }
 
@@ -3964,6 +4073,7 @@ mod tests {
             force,
             git: false,
             no_git: false,
+            metadata: Default::default(),
             announce: false,
             announce_repo: None,
             push_registry: None,
@@ -4123,6 +4233,7 @@ mod tests {
             force: false,
             git: false,
             no_git: false,
+            metadata: Default::default(),
             announce: false,
             announce_repo: None,
             push_registry: None,

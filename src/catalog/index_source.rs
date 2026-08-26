@@ -79,6 +79,15 @@ struct IndexPackage {
     /// Successor reference, mirroring `com.grimoire.replaced-by`.
     #[serde(default)]
     replaced_by: Option<String>,
+    /// SPDX license expression, mirroring
+    /// `org.opencontainers.image.licenses`. Absent in pre-license index files.
+    #[serde(default)]
+    license: Option<String>,
+    /// Publishing commit date (RFC3339), mirroring
+    /// `org.opencontainers.image.created` — the browse-time recency signal.
+    /// Absent in pre-provenance index files.
+    #[serde(default)]
+    created: Option<String>,
 }
 
 impl IndexPackage {
@@ -107,7 +116,7 @@ impl IndexPackage {
             // Same HTTPS prefix guard as the manifest read-back path.
             repository_url: self.repository.filter(|r| r.starts_with("https://")),
             revision: None,
-            created: None,
+            created: self.created,
             // Same trim/empty-⇒-`None` normalization the annotation seam
             // applies, so a hand-authored `"deprecated": " "` in the index
             // cannot mark a row deprecated with an empty notice.
@@ -119,8 +128,12 @@ impl IndexPackage {
                 .replaced_by
                 .as_deref()
                 .and_then(crate::oci::annotations::normalize_deprecated),
-            // The index phone book carries no OCI image annotations.
-            oci: crate::catalog::registry_catalog::OciMeta::default(),
+            // The index phone book carries no OCI image annotations beyond the
+            // license the pointer now mirrors.
+            oci: crate::catalog::registry_catalog::OciMeta {
+                licenses: self.license,
+                ..Default::default()
+            },
             // Phone-book contract: no version data in the index; tags are
             // resolved live from the registry at install time.
             latest_tag: None,

@@ -93,6 +93,10 @@ pub struct ReleaseArgs {
     #[arg(long, overrides_with = "git")]
     pub no_git: bool,
 
+    /// Metadata for annotations the artifact file does not author.
+    #[command(flatten)]
+    pub metadata: super::build::MetadataArgs,
+
     /// Push to this registry endpoint (`host[/prefix]`) instead of the
     /// reference's registry, while every baked and reported name — the
     /// source-annotation fallback, pinned bundle member ids, the report
@@ -226,7 +230,14 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // Derive provenance once before packing. Under `--git` a non-git path
     // fails here (65), before anything is pushed.
     let git = derive_git_provenance(&args.path, args.git_mode()).await?;
-    let packed = validate_and_pack(&args.path, kind, &version, Some(&source), git.as_ref())?;
+    let packed = validate_and_pack(
+        &args.path,
+        kind,
+        &version,
+        Some(&source),
+        git.as_ref(),
+        &args.metadata.defaults(),
+    )?;
 
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
     let manifest = OciManifest {
@@ -366,6 +377,7 @@ async fn release_bundle(
         Some(source),
         &metadata,
         git.as_ref(),
+        &args.metadata.defaults(),
     );
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
@@ -437,7 +449,14 @@ async fn release_mcp(
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize MCP layer: {e}"))?;
     let layer_digest = Algorithm::Sha256.hash(&layer);
-    let annotations = annotations_for_mcp(&name, &descriptor, version, Some(source), git.as_ref());
+    let annotations = annotations_for_mcp(
+        &name,
+        &descriptor,
+        version,
+        Some(source),
+        git.as_ref(),
+        &args.metadata.defaults(),
+    );
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
@@ -985,6 +1004,7 @@ mod tests {
             no_cascade: false,
             git: false,
             no_git: false,
+            metadata: Default::default(),
             push_registry: push_registry.map(str::to_string),
         }
     }

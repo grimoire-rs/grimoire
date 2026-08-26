@@ -211,6 +211,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             version: r.version,
             deprecated: r.deprecated,
             replaced_by: r.replaced_by,
+            oci: r.oci,
             // Absence is *unrated*, never `up: 0` — the JSON field stays null.
             rating: r.rating.map(|x| SearchRating { up: x.up, url: x.url }),
             status: r.badge,
