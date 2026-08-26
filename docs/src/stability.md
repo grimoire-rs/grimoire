@@ -46,6 +46,17 @@ ignore fields it does not recognize rather than error on them. That pairing
 is what makes "add a field in a minor" safe for every consumer, including
 ones written before the field existed.
 
+Manifest **annotations** follow the same additive rule from the other
+direction: a minor release may start emitting a key it did not emit before, or
+add a new `com.grimoire.*` key, but never changes what an existing key means
+and never stops emitting one a reader could already rely on. Unlike a report
+field, an annotation that does not apply is simply **absent** — an OCI
+annotation map has no null. A reader must treat an absent key as "this
+artifact does not say", never as "this grim is too old".
+[Build provenance](./publishing.md#git-provenance) is an instance: `revision`
+and `created` were once emitted only under `--git` and are now emitted by
+default, which adds values where consumers previously saw nothing.
+
 Optional report fields are **always present**: a field that does not apply
 serializes as an explicit `null`, never as an absent key. A consumer can
 therefore distinguish "not applicable" (`null`) from "talking to an older

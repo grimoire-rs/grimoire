@@ -31,7 +31,7 @@ round-trip, never rejected.
 | `name` | yes | Must equal the directory name |
 | `description` | yes | Non-empty, ≤ 1024 chars; what it does + when to use it |
 | `license` | no | SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation |
-| `compatibility` | no | Free-text environment hint (e.g. `grim>=0.4`) |
+| `compatibility` | no | Free-text environment hint (e.g. `grim>=0.4`); published as the `com.grimoire.compatibility` annotation |
 | `allowed-tools` | no | Comma-separated tool allowlist |
 | `metadata` | no | String→string map: catalog keys + vendor extensions |
 
@@ -59,6 +59,15 @@ rules and bundles, where these keys are top-level):
 | `metadata.repository` | `https://` URL only; `git@…` or `http://` fails the release (exit 65) |
 | `metadata.deprecated` | Deprecation notice; non-empty marks the skill deprecated (flagged in search/TUI, warned on `add`). Empty ⇒ not deprecated |
 | `metadata.replaced-by` | Successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |
+| `metadata.authors` | Who maintains it. Prefer a team name or alias — a manifest is readable by anyone who can pull it |
+| `metadata.vendor` | Distributing organization; derived from the release repository's namespace when omitted |
+| `metadata.homepage` | Project home page; defaults to `metadata.repository` |
+| `metadata.documentation` | Docs URL; defaults to `<repository>#readme` |
+
+The last four are optional and derived when omitted, so most skills need
+none of them. Each also has a matching `grim release` flag and a
+`publish.toml` `[metadata]` entry — both fill gaps and never override what
+the file authors.
 
 Full annotation mapping: [catalog metadata][pub-metadata] and
 [annotations][annotations].
