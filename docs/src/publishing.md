@@ -490,19 +490,27 @@ version-scoped and whether the surface is allowed to cache it.
 | `created`, `revision` | ✅ | ✅ | `created` only |
 | `authors`, `vendor`, `url`, `documentation` | ✅ | registry browse only | ❌ |
 | `compatibility` | ✅ | registry browse only | ❌ |
-| [`support.*`](#description-support) | ✅ | ❌ | ❌ |
+| [`support.*`](#description-support) | ✅ | ❌ (see below) | ❌ |
 
 - **`grim describe` is the complete surface.** It resolves the reference to a
   manifest live, so it reports every key, including the support channels off
   the [description companion](#description-support).
-- **Browse is version-scoped and cached.** `grim search` and the TUI detail
-  pane read a disk-cached catalog. Everything above the `support` row belongs
-  to the manifest being browsed, so caching it is correct. Support channels are
+- **Browse is version-scoped and cached.** `grim search` and the TUI catalog
+  read a disk-cached catalog. Everything above the `support` row belongs to the
+  manifest being browsed, so caching it is correct. Support channels are
   repository-level and *mutable* — caching one would show a link that has since
   moved, which is exactly what putting them on the companion was meant to
   avoid. An [index-backed](./package-index.md) row is thinner still: the index
   is a phone book, so it carries `license` and `created` and resolves the rest
   from the registry at install time.
+- **The TUI detail pane is the exception, because it does not cache them.**
+  The pane is always live for the selected row; once the selection holds still
+  — or immediately on `enter` — grim fetches the companion once per repository
+  per session and shows the channels in its `Overview` panel, alongside
+  `Readme` / `Changelog`. See [detail panels](./commands.md#tui-detail-tabs).
+  A live read triggered by dwell time is a different mechanism from a cached
+  browse row and carries none of its staleness; the browse row itself still
+  never carries them.
 - **Downstream tooling reads `describe`.** The
   [`--format json`](./json-interface.md) payload is the integration point — an
   index site or an editor extension runs `grim describe <ref> --format json`

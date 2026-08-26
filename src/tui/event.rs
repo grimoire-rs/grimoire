@@ -75,6 +75,10 @@ pub enum TuiInput {
     Versions,
     /// Rebuild the catalog.
     Refresh,
+    /// Move to the next detail-pane tab (wraps).
+    NextTab,
+    /// Move to the previous detail-pane tab (wraps).
+    PrevTab,
     /// Quit the TUI.
     Quit,
 }
@@ -139,6 +143,14 @@ pub enum TuiAction {
     /// `bundle_repo` is the `registry/repository` reference (stable cache
     /// key).
     LoadBundleMembers { row: usize, bundle_repo: String },
+    /// Lazily fetch the description companion for `repo` — the README,
+    /// CHANGELOG, and support channels behind the detail pane's tabs.
+    ///
+    /// Emitted by `handle_browse` when `Enter` opens the detail pane on a
+    /// catalog row that has no companion cache entry yet. A `Failed` entry is
+    /// re-emitted (unlike a bundle-member fetch): the trigger is one keypress,
+    /// so a transient network fault should cost one retry, not the session.
+    LoadCompanion { repo: String },
     /// Open `url` in the system browser (the selected row's repository).
     OpenUrl { url: String },
     /// Re-issue the refused install at `rows[row]` with `force`, after the
@@ -159,14 +171,14 @@ pub enum TuiAction {
 ///
 /// The mapping is mode-sensitive: in [`Mode::Search`] printable characters
 /// edit the query (so they cannot double as list hotkeys); in
-/// [`Mode::List`] / [`Mode::Detail`] navigation and action keys apply.
+/// [`Mode::List`] navigation and action keys apply.
 pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match state.mode {
         Mode::Search => handle_search(state, input),
         Mode::Help => handle_help(state, input),
         Mode::VersionPick => handle_picker(state, input),
         Mode::ConfirmForce => handle_confirm_force(state, input),
-        Mode::List | Mode::Detail => handle_browse(state, input),
+        Mode::List => handle_browse(state, input),
     }
 }
 
@@ -283,6 +295,13 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         TuiInput::Down => {
             state.back();
             state.move_selection(1);
+            TuiAction::None
+        }
+        // Tab keys keep cycling the visible detail pane mid-typing, for the
+        // same reason the page keys do: the pane is beside the search box, not
+        // behind it, and there is no completion for Tab to mean instead.
+        TuiInput::NextTab | TuiInput::PrevTab => {
+            state.cycle_detail_tab(if input == TuiInput::NextTab { 1 } else { -1 });
             TuiAction::None
         }
         // Page keys keep scrolling the visible detail pane mid-typing.
@@ -428,16 +447,21 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             } else {
                 state.enter_detail();
             }
+            // `enter` forces the fetch immediately rather than waiting for the
+            // idle tick that normally triggers it, and is the one caller
+            // allowed to retry a *failed* companion — a keypress is bounded by
+            // how fast a person can press it, where the idle poll is not.
+            state
+                .companion_to_retry()
+                .map_or(TuiAction::None, |repo| TuiAction::LoadCompanion { repo })
+        }
+        TuiInput::NextTab | TuiInput::PrevTab => {
+            state.cycle_detail_tab(if input == TuiInput::NextTab { 1 } else { -1 });
             TuiAction::None
         }
-        TuiInput::Esc => {
-            if state.mode == Mode::Detail {
-                state.back();
-                TuiAction::None
-            } else {
-                TuiAction::Quit
-            }
-        }
+        // One press quits. There is no detail focus to back out of first —
+        // the pane is always visible and never captures the keyboard.
+        TuiInput::Esc => TuiAction::Quit,
         TuiInput::Char('/') => {
             state.enter_search();
             TuiAction::None
@@ -799,13 +823,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_detail_esc_returns() {
+    fn esc_quits_on_the_first_press_even_after_enter() {
+        // There is no detail focus to back out of: the pane is always visible
+        // and never captures the keyboard, so a second `esc` to leave a mode
+        // that changed nothing was pure ceremony.
         let mut s = seeded();
         handle(&mut s, TuiInput::Enter);
-        assert_eq!(s.mode, Mode::Detail);
-        // Esc in detail returns to list (not quit).
-        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
         assert_eq!(s.mode, Mode::List);
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::Quit);
     }
 
     #[test]
@@ -1130,10 +1155,16 @@ mod tests {
         // In flat mode every row is a leaf: Enter must open detail.
         assert_eq!(s.view_mode, super::super::state::ViewMode::Flat);
         s.move_selection(1);
-        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
-        assert_eq!(s.mode, Mode::Detail);
+        // Enter both opens the pane AND asks for the row's description
+        // companion — the tabs and the support channels have no other trigger.
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::LoadCompanion {
+                repo: "r/b".to_string()
+            }
+        );
+        assert_eq!(s.mode, Mode::List, "there is no detail mode to enter");
         assert_eq!(s.selected_row().unwrap().repo, "r/b");
-        s.back();
 
         // In tree mode, Enter on the currently-selected row should:
         //   - if selected_is_group() → toggle collapse (fold/unfold) — mode stays List
@@ -1149,14 +1180,14 @@ mod tests {
     }
 
     #[test]
-    fn arrows_always_move_selection_even_in_detail_mode() {
-        // Issue #30: Mode::Detail used to hijack ↑/↓ into detail-pane
-        // scrolling, silently stranding list navigation until Esc. Arrows
-        // now ALWAYS move the selection; the pane scrolls only via the
-        // focus-free j/k and pgup/pgdn keys.
+    fn arrows_always_move_selection_after_enter() {
+        // Issue #30: a detail mode used to hijack ↑/↓ into detail-pane
+        // scrolling, silently stranding list navigation until Esc. That mode is
+        // gone entirely; arrows ALWAYS move the selection and the pane scrolls
+        // only via the focus-free j/k and pgup/pgdn keys.
         let mut s = seeded();
         handle(&mut s, TuiInput::Enter);
-        assert_eq!(s.mode, Mode::Detail);
+        assert_eq!(s.mode, Mode::List);
         // Down moves the selection — no hijack; the pane offset stays put.
         assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
         assert_eq!(s.selected, 1, "arrows navigate the list in detail mode");
@@ -1186,10 +1217,7 @@ mod tests {
         let mut s = seeded();
         // The content's exact scroll range in the current viewport — the
         // bottom clamp the page keys must respect.
-        let max = crate::tui::detail::scroll_max(
-            &crate::tui::detail::detail_lines(s.selected_row()),
-            crate::tui::detail::viewport(s.term_size, s.show_registry_column()),
-        );
+        let max = crate::tui::detail::scroll_max(&s.active_detail_lines(), s.detail_viewport(s.term_size));
         let page = u16::try_from(DETAIL_PAGE).unwrap();
         assert!(max > page, "fixture content must overflow by more than one page");
         // List mode: PageDown scrolls the pane, selection stays put.
@@ -1255,7 +1283,8 @@ mod tests {
             }
         );
         handle(&mut s, TuiInput::Enter);
-        assert_eq!(s.mode, Mode::Detail);
+        // `o` works the same before and after `enter` — the pane never
+        // captures the keyboard.
         assert_eq!(
             handle(&mut s, TuiInput::Char('o')),
             TuiAction::OpenUrl {
@@ -1538,13 +1567,15 @@ mod p2_event_member_node_tests {
 
         assert_eq!(
             s.mode,
-            Mode::Detail,
-            "C-5: Enter on bundle leaf must enter Mode::Detail"
+            Mode::List,
+            "C-5: Enter on a bundle leaf must not toggle collapse — and there is no detail mode to enter"
         );
         assert_eq!(
             action,
-            TuiAction::None,
-            "C-5: Enter on bundle leaf returns TuiAction::None"
+            TuiAction::LoadCompanion {
+                repo: "reg/acme/bundle-x".to_string()
+            },
+            "C-5: Enter on a bundle leaf requests its companion"
         );
         // expanded_bundles must be unchanged by Enter (F3: check full repo key).
         assert!(
@@ -1553,10 +1584,10 @@ mod p2_event_member_node_tests {
         );
     }
 
-    // ── C-5b: Enter on a member enters Mode::Detail ───────────────────────────
+    // ── C-5b: Enter on a member rewinds the pane, never toggles ──────────────
 
     #[test]
-    fn c5b_enter_on_member_enters_detail_mode() {
+    fn c5b_enter_on_member_is_not_a_collapse_toggle() {
         let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
 
         let found = select_member(&mut s);
@@ -1566,8 +1597,8 @@ mod p2_event_member_node_tests {
 
         assert_eq!(
             s.mode,
-            Mode::Detail,
-            "C-5b: Enter on a member must transition to Mode::Detail (not a no-op)"
+            Mode::List,
+            "C-5b: a member row has no detail mode to enter — the pane is always live"
         );
         assert_eq!(
             action,

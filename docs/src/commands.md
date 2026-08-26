@@ -1418,7 +1418,8 @@ like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
 | `→` | Expand the selected group (reveal its children). Tree mode only. |
 | `←` | Collapse the selected group. On an already-collapsed group or on a leaf entry, jump to the parent group instead (ARIA-style navigation). Tree mode only. |
 | `z` | Fold the whole tree: if anything is collapsed, expand everything; otherwise collapse back to the configured [`expand_levels`][options-tui] depth. Tree mode only. |
-| `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle); on a leaf entry, open the detail pane as usual. |
+| `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle). On a leaf entry it rewinds the detail pane and fetches its companion immediately rather than waiting for the selection to settle — and it is the only way to retry a companion whose fetch failed. |
+| `tab` / `shift-tab` | Cycle the detail pane's [panels](#tui-detail-tabs) forward / backward. Works on every catalog row; a panel with nothing published behind it reads `not available`. |
 | `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
 | `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on `not installed`, `pending` and `integrity-missing` leaves; `u`/`d` act on `installed`, `via bundle`, `outdated`, `modified`, `pending` and `integrity-missing` ones. `pending` is in both sets: the artifact is installed, so update and uninstall apply, *and* an install still has outputs to write for it. Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
 
@@ -1490,16 +1491,60 @@ config, keyed `index` or `oci` by the locator's shape — the type choice
 picks the prefill, the shape keys the entry (clearing the input seeds
 nothing). Cancelling closes the TUI.
 
-`enter` opens the detail pane for the selected row: the centered artifact
-reference, its `Summary:` and `Description:` sections, and a `Metadata:`
-block with the keywords and the
+The detail pane sits beside the catalog and is always live for the selected
+row: the centered artifact reference, its `Summary:` and `Description:`
+sections, and a `Metadata:` block with the keywords and the
 [repository URL](./publishing.md#metadata-repository) (version and install
-status stay on the catalog row). `↑`/`↓` always move the selection —
-detail open or not — so navigation is never stranded; `esc` returns to
-the list. The pane itself scrolls with `j`/`k` (line by line) and
-`pgup`/`pgdn` (a page), from any mode — no need to open it first.
-Scrolling is clamped at both ends: it saturates at the top and stops
-when the content's last line reaches the pane's bottom edge.
+status stay on the catalog row).
+
+There is **no detail focus to enter or leave.** `↑`/`↓` always move the
+selection, the pane scrolls with `j`/`k` (line by line) and `pgup`/`pgdn` (a
+page), `tab` switches its panel — every one of them from wherever you are, and
+`esc` quits on the first press. Scrolling is clamped at both ends: it saturates
+at the top and stops when the content's last line reaches the pane's bottom
+edge.
+
+### Detail tabs and repository docs {#tui-detail-tabs}
+
+Every catalog row's detail pane carries a three-panel strip, painted into the
+pane's own top border and cycled with `tab` / `shift-tab`:
+
+```
+──Overview──Readme──Changelog─────────────────────
+```
+
+| Panel | Content |
+|---|---|
+| `Overview` | The metadata pane above, plus a `Support:` section when the repository publishes [support channels](./publishing.md#description-support). |
+| `Readme` | The companion's `README.md`. |
+| `Changelog` | The companion's `CHANGELOG.md`. |
+
+The strip is **fixed** — all three, on every row, always visible. A panel whose
+document the repository did not publish is greyed and reads `not available`
+when you land on it, rather than disappearing: a strip that changed as a fetch
+landed would resize the pane under you, and `tab` would mean something
+different on every row. Selection always starts on `Overview`.
+
+grim asks the registry for the row's [description
+companion](./publishing.md#description-companion) once per repository per
+session, as soon as the selection holds still — arrowing through the catalog
+never triggers it, and nothing needs pressing first. Markdown is rendered
+lightly — headings, lists, fenced code, and rules; everything else shows as
+written.
+
+Support channels are the one thing in the pane that is **not** read from the
+browse catalog. They live on the companion tag, which is mutable by design, so
+a cached copy could name a contact that has already moved — which is why they
+are absent from `grim search` and from a catalog row
+([where each field surfaces](./publishing.md#metadata-surfaces)). Fetching them
+once the selection settles — or immediately on `enter` — avoids that entirely.
+
+Offline (or on a fetch that fails) the Overview keeps every catalog field and
+its `Support:` section names the reason instead of the channels — an omitted
+section would be indistinguishable from a repository that publishes none. A
+failed fetch is **not** retried automatically: press `enter` for one more
+attempt, or `r`, which clears the cache along with the catalog so a republished
+README shows up without restarting the session.
 
 A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like

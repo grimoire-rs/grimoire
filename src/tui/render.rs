@@ -19,8 +19,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::config::registry_resolve::RowSource;
 
 use super::detail::{
-    DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REGISTRY, W_REPO, W_STATUS, W_TAG, catalog_width,
-    detail_lines, scroll_max, viewport,
+    BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REGISTRY, W_REPO, W_STATUS,
+    W_TAG, catalog_width, detail_lines, scroll_max,
 };
 use super::state::{ArtifactState, Mode, TuiState};
 
@@ -312,6 +312,13 @@ pub struct RenderModel {
     /// content's post-wrap height in the live viewport
     /// (see [`super::detail::scroll_max`]).
     pub detail_scroll: u16,
+    /// Every detail tab in strip order, each flagged with whether content sits
+    /// behind it. Empty when the selection is a tree group or a virtual bundle
+    /// member, which is the only case that paints no strip — a catalog row
+    /// always shows all three, so the pane never resizes as a fetch lands.
+    pub detail_tabs: Vec<(super::detail::DetailTab, bool)>,
+    /// Which of [`Self::detail_tabs`] is showing.
+    pub detail_tab: super::detail::DetailTab,
     /// The bottom status line — transient only (loading, counts, batch
     /// results, marked-set actions). Empty when idle.
     pub status: String,
@@ -334,8 +341,6 @@ pub struct RenderModel {
     /// at the cap (the row list / search may be incomplete); empty when the
     /// window is exhaustive. Rendered as a quiet span on the legend line.
     pub truncation_hint: String,
-    /// Whether the detail pane is the focused element.
-    pub detail_focused: bool,
     /// Whether the help overlay is showing.
     pub show_help: bool,
     /// Vertical scroll offset of the help overlay (rows).
@@ -589,6 +594,72 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
 /// used in place of [`detail_lines`] when the selection is a group node.
 ///
 /// `flat` is the caller-owned result of [`TuiState::flattened`]; threading it
+/// The detail pane's tab strip, painted **into the block's top border**.
+///
+/// Each label is framed by the border's own `\u{2500}` glyphs so the strip reads as
+/// part of the frame rather than as a row of content — it costs no content
+/// line, it cannot be confused for the document below it, and the pane's height
+/// no longer changes with what is selected.
+///
+/// Three tiers, so the strip answers two questions at a glance: which tab am I
+/// on, and which of the others have anything to show. Styling reuses the
+/// catalog list's own selection idiom — a dim background block plus bold cyan —
+/// rather than an underline, which renders inconsistently across terminals and
+/// reads as a link.
+fn tab_strip_line(tabs: &[(super::detail::DetailTab, bool)], active: super::detail::DetailTab) -> Line<'static> {
+    if tabs.is_empty() {
+        // The leading rule belongs to the frame, so it takes the border colour
+        // — bundling it into the accent span painted a stray cyan dash in front
+        // of the title.
+        return Line::from(vec![
+            Span::styled("\u{2500}", Style::default().fg(Color::Blue)),
+            Span::styled("Detail", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]);
+    }
+    let mut spans = Vec::with_capacity(tabs.len() * 2 + 1);
+    for (i, (tab, live)) in tabs.iter().enumerate() {
+        // A single rule glyph between labels, and one before the first, so the
+        // strip starts flush against the block's corner instead of floating.
+        spans.push(Span::styled(
+            if i == 0 { "\u{2500}" } else { "\u{2500}\u{2500}" },
+            Style::default().fg(Color::Blue),
+        ));
+        let style = if *tab == active {
+            Style::default()
+                .bg(Color::Indexed(236))
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if *live {
+            Style::default().fg(Color::Gray)
+        } else {
+            // Nothing published behind it. Still selectable — landing on it
+            // says so, which beats a key that does nothing on most of a catalog.
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+    }
+    Line::from(spans)
+}
+
+/// The binding that moves between tabs, painted into the block's **bottom**
+/// border.
+///
+/// A strip that shows tabs but not how to reach them is a puzzle, and the
+/// bottom border is the one place a hint costs nothing: no content row, and out
+/// of the way of the document being read. Empty when no strip is painted.
+fn tab_hint_line(tabs: &[(super::detail::DetailTab, bool)]) -> Line<'static> {
+    if tabs.is_empty() {
+        return Line::default();
+    }
+    Line::from(Span::styled(
+        format!("\u{2500} {TAB_HINT} \u{2500}"),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+/// The key hint painted into the tab strip's bottom border.
+const TAB_HINT: &str = "(shift) tab  switch panel";
+
 /// in avoids a redundant rebuild (P1 dedup: shared with `tree_render_rows`).
 fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<DetailLine> {
     let Some(super::tree::DisplayRow::Group {
@@ -692,7 +763,7 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
             if let Some(repo) = node.member_repo.as_deref()
                 && let Some(catalog_row) = state.rows.iter().find(|r| r.repo == repo)
             {
-                let mut lines = detail_lines(Some(catalog_row));
+                let mut lines = detail_lines(Some(catalog_row), None);
                 lines.push(DetailLine::MetaEntry {
                     label: "Via bundle:",
                     value: sanitize_member_label(parent_bundle_repo),
@@ -802,18 +873,22 @@ pub fn frame(state: &TuiState) -> RenderModel {
                 // and delegate to detail_lines_for_member.
                 member_detail_lines_from_state(state, flat_ref.get(state.selected))
             }
-            // Leaf: delegate to the standard row detail builder.
-            Some(super::tree::DisplayRow::Leaf { .. }) => detail_lines(state.selected_row()),
+            // Leaf: delegate to the active-tab builder, which folds in the
+            // live companion (support channels, README, CHANGELOG).
+            Some(super::tree::DisplayRow::Leaf { .. }) => state.active_detail_lines(),
             // No selection (empty or out-of-range display list).
-            None => detail_lines(state.selected_row()),
+            None => state.active_detail_lines(),
         }
     } else {
-        detail_lines(state.selected_row())
+        state.active_detail_lines()
     };
-    let detail_scroll = state.detail_scroll.min(scroll_max(
-        &detail,
-        viewport(state.term_size, state.show_registry_column()),
-    ));
+    // A group or virtual member row has no companion, so its strip is never
+    // painted — but `detail_tabs` already answers `Overview`-only for those,
+    // because it reads `selected_row`, which is `None` for both.
+    let detail_tabs = state.detail_tabs();
+    let detail_scroll = state
+        .detail_scroll
+        .min(scroll_max(&detail, state.detail_viewport(state.term_size)));
 
     // Status is transient only — loading / counts / batch results, or the
     // marked-set action keys (contextual). The always-on key summary lives
@@ -949,6 +1024,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
         rows,
         detail,
         detail_scroll,
+        detail_tabs,
+        detail_tab: state.detail_tab,
         status,
         hint,
         hint_tiers,
@@ -958,7 +1035,6 @@ pub fn frame(state: &TuiState) -> RenderModel {
             .map(|s| s.content.as_ref())
             .collect(),
         truncation_hint,
-        detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
         help_scroll: state.help_scroll,
         picker,
@@ -1213,8 +1289,13 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     let detail_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if model.detail_focused { Color::Cyan } else { Color::Blue }))
-        .title(Span::styled("Detail", accent));
+        .border_style(Style::default().fg(Color::Blue))
+        // The tabs ARE the pane's title: they name what is showing and sit in
+        // the top border, so they cost no content row and cannot be mistaken
+        // for content. A pane beside a block titled "Catalog" does not also
+        // need to say "Detail".
+        .title_top(tab_strip_line(&model.detail_tabs, model.detail_tab))
+        .title_bottom(tab_hint_line(&model.detail_tabs).alignment(Alignment::Right));
     // Mechanical mapping only — the layout decisions live in
     // `detail_lines` (the pure projection).
     let detail_text: Vec<Line> = model
@@ -1239,6 +1320,35 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                 Span::styled(value.clone(), Style::default().fg(Color::White)),
             ]),
             DetailLine::Text(s) => Line::from(Span::styled(s.clone(), Style::default().fg(Color::White))),
+            // Companion-document lines. One style axis, so the heading ramp is
+            // emphasis and color, never indentation — the pane is too narrow to
+            // spend columns on nesting.
+            DetailLine::Heading { level, text } => Line::from(Span::styled(
+                text.clone(),
+                match level {
+                    1 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    2 => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED),
+                },
+            )),
+            DetailLine::Bullet(s) => Line::from(vec![
+                Span::styled(BULLET_PREFIX, Style::default().fg(Color::Blue)),
+                Span::styled(s.clone(), Style::default().fg(Color::White)),
+            ]),
+            DetailLine::Code(s) => Line::from(Span::styled(
+                format!("{CODE_PREFIX}{s}"),
+                Style::default().fg(Color::Green),
+            )),
+            // Painted to the pane's inner width, which is why `detail_line_text`
+            // measures a rule as empty: it is exactly one row, never wrapped.
+            DetailLine::Rule => Line::from(Span::styled(
+                "─".repeat(usize::from(detail_area.width.saturating_sub(2))),
+                Style::default().fg(Color::DarkGray),
+            )),
+            DetailLine::Notice(s) => Line::from(Span::styled(
+                s.clone(),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            )),
         })
         .collect();
     f.render_widget(
@@ -1452,7 +1562,9 @@ fn help_entries() -> [(&'static str, &'static str); 10] {
         ("o", "open the selected entry's repository URL"),
         ("g / t", "toggle scope project ⇄ global · toggle tree / flat view"),
         ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
-        ("/ · enter", "search (enter commits) · open the detail pane"),
+        // `tab` shares this row rather than taking its own: the overlay is
+        // sized to fit an 80×24 terminal, and an eleventh row overflows it.
+        ("(shift) tab", "switch detail panel — overview / readme / changelog"),
         ("h · r · ?", "deprecated on/off · refresh catalog · this help — q quits"),
     ]
 }
@@ -1874,7 +1986,6 @@ mod tests {
         // glyph) — the detail pane does not repeat them.
         assert!(!detail.contains("Version:"));
         assert!(!detail.contains("Status:"));
-        assert!(!m.detail_focused);
         // Idle: status is empty; the key summary lives in `hint`.
         assert_eq!(m.status, "");
         assert!(m.hint.contains("quit"));
@@ -1954,6 +2065,73 @@ mod tests {
     // The overlay must document the keys that were previously missing or newly
     // added — j/k detail scroll and the tree expand/collapse + view toggle.
     #[test]
+    fn the_tab_strip_names_every_tab_and_blends_into_the_border() {
+        use crate::tui::detail::DetailTab;
+        let tabs = [
+            (DetailTab::Overview, true),
+            (DetailTab::Readme, false),
+            (DetailTab::Changelog, false),
+        ];
+        let line = tab_strip_line(&tabs, DetailTab::Overview);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        for label in ["Overview", "Readme", "Changelog"] {
+            assert!(text.contains(label), "{label} missing from {text:?}");
+        }
+        // Rule glyphs join the labels to the block's own frame, so the strip
+        // reads as the border rather than as a row of content.
+        assert!(
+            text.starts_with('\u{2500}'),
+            "the strip must sit flush against the corner: {text:?}"
+        );
+        assert!(
+            text.contains("\u{2500}\u{2500}"),
+            "labels are separated by the border rule: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_strips_rule_glyphs_take_the_border_colour_not_the_accent() {
+        use crate::tui::detail::DetailTab;
+        // A rule glyph is frame, not text. Painting one in the title's accent
+        // put a stray cyan dash in front of the label.
+        let accent_is_frame = |line: Line<'_>| {
+            line.spans
+                .iter()
+                .any(|s| s.content.chars().all(|c| c == '\u{2500}') && s.style.fg == Some(Color::Cyan))
+        };
+        assert!(!accent_is_frame(tab_strip_line(&[], DetailTab::Overview)));
+        assert!(!accent_is_frame(tab_strip_line(
+            &[(DetailTab::Overview, true), (DetailTab::Readme, false)],
+            DetailTab::Overview
+        )));
+    }
+
+    #[test]
+    fn a_row_without_tabs_keeps_the_plain_detail_title() {
+        // Tree groups and virtual bundle members have no repository companion,
+        // so the block falls back to naming itself.
+        let line = tab_strip_line(&[], crate::tui::detail::DetailTab::Overview);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("Detail"));
+        assert!(tab_hint_line(&[]).spans.is_empty(), "no strip ⇒ no key hint");
+    }
+
+    #[test]
+    fn the_key_hint_names_both_directions() {
+        use crate::tui::detail::DetailTab;
+        let text: String = tab_hint_line(&[(DetailTab::Overview, true)])
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            text.contains("shift"),
+            "the hint must name the backward key too: {text:?}"
+        );
+        assert!(text.contains("tab"));
+    }
+
+    #[test]
     fn help_overlay_documents_detail_scroll_and_tree_keys() {
         // Asserts the binding is DOCUMENTED, not that it occupies a row of its
         // own: entries merge as the list is condensed to keep the overlay
@@ -1964,6 +2142,7 @@ mod tests {
         for (needle, what) in [
             ("j / k", "detail-scroll j/k"),
             ("pgup/pgdn", "detail-scroll by page"),
+            ("(shift) tab", "detail panel switch"),
             ("→ / ←", "tree expand/collapse"),
             ("z", "tree fold"),
             ("t", "view toggle"),
@@ -2066,9 +2245,10 @@ mod tests {
         assert_eq!(m.search, "al_");
         assert!(!m.search_placeholder);
         s.back();
-        s.enter_detail();
-        let m2 = frame(&s);
-        assert!(m2.detail_focused);
+        assert_eq!(
+            m.search, "al_",
+            "the search box keeps the query while the pane stays live"
+        );
     }
 
     #[test]
@@ -2305,7 +2485,10 @@ mod tests {
             s.scroll_detail(1);
         }
         let m = frame(&s);
-        let max = scroll_max(&m.detail, viewport(s.term_size, s.show_registry_column()));
+        let max = scroll_max(
+            &m.detail,
+            crate::tui::detail::viewport(s.term_size, s.show_registry_column()),
+        );
         assert_eq!(m.detail_scroll, max);
         assert!(max > 0, "an overflowing pane has a non-zero scroll range");
         // Within range: passed through untouched.
