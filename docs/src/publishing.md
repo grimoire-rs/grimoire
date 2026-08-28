@@ -88,7 +88,7 @@ every kind, publish a [repository description companion](#description-companion)
 ## Repository description companion {#description-companion}
 
 The in-tree READMEs above ride each artifact's own layer, so they cover the
-tree-backed kinds (skill, rule, agent) but not mcp or bundle. A **description
+tree-backed kinds (skill, rule, agent, hook) but not mcp or bundle. A **description
 companion** is a repository-level channel that works for *every* kind: it is the
 one home for all of a repo's descriptive data — a `README.md`, a `CHANGELOG.md`,
 a logo, and any assets the README references — published to the reserved
@@ -688,9 +688,11 @@ plus `authors`.
 
 ## Publishing bundles {#bundles}
 
-A [bundle](./concepts.md#bundles) groups skills, rules, and
-[agents](./agents.md) so consumers declare one reference instead of a dozen.
-You author it as a small TOML file whose `[skills]`/`[rules]`/`[agents]`
+A [bundle](./concepts.md#bundles) groups skills, rules,
+[agents](./agents.md), and [hooks](./artifacts.md#hooks) so consumers declare
+one reference instead of a dozen.
+You author it as a small TOML file whose
+`[skills]`/`[rules]`/`[agents]`/`[hooks]`
 tables list the members — the same shape as a `grimoire.toml`:
 
 ```toml
@@ -1118,6 +1120,7 @@ kind, relative to the manifest's directory:
 | rule | `rules/{name}.md` |
 | agent | `agents/{name}.md` |
 | mcp | `mcp/{name}.toml` |
+| hook | `hooks/{name}/` |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -1126,11 +1129,17 @@ elsewhere.
 ### Kind ordering {#batch-publish-ordering}
 
 Entries publish in a fixed kind order — skills, then rules, then agents,
-then [MCP servers](./mcp-servers.md), then bundles — alphabetical within
+then [MCP servers](./mcp-servers.md), then [hooks](./artifacts.md#hooks),
+then bundles — alphabetical within
 each kind. Bundle entries land last by design: a bundle holds references
 to already-published members, and consumers resolve those members at lock
 time. Publishing a bundle before its members would produce a bundle that
 references artifacts that do not yet exist.
+
+Hooks sit immediately before bundles for exactly that reason — a bundle may
+declare a hook member — and they were **appended** after `mcp` rather than
+inserted among the older kinds, so no existing kind's relative position
+moved.
 
 ### Skip-existing default and --force {#batch-publish-skip-existing}
 

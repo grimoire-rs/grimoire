@@ -27,6 +27,7 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
+| [Hook manifest][hook-manifest] (`hook.toml`) | The published manifest schema — `schema`, `name`, `description`, and each `[[hooks]]` entry's fields — plus the closed `tier`, `event`, and `payload` vocabularies, which grow additively and never lose a literal. The two levels differ deliberately: the **document** rejects unknown keys like every other grim manifest, while an **entry** inside `[[hooks]]` preserves them, so a `<vendor>.<field>` override table and the reserved `policy` key round-trip through a grim that does not understand them |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
 | OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], and the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts |
 | [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json`, the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised (most indexes publish none, and a `404` is a normal, non-error answer); its **path and document shape** are, under its own monotonic `schema_version` and the consumer rule stated with it |
@@ -398,6 +399,49 @@ with no warning at all. This follows from the same "trusted like a build
 script" model above: grim does not resolve symlinks to police the trust
 boundary any more than [`make`][gnu-make] or [`npm install`][npm-install] do.
 
+### Hook reporting is incomplete {#limitations-hook-reporting}
+
+[Hook](./artifacts.md#hooks) arming works and is tested, and
+[`grim hook list`][hook-list] reports it; one *reporting* gap remains. It is
+a visibility gap rather than an enforcement gap — it cannot arm a hook that
+the [gates](./artifacts.md#hook-gates) did not allow — but it will mislead
+you if you script against it as-is.
+
+**There is no command that lists every workspace you have consented to.**
+[`grim hook list`][hook-list] and [`grim status`][status] both answer the
+question for *this* workspace, and [`grim hook allow`][hook-allow] /
+[`grim hook revoke`][hook-revoke] change the answer for it. Neither
+enumerates the [consent records][workspace-consent] a machine holds for other
+checkouts — those are a directory of files under `$GRIM_HOME/hooks/consent/`,
+and reading them is `ls`. That is a reporting gap, not an enforcement one: a
+record only ever grants for the workspace named inside it.
+
+Related to it, and accepted rather than scheduled: **records are never
+garbage-collected.** A record for a workspace you deleted, or one whose hooks
+you have since uninstalled, stays on disk. It grants nothing — consent is
+measured against what a workspace currently declares, and a workspace that
+declares no hooks arms none — and `grim hook revoke` is the only thing that
+removes one.
+
+One related sharp edge, deliberate:
+
+**Clearing the flag does not itself disarm.** Both
+`grim config set options.experimental.hooks false` and the matching `unset`
+are permitted and exit **0**, and both warn that hooks already armed stay
+armed until convergence runs. `grim install` is what disarms them.
+
+That is a deliberate split rather than an oversight. A config write cannot
+run the convergence pass, so the write and the disarm are two steps; an
+earlier revision refused the write outright to avoid implying otherwise,
+which left a `true` on disk with no supported route back at all and a
+refusal message naming a command that could not clear the flag. Explaining
+the second step is the honest version of the same caution.
+
+Because [error and warning text is explicitly not a
+contract](#unstable), the `message` strings behind these states may be
+reworded in any minor. Branch on the `cause` enum, which is frozen — see
+[Hook arming](./json-interface.md#hook-arming).
+
 ### Offline re-materialization needs a manifest {#limitations-offline-remat}
 
 Grimoire caches a fetched artifact's content layer — content-addressed, so
@@ -441,6 +485,13 @@ unaffected — they read straight from disk and never touch a manifest.
 [gap-shared-pool]: ./clients.md#gap-shared-pool
 [env-vars]: ./configuration.md#environment-variables
 [artifacts-kinds]: ./artifacts.md#kinds
+[hook-manifest]: ./artifacts.md#hooks
+[hook-gates]: ./artifacts.md#hook-gates
+[workspace-consent]: ./configuration.md#workspace-consent
+[hook-allow]: ./commands.md#hook-allow
+[hook-revoke]: ./commands.md#hook-revoke
+[hook-list]: ./commands.md#hook-list
+[options-experimental]: ./configuration.md#options-experimental
 [batch-publish]: ./publishing.md#batch-publish
 [publishing-release]: ./publishing.md#release
 [vendor-metadata]: ./vendor-metadata.md

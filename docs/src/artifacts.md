@@ -1,7 +1,7 @@
 # Artifact Reference
 
-Grimoire ships five artifact kinds — skills, rules, agents, MCP servers,
-and bundles. Each has its own source shape, frontmatter schema, and
+Grimoire ships six artifact kinds — skills, rules, agents, MCP servers,
+hooks, and bundles. Each has its own source shape, frontmatter schema, and
 validation rules, and until now those details lived scattered across the
 publishing, agents, and vendor-metadata chapters.
 
@@ -14,7 +14,7 @@ looks like. This page is that reference. Narrative background stays in
 reference lives in its own chapter,
 [MCP Server Artifacts](./mcp-servers.md).
 
-## The five kinds {#kinds}
+## Artifact kinds {#kinds}
 
 Every artifact carries its kind in a `com.grimoire.kind` manifest
 annotation, so registries and tooling can distinguish kinds without
@@ -26,6 +26,7 @@ downloading layers.
 | **Rule** | Single `.md` file (+ optional sibling support directory) | `rule` | `rules/<name>.md` (+ `rules/<name>/…`), per-client transform |
 | **Agent** | Single `.md` file | `agent` | One agent file per client, per-client rendering |
 | **MCP server** | `mcp/<name>.toml` | `mcp` | Entry registered in each client's own MCP config file — never a materialized file |
+| **Hook** | Directory with a `hook.toml` manifest | `hook` | A shared payload directory plus a registration in the client's own hooks config — and only once [both gates](#hook-gates) allow it |
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
 
 The manifest's config descriptor is the OCI empty config
@@ -38,12 +39,16 @@ grim still reads those when present, so artifacts published before this
 change resolve their kind unchanged.
 
 `grim build` and `grim release` infer the kind from the path — a directory
-is a skill, a `.md` file is a rule, a `.toml` file is a bundle. Two kinds
-are the exception, because their shape collides with another kind's:
-an agent `.md` is indistinguishable from a rule, so `--kind agent` is
-required (see [Agent Artifacts](./agents.md#publishing)); an MCP
-descriptor `.toml` is indistinguishable from a bundle, so `--kind mcp`
-is required (see [MCP Server Artifacts](./mcp-servers.md#publishing)).
+is a skill or a hook, a `.md` file is a rule, a `.toml` file is a bundle.
+Directories are told apart by their index file, which is why a hook needs
+no flag: a directory carrying a `hook.toml` is a hook, one carrying a
+`SKILL.md` is a skill, and `hook.toml` is tested first. Two kinds *are* the
+exception, because their shape collides with another kind's and no index
+file separates them: an agent `.md` is indistinguishable from a rule, so
+`--kind agent` is required (see [Agent
+Artifacts](./agents.md#publishing)); an MCP descriptor `.toml` is
+indistinguishable from a bundle, so `--kind mcp` is required (see [MCP
+Server Artifacts](./mcp-servers.md#publishing)).
 
 ## Names {#names}
 
@@ -375,6 +380,148 @@ Full field reference, the per-client emit matrix, publishing, and the
 semantic modification-detection model live in
 [MCP Server Artifacts](./mcp-servers.md).
 
+## Hooks {#hooks}
+
+A hook binds a handler to a moment in an agent's lifecycle: run this
+before a tool call, after one, at session start, when the turn stops. Its
+source is a directory with a `hook.toml` manifest at the top and the
+handler files beside it, so one artifact can ship a pre/post pair that
+shares a payload tree.
+
+Every other kind is inert until an agent chooses to read it. A hook is the
+opposite — installing one means a client will execute it automatically,
+without a prompt, on someone else's schedule. So a hook is the only kind
+grim refuses to activate on the strength of a declaration alone: it needs
+[two deliberate opt-ins](#hook-gates) as well.
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `schema` | yes | integer | Manifest and envelope contract version. This release writes and reads `1` |
+| `name` | yes | string | Artifact name, under the same [charset rules](#names) as every other kind. Must equal the containing directory's name — the same rule a skill's `SKILL.md` follows |
+| `description` | yes | string | Becomes the OCI description annotation |
+| `[[hooks]]` | no | array of tables | The handlers, one table per handler — see below |
+
+Unknown keys at the **document** level are a hard parse error, as in every
+other grim manifest. Inside a `[[hooks]]` entry they are deliberately
+**preserved** instead, which is what lets a `<vendor>.<field>` override table
+and the reserved `policy` key survive a round trip through a grim that
+predates them.
+
+Author `hook.toml` in the **TOML 1.0-compatible subset** — unquoted dotted
+keys and single-line inline tables only. Grim's own parser accepts TOML 1.1
+forms, but a published `hook.toml` is read by third-party tooling whose stock
+1.0 parsers hard-reject them, so grim is liberal in what it accepts and
+conservative in what it emits and documents. One narrowing follows from the
+same reasoning: a TOML **datetime**, local-date, or local-time under `policy`
+or a vendor key is rejected at `grim build`, because grim cannot re-emit those
+types without corrupting them.
+
+Each `[[hooks]]` entry is one handler bound to one moment and one tier:
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `id` | yes | string | Stable id, unique within the artifact. ASCII letters, digits, `_`, `-` and `.` only, max 128 bytes. Reaches the dispatch table and the audit trail as `<artifact>/<id>` |
+| `tier` | yes | enum | `observer`, `gatekeeper`, or `mutator` — see [Tiers](#hook-tiers) |
+| `event` | no | enum | `PreToolUse`, `PostToolUse`, `SessionStart`, or `Stop`. Omitted only when a `<vendor>.event` override stands alone, naming a moment that exists on exactly one client |
+| `command` | one of | string | The handler as a single string, handed to the platform shell |
+| `argv` | one of | array of string | The handler in exec form — an argument vector, no shell involved |
+| `matcher` | no | string | Which tool the handler applies to: an exact name or a glob, **never** a regex. Restricted to `A-Za-z0-9_*?./-\|` and 256 bytes, checked at `grim build` |
+| `timeout` | no | integer | Per-handler timeout in seconds; `30` when omitted. **Grim** enforces it rather than the client, so the behaviour is identical everywhere |
+| `payload` | no | enum | `stdin` (the default) hands the handler one JSON object on stdin; `file` writes the envelope to a file and exports its path as `GRIM_HOOK_PAYLOAD` |
+| `policy` | no | table | Reserved for a future vocabulary. Captured unparsed and re-emitted, so a grim that predates it preserves it |
+
+Exactly one of `command` and `argv` is required — they are the two spellings
+of "what to run", not alternatives you may combine.
+
+### Tiers {#hook-tiers}
+
+A handler's tier is a declaration of how much power it is asking for, and
+grim enforces the ceiling rather than trusting the handler to stay inside
+it:
+
+| Tier | May do | Restricted to |
+|------|--------|---------------|
+| `observer` | Read the event. Its response cannot change what happens | any event |
+| `gatekeeper` | Return a verdict that blocks the operation | events that admit a verdict — and not every client admits one on every event (see [Client Compatibility](./clients.md#gap-copilot-hooks)) |
+| `mutator` | Rewrite the tool's input | `PreToolUse` only, and refused **per tool** for tools whose input is a shell command |
+
+A tier a client cannot honour is **declined** for that pair rather than
+quietly downgraded, so a `gatekeeper` never silently becomes an
+`observer`. The `mutator` refusal is the one that is per *tool* rather than
+per client: a matcher that could select a shell-command tool is refused even
+on a client that otherwise supports rewriting. The same rule covers `matcher`: grim's dialect is translated
+into each client's own, and a matcher that cannot be translated losslessly
+declines that `(hook, client)` pair rather than being approximated —
+an inert or over-broad matcher that still reported as installed would be
+worse than an honest refusal.
+
+> **A grim hook is defence in depth, never a security boundary.** A
+> `gatekeeper` that does not fire — because grim is not installed, the
+> launcher is missing, or the client never registered it — is *by design*:
+> every layer fails open so a broken guardrail can never deny you a tool
+> call. Do not put a control you actually rely on behind one.
+>
+> One case is worth naming because it looks armed: on Codex, a hook runs
+> through your **login shell**, so a `fish` or `nushell` user gets a hook
+> that installs, reports `installed`, and never runs — see
+> [Codex: hooks need a POSIX login shell](./clients.md#gap-codex-shell).
+
+### The two gates {#hook-gates}
+
+Declaring a hook is not arming it. `grim add` and `grim lock` treat a hook
+like any other artifact, and `grim install` then **skips** it unless both
+of these allow it:
+
+1. **The feature flag** — `hooks = true` under
+   [`[options.experimental]`](./configuration.md#options-experimental).
+   Off by default, per scope.
+2. **Workspace consent** — this checkout must carry a
+   [consent record](./configuration.md#workspace-consent), written by
+   `grim hook allow`, by `grim add`, or by a prompt you accepted. Cloning a
+   repository is not consenting to it, so a declared hook in a fresh clone
+   arms nothing until you say so. Global scope needs no record: it is your
+   own config on your own machine, and is always consented.
+
+Until both pass, [`grim status`](./commands.md#status) reads `gated` and
+names which gate it was — `feature-flag-off`, `workspace-not-consented`, or
+`consent-drifted`. The exit code stays `0`, because a gate doing its job is
+not a failure. For a run with no terminal to prompt on — CI, a
+cloud agent — [`grim install --trust-hooks`](./commands.md#install) answers
+gate 2 for that invocation, and `--no-trust-hooks` refuses it; the pair
+outranks the record in both directions, writes nothing, and there is
+deliberately no environment variable that does the same thing. Neither opens
+gate 1.
+
+A third condition sits outside both gates and cannot be answered by any
+file: a hook whose pinned registry host is not loopback and is reached over
+[plain HTTP](./configuration.md#workspace-consent-transport) never arms,
+whatever the record says.
+
+### Example — a pre-tool observer {#hook-example-observer}
+
+```toml
+# shell-guard/hook.toml
+schema = 1
+name = "shell-guard"
+description = "Observes Bash tool calls before they run."
+
+[[hooks]]
+id = "guard"
+event = "PreToolUse"
+tier = "observer"
+matcher = "Bash"
+command = "sh guard.sh"
+timeout = 5
+```
+
+Built from the directory holding it, with no `--kind` flag:
+
+```sh
+$ grim build ./shell-guard
+Kind  Name         Path            Layer Digest      Status
+hook  shell-guard  ./shell-guard   sha256:272331f3…  built
+```
+
 ## Bundles {#bundles}
 
 A bundle is a curated set of references to other artifacts. Its source is
@@ -393,6 +540,7 @@ Top-level keys and member tables:
 | `[skills]` | no | name → ref table | Skill members |
 | `[rules]` | no | name → ref table | Rule members |
 | `[agents]` | no | name → ref table | Agent members |
+| `[hooks]` | no | name → ref table | [Hook](#hooks) members. A bundle carrying one is disclosed on install, and adding the bundle consents to the hook members that gesture resolves to — the record stores the resolved set, so a bundle that later gains a member drifts and re-asks rather than arming silently |
 | `[mcp]` | no | name → ref table | MCP server members; the name is the key the server registers under in each client's MCP config |
 
 Each member entry maps the **config binding name** (the name the member is
@@ -404,8 +552,8 @@ re-resolve on `grim update`; digest pins never move
 
 Limits enforced at parse time: at most 512 members per bundle, and the
 members document is capped at 512 KiB. Nested bundles are invalid — a
-member's kind may be `skill`, `rule`, `agent`, or `mcp`, and a `bundle`
-member is rejected at expansion.
+member's kind may be `skill`, `rule`, `agent`, `hook`, or `mcp`, and a
+`bundle` member is rejected at expansion.
 
 ### Deployment-relative members {#bundle-relative-refs}
 

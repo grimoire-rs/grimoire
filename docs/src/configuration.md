@@ -16,7 +16,7 @@ rewrite preserves at the top of the file.
 ## `grimoire.toml` {#grimoire-toml}
 
 The declaration file. An `[options]` table holds defaults, and `[skills]` /
-`[rules]` / `[agents]` map each binding name to a reference:
+`[rules]` / `[agents]` / `[hooks]` map each binding name to a reference:
 
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
@@ -36,6 +36,9 @@ rust-style = "ghcr.io/acme/rust-style:2"
 
 [agents]
 code-reviewer = "ghcr.io/acme/code-reviewer:1"
+
+[hooks]
+shell-guard = "ghcr.io/acme/hooks/shell-guard:1"
 ```
 
 The `[[registries]]` entry with `default = true` sets the primary registry short references expand against; `clients` selects which
@@ -149,11 +152,53 @@ grim config unset options.vendors.cursor.shared_skills
 Because the client name is part of the key, naming a client that does not
 exist is an unknown key — exit 64 (`EX_USAGE`), not a value error.
 
+### `[options.experimental]` {#options-experimental}
+
+The optional `[options.experimental]` sub-table turns on capabilities that
+are shipped but not on by default. An absent table means every one of them
+is off, which is the point: nothing here activates because a file mentions
+it.
+
+```toml
+[options.experimental]
+hooks = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hooks` | boolean | `false` | Whether grim may arm [hooks](./artifacts.md#hooks) in this scope. Off, a declared hook still resolves, locks, and materializes nothing — [`grim status`](./commands.md#status) reports it `gated` with cause `feature-flag-off`, and the exit code stays `0`. |
+
+The flag is deliberately **config-only**: there is no `GRIM_*` environment
+variable that enables hooks. A repository routinely carries its own
+environment — `.envrc`, `.mise.toml`, a devcontainer's `containerEnv`, a CI
+`variables:` block — and a repository must never be able to arm code
+execution on the machine of whoever clones it. Setting the flag is a
+deliberate, legible act in a file you own.
+
+Turning it on is not sufficient by itself. A hook also needs the
+[workspace consent record](#workspace-consent) below, and both gates are
+re-read on every `grim install`, so flipping either one and re-running is
+what arms or disarms.
+
+```sh
+grim config set options.experimental.hooks true
+grim install
+```
+
+> **Turning hooks off is two steps.** `grim config set
+> options.experimental.hooks false` (or `grim config unset
+> options.experimental.hooks`) clears the flag and exits **0**, warning that
+> anything already armed stays armed; `grim install` then converges and
+> disarms it. Check the result with `grim status` — the rows should read
+> `gated` and the client registration should be gone. See [Hook
+> reporting](./stability.md#limitations-hook-reporting).
+
 ### `[bundles]` {#bundles}
 
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member
-skills, rules, and [agents](./agents.md) at lock time:
+skills, rules, [agents](./agents.md), and [hooks](./artifacts.md#hooks) at
+lock time:
 
 ```toml
 [bundles]
@@ -765,6 +810,119 @@ whether the registry supports `_catalog`. An index-only browse set is
 exempt — an index never touches `_catalog`, and a failed index fetch
 gets its own per-source warning instead.
 
+## Consenting a workspace to hooks {#workspace-consent}
+
+Installing a skill or a rule puts text where an agent may read it.
+Installing a [hook](./artifacts.md#hooks) makes a client *execute* something
+automatically. That is a different decision, and grim asks it **per
+workspace** — one legible answer about a checkout you chose to work in,
+instead of a prompt per package that everyone learns to click through.
+
+The question is deliberately not *whose code is this*. Digest pinning
+already answers that: the lock names a manifest digest, and a pinned
+artifact is byte-identical or the install fails. The question consent
+answers is the one a pin cannot — **may this checkout arm hooks on this
+machine at all?** Cloning a repository is not vouching for it, so a
+`grimoire.toml` that arrives with a clone declares hooks and arms nothing
+until you say so, in this workspace, by hand.
+
+### The record {#workspace-consent-record}
+
+Consent lives in one machine-local file per workspace, and never inside the
+repository:
+
+```
+$GRIM_HOME/hooks/consent/<workspace-key>.json
+```
+
+`<workspace-key>` is the SHA-256 of the workspace path in hex — the same key
+grim already uses for that workspace's hook payload tree, so the two agree by
+construction and two workspaces sharing one `$GRIM_HOME` cannot collide.
+
+```json
+{
+  "v": 1,
+  "workspace": "/home/you/src/acme-api",
+  "hooks": ["guard@ghcr.io/acme/hooks/command-guard"],
+  "consented_at": "2026-08-28T10:00:00Z"
+}
+```
+
+Every field is required. `workspace` is the **identity** and the filename is
+only a lookup index: a record whose `workspace` does not equal the resolved
+one is not consent for it. An unknown `v`, a truncated file, an unexpected
+key, or an I/O error all read as **no record at all** — never as an error and
+never as a grant, so a damaged file degrades to "not consented" rather than
+blocking the install.
+
+`hooks` is the set of `<binding>@<registry>/<repository>` entries the scope
+declared when you consented — **no tag and no digest**. That granularity is
+the trade-off, and it is deliberate:
+
+- Declaring a **new** hook, binding an existing one under a new name, or
+  pulling one from a **new repository** is drift. Arming stops, and
+  [`grim status`](./commands.md#status) names the entry that is new.
+- A **version bump** of a hook you already consented to is not drift, and
+  does not re-ask. The bump is visible in the lock's `git diff` and in
+  `grim status`; a publisher who owns a repository you consented to can ship
+  new bytes for it, and grim's answer to that is the digest pin, not a
+  second prompt.
+
+Records are never garbage-collected. One for a workspace you deleted, or one
+whose hooks you have all uninstalled, is inert — consent grants nothing when
+nothing is declared — and `grim hook revoke` is the only thing that removes
+it.
+
+### Granting and withdrawing {#workspace-consent-commands}
+
+```sh
+grim hook allow          # consent to this workspace's currently declared hooks
+grim hook revoke         # remove the record; the next grim install disarms
+grim hook deny           # the same command — direnv's name for it
+```
+
+Both resolve a scope like any other command and report
+`{workspace, action, hooks}` under `--format json`. `revoke` is idempotent:
+removing a record that was never written leaves exactly the state you asked
+for, so it exits `0` either way.
+
+**Global scope is always consented, and carries no record.**
+`$GRIM_HOME/grimoire.toml` is your own file on your own machine — there is no
+third party's checkout being gated, so there is nothing for consent to
+decide. `grim hook allow --global` is therefore a usage error (exit **64**)
+rather than a write, and no global record ever exists to inspect.
+
+**Only three things write a record**, and the list is closed on purpose:
+`grim hook allow`, `grim add` (typing a reference *is* the declaration
+gesture), and a prompt you accepted. `grim install`, `grim update`,
+`grim lock`, `grim status`, `grim context`, `grim hook list`,
+`grim hook run`, the TUI and the MCP server **never** write one, not even
+after materializing a hook. That is the whole control: `grim install`
+materializes what is already declared, and a cloned repository's
+`grimoire.toml` is not your gesture.
+
+When a workspace has no record and grim has a terminal to ask on, it prompts
+once — naming the workspace, the file it will write, and, on drift, the hooks
+that are new. With no terminal it neither hangs nor silently consents: the
+hook reports `gated`, the install exits `0`, and the message names
+[`--trust-hooks`](./commands.md#install) as the per-invocation escape.
+`--trust-hooks` never writes a record; it is per-invocation by contract.
+
+### Plain HTTP never arms {#workspace-consent-transport}
+
+Independent of consent, a hook whose pinned registry host is **not loopback
+and is reached over plain HTTP** does not arm, and `grim status` reports the
+cause `insecure-transport`. On plain HTTP the *first* resolution that
+produces the digest pin is itself attacker-influenceable on the wire, so the
+pin cannot rescue it — see [Plain-HTTP registries](#plain-http-registries)
+for which hosts count.
+
+Loopback (`localhost`, `127.0.0.1`, with or without a port) is exempt, so the
+local test-registry path still works. This gate is not reachable from any
+configuration file — an `insecure = true` entry in a repository can only stop
+its own hook from arming, never start one — and the only thing that overrides
+it is [`--trust-hooks`](./commands.md#install) typed on the invocation.
+
 ## `grimoire.lock` {#grimoire-lock}
 
 The lockfile pins every declared tag to an exact digest and records the
@@ -909,6 +1067,21 @@ applies.
 | `GEMINI_CLI_HOME` | Gemini CLI home override (vendor variable). It replaces the **home directory**, so Gemini's config root becomes `$GEMINI_CLI_HOME/.gemini` — the segment is still appended, the opposite shape to `CODEX_HOME`/`KIRO_HOME`. Relocates global-scope Gemini agents and its `settings.json` MCP registration, and drives detection. Does **not** relocate the shared `$HOME/.agents/skills` pool, which serves several clients under one refcount. | unset |
 | `XDG_CONFIG_HOME` | Standard XDG base directory. Roots OpenCode's default config dir, Amp's settings dir, and — **on Linux and FreeBSD only** — Zed's. On macOS Zed uses a hardcoded `~/.config/zed`; on Windows, `%APPDATA%\Zed`. Also one of the candidate roots for Kilo and Goose *detection*. | `~/.config` |
 | `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
+
+**No environment variable enables or consents to [hooks](./artifacts.md#hooks),
+and this is a deliberate omission rather than a gap.** Neither the
+[`hooks` feature flag](#options-experimental) nor the
+[workspace consent record](#workspace-consent) has an environment form —
+there is no variable that grants consent, and none that relocates or names
+the record. A repository routinely carries its own environment (`.envrc`,
+`.mise.toml`, a devcontainer's `containerEnv`, a CI `variables:` block), so
+an environment variable that armed code execution would let a repository
+grant itself consent on the machine of whoever cloned it, and one that named
+the record's path would let it supply a pre-consented file. The
+per-invocation answers are the
+[`--trust-hooks` / `--no-trust-hooks`](./commands.md#install) pair, which must
+be typed into the command line by whoever runs it — which is exactly why the
+pair is allowed to outrank the record in both directions.
 | `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
 | `NO_COLOR` | Any non-empty value disables color under [`--color auto`](./commands.md#global-options) — the highest-priority `auto` signal, overriding even `CLICOLOR_FORCE`. Only `--color always` overrides it. | unset |
 | `CLICOLOR_FORCE` | A non-empty value other than `0` forces color on under `--color auto`, even when stdout is not a terminal — beaten only by `NO_COLOR`. | unset |

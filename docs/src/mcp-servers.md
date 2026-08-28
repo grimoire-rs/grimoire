@@ -306,7 +306,7 @@ On the wire, an MCP descriptor publishes as a single canonical-JSON layer
 (media type `application/vnd.grimoire.mcp.v1+json`, capped at 64 KiB),
 the same OCI empty config every kind uses, and the same
 `com.grimoire.kind: mcp` manifest annotation — see
-[The five kinds](./artifacts.md#kinds) for why the annotation exists.
+[Artifact kinds](./artifacts.md#kinds) for why the annotation exists.
 Conventionally it publishes to `<registry>/<namespace>/mcp/<name>:<version>`,
 the same `{kind-subdir}/{name}` layout every other kind uses by default.
 
@@ -326,7 +326,7 @@ The conventional source path — when `path` is omitted — is
 `mcp/{name}.toml`, relative to the manifest's directory, alongside the
 `skills/`, `rules/`, `agents/`, and `bundles/` conventions.
 [`grim publish`](./commands.md#publish) releases entries in a fixed kind
-order: **skills → rules → agents → mcp → bundles**, alphabetical within
+order: **skills → rules → agents → mcp → hooks → bundles**, alphabetical within
 each kind — mcp servers publish before bundles for the same reason
 skills and rules do: a bundle may reference an already-published member.
 
