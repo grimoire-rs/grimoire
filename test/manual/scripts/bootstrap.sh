@@ -202,7 +202,7 @@ release "$CATALOG/skills/cut-release" "playbooks/ci/release" cut-release 1.0.0
 #     batch command instead. --force because the rig re-seeds from the top:
 #     publish otherwise SKIPS an already-published exact version, and an edited
 #     SKILL.md would silently never reach the registry. The companion tag is
-#     re-pointed either way, so editing only [description.support] and
+#     re-pointed either way, so editing only [support] and
 #     re-running this script updates every version's answer with no digest
 #     churn on the artifact itself.
 log "publish support-desk:1.0.0 (annotations + description companion)"

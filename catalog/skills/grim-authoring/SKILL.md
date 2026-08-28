@@ -116,8 +116,10 @@ skill's top-level `compatibility` is published too, as
 
 Repository-level support channels (`issues` / `chat` / `contact` /
 `security`) are **not** artifact metadata — they are authored as
-`[description.support]` in `publish.toml` and ride the mutable description
-companion, so changing a link needs no re-release.
+a manifest-level `[support]` table in `publish.toml` and ride the mutable
+description companion, so changing a link needs no re-release. The table fans
+out to every companion the run pushes; there is no per-entry override and no
+`grim release` flag.
 
 ## Companion: Content Craft
 

@@ -541,7 +541,7 @@ timestamp would break that guarantee, and grim never writes one.
 Repository-level support channels
 (`com.grimoire.support.{issues,chat,contact,security}`) are **not** in this
 map: they live on the mutable
-[description companion](./publishing.md#description-support) so they can be
+[description companion](./publishing.md#support-channels) so they can be
 updated without re-releasing every published version.
 
 <!-- external -->

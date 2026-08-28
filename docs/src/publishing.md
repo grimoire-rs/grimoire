@@ -175,52 +175,6 @@ a dry run still containment- and size-checks every companion and packs it into
 its layer, so a bad companion fails the dry run — only the registry push is
 skipped, and either way zero registry mutations occur.
 
-### Support channels {#description-support}
-
-Who maintains this repository, and where do I reach them? That answer belongs
-to the *repository*, not to any one version — and it changes. A
-`[description.support]` table publishes it alongside the companion:
-
-```toml
-[description]
-readme = "README.md"
-
-[description.support]
-issues   = "https://github.com/acme/skills/issues"
-chat     = "https://teams.microsoft.com/l/channel/…"
-contact  = "ai-platform@example.com"
-security = "https://acme.example/security"
-```
-
-All four are optional; the field names follow
-[CycloneDX's external-reference vocabulary](https://cyclonedx.org/docs/1.5/json/)
-(`issue-tracker`, `chat`, `support`, `security-contact`).
-
-**These ride the companion, not the artifact manifest, and that is the point.**
-The companion tag is mutable: move your chat channel, change the table, re-run
-`grim publish`, and *every already-published version* reports the new link. On
-a version's manifest the old link would be frozen into every tag you ever
-pushed, fixable only by re-releasing history.
-
-Read them back with [`grim describe`](./commands.md#describe), which reports a
-`support` object with all four fields (`null` where unset). It costs no extra
-work for a repository that publishes no companion.
-
-Like the rest of `[description]`, a top-level table
-[fans out](#description-fanout) to every entry in the manifest and a per-entry
-table overrides it — so a repository owned by a different team names its own
-contact:
-
-```toml
-[skills.legacy-helper.description]
-readme = "skills/legacy-helper/README.md"
-[skills.legacy-helper.description.support]
-contact = "archive-team@example.com"
-```
-
-**Prefer a team alias to a personal mailbox.** A manifest is readable by
-anyone who can pull from the repository.
-
 ### Read it back {#description-read}
 
 Read the companion with
@@ -490,11 +444,11 @@ version-scoped and whether the surface is allowed to cache it.
 | `created`, `revision` | ✅ | ✅ | `created` only |
 | `authors`, `vendor`, `url`, `documentation` | ✅ | registry browse only | ❌ |
 | `compatibility` | ✅ | registry browse only | ❌ |
-| [`support.*`](#description-support) | ✅ | ❌ (see below) | ❌ |
+| [`support.*`](#support-channels) | ✅ | ❌ (see below) | ❌ |
 
 - **`grim describe` is the complete surface.** It resolves the reference to a
   manifest live, so it reports every key, including the support channels off
-  the [description companion](#description-support).
+  the [description companion](#support-channels).
 - **Browse is version-scoped and cached.** `grim search` and the TUI catalog
   read a disk-cached catalog. Everything above the `support` row belongs to the
   manifest being browsed, so caching it is correct. Support channels are
@@ -926,6 +880,49 @@ artifact frontmatter > --flag > per-entry [metadata] > top-level [metadata] > de
 Merging is field by field, not wholesale: the `[skills.legacy-helper.metadata]`
 table above changes only `authors` and still inherits the catalog's license,
 repository, and vendor.
+
+### Repository support channels {#support-channels}
+
+Who maintains this repository, and where do I reach them? That answer belongs
+to the *repository*, not to any one version — and it changes. A manifest-level
+`[support]` table, sibling of `[metadata]`, publishes it:
+
+```toml
+registry = "ghcr.io"
+
+[support]
+issues   = "https://github.com/acme/skills/issues"
+chat     = "https://teams.microsoft.com/l/channel/…"
+contact  = "ai-platform@example.com"
+security = "https://acme.example/security"
+```
+
+All four are optional; the field names follow
+[CycloneDX's external-reference vocabulary](https://cyclonedx.org/docs/1.5/json/)
+(`issue-tracker`, `chat`, `support`, `security-contact`).
+
+**These ride the [description companion](#description-companion), not the
+artifact manifest, and that is the point.** The companion tag is mutable: move
+your chat channel, change the table, re-run `grim publish`, and *every
+already-published version* reports the new link. On a version's manifest the
+old link would be frozen into every tag you ever pushed, fixable only by
+re-releasing history.
+
+The table fans out to **every** companion the run publishes — support describes
+the repository, not one entry's files, so a per-entry `[description]` table
+(which replaces the file set [wholesale](#description-fanout)) never disturbs
+it. There is no per-entry `[<kind>.<name>.support]` override and no
+`grim release` flag: support rides the companion, and only `grim publish`
+produces one. An entry that publishes no companion at all — `description =
+false`, or a manifest with nothing to pack — ships no support channels either,
+the same way it ships no README, and grim does not warn about it.
+
+Read them back with [`grim describe`](./commands.md#describe), which reports a
+`support` object with all four fields (`null` where unset). It costs no extra
+work for a repository that publishes no companion.
+
+**Prefer a team alias to a personal mailbox.** A manifest is readable by
+anyone who can pull from the repository.
 
 ### Repository namespace {#batch-publish-namespace}
 

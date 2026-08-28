@@ -21,6 +21,29 @@ repository = "https://github.com/grimoire-rs/index"
 namespace = "grimoire-rs"
 owner_id = 298895348
 
+# Catalog-wide metadata defaults. Gap-fillers only — every package already
+# authors its own `license`, `repository`, `summary` and `keywords`, and what
+# a file says about itself always wins. What is here is what no artifact
+# authors: `authors` is NEVER derived (the only automatic source is the commit
+# author under --git, i.e. a person's name), and the derivations for the other
+# three would be wrong or worse — vendor would come out as the raw namespace
+# `grimoire-rs`, url as the git forge, documentation as `<repo>#readme`.
+[metadata]
+authors = "The Grimoire Authors"
+vendor = "Grimoire"
+url = "https://grimoire.rs"
+documentation = "https://grimoire.rs/introduction.html"
+
+# Repository support channels. Manifest-level, so they fan out to every
+# companion this run pushes — a per-entry [description] table replaces the
+# file set, never these. Repository-level and mutable: they ride the companion
+# tag, so a moved link needs no re-release. No `contact`: there is no team
+# mailbox to publish, and a personal one does not belong in a public manifest.
+[support]
+issues = "https://github.com/grimoire-rs/grimoire/issues"
+chat = "https://github.com/grimoire-rs/grimoire/discussions"
+security = "https://github.com/grimoire-rs/grimoire/security"
+
 # Description companions: every entry declares an explicit per-entry
 # [description] table (a per-entry table REPLACES the top-level one, so
 # each repeats logo + changelog). Keep it that way — an entry without a

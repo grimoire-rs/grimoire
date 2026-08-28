@@ -376,8 +376,8 @@ than repeating them in every artifact — the table fills only what an
 artifact leaves unset, so a package that states its own license still wins.
 
 Two repository-level companions complete the picture, and neither is
-artifact metadata: `[description]` (README/CHANGELOG/logo) and
-`[description.support]` (issues/chat/contact/security). Together with the
+artifact metadata: `[description]` (README/CHANGELOG/logo) and the
+manifest-level `[support]` table (issues/chat/contact/security). Together with the
 table above they are exactly what fills the TUI detail pane's `Overview`,
 `Readme`, and `Changelog` panels — see [Description
 Companion](#description-companion).
@@ -428,14 +428,17 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
 - There is no separate publish command for it — re-running `grim publish`
   after a docs-only edit re-points the companion; the artifacts themselves
   skip-existing as usual.
-- **Support channels.** A `[description.support]` sub-table publishes
+- **Support channels.** A manifest-level `[support]` table — sibling of
+  `[metadata]`, not part of `[description]` — publishes
   `issues` / `chat` / `contact` / `security` as `com.grimoire.support.*`
   annotations on the companion manifest, read back as `grim describe`'s
   `support` object. They ride the *companion* rather than a version's
   manifest precisely because the companion tag is mutable: change a link,
   re-run `grim publish`, and every already-published version reports the new
-  one — no re-release. Fans out and overrides per entry exactly like the rest
-  of `[description]`. `grim describe` is the **only** read surface for them:
+  one — no re-release. It fans out to **every** companion the run pushes, so a
+  per-entry `[description]` table (which replaces the file set wholesale) never
+  disturbs it; there is no per-entry override and no `grim release` flag.
+  `grim describe` is the **only** read surface for them:
   `grim search` and the TUI read a disk-cached catalog, and a cached contact
   link is one that may already have moved.
 - The companion's tag namespace is machine-owned: `grim release` /

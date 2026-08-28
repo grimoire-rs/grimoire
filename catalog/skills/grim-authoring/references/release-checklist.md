@@ -55,8 +55,8 @@ routinely skip because the field table calls them optional:
 Publishing a set of packages? Put the shared four (`license`,
 `repository`, `authors`, `vendor`) in `publish.toml`'s `[metadata]` table
 once instead of in every artifact; the table fills only what an artifact
-leaves unset. Add `[description]` and `[description.support]` in the same
-manifest — [the companion](#description-companion) is what fills the TUI's
+leaves unset. Add `[description]` and the sibling `[support]` table in the
+same manifest — [the companion](#description-companion) is what fills the TUI's
 `Readme` / `Changelog` panels and the `Overview` panel's support section.
 
 `compatibility` (skills only) and the retirement pair are the exceptions:

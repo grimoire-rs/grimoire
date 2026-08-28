@@ -285,13 +285,6 @@ pub struct DescriptionSpec {
     /// the whole manifest. Ignored on a per-entry table (opt out an entry with
     /// `description = false` instead).
     pub publish: Option<bool>,
-
-    /// Repository support channels published as annotations on the companion
-    /// manifest. Repository-level and mutable: changing a link and re-running
-    /// `grim publish` updates it for every already-released version, with no
-    /// re-release and no version bump.
-    #[serde(default)]
-    pub support: Option<SupportSpec>,
 }
 
 /// The `[metadata]` table — annotation values applied to every entry that does
@@ -346,7 +339,7 @@ impl MetadataSpec {
     }
 }
 
-/// The `[description.support]` table — where to reach whoever maintains the
+/// The manifest-level `[support]` table — where to reach whoever maintains the
 /// repository.
 ///
 /// Field names follow CycloneDX's `externalReferences` vocabulary; each maps
@@ -567,6 +560,17 @@ pub struct PublishManifest {
     /// overrides field by field; a `grim publish` flag overrides both.
     #[serde(default)]
     pub metadata: Option<MetadataSpec>,
+
+    /// Repository support channels, published as annotations on every
+    /// companion this run pushes (manifest-wide fan-out — support is a
+    /// property of the repository, not of one entry's files, so a per-entry
+    /// `[description]` override never disturbs it). Repository-level and
+    /// mutable: changing a link and re-running `grim publish` updates it for
+    /// every already-released version, with no re-release and no version bump.
+    /// An entry that publishes no companion at all ships no support channels
+    /// either — the same way it ships no README.
+    #[serde(default)]
+    pub support: Option<SupportSpec>,
 }
 
 /// One planned publish operation, ready to be handed to `release::run`.
@@ -2003,14 +2007,6 @@ const DESC_CHANGELOG: &str = "CHANGELOG.md";
 ///
 /// Data error (65) when an explicit `readme`/`logo`/`changelog` path is
 /// missing, or when an explicit `[description]` table resolves to no files.
-/// The support channels a `[description]` table declares, empty when it
-/// declares none. One place so the top-level and per-entry paths cannot drift.
-fn support_links(spec: Option<&DescriptionSpec>) -> crate::oci::description::SupportLinks {
-    spec.and_then(|s| s.support.as_ref())
-        .map(SupportSpec::links)
-        .unwrap_or_default()
-}
-
 fn plan_descriptions(
     manifest: &PublishManifest,
     entries: &[PlannedEntry],
@@ -2029,24 +2025,22 @@ fn plan_descriptions(
         }
     };
 
-    // Support channels follow the files: the top-level table fans out, a
-    // per-entry override table replaces it wholesale (never merges — a partial
-    // merge would silently keep a contact the entry deliberately dropped).
-    let top_level_support = support_links(manifest.description.as_ref());
+    // Support channels do NOT follow the files. `[description]`'s wholesale
+    // replace rule is about which files a companion carries (a partial merge
+    // would silently keep a file the entry deliberately dropped); the channels
+    // describe the repository, so the manifest-level `[support]` table fans out
+    // to every companion regardless of which `[description]` table won.
+    let support = manifest.support.as_ref().map(SupportSpec::links).unwrap_or_default();
 
     let mut planned: Vec<PlannedDescription> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for entry in entries {
-        let resolved = match entry_description(manifest, entry.kind, &entry.name) {
+        let files = match entry_description(manifest, entry.kind, &entry.name) {
             Some(EntryDescription::Enabled(false)) => None,
-            Some(EntryDescription::Enabled(true)) => top_level.clone().map(|f| (f, top_level_support.clone())),
-            Some(EntryDescription::Spec(spec)) => Some((
-                resolve_description_spec(spec, manifest_dir, manifest_path)?,
-                support_links(Some(spec)),
-            )),
-            None => top_level.clone().map(|f| (f, top_level_support.clone())),
+            Some(EntryDescription::Spec(spec)) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
+            Some(EntryDescription::Enabled(true)) | None => top_level.clone(),
         };
-        let Some((files, support)) = resolved else { continue };
+        let Some(files) = files else { continue };
         // The repository is the entry reference minus its tag. The rightmost
         // `:` is the tag separator (a registry port keeps its own earlier `:`).
         let repository = entry
@@ -2058,7 +2052,7 @@ fn plan_descriptions(
             planned.push(PlannedDescription {
                 repository,
                 files,
-                support,
+                support: support.clone(),
             });
         }
     }
@@ -4667,7 +4661,6 @@ mod tests {
             changelog: Some(PathBuf::from("docs/CHANGES.md")),
             include: vec!["img/*.png".to_string()],
             publish: None,
-            support: None,
         };
         let files = resolve_description_spec(&spec, dir, Path::new("publish.toml")).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -4684,7 +4677,6 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
-            support: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -4700,7 +4692,6 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
-            support: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -5000,7 +4991,6 @@ mod tests {
             changelog: None,
             include: vec!["../**/*.env".to_string()],
             publish: None,
-            support: None,
         };
         let err = resolve_description_spec(&spec, &dir, Path::new("publish.toml"))
             .expect_err("an include glob that escapes the manifest tree must be a containment error");

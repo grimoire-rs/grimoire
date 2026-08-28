@@ -107,8 +107,13 @@ Two asymmetries closed while here: an MCP descriptor could not name a successor
 ### 4. Support channels live on the companion, not on a version
 
 `com.grimoire.support.{issues,chat,contact,security}` are published on the
-**`__grimoire` companion manifest**, authored as `[description.support]` in
-`publish.toml`.
+**`__grimoire` companion manifest**, authored in `publish.toml`.
+
+> **Amendment (pre-release, before the 0.14.0 tag).** The authoring surface
+> was originally `[description.support]`, a sub-table of `[description]`. It is
+> now a manifest-level `[support]` table, sibling of `[metadata]` — see § 5.
+> The decision this section records (support on the companion, CycloneDX
+> names, flat string keys, mutable answer) is unchanged.
 
 They answer "who maintains this repository and where do I reach them" — a
 property of the repository that changes over time. On a version's manifest a
@@ -145,6 +150,15 @@ table and a per-entry `[<kind>.<name>.metadata]` override in `publish.toml`.
 artifact frontmatter > flag > per-entry table > top-level table > derived
 ```
 
+**Support is the fourth surface and it is not on this chain**: a single
+manifest-level `[support]` table, sibling of `[metadata]`, fanning out to every
+companion the run publishes — no per-entry `[<kind>.<name>.support]` override,
+and no flag tier, because support rides the companion and only `grim publish`
+produces one. Keeping it off `[description]` leaves that table's
+wholesale-replace rule exactly as shipped (a per-entry table replaces the file
+set, support included, would have been the alternative) and keeps it clear of
+the "explicit table resolving to zero files is a data error" gate.
+
 Merging is field by field, never wholesale: a per-entry `authors` must not
 silently drop the catalog-wide `license`. The `publish.toml` tiers are a pure
 convenience layer — they add no capability the flags lack. A default
@@ -179,9 +193,10 @@ browse-time source and a browse row could show neither.
   again — see below)
 
 **Risks:**
-- A top-level `[description.support]` fans one contact out to every entry in
-  the manifest, the same hazard `[description]` already documents. Per-entry
-  override is first-class.
+- `[support]` fans one contact out to every entry in the manifest, the same
+  hazard `[description]` already documents — and unlike `[description]` there
+  is deliberately no per-entry override (see § 5). Nothing in-tree needs one;
+  adding the key later is purely additive.
 
 ## Alternatives considered
 

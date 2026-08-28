@@ -1307,7 +1307,7 @@ beyond the globals.
 `kind` is `null` for a foreign / non-Grimoire manifest (describe never
 hard-errors on one). `support` is an object `{issues, chat, contact,
 security}` carrying the repository's
-[support channels](./publishing.md#description-support); it is read from the
+[support channels](./publishing.md#support-channels); it is read from the
 description companion's manifest — one extra fetch, and only when
 `has_description` is already true — so a repository without a companion costs
 nothing and reports four `null`s. `compatibility` is a skill's authored
@@ -1515,7 +1515,7 @@ pane's own top border and cycled with `tab` / `shift-tab`:
 
 | Panel | Content |
 |---|---|
-| `Overview` | The metadata pane above, plus a `Support:` section when the repository publishes [support channels](./publishing.md#description-support). |
+| `Overview` | The metadata pane above, plus a `Support:` section when the repository publishes [support channels](./publishing.md#support-channels). |
 | `Readme` | The companion's `README.md`. |
 | `Changelog` | The companion's `CHANGELOG.md`. |
 

@@ -19,18 +19,22 @@ repository = "https://github.com/grimoire-rs/grimoire"
 authors = "Grimoire Manual Rig"
 vendor = "Grimoire Manual Rig"
 
-# Repository-level, mutable: these ride the __grimoire companion tag, not any
-# version's manifest. Edit a link, re-run bootstrap.sh, and every published
-# version reports the new value with no version bump and no digest churn.
-[description]
-readme    = "skills/support-desk/README.md"
-changelog = "skills/support-desk/CHANGELOG.md"
-
-[description.support]
+# Repository support channels. Manifest-level, so they fan out to every
+# companion the run publishes — a per-entry [description] table replaces the
+# file set, never these. Repository-level and mutable: they ride the
+# __grimoire companion tag, not any version's manifest. Edit a link, re-run
+# bootstrap.sh, and every published version reports the new value with no
+# version bump and no digest churn.
+[support]
 issues   = "https://github.com/grimoire-rs/grimoire/issues"
 chat     = "https://teams.microsoft.com/l/channel/manual-rig"
 contact  = "ai-platform@example.invalid"
 security = "https://example.invalid/security"
+
+# The files the companion carries.
+[description]
+readme    = "skills/support-desk/README.md"
+changelog = "skills/support-desk/CHANGELOG.md"
 
 [skills.support-desk]
 version = "1.0.0"

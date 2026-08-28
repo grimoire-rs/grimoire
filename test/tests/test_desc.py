@@ -457,3 +457,93 @@ def test_publish_false_kill_switch_yields_no_companion(
     )
     # No companion tag on the registry either.
     _assert_tag_absent(f"skills/{name}", "__grimoire")
+
+
+# ---------------------------------------------------------------------------
+# S7 — manifest-level `[support]` channels
+# ---------------------------------------------------------------------------
+
+ISSUES = "https://github.com/acme/skills/issues"
+CHAT = "https://chat.example.invalid/acme"
+CONTACT = "ai-platform@example.invalid"
+SECURITY = "https://acme.example.invalid/security"
+
+
+def test_manifest_support_fans_out_to_every_companion(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`[support]` is manifest-level, so it reaches EVERY companion the run
+    pushes — including an entry that overrides `[description]` with its own
+    table. That override replaces the file set wholesale; support is not part
+    of the file set and must survive it."""
+    prefix = unique_repo.split("/")[-1]
+    a, b = f"{prefix}-sup-a", f"{prefix}-sup-b"
+    _skill(project_dir, a)
+    _skill(project_dir, b)
+    _write(project_dir / "README.md", README)
+    _write(project_dir / "own.md", "# Own readme\n")
+    _manifest(
+        project_dir,
+        registry,
+        "\n[support]\n"
+        f'issues = "{ISSUES}"\n'
+        f'chat = "{CHAT}"\n'
+        f'contact = "{CONTACT}"\n'
+        f'security = "{SECURITY}"\n'
+        "\n[description]\n"
+        'readme = "README.md"\n'
+        f'\n[skills.{a}]\nversion = "0.1.0"\n'
+        # b brings its own file set — support must NOT travel with it.
+        f'\n[skills.{b}]\nversion = "0.1.0"\n'
+        f'[skills.{b}.description]\nreadme = "own.md"\n',
+    )
+
+    runner = grim_at(project_dir)
+    out = runner.json("publish")
+    assert len(out["descriptions"]["items"]) == 2
+
+    expected = {"issues": ISSUES, "chat": CHAT, "contact": CONTACT, "security": SECURITY}
+    for name in (a, b):
+        d = runner.json("describe", f"{registry}/skills/{name}:0.1.0")
+        assert d["support"] == expected, f"{name} lost the manifest-wide support block: {d['support']}"
+
+    # The per-entry table still replaced the FILES.
+    assert runner.json("fetch", f"{registry}/skills/{b}:__grimoire")["content"] == "# Own readme\n"
+
+
+def test_support_absent_yields_four_nulls(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """No `[support]` table ⇒ `describe` still reports all four keys, null.
+    The consumer contract is always-present-null, never an absent object."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-nosup"
+    _skill(project_dir, name)
+    _write(project_dir / "README.md", README)
+    _manifest(project_dir, registry, f'\n[skills.{name}]\nversion = "0.1.0"\n')
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+    d = runner.json("describe", f"{registry}/skills/{name}:0.1.0")
+    assert d["support"] == {"issues": None, "chat": None, "contact": None, "security": None}
+
+
+def test_partial_support_publishes_only_declared_keys(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `[support]` table declaring one key publishes one annotation — the
+    other three read back null, not an empty string."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-partsup"
+    _skill(project_dir, name)
+    _write(project_dir / "README.md", README)
+    _manifest(
+        project_dir,
+        registry,
+        f'\n[support]\nissues = "{ISSUES}"\n' f'\n[skills.{name}]\nversion = "0.1.0"\n',
+    )
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+    d = runner.json("describe", f"{registry}/skills/{name}:0.1.0")
+    assert d["support"] == {"issues": ISSUES, "chat": None, "contact": None, "security": None}

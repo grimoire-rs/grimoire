@@ -2,7 +2,7 @@
 
 Repository README for the manual rig's annotation showcase. It is published
 as the repository's **description companion** (the reserved `__grimoire`
-tag), together with the `[description.support]` channels declared in
+tag), together with the manifest-level `[support]` channels declared in
 `catalog/publish.toml`.
 
 Read it back with:

@@ -106,5 +106,12 @@ see `docs/src/publishing.md#metadata-surfaces`.
 grim describe ghcr.io/grimoire-rs/skills/grim-usage --format json | jq '{created, revision, authors, vendor, url, documentation, support}'
 ```
 
-A repository with a companion carrying `[description.support]` returns a
-populated `support` object; one without returns four `null`s.
+A repository with a companion carrying support channels returns a populated
+`support` object; one without returns four `null`s.
+
+**The read contract is unchanged.** Support channels are now authored as a
+manifest-level `[support]` table in `publish.toml` instead of the original
+`[description.support]` sub-table — a publisher-side change only. The
+annotation keys (`com.grimoire.support.*`), the `grim describe --format json`
+`support` object, and the companion-digest caching model are all untouched, so
+neither consumer repo's handover needs revision.

@@ -22,7 +22,7 @@ project, and a `teardown.sh`.
 | `catalog/skills/<name>/SKILL.md` | Source-of-truth sample skills (committed) |
 | `catalog/rules/<name>.md` | Source-of-truth sample rules (committed) |
 | `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
-| `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion (README + CHANGELOG), `[description.support]` channels (committed) |
+| `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion (README + CHANGELOG), manifest-level `[support]` channels (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
@@ -570,7 +570,7 @@ Worth checking by hand, since none of it is reachable from an acceptance test:
 
 ```sh
 grim describe localhost:5050/grimoire/skills/support-desk --format json | jq -r '.digest'
-$EDITOR test/manual/catalog/publish.toml      # change [description.support].chat
+$EDITOR test/manual/catalog/publish.toml      # change [support].chat
 test/manual/scripts/bootstrap.sh              # re-seed
 grim describe localhost:5050/grimoire/skills/support-desk --format json |
   jq '{digest, support}'
