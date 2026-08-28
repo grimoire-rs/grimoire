@@ -95,7 +95,7 @@ research-axes:
 
 ## Memory
 
-- **Active plan (2026-08-19):** `.agents/plans/plan_ratings_deferred_findings.md`
+- **Preceding plan (2026-08-19):** `.agents/plans/plan_ratings_deferred_findings.md`
   — State `review`. Eight WPs closing the nine findings the ratings review
   deferred, landed on the same three feature branches so the one-PR-per-repo
   rule held. Two findings rested on false premises and were recorded as such
@@ -173,6 +173,109 @@ research-axes:
   ADR-vs-design divergence, the trade-off-margin arithmetic). `rev-sota` and
   `rev-docs`, both sonnet, delivered normally — the failure so far correlates
   with opus workers.
+
+- **Active plan (2026-08-14, `/hex-plan high`; rebased onto `main` 2026-08-28):**
+  `.agents/plans/plan_hooks_artifact_kind.md` — hooks as `ArtifactKind::Hook` behind a
+  `grim hook run` trampoline, from `adr_hooks_support.md`. **18 WPs in 7 waves**, critical path
+  `A → F → I → J2 → O → P → Q`, feature-complete after wave 5, landable after wave 7.
+  Trimmed run (`architect=inline research=skip`) because the ADR and five research artifacts
+  already existed — the right call; Discover instead produced **13 corrections to the ADR's cost
+  model** (D-1…D-13). `Step: /hex-execute` — not started. Owner decisions pending: Open Question 1
+  (the project-scope reduction) gates flipping the ADR to `Accepted`.
+
+  **The owner's gate answer was reversed by the review, on evidence.** They chose to widen
+  project scope to all three clients over the recommended fallback; the panel established it is
+  unsafe, and v1 landed back on the ADR's Decision I (claude-only project scope). Three of five
+  perspectives reached that independently. The decisive finding: a committed registration makes the
+  **executed binary path** environment-derived (`${GRIM_HOME:-…}`), so an ordinary `.envrc` /
+  `.mise.toml` / devcontainer `containerEnv` plus a committed executable is **clone-to-RCE on one
+  tool call**, before any approval, digest, dispatch entry or tier gate runs. Copilot's
+  `{{project_dir}}` makes `--root` portable but not the launcher path, and there is no shape that
+  is both committed-portable and non-environment-derived.
+
+  **Lesson — a fix pass must sweep every layer a test is generated from.** The recorded lesson from
+  the ADR run was "amending decisions but not contracts does not converge." This run reproduced it
+  **one layer down**: the fix pass amended contract text *and* Scope cells and left the
+  **`Specify:` lines** standing. Under contract-first TDD the Specify list is equally test-source,
+  so relocating C-002 and the runtime halves of C-009/C-012 into WP-K — the entire point of closing
+  four findings — was **unarmed**: 13 IDs sat in a Scope cell and in no test step. Worse, the
+  Constitution-deviations table *asserted* a WP-D Specify item that did not exist, which is worse
+  than silence. The generalized rule: after any fix pass, diff **decisions → contracts → Scope
+  cells → Specify lines → any table that claims what a Specify contains**, and split a WP in the
+  table only if you split its Implementation Steps section in the same edit (three table rows had
+  no instructions at all).
+
+  **When a worker declines to route around a constraint in its brief, re-derive the constraint —
+  do not simply overrule it.** The launcher spike returned NOT FEASIBLE and explicitly flagged that
+  my constraint ("no `$HOME`") was what blocked it. Overruling was half right (byte-stability does
+  hold — Codex hashes the raw unexpanded string) and half wrong: I never checked `--root`, and never
+  asked what the *executed path* was. `grep '\-\-root'` on my own draft returned zero hits.
+
+  **Two briefing instructions paid for themselves a third time.** Telling the `architect`
+  perspective to **re-derive rather than assess** produced the `--root` find and the differentiated
+  per-client verdict; naming the frozen decisions kept five reviewers from re-arguing settled scope
+  while still reporting divergence as information. Keep both standard. Panel scale: 5 perspectives →
+  **9 Block / 13 High / 19 Warn / 5 Suggest**; re-validation → **5 Block / 5 High**.
+
+  **The file-drop contract saved the highest-value report again.** `rev-security` wrote **605 lines
+  and never sent an in-band reply or a completion notification** — its 5 Blocks including the
+  decisive one would have been lost. `rev-docs`, `rev-gap`, `rev-arch`, `rev2-spec`, `exp-install`
+  and `arch-map` all also delivered by file first. Treat an idle notification as "it stopped", read
+  the file. Mandatory in every brief, no exceptions.
+
+  **`codex:rescue` still absent — a sixth run with no cross-model layer.** Verified again against
+  `~/.claude/skills/` and the plugins manifest. The ADR and now this plan both carry one fewer
+  review layer than tier high specifies. Re-pointing or retiring `adversary:` in Preferences is an
+  owner edit; it is well past overdue.
+
+- **Design record (2026-08-14, `/hex-architect high`):**
+  `.agents/adr/adr_hooks_support.md` — hooks as `ArtifactKind::Hook`, distributed
+  via a `grim hook run` trampoline. **Status: Proposed; owner has not accepted.**
+  Rewritten in place over the never-accepted 2026-06-03 draft (git preserves it).
+  17 decisions **A–Q**, contracts **C-001…C-014**, 5-option matrix (Option 4 wins
+  130/145 architect, 109/145 on a blind independent re-score — same winner,
+  narrower margin). v1 clients **claude + codex + copilot**; **project-scope hooks
+  are Claude-only** (a user-level registration cannot carry a per-project
+  `--root`). Evidence: `research_hooks_trampoline.md` (F1–F13, D6a/D7a/D10a,
+  P1–P4), `research_hooks_vendor_survey.md` (17 clients — **15 have hooks**, only
+  warp and zed do not), `research_hooks_{codex_surface,hotpath_cost,autoexec_supply_chain}.md`,
+  and `research_hooks_vendor_reports/` (18 files, ~700 KB primary evidence).
+  Owner froze: mutator in v1, per-hook digest approval, off by default behind
+  `[options.experimental]`. `Step: /hex-plan` — not started.
+
+  **Cross-model adversary NOT RUN: `codex:rescue` is not installed.** Verified
+  absent from `~/.claude/skills/`, `~/.claude/plugins/installed_plugins.json`, and
+  the session skill list. This is a **fifth** distinct failure mode after the four
+  already recorded below (dropped task text; no-args self-questioning fork; a fork
+  that pressured its own worker to fabricate output; a fork reporting `completed`
+  having written nothing). The configured adversary name now points at nothing at
+  all, so **every** `adversary=on` run silently loses a review layer unless the
+  skip is reported. Nothing in this ADR has been challenged by a second model.
+  Retiring or re-pointing `adversary:` in Preferences is an owner edit — hex must
+  not make it — but it is overdue.
+
+  **The file-drop contract rescued five of eleven workers this run.** `hooks-claude`,
+  `res-autoexec-security`, `rev-quality`, `rev-security`, `rev-spec` and `rev2-spec`
+  all returned **idle notifications with no in-band text**, and every one had
+  written its file. Two of those were the run's highest-value outputs (5 Blocks
+  each). Treat an idle notification as "it stopped", read the file, and keep the
+  drop mandatory in every brief — this is now proven at planning, research **and**
+  review scale.
+
+  **Two panel instructions paid for themselves again.** Telling `reviewer:quality`
+  to score the matrix **blind before reading the ADR's cells** produced an
+  independent 109/145 and three ≥2-point cell deltas; telling every reviewer which
+  decisions were frozen kept five perspectives from re-arguing settled scope while
+  still reporting divergence as information. Both should stay standard.
+
+  **A fix pass that amends decisions but not contracts does not converge.** Round 1
+  closed 3 of 14 Blocks and the re-validation returned **5 new Blocks** — three of
+  them contradictions *introduced* by adding nine decisions at once (a user-scope
+  registration cannot carry `--root`; a machine-global table cannot be regenerated
+  wholesale by a single-scope command; pushing a matcher down breaks a
+  one-registration-per-event invariant). The reviewer's diagnosis is the durable
+  lesson: **a contract is the text a test gets generated from, so "the decision
+  wins where they disagree" is not a fix.** Edit the contract.
 
 - **Landed plan (finalized 2026-08-13):** `.agents/plans/plan_review_fixes_materialization_drift.md` —
   applies the 7 Block + 10 High findings of the tier-high review of

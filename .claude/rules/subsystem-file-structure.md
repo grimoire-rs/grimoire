@@ -161,6 +161,124 @@ config files:
 Every non-Claude client declines the `ws` transport and the structured
 `oauth` block (skip + warn) — see `docs/src/clients.md` "Known gaps".
 
+### Hooks {#install-layout-hooks}
+
+A **hook** is a hybrid, and modelling it as either of its neighbours
+mis-scopes half the work. It **materializes like Agent/Skill** (a payload
+tree with a real recorded `ClientOutput`) and **registers like Mcp**
+(foreign config, written through `sync_config`) — except more restrained,
+because *the registration is never recorded at all*, plus a consent gate no
+other kind has any precedent for — **workspace-scoped**, machine-local, and
+written by exactly three seams (`grim hook allow`, `grim add`, an accepted
+prompt). `grim install` deliberately writes none: it converges what is already
+declared, and a cloned repository's `grimoire.toml` is not the user's gesture
+(**T3**). Global scope is always consented and carries no record at all.
+
+A hook payload is **machine-local at both scopes** (invariant I1):
+`$GRIM_HOME/hooks/<name>/` globally, and
+`$GRIM_HOME/hooks/payload/<workspace-key>/<name>/` for a workspace, where
+`<workspace-key>` is the SHA-256 of the workspace path (hex) so two
+workspaces sharing one `$GRIM_HOME` cannot collide. It is deliberately
+**not** the dispatch `root_token`: a recorded install target is printed by
+`grim status` and `grim install`, and a disclosed root token would let a
+hostile repository's own registration fire the victim's already-armed hooks
+(B3). A path key must be safe to print; a wire key must not be printable at
+all. `payload` is therefore one of the `RESERVED_ARTIFACT_NAMES` entries — the
+full set is `bin`, `consent`, `dispatch.json`, `dispatch.json.lock`, `payload`,
+`root-key`, and it is deliberately **not** restated as a count anywhere: this
+list fell one behind the layout three times (`root-key`, the lock sidecar, then
+`consent`), each time because a prose enumeration was cheaper to leave alone
+than to check. The array in
+`oci::hook` is the source of truth, the refusal message renders itself from it,
+and `hook_dispatch`'s `every_grim_owned_name_under_hooks_is_a_reserved_binding_name`
+fails the build for a layout constant that is missing from it.
+
+**The reservation guards the *binding* name, and only since the P-2 fix.**
+The check is `oci::hook::binding_name_refusal`, applied in three places, and the
+split matters: `HookManifest::validate` checks the manifest's own `name` at
+`grim build`, on the **publisher's** machine; `installer::install_one` checks the
+**binding** name before materialization, which is the control, because the
+payload directory is `payload_dir(grim_home, root, &record.name)` over that
+binding; `grim add` checks it too, as the friendlier error at the moment a user
+types the name. `add` cannot be the control — a **bundle** picks its members'
+binding names and they never pass through that command.
+
+`binding_name_refusal` is **two rules, not one**. The reserved-name equality
+check is the narrow half; the load-bearing half is that the name must parse as a
+`SkillName`, whose grammar (`[a-z0-9]+([.-][a-z0-9]+)*`) makes every traversal
+spelling *unrepresentable* rather than blocklisted. A blocklist has to anticipate
+the next escape; a grammar does not. That half closed a confirmed
+arbitrary-file-overwrite: a binding name of `../../../../victim` from a cloned
+repository's `grimoire.toml` was joined onto `$GRIM_HOME` and materialized
+*before* anchor classification ran, so the write landed and only then failed to
+classify. The same gap for the **other kinds'** declaration keys is tracked
+separately (issue #90) and is not hook-specific — `SkillName::parse` reaches CLI
+names and bundle members, never a committed config's keys.
+
+Until wave 8 only the build-time check existed, so it guarded the wrong string:
+a hook bound as `bin` did materialize `$GRIM_HOME/hooks/bin/hook.toml`. The
+write collision was survivable (convergence regenerates `bin/grim-hook`
+afterwards in the same command, so grim's shim wins); the **reap** was not —
+`grim uninstall --global hook bin` deleted the recorded output tree and took the
+launcher with it, silently disarming every hook on the machine for every client
+and every workspace, because the registered command's own
+`[ -f "$L" ] && [ -x "$L" ] || exit 0` guard degrades to exit 0.
+
+**Convergence derives this directory from `$GRIM_HOME` and the resolved
+scope, never from the install record** — that derivation, not the
+relocation, is what closes SEC-1. A record is attacker-supplied in the
+cloned-repository case, so a payload directory read out of one is a
+directory the attacker chose.
+
+Grim writes several things directly under **`$GRIM_HOME/hooks/`**, and that root
+is load-bearing rather than incidental. The table below covers the dispatch-side
+files install writes; the namespace also holds the `payload/` tree (written by
+materialization, also install-side) and two runtime-side families — the rotating
+`hook_audit.jsonl{,.1}` trail and transient `payload_<pid>_<slot>.json` envelopes.
+The install/runtime split matters because only the install-side names are covered
+by a test that walks the directory; the runtime-side ones are covered by a test
+that lists them. (No count is stated: a count beside the list
+it counts is how this section, and the authoring reference, each went stale once.) **Adding a file here means
+adding its name to `RESERVED_ARTIFACT_NAMES`** unless it is unrepresentable as a
+binding name — a hook bound to a name grim already writes lands a directory on
+that path and stops every hook on the machine from arming:
+
+| Path | What it is |
+|---|---|
+| `$GRIM_HOME/hooks/dispatch.json` | The dispatch table — schema-versioned, keyed by an opaque per-install root token, each root carrying its `root` path and a `hooks` array of `(artifact, id, client, event, tier, matcher, handler, timeout, payload, payload_dir, resolved_digest)` rows. Sorted on `(artifact, id, event, client)` so a no-change rewrite is byte-identical |
+| `$GRIM_HOME/hooks/bin/grim-hook` | The generated launcher: a `sh` script holding the absolute path of the `grim` binary, an `[ -f ] && [ -x ] \|\| exit 0` guard, and `exec "$G" hook "$@"`. Regenerated by `grim install`, never hand-edited |
+| `$GRIM_HOME/hooks/root-key` | The root-token map backing the opaque `--root` lookup — a `0o600` regular file; a directory here is unrecoverable, since the mint path is `create_new` on the same path |
+| `$GRIM_HOME/hooks/dispatch.json.lock` | The table's advisory-lock sidecar (`AdvisoryFileLock` appends `.lock` to the **full** file name). Reserved: a directory here makes `try_acquire` fail `EISDIR`, so no table is written for as long as the offending artifact is installed |
+| `$GRIM_HOME/hooks/consent/<workspace-key>.json` | The **workspace consent record** — `{v, workspace, hooks, consented_at}`, `deny_unknown_fields` with every field required, so a truncated file cannot deserialize into a valid-looking one. One file per workspace, never one shared file: a whole-file rewrite would let one workspace's operation disarm every other (Decision E's own reasoning about the dispatch table), and per-workspace files remove the read-modify-write entirely — no lock, no cross-workspace blast radius. `<workspace-key>` is `hook_dispatch::workspace_key` **verbatim**, so the record and the payload tree agree by construction rather than by a second spelling of the same identity. The `workspace` field is the identity; the filename is a lookup index only, and a record whose `workspace` ≠ the resolved one is not consent for it. An unknown `v`, a parse error or an I/O error ≡ **absent** — logged at debug, never warned, never an error (I3). Not a `ClientOutput`, so it is invisible to the anchor/remainder table and to reaping; it is never garbage-collected, and `grim hook revoke` is its only remover |
+
+**`GRIM_HOME` nesting is a refusal to arm here, not a caveat.** The
+[project-state section](#install-state-project) records "GRIM_HOME must not
+be nested inside a workspace directory" as a *state-record* caveat — a
+mis-classified anchor. For hooks the same condition makes an **armable** file
+repo-resident, which the threat model forbids outright, so grim **declines to
+arm** and reports it: cause `grim-home-in-workspace` for a nested root and
+`grim-home-relative` for a relative one (a relative root resolves against the
+process CWD, which for a client-spawned `grim hook run` *is* the workspace).
+Both are `state: not-armed`. Do not downgrade either to a warning.
+
+The client-side registration is a `sync_config` **projection, never a
+recorded `ClientOutput`** — deliberately not built by copying
+`install_mcp`'s record-a-`ClientOutput`-per-registration shape, because that
+shape is the orphaned-registration bug behind issues #54/#55. Claude splices
+`.claude/settings.local.json` at project scope; Codex and Copilot each own a
+`hooks.json` grim writes and deletes outright. Only three of eighteen clients
+arm at all, and only Claude at project scope — the reason is not scheduling
+but that a committed registration makes the *executed binary path*
+environment-derived (CWE-426), which every grim control is downstream of.
+`docs/src/clients.md` `{#gap-hooks}` is the enforced matrix; trust it over
+any prose here.
+
+Payload-directory pruning goes through `prune::shared_by_surviving_sibling`,
+the same N-outputs → one-destination refcount shared-pool skills already use
+(hooks are **not** the first `entry: None` shared destination). The refcount
+is record-only with no filesystem fallback, so a lost or partial record must
+never delete a payload another client still references.
+
 ### Agents {#install-layout-agents}
 
 An **agent** materializes as a single file in the client's agents
@@ -353,6 +471,8 @@ This is transient; the next mutating command reaps the legacy file.
 **Nesting constraint**: `GRIM_HOME` must not be nested inside a workspace
 directory. If it is, `from_target` may match `GrimHome` as the anchor for
 a path that should classify as `Workspace`, producing an incorrect record.
+For **hooks** the same condition is not a record caveat but a hard
+**refusal to arm** — see [Hooks](#install-layout-hooks).
 
 ### Global state {#install-state-global}
 
@@ -458,7 +578,9 @@ Anchors are named below by their **serde tag** — what actually lands in
 
 | Scope · client · kind | Anchor | Stored `relative` |
 |---|---|---|
-| project · any · any | `workspace` | `.claude/…`, `.opencode/…`, `.github/…`, `.agents/…`, `.codex/…` (full sub-path from workspace) |
+| project · any · any **except `hook`** | `workspace` | `.claude/…`, `.opencode/…`, `.github/…`, `.agents/…`, `.codex/…` (full sub-path from workspace) |
+| project · any · hook | `grim-home` | `hooks/payload/<sha256-of-workspace>/<name>` — **the one project triple that does not anchor at `workspace`** (I1). `workspace` stays in the candidate set, second, so pre-relocation records still classify for the layout reaper |
+| global · any · hook | `grim-home` | `hooks/<name>` (client-independent — S-003) |
 | global · claude · skill | `claude-root` | `skills/<name>` |
 | global · claude · rule | `claude-root` | `rules/<name>.md` |
 | global · claude · agent | `claude-root` | `agents/<name>.md` |

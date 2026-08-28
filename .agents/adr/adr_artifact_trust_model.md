@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; documents existing behavior)
 **Domain Tags:** security
 **Supersedes:** N/A
-**Superseded By:** N/A
+**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception, see the box under Decision)
 
 ## Context
 
@@ -52,6 +52,35 @@ descriptor, bundle — no per-kind consent prompt, no per-kind exclusion
 from bundles, no "this kind is more dangerous" carve-out. A gate on one
 kind while the others reach equally far is theatre: it trains
 click-through and stops nothing.
+
+> ### ⛔ AMENDED 2026-08-28 — decision 2 carries one scoped exception: **hooks**
+>
+> [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) gates hook
+> arming on a **per-workspace consent record**. That is a per-kind consent
+> gate, and it is recorded here rather than left for the next reviewer to
+> re-derive as a contradiction.
+>
+> **The reason is Principle 9, not danger.** Decision 2's argument is that a
+> gate on one kind while the others reach equally far is theatre — and that
+> argument is *unchanged and still correct*. Hooks are not exempted because
+> they are more dangerous than a skill that ships a script; the honest
+> statement is narrower: **hooks are the only kind that has never shipped.**
+> Every other kind went out ungated, so gating one of them now would be a
+> breaking change under Principle 9, while the hook kind is still unreleased
+> and free to ship gated. The asymmetry is release history, not risk class.
+>
+> The consequence, stated so it is not mistaken for a licence: **this is not
+> an invitation to gate the next kind.** A gate on a shipped kind stays
+> prohibited. The record's format is deliberately **kind-agnostic** — it
+> stores `<binding>@<registry>/<repository>` entries with no kind field — so
+> if the boundary is ever widened (most plausibly when signatures arrive and
+> § *When signatures arrive* is revisited), the exception widens without a
+> format change and without a second decision about file shape.
+>
+> Note also what the exception does **not** touch: decision 1 still holds
+> in full. `grim add` — including `grim add <bundle>` — *is* the consenting
+> gesture, and a bundle's hook members inherit it transitively. Transitivity
+> remains the bundle feature, not a loophole in it.
 
 **3. Until signatures exist, an artifact is treated as if signed by a
 trusted authority.** The trust anchors grim actually has are registry
@@ -107,3 +136,7 @@ above holds.
   integrity checks above.
 - The absence of a signature story is a **known, accepted** gap, not an
   oversight to be re-raised per feature. It is tracked as its own work.
+- **The hook exception above is a decided trade, not an open question.**
+  "Hooks are gated, therefore kind X should be too" and "hooks are gated,
+  therefore decision 2 is dead" are both misreadings — cite the amendment and
+  move on. Changing it is an ADR amendment, not a review finding.
