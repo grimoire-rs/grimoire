@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-28
+
+### Added
+
+- Read artifact ratings from the index stats.json sidecar *(catalog)*
+- Vote on artifacts through the index's rating forge *(rate)*
+- Report artifact ratings and order the browse by them *(search)*
+- Show an artifact's rating in the detail pane *(tui)*
+- Restate a dropped path scope in the rule body *(install)*
+- Name the cause when an error hits an unrecognized key *(cli)*
+- Derive provenance by default, add descriptive + support annotations *(oci)*
+- Metadata flags, publish.toml defaults, index pointer fields *(publish)*
+- Show the compatibility annotation, and settle where metadata lands *(tui)*
+- Tabbed detail pane with repository docs and support channels *(tui)*
+- Move support channels to a manifest-level [support] table *(publish)*
+
+### Changed
+
+- Share the managed-array config splice driver *(install)*
+- Close the provenance disclosure seam behind the module boundary *(oci)*
+
+### Documentation
+
+- Explain forge-backed ratings and how to set them up
+- Record the vendor compensation boundary and support tiers
+- State the real bundle member-kind rule on every surface
+- Record default provenance, new annotations, and support channels
+- Hand the indexer pickup for #106 over *(agents)*
+- Finish the catalog drift pass, state the annotation additive rule
+- Name both consumer handovers in the grim-side record *(agents)*
+- State the metadata defaults, flat repository layout, and default provenance
+
+### Fixed
+
+- Edit an existing global opencode.jsonc in place *(opencode)*
+- Exclude a rule's Claude support directory from auto-load *(install)*
+- Author MCP members from a bundle's [mcp] table *(build)*
+
 ## [0.13.0] - 2026-08-13
 
 ### Added
@@ -741,6 +779,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.14.0]: https://github.com/grimoire-rs/grimoire/compare/v0.13.0..v0.14.0
 [0.13.0]: https://github.com/grimoire-rs/grimoire/compare/v0.12.1..v0.13.0
 [0.12.1]: https://github.com/grimoire-rs/grimoire/compare/v0.12.0..v0.12.1
 [0.12.0]: https://github.com/grimoire-rs/grimoire/compare/v0.11.1..v0.12.0
