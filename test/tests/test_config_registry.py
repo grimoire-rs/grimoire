@@ -774,9 +774,19 @@ def test_registry_fields_works_without_config(
         f"registry fields must list exactly the 6 per-registry fields; got: {items!r}"
     )
     keys = [i.get("key") for i in items]
-    assert keys == ["oci", "index", "default", "include", "exclude", "insecure"], (
-        f"fields must be oci, index, default, include, exclude, insecure in that "
-        f"order; got: {keys!r}"
+    # `RegistryField::ALL` is documented append-only with frozen positions,
+    # and the `default` index assertion below depends on that, so a new
+    # field never lands mid-list.
+    assert keys == [
+        "oci",
+        "index",
+        "default",
+        "include",
+        "exclude",
+        "insecure",
+    ], (
+        f"fields must be oci, index, default, include, exclude, insecure "
+        f"in that order; got: {keys!r}"
     )
     # The browse filters were appended after `default` partly to keep this
     # index stable.
