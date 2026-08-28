@@ -31,7 +31,7 @@ round-trip.
 | `summary` | string | **Top-level** — catalog blurb for `grim search` |
 | `keywords` | string | **Top-level** — comma-separated tags (a YAML list is tolerated and comma-joined, but write the string form: it is the only shape valid in every kind) |
 | `license` | string | **Top-level** — SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation |
-| `authors` / `vendor` / `homepage` / `documentation` | string | **Top-level** — optional provenance and docs metadata, derived when omitted (see [catalog metadata][pub-metadata]) |
+| `authors` / `vendor` / `homepage` / `documentation` | string | **Top-level** — provenance and docs metadata. `vendor`/`homepage`/`documentation` are derived when omitted; `authors` never is, so author a team alias (see [catalog metadata][pub-metadata] and [the default set](./release-checklist.md#metadata-defaults)) |
 | `repository` | string | **Top-level** — `https://` source URL, hard-gated at release |
 | `deprecated` | string | **Top-level** — deprecation notice; non-empty marks the rule deprecated (flagged in search/TUI, warned on `add`) |
 | `replaced-by` | string | **Top-level** — successor reference (independent of `deprecated`); surfaced in search / `grim describe`. Must parse as a reference or the release fails (exit 65) |

@@ -64,10 +64,13 @@ rules and bundles, where these keys are top-level):
 | `metadata.homepage` | Project home page; defaults to `metadata.repository` |
 | `metadata.documentation` | Docs URL; defaults to `<repository>#readme` |
 
-The last four are optional and derived when omitted, so most skills need
-none of them. Each also has a matching `grim release` flag and a
-`publish.toml` `[metadata]` entry — both fill gaps and never override what
-the file authors.
+`vendor`, `homepage`, and `documentation` are derived when omitted;
+`authors` is **not** — the only automatic source is the commit author
+under `--git`, which publishes a person's name, so author a team alias
+instead. Together with the top-level `license`, the set to write on every
+skill is [the default six][defaults]. Each has a matching `grim release`
+flag and a `publish.toml` `[metadata]` entry — both fill gaps and never
+override what the file authors.
 
 Full annotation mapping: [catalog metadata][pub-metadata] and
 [annotations][annotations].
@@ -180,3 +183,4 @@ All hard errors exit 65 (DataError) at `grim build` / `grim release`.
 [projection]: https://grimoire.rs/vendor-metadata.html#projection-semantics
 [migration]: https://grimoire.rs/vendor-metadata.html#migration
 [agentskills]: https://agentskills.io/specification
+[defaults]: ./release-checklist.md#metadata-defaults

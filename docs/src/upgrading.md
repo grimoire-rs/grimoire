@@ -252,6 +252,35 @@ normally. And a cache whose entries are all unrated is byte-identical to
 what 0.13 wrote, so a user who never browsed a rating-publishing index is
 not affected in either direction.
 
+## Publishing stamps provenance without `--git` {#default-provenance}
+
+Through 0.13.0, `grim build` / `release` / `publish` wrote **no** build
+provenance unless you passed `--git`. Since 0.14.0 they derive
+`org.opencontainers.image.revision` and `…created` on every run, and fill the
+descriptive `vendor`, `url` and `documentation` keys wherever a `repository`
+(authored, or from `[metadata]`) makes them derivable — see [build
+provenance][git-provenance].
+
+Two things change for an existing publisher:
+
+- **Manifests carry annotations you did not author.** Consumers that
+  enumerate the annotation map see more keys; the curated readers
+  (`grim describe`, `grim search --format json`, the TUI detail pane) simply
+  stop reporting `null` for fields they already had. Nothing was renamed or
+  retyped.
+- **Re-releasing an exact version from a *different* commit now needs
+  `--force`.** The revision is part of the manifest, so identical content
+  built from a new commit is a new digest, and the immutability gate refuses
+  to move the tag. A re-release from the **same** commit stays byte-identical
+  and idempotent, because no derived value is read from the clock — `created`
+  is the commit's own date, or a `SOURCE_DATE_EPOCH` instant outside a
+  repository.
+
+Nothing new is disclosed by default: the `origin` remote and the commit
+author's name — the two values that name infrastructure and a person rather
+than the artifact — remain behind `--git`. `--no-git` suppresses every derived
+annotation and restores the 0.13.0 manifest shape exactly.
+
 ## Smaller notes {#smaller-notes}
 
 - **A live symlink at an install destination now exits 65, not 74.** A
@@ -276,6 +305,7 @@ not affected in either direction.
 
 <!-- internal -->
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
+[git-provenance]: ./publishing.md#git-provenance
 [browse-filters]: ./configuration.md#browse-filters
 [ratings]: ./ratings.md
 [stability]: ./stability.md

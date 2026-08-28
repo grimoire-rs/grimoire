@@ -2,7 +2,7 @@
 name: grim-authoring
 description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.12
+compatibility: grim>=0.14
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,bundle,packaging
@@ -103,12 +103,16 @@ annotation. `replaced-by` names the successor artifact, authored
 independently of `deprecated`; its value must parse as a reference or the
 release fails with 65 — detail in [Publishing][publishing].
 
-`authors` / `vendor` / `homepage` / `documentation` are optional and
-**derived when omitted** — vendor from the release repository's namespace,
-homepage from `repository`, documentation from `<repository>#readme`. Put a
-team name or alias in `authors`, never a personal mailbox: a manifest is
-readable by anyone who can pull the artifact. A skill's top-level
-`compatibility` is published too, as `com.grimoire.compatibility`.
+`vendor` / `homepage` / `documentation` are derived when omitted — vendor
+from the release repository's namespace, homepage from `repository`,
+documentation from `<repository>#readme`. `authors` is **not**: the only
+automatic source is the commit author under `--git`, which publishes a
+person's name, so author a team name or alias instead — a manifest is
+readable by anyone who can pull the artifact. Optional in the schema does
+not mean optional in practice: the set to write on every artifact is
+[the default six](references/release-checklist.md#metadata-defaults). A
+skill's top-level `compatibility` is published too, as
+`com.grimoire.compatibility`.
 
 Repository-level support channels (`issues` / `chat` / `contact` /
 `security`) are **not** artifact metadata — they are authored as
@@ -169,7 +173,7 @@ repeat → release. Confirm flags with `grim install --help`.
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
 | [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in a reserved `<vendor>.*` namespace — one per client name (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`, `cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*`) |
-| [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, batch manifests, description companions, or triaging an exit-65 failure |
+| [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, the metadata every package should set, repository-path layout, batch manifests, description companions, or triaging an exit-65 failure |
 | [references/bootstrap-existing-repo.md](references/bootstrap-existing-repo.md) | Turning an existing skill repo (agentskills.io `skills/<name>/SKILL.md` or `.claude/skills/`) into a grim publisher — inventorying artifacts, fixing names, backfilling catalog metadata, wiring publish CI |
 | [references/updating.md](references/updating.md) | Maintaining this skill package itself |
 

@@ -156,6 +156,41 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   value exits 65 before any push. `grim release` takes the same
   `--push-registry` flag.
 
+### Repository Layout: Prefer Flat {#flat-layout}
+
+The default layout puts a kind segment in the path — `registry/skills/x`,
+`registry/bundles/y`. That segment is a **namespace partition, not a type
+tag**: grim reads an artifact's kind from the `com.grimoire.kind`
+annotation on its manifest, never from the path. It buys exactly one
+thing — room for a skill and a bundle to share a name.
+
+With names unique across kinds it buys nothing and still costs:
+
+- every reference your users type carries it, and a short reference cannot
+  shrink below `skills/x`;
+- the TUI tree nests every artifact under a `skills` / `bundles` node that
+  restates what the row's kind already says — and doubles it when
+  `options.tui.group_by_type` is on, giving a `skill` group holding a
+  `skills` group.
+
+Publish flat by naming your namespace as the prefix:
+
+```toml
+registry = "ghcr.io"
+repository_prefix = "acme"
+
+[skills.code-review]     # → ghcr.io/acme/code-review
+[bundles.essentials]     # → ghcr.io/acme/essentials
+```
+
+Bundles work unchanged; a flat bundle names its members with the
+same-directory form `./code-review:0` instead of `../skills/code-review:0`.
+
+**Decide before the first publish.** A repository path is a public
+reference the moment a consumer pins it in a `grimoire.lock`, so moving it
+later means publishing under new names and keeping the old ones alive for
+everyone already on them.
+
 Common flags — confirm current spelling with `grim publish --help`:
 
 ```sh
@@ -320,6 +355,36 @@ Not editing every artifact: each field has a matching flag on `build`,
 top-level `[metadata]` table plus per-entry overrides. Both are gap-fillers
 — precedence is **artifact frontmatter > flag > per-entry `[metadata]` >
 top-level `[metadata]` > derived**, merged field by field.
+
+### What to Set by Default {#metadata-defaults}
+
+Grim derives what it can, but a derivation is a guess, and an unset key is
+a missing row in `grim describe` and a blank line in the TUI detail pane.
+Treat these as required on every package, not optional:
+
+| Field | Why it is not optional in practice |
+|---|---|
+| `summary` | The single line `grim search` and the TUI show *instead of* the description |
+| `keywords` | The only thing fuzzy search matches beyond the name |
+| `repository` | Also the source `homepage` and `documentation` derive from — author one key, get three annotations |
+| `license` | Never derived. A manifest with no license is one a company's review cannot clear |
+| `authors` | **Never derived.** The only automatic source is the commit author under `--git` — which publishes a person's name. A team alias here is what prevents that |
+| `vendor` | Derived from the release namespace; author it when that namespace is not your organization's name |
+
+Set them once per catalog in `publish.toml`'s `[metadata]` table rather
+than repeating them in every artifact — the table fills only what an
+artifact leaves unset, so a package that states its own license still wins.
+
+Two repository-level companions complete the picture, and neither is
+artifact metadata: `[description]` (README/CHANGELOG/logo) and
+`[description.support]` (issues/chat/contact/security). Together with the
+table above they are exactly what fills the TUI detail pane's `Overview`,
+`Readme`, and `Changelog` panels — see [Description
+Companion](#description-companion).
+
+`compatibility` (skills only) and the retirement pair `deprecated` /
+`replaced-by` stay opt-in: publish them when they are true, never as
+boilerplate.
 
 ## Description Companion {#description-companion}
 

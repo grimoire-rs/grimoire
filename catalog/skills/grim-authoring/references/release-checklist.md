@@ -3,28 +3,28 @@
 You loaded this file because you are about to `grim release` an
 artifact, or a build/release just failed and you need the triage table.
 
-Contents: [Pre-Release](#pre-release) ·
-[Release Mechanics](#release-mechanics) · [Batch Publish](#batch-publish) ·
-[Description Companion](#description-companion) · [Exit-65 Triage](#exit-65-triage)
+Contents: [Pre-Release](#pre-release) · [Metadata Defaults](#metadata-defaults) ·
+[Repository Layout](#flat-layout) · [Release Mechanics](#release-mechanics) ·
+[Batch Publish](#batch-publish) · [Description Companion](#description-companion) ·
+[Exit-65 Triage](#exit-65-triage)
 
 ## Pre-Release
 
 Work through these in order; each catches a class of failure before it
 reaches a registry:
 
-1. **Catalog metadata authored** — `summary` present (search shows it
-   instead of the description), `keywords` is one comma-separated string
-   (never a YAML/TOML list), `repository` is an `https://` URL. Check
-   the per-kind location: skill/agent → `metadata` map; rule → top-level
-   frontmatter; mcp/bundle → top-level TOML. If this release retires a
-   package, set the `deprecated` notice in the same location (a re-release
-   without it clears the flag), and point consumers at the successor with
-   `replaced-by` — authored independently of `deprecated`, must parse as
-   a reference (65 otherwise), surfaced by `grim search`/`grim describe`.
-   `deprecated` travels into the package-index pointer on the next
-   announce, so `grim search`/the TUI hide the package — unless it is
-   installed or `show_deprecated` is on — without fetching its manifest;
-   `replaced-by` travels alongside it and only names the successor.
+1. **Catalog metadata authored** — the [default set](#metadata-defaults)
+   below, in the right per-kind location: skill/agent → `metadata` map;
+   rule → top-level frontmatter; mcp/bundle → top-level TOML. If this
+   release retires a package, set the `deprecated` notice in the same
+   location (a re-release without it clears the flag), and point consumers
+   at the successor with `replaced-by` — authored independently of
+   `deprecated`, must parse as a reference (65 otherwise), surfaced by
+   `grim search`/`grim describe`. `deprecated` travels into the
+   package-index pointer on the next announce, so `grim search`/the TUI
+   hide the package — unless it is installed or `show_deprecated` is on —
+   without fetching its manifest; `replaced-by` travels alongside it and
+   only names the successor.
 2. **`grim build <path>` exits 0** — and read the *warnings* too:
    warn-and-drop vendor keys and migration nudges are silent data loss
    if shipped.
@@ -35,6 +35,65 @@ reaches a registry:
    members breaks the consumer's `grim lock`, not your release.
 5. **`grim release … --dry-run`** — prints the exact push plan: every
    tag and the digest each will point at, without touching the registry.
+
+### Metadata Defaults {#metadata-defaults}
+
+Grim derives what it can, but a derivation is a guess and an unset key is
+a missing row in `grim describe` and a blank line in the TUI detail pane.
+Author all six on every package — the last two are the ones publishers
+routinely skip because the field table calls them optional:
+
+| Field | Why it is not optional in practice |
+|---|---|
+| `summary` | The single line `grim search` and the TUI show *instead of* the description |
+| `keywords` | One comma-separated string (never a YAML/TOML list) — the only thing fuzzy search matches beyond the name |
+| `repository` | An `https://` URL (anything else: 65). Also the source `homepage` and `documentation` derive from — one key, three annotations |
+| `license` | Never derived. A manifest with no license is one a company's review cannot clear |
+| `authors` | **Never derived.** The only automatic source is the commit author under `--git`, which publishes a person's name; a team alias here is what prevents that |
+| `vendor` | Derived from the release namespace — author it when that namespace is not your organization's name |
+
+Publishing a set of packages? Put the shared four (`license`,
+`repository`, `authors`, `vendor`) in `publish.toml`'s `[metadata]` table
+once instead of in every artifact; the table fills only what an artifact
+leaves unset. Add `[description]` and `[description.support]` in the same
+manifest — [the companion](#description-companion) is what fills the TUI's
+`Readme` / `Changelog` panels and the `Overview` panel's support section.
+
+`compatibility` (skills only) and the retirement pair are the exceptions:
+publish them when they are true, never as boilerplate.
+
+### Repository Layout: Prefer Flat {#flat-layout}
+
+The default layout puts a kind segment in the path —
+`registry/skills/x`, `registry/bundles/y`. It is a **namespace partition,
+not a type tag**: grim reads an artifact's kind from the
+`com.grimoire.kind` annotation, never from the path. The segment buys one
+thing — room for a skill and a bundle to share a name.
+
+With names unique across kinds it buys nothing and still costs: every
+reference your users type carries it (a short reference cannot shrink
+below `skills/x`), and the TUI tree nests every artifact under a `skills`
+/ `bundles` node restating what the row's kind already says — doubled
+when `options.tui.group_by_type` is on, giving a `skill` group holding a
+`skills` group.
+
+Publish flat by naming your namespace as the prefix in `publish.toml`:
+
+```toml
+registry = "ghcr.io"
+repository_prefix = "acme"
+
+[skills.code-review]     # → ghcr.io/acme/code-review
+[bundles.essentials]     # → ghcr.io/acme/essentials
+```
+
+A flat bundle names its members with the same-directory form
+`./code-review:0` instead of `../skills/code-review:0`.
+
+**Decide before the first publish.** A repository path is a public
+reference the moment a consumer pins it in a `grimoire.lock`; moving it
+later means republishing under new names and keeping the old ones alive
+for everyone already on them. Full rules: [Batch publishing][batch-publish].
 
 ## Release Mechanics
 

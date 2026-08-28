@@ -970,7 +970,11 @@ describe ghcr.io/michael-herwig/arcana/hex-core` reports `kind=skill` and
 So `{kind-subdir}` is a **namespace partition, not a type tag**. It buys one
 thing: room for the same name to exist as two kinds — a skill `foo` and a
 bundle `foo` side by side. If your names are unique across kinds, it buys
-nothing and costs a segment in every reference your users type.
+nothing and costs a segment in every reference your users type — plus a
+`skills` / `bundles` node in the [TUI tree](./commands.md#tui) that
+restates what the row's kind column already says, doubled into a `skill`
+group holding a `skills` group when
+[`options.tui.group_by_type`](./configuration.md#options-tui) is on.
 
 Publish flat by setting `repository_prefix` to your namespace:
 

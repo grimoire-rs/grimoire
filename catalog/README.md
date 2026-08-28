@@ -68,7 +68,13 @@ package whose version is new).
 Registry refs are kind-segmented: `ghcr.io/grimoire-rs/skills/<name>:<version>`,
 `ghcr.io/grimoire-rs/bundles/<name>:<version>` (per-entry `repository`
 overrides in `publish.toml` set the `skills/`/`bundles/` segment — see
-[Batch publishing with a manifest][batch-publish]). Semver releases
+[Batch publishing with a manifest][batch-publish]). That layout is
+**historical, not the recommendation**: these paths were published before
+the flat guidance and every consumer lockfile pins them, so they stay.
+New publishers should read [Repository
+Layout](./skills/grim-authoring/references/release-checklist.md#flat-layout)
+and publish flat — kind travels in the `com.grimoire.kind` annotation, not
+the path. Semver releases
 cascade (`1.2.3` also moves `1.2`, `1`, `latest`). Bundle members
 reference the floating major tag (`:0` while on the 0.x line, relative to
 the bundle's own deployment — `../skills/<name>:0`) and bundles publish

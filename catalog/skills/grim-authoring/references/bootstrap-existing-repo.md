@@ -41,10 +41,12 @@ already rejected one.
 
 ## Backfill Catalog Metadata
 
-Catalog fields (`summary`, `keywords`, `repository`, `deprecated`,
-`replaced-by`) live in a different place per kind — skills and agents
-inside the frontmatter `metadata` map, rules at the top level of
-frontmatter. Get this wrong and nothing errors; the field is just never
+Catalog fields (`summary`, `keywords`, `repository`, `license`, `authors`,
+`vendor`, plus the retirement pair `deprecated` / `replaced-by`) live in a
+different place per kind — skills and agents inside the frontmatter
+`metadata` map, rules at the top level of frontmatter. Backfill [the
+default six](release-checklist.md#metadata-defaults) on every artifact, or
+declare the shared ones once in the manifest's `[metadata]` table below. Get this wrong and nothing errors; the field is just never
 seen by `grim search`. See the Metadata-Location Asymmetry
 ([../SKILL.md#the-metadata-location-asymmetry][asymmetry]) for the full
 picture, and the per-kind field tables in
@@ -62,19 +64,34 @@ registry = "ghcr.io"
 version = "0.1.0"
 version_prefix = "v"   # stripped from --version <git-tag>; "v" is the default, spelled out here
 
+# Shared metadata, once for the whole catalog. Each key fills only what an
+# artifact leaves unset, so a package stating its own license still wins.
+[metadata]
+license    = "Apache-2.0"
+repository = "https://github.com/acme/ai-config"
+authors    = "Acme AI Platform"
+
 [skills.code-review]
-repository = "acme/skills/code-review"
+repository = "acme/code-review"
 
 [rules.style]
-repository = "acme/rules/style"
+repository = "acme/style"
 
 [agents.reviewer]
-repository = "acme/agents/reviewer"
+repository = "acme/reviewer"
 ```
 
-Write `repository` out verbatim on every entry (the `<ns>/<kind-subdir>/<name>`
-shape) rather than leaning on `repository_prefix` — a renamed or moved
-artifact then can't silently change its published address. `--version`
+Write `repository` out verbatim on every entry rather than leaning on
+`repository_prefix` — a renamed or moved artifact then can't silently
+change its published address.
+
+Note the **flat** paths: no `skills/` or `agents/` segment. Kind travels
+in the `com.grimoire.kind` annotation, never in the path, so a kind
+segment only partitions the namespace against a name collision across
+kinds — and if your names are unique, it just lengthens every reference
+your users type and adds a redundant node to the TUI tree. Take it only
+when you need the partition ([Repository
+Layout](release-checklist.md#flat-layout)). `--version`
 (the CI shape), the skip-existing default, and `push_registry` are all
 covered in [Batch Publish][batch-publish] — read it before your first run.
 
