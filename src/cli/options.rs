@@ -128,6 +128,60 @@ impl VerifyOpts {
     }
 }
 
+/// A `--trust-hooks` / `--no-trust-hooks` flag pair resolving to a
+/// **tri-state**, because "neither was typed" is a third answer the arming
+/// table acts on rather than a missing one: it is the only state in which grim
+/// asks. Flatten into a command's args with `#[command(flatten)]`; when both
+/// flags are given, the later one wins (`overrides_with` in both directions).
+///
+/// The pair keeps its name through the move from registry-scoped trust to
+/// workspace consent (owner decision 2026-08-28): a second rename in two
+/// sessions buys nothing, and the spelling keeps maximum distance from the
+/// permanently forbidden `GRIM_ALLOW_HOOKS`. It and `grim hook allow` answer
+/// the same question — *may a hook arm here* — and differ in reach and
+/// lifetime: the record names one workspace and persists, the flag covers the
+/// whole invocation and is written nowhere.
+///
+/// **The flag beats the record in both directions.** A flag typed on this run
+/// is the most explicit answer there is, and no file can type one — which is
+/// exactly why it may outrank a stored answer where a config key may not
+/// (threat-model N4).
+///
+/// **Flags only.** There is no `GRIM_TRUST_HOOKS`, and `GRIM_ALLOW_HOOKS` was
+/// removed rather than renamed: a repository routinely carries its own
+/// environment (`.envrc`, `.mise.toml`, devcontainer `containerEnv`), so an
+/// env-settable arming gate would let a repo grant itself code execution on a
+/// cloner's machine (CWE-426). A config file cannot type a flag.
+#[derive(Debug, Clone, Copy, Args)]
+pub struct HookTrustOpts {
+    /// Arm hooks on this invocation whatever the workspace's consent record
+    /// says, including an unconsented or drifted one. **Writes no record** —
+    /// it is per-invocation by contract. Does **not** turn the feature on:
+    /// `[options.experimental] hooks` is answered first, so this is inert
+    /// while hooks are gated.
+    #[arg(long, overrides_with = "no_trust_hooks")]
+    pub trust_hooks: bool,
+
+    /// Arm no hook on this invocation, whatever the record grants.
+    #[arg(long, overrides_with = "trust_hooks")]
+    pub no_trust_hooks: bool,
+}
+
+impl HookTrustOpts {
+    /// The effective tri-state: `Some(true)` for `--trust-hooks`,
+    /// `Some(false)` for `--no-trust-hooks`, `None` when neither was typed.
+    ///
+    /// `overrides_with` makes both-true unreachable through clap; the arm
+    /// order below is defensive, not a precedence rule.
+    pub fn flag(self) -> Option<bool> {
+        match (self.trust_hooks, self.no_trust_hooks) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

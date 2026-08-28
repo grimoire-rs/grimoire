@@ -78,6 +78,37 @@ pub enum CommandError {
         reason: String,
     },
 
+    /// `add` received a hook binding name that grim reserves for its own
+    /// `$GRIM_HOME/hooks/` namespace
+    /// ([`RESERVED_ARTIFACT_NAMES`](crate::oci::hook::RESERVED_ARTIFACT_NAMES)).
+    ///
+    /// Separate from [`Self::InvalidBindingName`] rather than folded into its
+    /// `reason`, because that variant's message ends "(allowed: lowercase
+    /// letters, digits, hyphens, periods)" — every reserved name already
+    /// satisfies that charset, so reusing it would tell the user to fix
+    /// something that is not wrong.
+    ///
+    /// **This is the ergonomic refusal, not the control.** `grim add` is where a
+    /// user first names a binding, but a *bundle member's* binding name never
+    /// goes through this command — the bundle picks it. The boundary is the
+    /// install seam (`installer::install_one`, before materialization). Exit 64.
+    // **Deliberately does not enumerate the reserved names.** This sentence used
+    // to restate `$GRIM_HOME/hooks/{bin,dispatch.json,payload}` alongside the
+    // copy in `oci::hook::binding_name_refusal`, and the two diverged the moment
+    // `root-key` was added to one of them — the round-1 review predicted exactly
+    // that. The list belongs to the module that owns the layout; this message
+    // says what the user must do, which is the only part that differs from the
+    // install seam's wording.
+    #[error(
+        "'{name}' is a reserved {kind} binding name: it names part of grim's own hook launcher under \
+         $GRIM_HOME/hooks/, and a hook bound as '{name}' would materialize over it — rebind it under \
+         another name"
+    )]
+    ReservedBindingName {
+        kind: crate::oci::ArtifactKind,
+        name: String,
+    },
+
     /// `config` received an unknown dotted key, a duplicate alias, or
     /// another input that violates the command contract (exit 64).
     #[error("{0}")]
@@ -87,6 +118,17 @@ pub enum CommandError {
     /// semantically rejected (exit 65).
     #[error("{0}")]
     ConfigValue(String),
+
+    /// `grim hook allow` / `grim hook revoke` was asked to act on a scope
+    /// that carries no consent record (exit 64).
+    ///
+    /// Global scope is permanently consented — `$GRIM_HOME/grimoire.toml` is
+    /// the user's own file on their own machine, so there is no third party's
+    /// checkout to gate. Reporting that as success would claim a record that
+    /// does not exist, and reporting it as an I/O failure would blame the
+    /// filesystem for a decision; it is a usage error, and it says so.
+    #[error("{0}")]
+    HookConsentUsage(String),
 }
 
 #[cfg(test)]

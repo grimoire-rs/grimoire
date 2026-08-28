@@ -157,6 +157,80 @@ impl TuiOptions {
     }
 }
 
+// No environment variable selects the hook feature.
+//
+// An owner decision on 2026-08-17 removed `GRIM_EXPERIMENTAL_HOOKS`
+// (and the separate `GRIM_ALLOW_HOOKS`) from the surface entirely, in
+// favour of config only. The feature flag is a *feature flag*, set by
+// `grim config set options.experimental.hooks true` in project or global
+// config; consent is the workspace's own machine-local record (written by
+// `grim hook allow`, never by a config file); and `--trust-hooks` remains
+// the per-invocation escape for CI.
+//
+// This is a simplification, not a mitigation: an environment variable is
+// repo-carriable (`.envrc`, `.mise.toml`, devcontainer `containerEnv`), so
+// honouring one in the enabling direction would let a cloned repository
+// turn on a default-deny *execution* feature through a file the user never
+// reads. Deleting the variable removes that class rather than guarding it,
+// and it retires the "which direction may it be honoured in" question with
+// no precedence rule to get wrong.
+
+/// Experimental-feature opt-ins, nested under `[options.experimental]`.
+///
+/// Shape follows [`TuiOptions`] verbatim (plan D-10): `[options.experimental]`
+/// is a *table*, so [`ConfigOptions::experimental`] needs
+/// `skip_serializing_if` regardless of field count or an unset table still
+/// serializes.
+///
+/// `#[serde(deny_unknown_fields)]` so an unknown key surfaces as a parse
+/// error rather than a silent ignore.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentalOptions {
+    /// Controls whether hooks are active — a declared hook resolves,
+    /// installs, and arms its clients. Disabled by default, so a declared
+    /// hook is reported and never armed.
+    ///
+    /// Config only — no environment variable overrides this; set it with
+    /// `grim config set options.experimental.hooks true`, in project or
+    /// global config.
+    ///
+    /// Enabling the feature is not consent to run any particular hook: every
+    /// hook still faces this workspace's consent record
+    /// (`grim hook allow`), and `--trust-hooks` is the separate
+    /// per-invocation escape. Three distinct questions — is the feature on,
+    /// has this checkout consented, and is this one run permitted —
+    /// deliberately answered in three places, and only the first is a config
+    /// key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hooks: bool,
+}
+
+impl ExperimentalOptions {
+    /// True when no option has been set — used for `skip_serializing_if`
+    /// so an unconfigured `[options.experimental]` table is omitted from
+    /// the serialized config.
+    ///
+    /// Derived from `PartialEq + Default` so any future field addition is
+    /// automatically reflected here without a manual update — the same
+    /// derivation [`TuiOptions::is_empty`] uses.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The effective hooks flag. **The config key is the whole answer** —
+    /// there is no environment override, so this is a plain read rather than
+    /// a precedence resolution.
+    ///
+    /// Kept as a named method rather than letting callers touch `hooks`
+    /// directly so the hook install path has one seam to consult, and so a
+    /// future scope-merge (should the flag ever become resolvable across
+    /// project and global config) lands here instead of at every caller.
+    pub fn hooks_enabled(&self) -> bool {
+        self.hooks
+    }
+}
+
 /// Per-client rendering options, nested under `[options.vendors.<name>]`.
 ///
 /// `#[serde(deny_unknown_fields)]` so an unknown key (e.g. a typo'd field
@@ -221,6 +295,10 @@ pub struct ConfigOptions {
     /// that never sets it never grows the key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vendors: BTreeMap<String, VendorOptions>,
+    /// Experimental-feature opt-ins. Omitted entirely when nothing is
+    /// enabled, so a config that never opts in never grows the table.
+    #[serde(default, skip_serializing_if = "ExperimentalOptions::is_empty")]
+    pub experimental: ExperimentalOptions,
 }
 
 /// One configured browse source in the top-level `[[registries]]` array.
@@ -386,6 +464,10 @@ pub struct DesiredSet {
     /// Declared MCP server descriptors, keyed by config name. Always
     /// `Registry` — the config parser rejects path values under `[mcp]`.
     pub mcp: BTreeMap<String, DeclaredSource>,
+    /// Declared hooks, keyed by config name. Always `Registry` — the config
+    /// parser rejects path values under `[hooks]` for now, so no hook
+    /// reaches the local-pack path that has no `Hook` arm yet.
+    pub hooks: BTreeMap<String, DeclaredSource>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -407,6 +489,7 @@ impl Clone for DesiredSet {
             agents: self.agents.clone(),
             bundles: self.bundles.clone(),
             mcp: self.mcp.clone(),
+            hooks: self.hooks.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -420,6 +503,7 @@ impl PartialEq for DesiredSet {
             && self.agents == other.agents
             && self.bundles == other.bundles
             && self.mcp == other.mcp
+            && self.hooks == other.hooks
     }
 }
 
@@ -462,6 +546,9 @@ impl DesiredSet {
             agents,
             bundles,
             mcp: BTreeMap::new(),
+            // Assigned after construction by the parser, like `mcp` — the
+            // signature stays at the four kinds every fixture already passes.
+            hooks: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
         }
     }

@@ -102,6 +102,7 @@ fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
         && lists_content_equal(&a.rules, &b.rules)
         && lists_content_equal(&a.agents, &b.agents)
         && lists_content_equal(&a.mcp, &b.mcp)
+        && lists_content_equal(&a.hooks, &b.hooks)
         && bundles_content_equal(&a.bundles, &b.bundles)
 }
 
@@ -187,6 +188,7 @@ mod tests {
 
     fn lock_with(generated_at: &str, skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,

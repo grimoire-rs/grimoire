@@ -541,6 +541,20 @@ pub struct PublishManifest {
     #[serde(default)]
     pub mcp: BTreeMap<String, PublishEntrySpec>,
 
+    /// Hook entries, keyed by name.
+    ///
+    /// Additive optional table (`#[serde(default)]`): a `publish.toml` written
+    /// before this key parses unchanged, which is what the frozen-manifest
+    /// widening rule requires (`docs/src/stability.md` § Additive fields — a
+    /// manifest that parses today parses on every later 1.x).
+    ///
+    /// Publishing a hook is **not** gated by `[options.experimental] hooks`:
+    /// the flag governs whether grim *arms* hooks on this machine, and a
+    /// publisher pushing a hook to a registry arms nothing. Gating here would
+    /// make an author's release pipeline depend on a consumer-side switch.
+    #[serde(default)]
+    pub hooks: BTreeMap<String, PublishEntrySpec>,
+
     /// Announcement defaults for `--announce` (target index repository,
     /// namespace, owner id).
     #[serde(default)]
@@ -795,12 +809,21 @@ fn resolve_versions(
 
     let top = cli_version.or(manifest.version.as_deref()).map(strip);
 
+    // `hooks` belongs here for the same reason every other map does, and its
+    // omission broke `grim publish` for the WHOLE manifest: validation runs
+    // before any push, so a single version-less hook entry failed the run and
+    // took the catalog's release job with it. The catalog contract is that every
+    // package omits `version` and inherits grim's release version via
+    // `--version <git tag>`, so there was no manifest-side workaround — pinning a
+    // version would freeze that entry forever, since an explicit per-entry
+    // version beats `--version`.
     let tables = [
         &mut manifest.skills,
         &mut manifest.rules,
         &mut manifest.agents,
         &mut manifest.bundles,
         &mut manifest.mcp,
+        &mut manifest.hooks,
     ];
     for table in tables {
         for (name, spec) in table.iter_mut() {
@@ -1510,6 +1533,7 @@ async fn run_announce(
 /// Return the singular kind string for constructing `--kind` flag value.
 fn kind_str(kind: ArtifactKind) -> &'static str {
     match kind {
+        ArtifactKind::Hook => "hook",
         ArtifactKind::Skill => "skill",
         ArtifactKind::Rule => "rule",
         ArtifactKind::Agent => "agent",
@@ -1702,11 +1726,14 @@ fn validate_manifest(
     // data error: the caller almost certainly provided the wrong file.
     // Note: --only filtering cannot produce this condition (unknown names
     // already error before this point).
+    // Every kind, including `hooks` — a hooks-only manifest is a legitimate
+    // shape and used to exit 65 with "no packages declared".
     let total_entries = manifest.skills.len()
         + manifest.rules.len()
         + manifest.agents.len()
         + manifest.bundles.len()
-        + manifest.mcp.len();
+        + manifest.mcp.len()
+        + manifest.hooks.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
     }
@@ -1720,6 +1747,7 @@ fn validate_manifest(
         .chain(manifest.agents.keys())
         .chain(manifest.bundles.keys())
         .chain(manifest.mcp.keys())
+        .chain(manifest.hooks.keys())
         .map(String::as_str)
         .collect();
 
@@ -1763,6 +1791,9 @@ fn validate_manifest(
     }
     for (name, spec) in &manifest.mcp {
         validate_entry(name, spec, ArtifactKind::Mcp, manifest_dir, manifest_path)?;
+    }
+    for (name, spec) in &manifest.hooks {
+        validate_entry(name, spec, ArtifactKind::Hook, manifest_dir, manifest_path)?;
     }
 
     Ok(())
@@ -1897,6 +1928,10 @@ fn entry_repository(
 /// Compute the conventional source path relative to the manifest directory.
 fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::path::Path) -> PathBuf {
     match kind {
+        // A DIRECTORY, like a skill and unlike every other kind — a hook's
+        // payload is a tree with `hook.toml` at its root, so the conventional
+        // path carries no extension.
+        ArtifactKind::Hook => manifest_dir.join("hooks").join(name),
         ArtifactKind::Skill => manifest_dir.join("skills").join(name),
         ArtifactKind::Rule => manifest_dir.join("rules").join(format!("{name}.md")),
         ArtifactKind::Agent => manifest_dir.join("agents").join(format!("{name}.md")),
@@ -1978,6 +2013,17 @@ fn plan_entries(
     add_kind!(manifest.rules, ArtifactKind::Rule);
     add_kind!(manifest.agents, ArtifactKind::Agent);
     add_kind!(manifest.mcp, ArtifactKind::Mcp);
+    // Hooks publish BEFORE bundles for the same correctness reason
+    // skills/rules/agents do: a bundle may declare a hook member, and a bundle
+    // manifest pinning a member needs that member already pushed. Appended
+    // after `mcp` rather than inserted, so no existing kind's relative position
+    // moves.
+    //
+    // Hook bundle membership is live: `RawBundleSource` accepts a `[hooks]`
+    // table, so this ordering is exercised rather than merely correct. Do not
+    // "simplify" it — a bundle naming a hook member needs that member pushed
+    // first, exactly as for the three older member kinds.
+    add_kind!(manifest.hooks, ArtifactKind::Hook);
     add_kind!(manifest.bundles, ArtifactKind::Bundle);
 
     entries
@@ -2099,6 +2145,7 @@ fn entry_description<'a>(
     name: &str,
 ) -> Option<&'a EntryDescription> {
     let table = match kind {
+        ArtifactKind::Hook => &manifest.hooks,
         ArtifactKind::Skill => &manifest.skills,
         ArtifactKind::Rule => &manifest.rules,
         ArtifactKind::Agent => &manifest.agents,
@@ -2122,6 +2169,7 @@ fn entry_metadata_defaults(
     name: &str,
 ) -> crate::oci::annotations::MetadataDefaults {
     let table = match kind {
+        ArtifactKind::Hook => &manifest.hooks,
         ArtifactKind::Skill => &manifest.skills,
         ArtifactKind::Rule => &manifest.rules,
         ArtifactKind::Agent => &manifest.agents,
@@ -2559,6 +2607,45 @@ mod tests {
             "${{version}} inherits"
         );
         assert_eq!(manifest.mcp["c"].version.as_deref(), Some("0.2.0"), "explicit wins");
+    }
+
+    /// **Every kind inherits, and `hooks` is checked by name.**
+    ///
+    /// `hooks` was appended to `PublishManifest`, to `validate_manifest` and to
+    /// `plan_entries`, but to **none** of the three helper aggregations —
+    /// `resolve_versions`'s table array, `--only`'s name set, and the
+    /// `total_entries` count. The first was a Block: validation runs before any
+    /// push, so one version-less hook entry failed the whole manifest and took
+    /// the catalog's release job with it.
+    ///
+    /// Looping `ArtifactKind::ALL` rather than asserting on `hooks` alone is the
+    /// point — the defect class is "a per-kind aggregation forgot a kind", and it
+    /// has now recurred six times in this codebase. A test naming one kind would
+    /// have to be remembered again for the seventh.
+    #[test]
+    fn resolve_versions_inherits_for_every_kind_including_hooks() {
+        let mut manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\nversion = \"1.2.3\"\n\n\
+             [skills.s]\n\n[rules.r]\n\n[agents.a]\n\n\
+             [mcp.m]\n\n[hooks.h]\n\n[bundles.b]\n",
+        )
+        .unwrap();
+        resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
+        for (kind, got) in [
+            ("skills", manifest.skills["s"].version.as_deref()),
+            ("rules", manifest.rules["r"].version.as_deref()),
+            ("agents", manifest.agents["a"].version.as_deref()),
+            ("mcp", manifest.mcp["m"].version.as_deref()),
+            ("hooks", manifest.hooks["h"].version.as_deref()),
+            ("bundles", manifest.bundles["b"].version.as_deref()),
+        ] {
+            assert_eq!(
+                got,
+                Some("1.2.3"),
+                "a version-less [{kind}] entry must inherit the top-level version; \
+                 an omitted kind fails the whole manifest at validation"
+            );
+        }
     }
 
     #[test]

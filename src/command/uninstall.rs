@@ -34,7 +34,7 @@ use super::scope_resolution;
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
     /// `skill`, `rule`, `agent`, or `mcp`.
-    #[arg(value_parser = ["skill", "rule", "agent", "mcp"])]
+    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
@@ -59,13 +59,26 @@ pub struct UninstallArgs {
 /// entry that is neither installed nor declared is reported, not an
 /// error.
 pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(UninstallReport, ExitCode)> {
-    // The value_parser above constrains the string to known kinds.
-    let kind = match args.kind.as_str() {
-        "skill" => ArtifactKind::Skill,
-        "agent" => ArtifactKind::Agent,
-        "mcp" => ArtifactKind::Mcp,
-        _ => ArtifactKind::Rule,
-    };
+    // Parsed through `ArtifactKind::from_kind_str`, the single source of truth
+    // for the spelling, rather than a local `match` with a `_ => Rule`
+    // catch-all. That catch-all was a live defect: the `value_parser` above
+    // gained `"hook"` (Principle 9's additive widening) while the arm list did
+    // not, so `grim uninstall hook <name>` silently resolved to
+    // `ArtifactKind::Rule` — reporting `rule … not-installed`, leaving the hook
+    // payload and its record in place, and, when a rule of the same binding
+    // name existed, deleting *that* instead. Derived from the enum, this can no
+    // longer drift when a kind is added.
+    //
+    // The `value_parser` already constrains the string, so `None` is a
+    // programming error rather than user input; it still refuses (64) instead
+    // of panicking, because a panic exits 101, bypasses `classify_error`, and
+    // emits no JSON error document (invariant I3).
+    let kind = ArtifactKind::from_kind_str(&args.kind).ok_or_else(|| {
+        crate::error::Error::from(super::command_error::CommandError::ConfigUsage(format!(
+            "unknown artifact kind '{}'",
+            args.kind
+        )))
+    })?;
 
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -148,6 +161,27 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
                 );
             }
         }
+
+        // S-008's deregistration half: converge hooks against the now-shrunken
+        // state, which drops the uninstalled hook's dispatch rows and reaps its
+        // registration from every client that carried one.
+        //
+        // The policy is resolved **without** the consent prompt reachable —
+        // `grim uninstall` takes no `--trust-hooks` and must never ask a
+        // question in order to *remove* something. A registry that is already
+        // trusted keeps every surviving hook armed; one that is not was not
+        // armed to begin with. Passing a gated policy instead would silently
+        // disarm every *surviving* hook as a side effect of removing an
+        // unrelated skill.
+        let hook_policy =
+            super::hook_consent::resolve_without_consent(ctx, &scope, None, &std::collections::BTreeSet::new())?;
+        crate::install::hook_registrar::converge_clients(
+            &state,
+            &scope.workspace,
+            scope.scope,
+            &scope.roots,
+            &hook_policy,
+        );
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later
@@ -208,6 +242,13 @@ pub(crate) fn undeclare_and_unlock(
 ) -> anyhow::Result<(bool, Vec<String>)> {
     let set_before = set.clone();
     let declared = match kind {
+        // `uninstall` is the full inverse of install and is therefore the ONLY
+        // command that disarms a hook: it deletes the payload, drops the record,
+        // and — through the registrar's derive-never-record convergence — removes
+        // the registration from the client's own config. Refusing a hook here
+        // would leave an armed registration with no supported way to remove it,
+        // which is a worse posture than any refusal buys.
+        ArtifactKind::Hook => set.hooks.remove(name).is_some(),
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
         ArtifactKind::Agent => set.agents.remove(name).is_some(),
@@ -283,6 +324,7 @@ mod tests {
 
     fn lock_with_skills(declaration_hash: &str, entries: &[(&str, char)]) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -506,5 +548,22 @@ mod tests {
             set.declaration_hash_cached(),
             "the lock hash must be reconciled to the declaration"
         );
+    }
+
+    /// Every string the `<kind>` positional accepts must resolve to the kind it
+    /// names. **Regression guard, and it caught a live defect:** the
+    /// `value_parser` gained `"hook"` while `run`'s local arm list kept a
+    /// `_ => ArtifactKind::Rule` catch-all, so `grim uninstall hook <name>` silently
+    /// acted on a *rule*. Deriving the kind from `ArtifactKind::from_kind_str`
+    /// makes the two sides one source of truth; this test pins the accepted set
+    /// against it so appending a kind to the parser and forgetting the mapping
+    /// is a test failure rather than a wrong-target action.
+    #[test]
+    fn every_accepted_kind_string_resolves_to_that_kind() {
+        for accepted in ["skill", "rule", "agent", "mcp", "hook"] {
+            let kind = ArtifactKind::from_kind_str(accepted)
+                .unwrap_or_else(|| panic!("the `uninstall` parser accepts '{accepted}' but no kind parses it"));
+            assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");
+        }
     }
 }

@@ -27,12 +27,14 @@ use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
+use crate::oci::hook::{CanonicalEvent, HookEntry, HookHandler, HookTier};
 use crate::skill::{AgentFrontmatter, RuleFrontmatter};
 use crate::store::atomic_write::atomic_write;
 
 use super::install_error::{InstallError, InstallErrorKind};
 
-use super::vendor::Vendor;
+use super::hook_dispatch::RootToken;
+use super::vendor::{KindSupport, Vendor};
 use super::vendor_agents::AgentsVendor;
 use super::vendor_amp::AmpVendor;
 use super::vendor_antigravity::AntigravityVendor;
@@ -306,6 +308,25 @@ impl ClientTarget {
         name: &str,
     ) -> PathBuf {
         match kind {
+            // A hook payload is **client-independent** (S-003) *and*
+            // machine-local at both scopes (SEC-1, invariant I1) — so its
+            // location is a function of `$GRIM_HOME`, which this seam never
+            // receives. `workspace` happens to BE `$GRIM_HOME` at global scope,
+            // which is how the project arm came to be written against the
+            // workspace in the first place; the fix is to route both scopes
+            // through the one function that takes `$GRIM_HOME` explicitly.
+            //
+            // Provably unreachable: `InstallTarget::path_for` — the only
+            // production caller of this function — intercepts `Hook` and
+            // delegates to `hook_dispatch::payload_dir` before it ever gets
+            // here (pinned by `install_target_path_for_never_delegates_a_hook`
+            // in `target.rs`). Same shape as the `Bundle` arm below rather than
+            // a plausible-looking fallback, because a fallback returning a
+            // workspace path is exactly the defect this arm used to be.
+            ArtifactKind::Hook => unreachable!(
+                "hook payloads are machine-local (I1); route through InstallTarget::path_for, \
+                 which delegates to install::hook_dispatch::payload_dir"
+            ),
             ArtifactKind::Skill => self.vendor().skills_root(workspace, scope).join(name),
             ArtifactKind::Rule => self.vendor().rule_path(workspace, scope, name),
             ArtifactKind::Agent => self.vendor().agent_path(workspace, scope, name),
@@ -338,6 +359,9 @@ impl ClientTarget {
     /// `<dest_parent>/<name>/`, so the index's relative links resolve. Only
     /// the index is ever transformed.
     ///
+    /// A **hook** payload copies verbatim like a skill but with no index render
+    /// and no per-client branch at all — see [`Self::materialize_hook`].
+    ///
     /// # Errors
     ///
     /// [`InstallErrorKind::TargetIo`] for a filesystem failure;
@@ -353,6 +377,7 @@ impl ClientTarget {
             support_dir,
         } = req;
         match kind {
+            ArtifactKind::Hook => Self::materialize_hook(artifact_root, dest),
             ArtifactKind::Skill => self.materialize_skill(name, artifact_root, dest),
             ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, scope, pinned, support_dir),
             ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
@@ -525,6 +550,292 @@ impl ClientTarget {
         };
         Ok(out)
     }
+
+    /// Materialize a hook payload: the canonical tree, copied **verbatim**,
+    /// with no per-client transform and no generated file (S-003).
+    ///
+    /// # Why this takes no `self`
+    ///
+    /// The payload is client-independent by construction. Decision L records
+    /// that one dispatcher serves every hook and that a registration is never
+    /// itself recorded, so what a client-specific render could differ *in* —
+    /// the event spelling, the matcher dialect, the command string — all lives
+    /// in the registration ([`Vendor::hook_registration`]), not in the tree on
+    /// disk. Taking `self` would invite a future per-client branch here, and a
+    /// per-client payload would fork the one destination the prune refcount and
+    /// the installer's dest-dedup both key on (C-020).
+    ///
+    /// Called once per `(client, scope)` by the installer onto the **same**
+    /// `dest`, so it must be idempotent: [`copy_tree`] overwrites in place and
+    /// creates missing parents, which makes a second call over an identical
+    /// tree a no-op in content terms.
+    ///
+    /// # Every file is `generated: false`
+    ///
+    /// Nothing is rendered, so the integrity hash anchors on the canonical
+    /// bytes and an author edit inside the payload reads as ordinary drift —
+    /// which is the whole of C-009's tamper-*evidence* leg (the runtime hashes
+    /// nothing; `ClientOutput::content_hash` surfaces payload drift at the next
+    /// `grim status` or install).
+    ///
+    /// # The exec bit is never load-bearing (C-019)
+    ///
+    /// A payload fetched through OCI arrives `0o644`, so this deliberately does
+    /// **not** chmod anything: `grim build` rejects a handler whose first token
+    /// resolves to a payload-relative file, which is what makes the interpreter
+    /// form the only shape and the mode a non-issue. `copy_tree` preserves
+    /// whatever mode the canonical tree carried; it never adds one.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallErrorKind::TargetIo`] for a filesystem failure. There is no
+    /// parse step and therefore no `MaterializeFailed` path — the manifest was
+    /// validated at `grim build` and is copied here as data.
+    fn materialize_hook(artifact_root: &Path, dest: &Path) -> Result<Vec<MaterializedFile>, InstallError> {
+        let mut out = Vec::new();
+        copy_tree(artifact_root, dest, &mut out)?;
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+}
+
+/// The absolute launcher path the [`hook_matrix_cell`] probes carry.
+///
+/// A matrix cell is a **documentation** question, so it must not depend on a
+/// resolved `$GRIM_HOME` — this stands in for one. It is safe because the whole
+/// refusal order of [`Vendor::hook_registration`] (surface → surface shape →
+/// event → tier → decision K → matcher) is launcher-blind: the launcher reaches
+/// the command *string* and nothing else, in the `Ok` arm every refusal returns
+/// before. The test below pins that by computing the cell with two different
+/// launcher paths and asserting the answers are equal; if a future refusal ever
+/// inspects the launcher, that test fails rather than the doc column silently
+/// becoming environment-dependent.
+const HOOK_CELL_PROBE_LAUNCHER: &str = "/grim-home/hooks/bin/grim-hook";
+
+/// The absolute dispatch-table path the [`hook_matrix_cell`] probes carry.
+///
+/// Same standing and same argument as [`HOOK_CELL_PROBE_LAUNCHER`]: the table is
+/// located by argv (B1) and reaches only the command string, so the refusal order
+/// never reads it, and the one equality test covers launcher, table and root
+/// token together.
+const HOOK_CELL_PROBE_TABLE: &str = "/grim-home/hooks/dispatch.json";
+
+/// The matcher forms [`hook_matrix_cell`] probes each `(event, tier)` pair
+/// with — a closed set, and a pair counts as armed when **any** entry arms it.
+///
+/// Two entries, because the set exists to separate a **matcher-specific**
+/// refusal from a **client-wide** one, and one entry alone cannot:
+///
+/// - `Some("Read")` — one exact, translatable, non-shell-command tool name.
+///   Deliberately absent from [`SHELL_COMMAND_TOOLS`](super::vendor) for every
+///   client and `MatcherForm::ExactOrAlternation`, the identity translation into
+///   all three v1 dialects, so it exercises the arming path.
+/// - `None` — match-all, the most common authored form. Decision K's predicate
+///   is conservative, so a match-all `mutator` *could* select a shell-command
+///   tool and is refused
+///   ([`HookDecline::MutatorOnShellCommandTool`](super::vendor::HookDecline::MutatorOnShellCommandTool)).
+///
+/// **Any-arms, not all-arms, and that is the whole point of two entries.**
+/// Decision K refuses a `(tool, matcher)`, never a client — so a client whose
+/// `mutator` arms for `Read` and declines for `*` *has* the tier, and the
+/// refusal the author actually hits is reported per hook through the `Declined`
+/// path (S-013), which is where a per-matcher fact belongs. Requiring every
+/// probe to arm would let Decision K alone drag claude and codex to `◐` and
+/// make the column say "partial hook support" about a per-matcher security
+/// refusal. A decline that holds for **both** probes is matcher-independent —
+/// a projection-table gap — and that is what degrades the cell.
+const HOOK_CELL_PROBE_MATCHERS: [Option<&str>; 2] = [Some("Read"), None];
+
+/// The `docs/src/clients.md` **Hook** cell for `client` (C-013).
+///
+/// One helper, one column, computed from code so the matrix can never assert
+/// hook support in prose. WP-L reads it from the parity test and maps it the
+/// way every other column is mapped: [`KindSupport::Native`] ⇒ `✓`,
+/// [`Degraded`](KindSupport::Degraded) ⇒ `◐`,
+/// [`Declined`](KindSupport::Declined) ⇒ `✗`.
+///
+/// # The verdict is read off `hook_registration`, and off nothing else
+///
+/// This is the whole reason the helper is not a one-line delegation.
+/// [`Vendor::hook_tier_support`] is tool- and matcher-blind, so
+/// `hook_tier_support(Mutator, PreToolUse)` answers `Native` on claude, codex
+/// and copilot **while the registration for a shell-command matcher declines**
+/// (ADR decision K, per `(tool, matcher)`). Both answers are correct at their
+/// own granularity, and a cell filled from the capability question alone would
+/// show a mutator as available where nothing is registered — the S-013
+/// silent-guardrail report this contract exists to prevent. Arming is
+/// [`Vendor::hook_registration`]'s answer, and it already consults
+/// `hook_tier_support` inside its own refusal order
+/// ([`TierUnsupported`](super::vendor::HookDecline::TierUnsupported)), so every
+/// projection-table gap still reaches the cell — through one authority instead
+/// of two.
+///
+/// # An absent `context` column is **not** a cell degrader
+///
+/// Read this before re-deriving the rule; the opposite reading is the easy
+/// mistake and it produces a matrix with zero `✓`. `additionalContext` has
+/// **no tier owner**, so its absence costs no tier anything it was entitled to:
+///
+/// - [`Observer`](crate::oci::hook::HookTier::Observer) is defined as a tier
+///   whose *"response cannot change what happens"*. Injecting context changes
+///   what the model subsequently sees, so an observer emitting it would
+///   contradict its own tier definition.
+/// - [`Gatekeeper`](crate::oci::hook::HookTier::Gatekeeper)'s power is the
+///   verdict; [`Mutator`](crate::oci::hook::HookTier::Mutator)'s is
+///   `updatedInput`.
+///
+/// The channel's one owner is **mutator control 5, visible-to-model** (S-016: a
+/// mutator's rewrite is also surfaced to the model). `mutator` is valid only at
+/// `PreToolUse`, and all three v1 clients carry `context: Some(_)` there — so
+/// the capability that genuinely needs the channel has it exactly where it is
+/// needed, and `context: None` at `Stop` / `SessionStart` denies nothing.
+/// `hook_tier_support`'s `Degraded` therefore has no bearing on this cell.
+///
+/// # The aggregation rule, stated so a test can be generated from it
+///
+/// 1. The probe set is the `(event, tier)` pairs of
+///    [`CanonicalEvent::ALL`](crate::oci::hook::CanonicalEvent::ALL) ×
+///    [`HookTier::ALL`](crate::oci::hook::HookTier::ALL) that
+///    [`HookTier::is_valid_at`](crate::oci::hook::HookTier::is_valid_at)
+///    admits — `mutator` only at `PreToolUse`, `gatekeeper` only on a
+///    verdict-admitting event. Scoping to *declarable* tiers is ADR C-013's own
+///    correction: without it the cell asks about combinations `grim build`
+///    rejects, and no client could ever reach `✓`. A tier not declarable at an
+///    event never degrades the cell — notably `verdict: &[]` at `SessionStart`,
+///    where **no** client admits a verdict, so gatekeeper is simply not a
+///    question there.
+/// 2. A pair **arms** when at least one [`HOOK_CELL_PROBE_MATCHERS`] entry
+///    returns `Ok`; it is `Declined` only when every entry returns `Err` — see
+///    that constant for why any-arms is the correct quantifier.
+/// 3. The cell is `✓` when every declarable pair arms, `◐` when some but not
+///    all do, `✗` when none do.
+///
+/// Only a **decline of a tier declarable at that event** degrades a cell. On the
+/// shipped table that makes claude and codex `✓`, and copilot `◐` — driven by
+/// `verdict: &[]` at `PostToolUse`, where gatekeeper *is* declarable because
+/// claude and codex both block there.
+///
+/// # Two things the cell deliberately does not say
+///
+/// - **It is scope-blind.** codex and copilot arm at global scope only
+///   (`SCOPE_GAPS`, ADR amendment A1); the cell does not encode that, exactly as
+///   the Rule column does not encode Junie's missing global surface. Both are
+///   Known-gaps prose (WP-L / WP-M), not a fourth cell value.
+/// - **It says nothing about whether hooks are *enabled*.** The experimental
+///   flag and the registry-trust gate are install-time consent, not client
+///   capability.
+///
+/// # Why `root` is a parameter and not minted here
+///
+/// [`RootToken`] has **no constructor** — by design, and the design is the point:
+/// a token any caller could build from a `&str` would be exactly as forgeable as
+/// the absolute path it replaced (B3). The only way to obtain one is
+/// [`hook_dispatch::root_token`](super::hook_dispatch::root_token), whose HMAC
+/// derivation reads or creates the machine key under a **real** `$GRIM_HOME` — so
+/// a documentation-matrix helper cannot mint its own without either doing
+/// filesystem I/O or acquiring a test-only bypass that would re-open what
+/// deleting the placeholder token closed. Taking it as a parameter is the third
+/// option and the honest one: the caller already has a `$GRIM_HOME` in every real
+/// consumer (WP-H's status cell runs inside a grim process; WP-L's parity test
+/// derives one in a temp dir), and the value provably cannot change the answer —
+/// which is exactly what [`hook_cell_probe_independence`](self) asserts.
+///
+/// # Fail-safe half, and the only half that holds without the projection table
+///
+/// A client with no surface answers `Declined` before anything else is consulted
+/// — 15 of 18 clients. Same split, and the same reason, as
+/// [`Vendor::hook_tier_support`]'s.
+// `allow`, not the Stub phase's `expect`, and the choice is forced: the
+// fail-safe-half test below calls this, so in the **test** target an `expect` is
+// unfulfilled and rejected, while in the **bin** target — where no production
+// caller exists yet — its absence is a `dead_code` error. Only `allow`
+// satisfies both. `allow` is inert, so the obligation is restated here where a
+// reader will see it: **WP-L's `clients.md` parity test must call this**, or the
+// doc column is asserted in prose, which is exactly what C-013 forbids. The two
+// probe constants and the two helpers below ride on this attribute as live roots.
+#[allow(
+    dead_code,
+    reason = "the production consumers are WP-L's clients.md parity test and WP-H's status cell"
+)]
+pub fn hook_matrix_cell(client: ClientTarget, root: &RootToken) -> KindSupport {
+    let vendor = client.vendor();
+    if vendor.declines_hooks_everywhere() {
+        return KindSupport::Declined;
+    }
+    // Rules 1 and 3. `declarable` is never zero — `observer` is valid at every
+    // event — so the `armed == declarable` arm cannot be reached vacuously.
+    let mut declarable = 0usize;
+    let mut armed = 0usize;
+    for event in CanonicalEvent::ALL {
+        for tier in HookTier::ALL {
+            if !tier.is_valid_at(event) {
+                continue;
+            }
+            declarable += 1;
+            // Rule 2: any-arms, never all-arms — see HOOK_CELL_PROBE_MATCHERS.
+            if HOOK_CELL_PROBE_MATCHERS
+                .iter()
+                .any(|matcher| hook_cell_probe_arms(vendor, event, tier, *matcher, root))
+            {
+                armed += 1;
+            }
+        }
+    }
+    match armed {
+        0 => KindSupport::Declined,
+        n if n == declarable => KindSupport::Native,
+        _ => KindSupport::Degraded,
+    }
+}
+
+/// Whether `(event, tier, matcher)` **registers** on `vendor` — one probe of
+/// [`hook_matrix_cell`]'s aggregation, and the only place the cell touches the
+/// arming authority.
+///
+/// `Ok` is the whole verdict: the registration either assembles or names a
+/// [`HookDecline`](super::vendor::HookDecline). The reason is deliberately
+/// dropped here — a cell has three values, and *which* refusal fired is the
+/// per-hook S-013 report's job, not the doc column's.
+fn hook_cell_probe_arms(
+    vendor: &dyn Vendor,
+    event: CanonicalEvent,
+    tier: HookTier,
+    matcher: Option<&str>,
+    root: &RootToken,
+) -> bool {
+    vendor
+        .hook_registration(
+            &hook_cell_probe_entry(tier, matcher),
+            event,
+            Path::new(HOOK_CELL_PROBE_LAUNCHER),
+            Path::new(HOOK_CELL_PROBE_TABLE),
+            root,
+        )
+        .is_ok()
+}
+
+/// The throwaway [`HookEntry`] one [`hook_cell_probe_arms`] probe registers.
+///
+/// Every field outside `(tier, matcher)` is a fixed, translation-neutral filler:
+/// the refusal order reads `tier` and `matcher` and nothing else off the entry,
+/// so a probe that varied `id`, `handler`, `timeout` or the vendor overrides
+/// would be asserting the *absence* of an influence in a way the two-launcher
+/// equality test already covers for the launcher.
+fn hook_cell_probe_entry(tier: HookTier, matcher: Option<&str>) -> HookEntry {
+    HookEntry {
+        id: "grim-matrix-probe".to_string(),
+        // `None`: the probed event is passed to `hook_registration` directly, and
+        // a `<vendor>.event` override is exactly the per-client special case a
+        // matrix cell must not encode.
+        event: None,
+        tier,
+        matcher: matcher.map(str::to_string),
+        handler: HookHandler::Command("true".to_string()),
+        timeout: None,
+        payload: None,
+        policy: None,
+        vendor: std::collections::BTreeMap::new(),
+    }
 }
 
 fn materialize_failed(msg: String) -> InstallError {
@@ -682,10 +993,17 @@ mod tests {
     }
 
     /// Parse the first markdown table of a docs page into `(client, [Skill,
-    /// Rule, Agent, MCP])` rows. Cell parsing keys on the `✓`/`◐`/`✗` token
-    /// only, whitespace- and formatting-insensitive; an unrecognized cell
+    /// Rule, Agent, MCP, Hook])` rows. Cell parsing keys on the `✓`/`◐`/`✗`
+    /// token only, whitespace- and formatting-insensitive; an unrecognized cell
     /// (e.g. a `TODO` placeholder) is a `None` that fails the caller's assert.
-    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 4])> {
+    ///
+    /// A **missing** column is the same `None` as an unrecognized token: cells
+    /// are read through `Vec::get`, so a row that stops short (a five-cell row
+    /// against a six-column matrix) still lands in the returned set and fails
+    /// the caller's placeholder assert by name. Dropping the row instead would
+    /// fail the row-set equality assert with a message about the row set, which
+    /// says nothing about the column that went missing.
+    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 5])> {
         let mut rows = Vec::new();
         let mut in_table = false;
         for line in md.lines() {
@@ -723,18 +1041,13 @@ mod tests {
                 .and_then(|r| r.split_once(']'))
                 .map_or(raw, |(text, _)| text)
                 .to_ascii_lowercase();
-            let cell = |c: &str| {
-                if c.contains('✓') {
-                    Some(Cell::Yes)
-                } else if c.contains('◐') {
-                    Some(Cell::Partial)
-                } else if c.contains('✗') {
-                    Some(Cell::No)
-                } else {
-                    None
-                }
+            let cell = |idx: usize| match cells.get(idx) {
+                Some(c) if c.contains('✓') => Some(Cell::Yes),
+                Some(c) if c.contains('◐') => Some(Cell::Partial),
+                Some(c) if c.contains('✗') => Some(Cell::No),
+                _ => None,
             };
-            rows.push((name, [cell(cells[1]), cell(cells[2]), cell(cells[3]), cell(cells[4])]));
+            rows.push((name, [cell(1), cell(2), cell(3), cell(4), cell(5)]));
         }
         rows
     }
@@ -745,12 +1058,19 @@ mod tests {
     /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_path` is
     /// `None`), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
     /// set equals `ClientTarget::ALL` exactly.
+    ///
+    /// The **Hook** column is the one cell with a different authority:
+    /// [`hook_matrix_cell`], not `kind_support` — see the assert below.
     #[test]
     fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
         use crate::install::vendor::KindSupport;
         let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/clients.md"))
             .expect("docs/src/clients.md exists (matrix parity)");
         let rows = parse_first_matrix(&md);
+        // The Hook cell's only input besides the client. Provably cannot change
+        // the answer (`hook_cell_probe_independence`), but the type has no
+        // constructor, so the test derives a real one in a temp `$GRIM_HOME`.
+        let (root, _tmp) = probe_root();
 
         let documented: std::collections::BTreeSet<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
         let expected: std::collections::BTreeSet<&str> = ClientTarget::ALL.iter().map(|c| c.as_str()).collect();
@@ -780,6 +1100,18 @@ mod tests {
             let mcp = cells[3].unwrap_or_else(|| panic!("unparsed MCP cell for '{name}' (TODO placeholder?)"));
             let supported = v.mcp_config_path(Path::new("/w"), project).is_some();
             assert_eq!(mcp != Cell::No, supported, "{name} MCP cell must track mcp_config_path");
+            // Hook column: its own authority. It CANNOT join the enumerate loop
+            // above, because Hook is not `kind_support`-driven —
+            // `hook_matrix_cell` aggregates `Vendor::hook_registration` over the
+            // declarable `(event, tier)` pairs, which is the whole reason a
+            // dedicated helper exists (C-013). Mapped like every other column.
+            let hook = cells[4].unwrap_or_else(|| panic!("unparsed Hook cell for '{name}' (TODO placeholder?)"));
+            let expected = match hook_matrix_cell(client, &root) {
+                KindSupport::Native => Cell::Yes,
+                KindSupport::Degraded => Cell::Partial,
+                KindSupport::Declined => Cell::No,
+            };
+            assert_eq!(hook, expected, "{name} Hook cell must track hook_matrix_cell");
         }
     }
 
@@ -1644,5 +1976,119 @@ mod tests {
             std::fs::read_to_string(support_dest.join("examples.md")).unwrap(),
             "# ex\n"
         );
+    }
+
+    /// A [`RootToken`] through the **real** HMAC derivation, keyed in a temp dir.
+    ///
+    /// No constructor exists and none should: minting one any other way is the
+    /// forgeability the type deletes. `_tmp` is returned so the caller keeps the
+    /// directory alive — dropping it would delete the key, which does not matter
+    /// to a token already derived, but keeping the pair together makes the
+    /// dependency visible.
+    fn probe_root() -> (RootToken, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let token = super::super::hook_dispatch::root_token(tmp.path(), super::super::hook_dispatch::RootScope::Global)
+            .expect("deriving a probe root token in a temp GRIM_HOME");
+        (token, tmp)
+    }
+
+    #[test]
+    fn hook_matrix_cell_declines_every_client_with_no_hook_surface() {
+        // The fail-safe half of C-013. Quantified over `ALL` rather than a
+        // literal list, so a new vendor is covered the day it lands.
+        let (root, _tmp) = probe_root();
+        let surfaceless: Vec<ClientTarget> = ClientTarget::ALL
+            .into_iter()
+            .filter(|client| client.vendor().hook_surface().is_none())
+            .collect();
+        assert_eq!(
+            surfaceless.len(),
+            15,
+            "15 of 18 clients decline hooks outright; the roster moved: {surfaceless:?}"
+        );
+        for client in surfaceless {
+            assert_eq!(
+                hook_matrix_cell(client, &root),
+                KindSupport::Declined,
+                "client: {client:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_matrix_cell_values_are_pinned_per_client() {
+        // The whole shipped column, so WP-L's `clients.md` cell and this code
+        // cannot drift apart silently, and so a projection-table edit that moves
+        // a cell fails here rather than in a doc review.
+        let (root, _tmp) = probe_root();
+        for client in ClientTarget::ALL {
+            let expected = match client {
+                // Both host every declarable pair at every event they support.
+                ClientTarget::Claude | ClientTarget::Codex => KindSupport::Native,
+                // `verdict: &[]` at `PostToolUse`, where gatekeeper IS declarable
+                // because claude and codex both block there — a projection-table
+                // gap, matcher-independent, so it degrades the cell.
+                ClientTarget::Copilot => KindSupport::Degraded,
+                _ => KindSupport::Declined,
+            };
+            assert_eq!(hook_matrix_cell(client, &root), expected, "client: {client:?}");
+        }
+    }
+
+    #[test]
+    fn hook_cell_probe_independence() {
+        // The cell is a documentation question, so it must not depend on a
+        // resolved `$GRIM_HOME`. Two independently derived tokens (different
+        // machine keys ⇒ different HMACs) must give the same column; if a future
+        // refusal starts reading the root, this fails rather than the doc column
+        // silently becoming environment-dependent. The launcher and table are
+        // consts, so their independence is covered by the same argument — every
+        // refusal returns before any of the three is read.
+        let (first, _a) = probe_root();
+        let (second, _b) = probe_root();
+        assert_ne!(first, second, "two temp keys must derive different tokens");
+        for client in ClientTarget::ALL {
+            assert_eq!(
+                hook_matrix_cell(client, &first),
+                hook_matrix_cell(client, &second),
+                "client: {client:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_matrix_cell_is_not_hook_tier_support() {
+        // S-013's silent guardrail, as an executable statement: for a mutator at
+        // `PreToolUse` with a match-all matcher, the capability question answers
+        // `Native` on claude and copilot while the REGISTRATION declines
+        // (decision K — a match-all mutator could select a shell-command tool).
+        // A cell filled from tier support alone would publish a mutator as
+        // available where nothing is registered.
+        let (root, _tmp) = probe_root();
+        for client in [ClientTarget::Claude, ClientTarget::Copilot] {
+            let vendor = client.vendor();
+            assert_eq!(
+                vendor.hook_tier_support(HookTier::Mutator, CanonicalEvent::PreToolUse),
+                KindSupport::Native,
+                "the capability question, {client:?}"
+            );
+            assert!(
+                !hook_cell_probe_arms(vendor, CanonicalEvent::PreToolUse, HookTier::Mutator, None, &root),
+                "but the match-all registration declines, {client:?}"
+            );
+            // And the any-arms quantifier is what keeps that per-matcher refusal
+            // from moving the cell: the same tier arms for an exact, non-shell
+            // tool name.
+            assert!(
+                hook_cell_probe_arms(
+                    vendor,
+                    CanonicalEvent::PreToolUse,
+                    HookTier::Mutator,
+                    Some("Read"),
+                    &root
+                ),
+                "an exact non-shell matcher arms the same tier, {client:?}"
+            );
+        }
     }
 }

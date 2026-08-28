@@ -143,20 +143,25 @@ pub fn derive_badge(
 
 /// Find the locked artifact whose pin is in `registry/repository`.
 ///
-/// Searches every lock list — skills, rules, agents, and mcp — so that an
-/// installed agent (SC-04) or MCP server is not incorrectly reported as
-/// `NotInstalled`.
+/// Iterates **every** kind through [`GrimoireLock::iter_artifacts`] rather
+/// than chaining the lists by hand, so an installed artifact of any kind is
+/// not incorrectly reported as `NotInstalled` (SC-04 was the agent case; the
+/// hook case shipped the same defect).
+///
+/// The hand-maintained chain is deliberately gone. It omitted `hooks`, and
+/// that is the **fifth** time in this codebase that a per-kind fan-out
+/// silently missed a kind — the others were `prune`'s declared set, the
+/// `remove`/`uninstall` kind match, `drop_from_lock`, and
+/// `evict_bundle_members`. Each was invisible until someone exercised the
+/// missing kind, because a chain that compiles cannot say what it forgot.
+/// `iter_artifacts` cannot drift, so adding a sixth kind never has to
+/// remember this file.
 fn find_by_repo<'a>(lock: &'a GrimoireLock, registry: &str, repository: &str) -> Option<&'a LockedArtifact> {
-    lock.skills
-        .iter()
-        .chain(lock.rules.iter())
-        .chain(lock.agents.iter())
-        .chain(lock.mcp.iter())
-        .find(|a| {
-            a.source
-                .pinned()
-                .is_some_and(|p| p.registry() == registry && p.repository() == repository)
-        })
+    lock.iter_artifacts().find(|a| {
+        a.source
+            .pinned()
+            .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+    })
 }
 
 #[cfg(test)]
@@ -191,6 +196,7 @@ mod tests {
 
     fn lock_with(repo: &str, byte: char) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -207,6 +213,44 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+        }
+    }
+
+    /// **Every kind the lock can hold is reachable by `find_by_repo`.**
+    ///
+    /// The regression this pins is the hand-maintained chain that searched
+    /// `skills → rules → agents → mcp` and omitted `hooks`, so every installed
+    /// hook badged `NotInstalled` in `grim search`, the TUI search rows, and
+    /// the deprecated-row filter. Asserting per-kind rather than only for
+    /// `hooks` is the point: a chain can forget any kind, and this loop fails
+    /// for whichever one a future edit drops. It also fails if a **new** kind
+    /// is added to `ArtifactKind` and not to the lock's own iterator, because
+    /// the match below is total.
+    #[test]
+    fn every_locked_kind_is_findable_by_repo() {
+        for kind in crate::oci::ArtifactKind::ALL {
+            // Bundles never enter the lock as artifacts — they expand into
+            // members — so there is nothing to find and nothing to assert.
+            if kind == crate::oci::ArtifactKind::Bundle {
+                continue;
+            }
+            let repo = "acme/thing";
+            let artifact = LockedArtifact::direct("x".to_string(), kind, pinned(repo, 'a'));
+            let mut lock = lock_with(repo, 'a');
+            lock.skills.clear();
+            match kind {
+                crate::oci::ArtifactKind::Skill => lock.skills.push(artifact),
+                crate::oci::ArtifactKind::Rule => lock.rules.push(artifact),
+                crate::oci::ArtifactKind::Agent => lock.agents.push(artifact),
+                crate::oci::ArtifactKind::Mcp => lock.mcp.push(artifact),
+                crate::oci::ArtifactKind::Hook => lock.hooks.push(artifact),
+                crate::oci::ArtifactKind::Bundle => unreachable!("skipped above"),
+            }
+            assert!(
+                find_by_repo(&lock, "localhost:5000", repo).is_some(),
+                "a locked {kind:?} must be findable by repo; a per-kind chain that omits it \
+                 badges every installed artifact of that kind as NotInstalled"
+            );
         }
     }
 
@@ -431,6 +475,7 @@ mod tests {
 
         // Lock lists the agent — ONLY in the agents array.
         let lk = GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -504,6 +549,7 @@ mod tests {
 
         // The lock lists the server ONLY in the mcp array.
         let lk = GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,

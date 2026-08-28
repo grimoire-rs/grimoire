@@ -14,12 +14,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::claude_config;
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, Vendor, env_dir, home_dir};
+use super::vendor::{
+    FieldType, HOOK_MARKER_KEY, HOOK_MARKER_VALUE, HookSpliceShape, KnownField, SplicedHandler, Vendor, env_dir,
+    home_dir,
+};
 
 /// Claude Code.
 pub struct ClaudeVendor;
@@ -192,6 +196,96 @@ impl Vendor for ClaudeVendor {
         CLAUDE_SKILL_FIELDS
     }
 
+    /// Claude's hook registrations are a managed member spliced into a config
+    /// the **user** owns — `~/.claude/settings.json` at global scope,
+    /// `<workspace>/.claude/settings.local.json` at project scope.
+    ///
+    /// **Claude is the only client grim registers at project scope**, and the
+    /// asymmetry is not about the surface's shape: `settings.local.json` is
+    /// gitignored by the client itself, so an absolute launcher path written
+    /// there is correct by construction and nothing armable is committed (I1,
+    /// attacker T3). Codex and copilot have working project surfaces too and
+    /// still decline, because theirs are *tracked* files.
+    ///
+    /// Two corrections WP-B executed against the earlier design
+    /// (`research_hooks_launcher_verification.md` § 2.1, § 6.1), both of which a
+    /// later reader will be tempted to undo:
+    ///
+    /// - **Claude has no exec-form argv.** The entry is
+    ///   `{"type":"command","command":"<string>"}` and that string is run by
+    ///   `/bin/sh` with full expansion — WP-B set a variable in the client's
+    ///   environment and watched it expand into the launcher's argv. Claude is
+    ///   *not* immune "by construction, no shell"; it is immune because grim
+    ///   writes an absolute literal into a non-committed file.
+    /// - **The `[ -x "$L" ] || exit 0` guard is emitted for claude too.** Claude
+    ///   is fail-open, so its absence is not a Block — but without it the user
+    ///   gets a spurious `Hook command failed with code 127` in the transcript
+    ///   on *every* tool call while grim is not yet installed.
+    ///
+    /// **Watchlisted, and I1 leans on it:** that Claude Code itself adds
+    /// `settings.local.json` to `.gitignore` is documented upstream but was
+    /// **not** verified by execution (WP-B row S4 — the probe file was
+    /// hand-written). Re-verify before widening anything that depends on it.
+    fn hook_surface(&self) -> Option<HookSurface> {
+        Some(HookSurface::SpliceConfig)
+    }
+
+    fn hook_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        hook_config_path(workspace, scope)
+    }
+
+    /// Claude's nested address: `hooks.<Event>[].hooks[]`, groups keyed on
+    /// `matcher`.
+    ///
+    /// **`*` is the match-all group value**, which is Claude's own documented
+    /// spelling for "every tool". It is deliberately *not* shared with the two
+    /// `OwnFile` clients, which omit the field instead — copilot rejects `*` as
+    /// an invalid regex, so one shared literal would silently skip every
+    /// match-all hook there.
+    ///
+    /// The element is `{type, command, timeout?, com.grimoire.managed}`. The
+    /// marker goes on the **element**, never the enclosing group: the upsert
+    /// primitive tests its `identity_keys` against the element and
+    /// `owned_nested_handlers` matches its `owner` predicate against elements,
+    /// so a group-level marker makes the upsert refuse *and* the reap own
+    /// nothing.
+    fn hook_splice_shape(&self) -> Option<HookSpliceShape> {
+        Some(HookSpliceShape {
+            container: "hooks",
+            group_key: "matcher",
+            elements_key: "hooks",
+        })
+    }
+
+    fn hook_spliced_handler(&self, registration: &HookRegistration) -> Option<SplicedHandler> {
+        let mut element = serde_json::Map::new();
+        element.insert("type".to_string(), serde_json::Value::String("command".to_string()));
+        // v1 registers the shell form on every client — `HookCommand::Argv` is
+        // never constructed, because copilot's exec form removes the shell and
+        // therefore the launcher guard.
+        let command = match &registration.command {
+            HookCommand::Shell(shell) => shell.clone(),
+            // Unreachable in v1 and refused rather than joined: joining an argv
+            // array into a shell string would re-introduce the quoting bug the
+            // single-generator rule exists to prevent.
+            HookCommand::Argv(_) => return None,
+        };
+        element.insert("command".to_string(), serde_json::Value::String(command));
+        if let Some(timeout) = registration.timeout {
+            element.insert("timeout".to_string(), serde_json::Value::from(timeout));
+        }
+        element.insert(
+            HOOK_MARKER_KEY.to_string(),
+            serde_json::Value::String(HOOK_MARKER_VALUE.to_string()),
+        );
+        Some(SplicedHandler {
+            shape: self.hook_splice_shape()?,
+            member: registration.event.clone(),
+            group_value: registration.matcher.clone().unwrap_or_else(|| "*".to_string()),
+            element: serde_json::Value::Object(element),
+        })
+    }
+
     // Rules: `paths:` is native and authored canonically; Claude defines
     // no vendor-specific rule fields today, so the registry is empty.
 
@@ -340,12 +434,46 @@ impl Vendor for ClaudeVendor {
         // projected common field), foreign vendor keys drop.
         render::render_agent_canonical(parsed, self, CLAUDE_AGENT_OVERRIDES)
     }
+
+    // **No `sync_config` override.** Hook convergence deliberately does *not*
+    // ride that seam: it needs the resolved hook policy (the feature flag and
+    // per-registry trust), the anchor roots, `$GRIM_HOME` and the running
+    // binary's path, none of which `sync_config(state, workspace, scope)` can
+    // see. It runs instead through `hook_registrar::converge_clients`, called
+    // once per mutating command with the policy the command resolved. Claude
+    // owns no other vendor config, so the trait default (a no-op) is correct
+    // here.
 }
 
 /// Claude's layout root for a scope: the project `.claude` dir, or the
 /// native user-level config root Claude Code actually discovers (falling
 /// back to the workspace layout when neither `$CLAUDE_CONFIG_DIR` nor
 /// `$HOME` resolves).
+/// The settings file Claude reads hook registrations from, per scope.
+///
+/// **Two different files, and the difference is the whole reason Claude is the
+/// only client grim registers at project scope:**
+///
+/// - project → `<workspace>/.claude/settings.local.json`, which the client
+///   itself treats as per-developer local. That is what lets an **absolute**
+///   launcher path live inside a repository without violating I1: the path is
+///   correct on this machine only, and nothing armable is committed.
+/// - global → `<claude_root>/settings.json` (`$CLAUDE_CONFIG_DIR` when set).
+///
+/// Never `settings.json` at project scope: that file is tracked in most repos,
+/// and a tracked registration is the shape § Launcher rejected outright.
+///
+/// Always `Some` — [`scope_root`] falls back to the project `.claude` dir rather
+/// than failing — so the `Option` exists for signature parity with the two
+/// global-only vendors, not because Claude can lack a surface.
+fn hook_config_path(workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+    let file = match scope {
+        ConfigScope::Project => "settings.local.json",
+        ConfigScope::Global => "settings.json",
+    };
+    Some(scope_root(workspace, scope).join(file))
+}
+
 pub(crate) fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".claude"),

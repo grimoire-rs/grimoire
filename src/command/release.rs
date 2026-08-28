@@ -44,7 +44,10 @@ pub struct ReleaseArgs {
     pub reference: String,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
+    ///
+    /// `hook` appended, never inserted — widening an accepted value set is the
+    /// additive direction on a frozen CLI surface (Principle 9).
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.
@@ -220,11 +223,26 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     let push_repo = push.as_ref().map_or_else(|| repo.clone(), |p| p.rewrite(&repo));
     let pushed_to = push.as_ref().map(|p| p.rewrite(&id).to_string());
 
-    if kind == ArtifactKind::Bundle {
-        return release_bundle(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
-    }
-    if kind == ArtifactKind::Mcp {
-        return release_mcp(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
+    // C-016(b)'s second production silent site, converted into a compiler-forced
+    // one. As two independent `if kind == …` checks this was a hand-maintained
+    // dispatch: a kind needing its own release path was silently routed down the
+    // shared one instead, with no compile error and no failing test. A total
+    // `match` makes "which path does this kind take?" a decision the compiler
+    // demands for every kind that ever exists.
+    //
+    // `Hook` deliberately takes the shared path: it genuinely is a directory
+    // tree in one tar layer, so `validate_and_pack` describes it exactly (see
+    // `build::pack_hook_dir`) and a dedicated `release_hook` would duplicate the
+    // push, tag-cascade, and companion logic to no benefit. `Bundle` and `Mcp`
+    // diverge because their layers are not tars of a directory at all.
+    match kind {
+        ArtifactKind::Bundle => {
+            return release_bundle(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
+        }
+        ArtifactKind::Mcp => {
+            return release_mcp(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
+        }
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook => {}
     }
 
     // Derive provenance once before packing. Under `--git` a non-git path

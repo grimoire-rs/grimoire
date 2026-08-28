@@ -214,17 +214,20 @@ pub async fn resolve_lock_partial(
 /// Collect the registry artifacts to resolve in deterministic `BTreeMap`
 /// order: every declared skill (kind Skill), then every declared rule
 /// (kind Rule), then every declared agent (kind Agent), then every
-/// declared MCP descriptor (kind Mcp). Path-sourced entries never become
+/// declared MCP descriptor (kind Mcp), then every declared hook (kind
+/// Hook). Path-sourced entries never become
 /// work items — they pin locally (no registry round-trip), so the
 /// registry-only invariant of the work list is structural. The final
 /// `(kind, name)` sort happens after resolution.
 fn collect_work(set: &DesiredSet) -> Vec<WorkItem> {
-    let mut work = Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len() + set.mcp.len());
+    let mut work =
+        Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len() + set.mcp.len() + set.hooks.len());
     let tables = [
         (&set.skills, ArtifactKind::Skill),
         (&set.rules, ArtifactKind::Rule),
         (&set.agents, ArtifactKind::Agent),
         (&set.mcp, ArtifactKind::Mcp),
+        (&set.hooks, ArtifactKind::Hook),
     ];
     for (table, kind) in tables {
         for (name, source) in table.iter() {
@@ -940,8 +943,15 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
     let mut rules = Vec::new();
     let mut agents = Vec::new();
     let mut mcp = Vec::new();
+    let mut hooks = Vec::new();
     for artifact in resolved {
         match artifact.kind {
+            // A real fan-in arm, not a marker: `collect_work` above now emits
+            // `Hook` work items from `set.hooks`, so the gate that justified the
+            // `unreachable!()` here ("no hooks map exists, so no resolved
+            // artifact can carry Hook") no longer holds. Every resolved kind
+            // lands in its own lock list.
+            ArtifactKind::Hook => hooks.push(artifact),
             ArtifactKind::Skill => skills.push(artifact),
             ArtifactKind::Rule => rules.push(artifact),
             ArtifactKind::Agent => agents.push(artifact),
@@ -965,6 +975,7 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
         rules,
         agents,
         mcp,
+        hooks,
         bundles,
     }
 }
@@ -1337,6 +1348,7 @@ mod tests {
     async fn partial_stale_hash_gate_fires_before_any_access() {
         let set = single_skill_set();
         let previous = GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1401,6 +1413,7 @@ mod tests {
             PinnedIdentifier::try_from(prev_a_id).unwrap(),
         );
         let previous = GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1446,6 +1459,7 @@ mod tests {
         let set = single_skill_set();
         let current = set.declaration_hash_cached().to_string();
         let previous = GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
