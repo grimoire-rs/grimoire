@@ -28,6 +28,7 @@ Behaviors covered:
 """
 from __future__ import annotations
 
+import os
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
@@ -774,9 +775,19 @@ def test_registry_fields_works_without_config(
         f"registry fields must list exactly the 6 per-registry fields; got: {items!r}"
     )
     keys = [i.get("key") for i in items]
-    assert keys == ["oci", "index", "default", "include", "exclude", "insecure"], (
-        f"fields must be oci, index, default, include, exclude, insecure in that "
-        f"order; got: {keys!r}"
+    # `RegistryField::ALL` is documented append-only with frozen positions,
+    # and the `default` index assertion below depends on that, so a new
+    # field never lands mid-list.
+    assert keys == [
+        "oci",
+        "index",
+        "default",
+        "include",
+        "exclude",
+        "insecure",
+    ], (
+        f"fields must be oci, index, default, include, exclude, insecure "
+        f"in that order; got: {keys!r}"
     )
     # The browse filters were appended after `default` partly to keep this
     # index stable.
@@ -1005,6 +1016,10 @@ def test_set_registry_include_with_a_bad_pattern_writes_nothing(
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="66,560 bytes of --include flags exceeds the ~32,767-char Windows command line",
+)
 def test_registry_add_over_the_aggregate_pattern_budget_exits_65(
     grim_at: object,
     project_dir: Path,

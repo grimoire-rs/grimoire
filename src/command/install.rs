@@ -52,6 +52,15 @@ pub struct InstallArgs {
     /// generic `agents` client when none are detected.
     #[arg(long = "client")]
     pub client: Vec<String>,
+
+    /// `--trust-hooks` / `--no-trust-hooks`: the per-invocation half of the
+    /// same question the workspace consent record answers durably.
+    ///
+    /// `--trust-hooks` is the CI escape for C-023's "no TTY never asks": a
+    /// non-interactive run declines an unconsented workspace rather than
+    /// prompting, and this is the only way to say yes without a terminal.
+    #[command(flatten)]
+    pub hook_trust: crate::cli::options::HookTrustOpts,
 }
 
 /// Run `grim install`.
@@ -76,13 +85,20 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
 
     let lock = require_fresh_lock(&scope)?;
 
+    // The hook consent pass, at the mutating boundary and above the per-client
+    // loop: it prompts at most once per registry and returns the policy every
+    // downstream seam reads. Deliberately NOT inside `InstallTarget::parse` —
+    // that seam is shared with `grim status`, `grim search` and `grim context`,
+    // and a prompt there would make a read-only report ask for hook consent.
+    let hook_policy = super::hook_consent::resolve(ctx, &scope, &lock, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
         &args.client,
         &scope.options.clients,
         &scope.options.vendors,
-    ))?;
+    ))?
+    .with_hook_policy(hook_policy);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
@@ -114,7 +130,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         .await,
     )?;
 
-    finish(outcomes)
+    let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
+    finish(outcomes, &armed)
 }
 
 /// One-off render of a local path source into the clients: validate +
@@ -192,6 +209,32 @@ async fn dev_install(
     // declaration the dev install never owned (data loss). Keeping dev records
     // disjoint from declared bindings makes that impossible downstream.
     let already_declared = match kind {
+        // ⛔ DECISION (WP-H): a hook is NOT dev-installable from a path in v1.
+        // Recorded here rather than left to a marker, because the plan named it
+        // an open decision and a fail-safe default is not the same as a made
+        // decision.
+        //
+        // Three reasons, any one sufficient:
+        //  1. **The pin the arming path leans on does not exist.** A path
+        //     source carries no registry and no digest, so the consent
+        //     record's `<binding>@<registry>/<repository>` entry has nothing
+        //     to name and the lock has nothing to pin. Dev-installing would
+        //     arm code identified by neither, which invariant I4
+        //     (default-deny for anything that executes) forbids outright.
+        //  2. **It would put an armable payload inside a repository.** A dev
+        //     install's source is a working-tree path; the natural authoring
+        //     loop is "edit the hook in the repo, re-install", i.e. exactly the
+        //     repo-resident arming invariant I1 exists to prevent.
+        //  3. It is additive to allow later (a new accepted `--kind` value) and
+        //     breaking to withdraw, so the freeze argues for the narrow start.
+        //
+        // Reachability today: dev-install's own `--kind` value_parser is
+        // ["skill","rule","agent"] and path-shape inference never yields `Hook`,
+        // so this arm is defence in depth against a future widening rather than
+        // a live path — which is why it refuses (DataError/65) instead of
+        // `unreachable!()`. Authoring loop for a hook author: `grim build` to
+        // validate, `grim release` to a local registry, then `grim add`.
+        ArtifactKind::Hook => return Err(crate::oci::hook::unsupported_kind().into()),
         ArtifactKind::Skill => scope.set.skills.contains_key(&name),
         ArtifactKind::Rule => scope.set.rules.contains_key(&name),
         ArtifactKind::Agent => scope.set.agents.contains_key(&name),
@@ -260,6 +303,7 @@ async fn dev_install(
         bundles: Vec::new(),
     };
     let mut synth = crate::lock::grimoire_lock::GrimoireLock {
+        hooks: vec![],
         metadata: crate::lock::grimoire_lock::LockMetadata {
             lock_version: crate::lock::lock_version::LockVersion::V1,
             declaration_hash_version: crate::config::DECLARATION_HASH_VERSION,
@@ -274,6 +318,11 @@ async fn dev_install(
         bundles: Vec::new(),
     };
     match kind {
+        // Second half of the same decision recorded above (hooks are not
+        // dev-installable from a path in v1) — the guard is repeated because
+        // this match builds the synthetic lock and the one above only checked
+        // for a colliding declaration, so neither subsumes the other.
+        ArtifactKind::Hook => return Err(crate::oci::hook::unsupported_kind().into()),
         ArtifactKind::Skill => synth.skills.push(entry),
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
@@ -281,13 +330,20 @@ async fn dev_install(
         ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("dev-install is limited to skill/rule/agent"),
     }
 
+    // A dev install's synthetic lock can hold no hook — both `ArtifactKind::Hook`
+    // arms above refuse a path source, which carries neither the registry the
+    // consent record names nor the digest the lock pins. The policy is still
+    // resolved and attached so convergence keeps a hook armed by an earlier
+    // `grim install` correctly converged rather than untouched-by-omission.
+    let hook_policy = super::hook_consent::resolve(ctx, scope, &synth, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
         &args.client,
         &scope.options.clients,
         &scope.options.vendors,
-    ))?;
+    ))?
+    .with_hook_policy(hook_policy);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
@@ -311,7 +367,8 @@ async fn dev_install(
         .await,
     )?;
 
-    finish(outcomes)
+    let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
+    finish(outcomes, &armed)
 }
 
 /// Wrap an install-state I/O failure as the install-tier `TargetIo` error.
@@ -356,13 +413,70 @@ pub(crate) fn require_fresh_lock(scope: &ResolvedScope) -> anyhow::Result<crate:
     Ok(lock)
 }
 
+/// The `(client, tier)` pairs the dispatch table holds per hook, after
+/// convergence has run.
+///
+/// Read from the table rather than re-derived from the trust gates: `grim
+/// status` and `grim hook list` already answer "is this armed?" from the same
+/// file, and a third *derivation* is how three commands come to disagree about
+/// one hook. This is a third consumer of one source.
+///
+/// Uses [`hook_dispatch::existing_root_token`], which never creates the machine
+/// key. A report path must not mint arming key material, and by the time this
+/// runs convergence has already created the key if anything armed — so a missing
+/// key means nothing armed and the empty map is the right answer.
+///
+/// Every failure degrades to an empty map: the install itself succeeded, and a
+/// report that failed to describe it would turn a completed install into an
+/// error (I3).
+fn armed_after_convergence(
+    grim_home: &std::path::Path,
+    workspace: &std::path::Path,
+    scope: crate::config::ConfigScope,
+) -> std::collections::BTreeMap<String, Vec<crate::api::install_report::ArmedEntry>> {
+    use crate::install::hook_dispatch;
+    let mut out: std::collections::BTreeMap<String, Vec<crate::api::install_report::ArmedEntry>> =
+        std::collections::BTreeMap::new();
+    let root = crate::install::hook_registrar::root_scope_for(workspace, scope);
+    let Ok(Some(token)) = hook_dispatch::existing_root_token(grim_home, root) else {
+        return out;
+    };
+    let (table, _degrade) = hook_dispatch::read_table(&hook_dispatch::dispatch_path(grim_home));
+    if let Some(entry) = table.roots.get(&token) {
+        for row in &entry.hooks {
+            out.entry(row.artifact.clone())
+                .or_default()
+                .push(crate::api::install_report::ArmedEntry {
+                    client: row.client.clone(),
+                    tier: row.tier.to_string(),
+                });
+        }
+    }
+    // One artifact can arm several clients and several entries per client; sorted
+    // and deduped so the row is deterministic and does not repeat a pair once per
+    // `[[hooks]]` entry.
+    for pairs in out.values_mut() {
+        pairs.sort();
+        pairs.dedup();
+    }
+    out
+}
+
 /// Turn per-artifact outcomes into the report + the worst exit code. A
 /// refusal or a hard error makes the run fail; a clean install/no-op is
 /// success.
 ///
 /// Shared with `grim add`'s install-on-add path (which discards the report
 /// and only propagates the first refusal/error).
-pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallReport, ExitCode)> {
+///
+/// `armed` maps a hook's binding name to the `(client, tier)` pairs the
+/// dispatch table now holds for it, built by [`armed_after_convergence`]. It is
+/// consulted only for `ArtifactKind::Hook`, so every other kind reports `null`
+/// — "the question does not apply" rather than "armed nowhere" (S-002).
+pub(crate) fn finish(
+    outcomes: Vec<ArtifactInstall>,
+    armed: &std::collections::BTreeMap<String, Vec<crate::api::install_report::ArmedEntry>>,
+) -> anyhow::Result<(InstallReport, ExitCode)> {
     let mut entries = Vec::with_capacity(outcomes.len());
     let mut first_error: Option<crate::error::Error> = None;
 
@@ -390,11 +504,14 @@ pub(crate) fn finish(outcomes: Vec<ArtifactInstall>) -> anyhow::Result<(InstallR
                 InstallStatus::Skipped
             }
         };
+        let armed_for = (reference.kind == crate::oci::ArtifactKind::Hook)
+            .then(|| armed.get(&reference.name).cloned().unwrap_or_default());
         entries.push(InstallEntry {
             kind: reference.kind,
             name: reference.name,
             target,
             status,
+            armed: armed_for,
         });
     }
 
@@ -454,7 +571,7 @@ mod tests {
                 result: Ok(InstallOutcome::AlreadyInstalled),
             },
         ];
-        let (report, code) = finish(outcomes).expect("clean run is success");
+        let (report, code) = finish(outcomes, &Default::default()).expect("clean run is success");
         assert_eq!(code, ExitCode::Success);
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["items"][0]["status"], "installed");
@@ -471,7 +588,7 @@ mod tests {
                 actual: crate::oci::Digest::Sha256("b".repeat(64)),
             }),
         }];
-        let err = finish(outcomes).expect_err("refusal must fail the run");
+        let err = finish(outcomes, &Default::default()).expect_err("refusal must fail the run");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -484,7 +601,7 @@ mod tests {
                 InstallErrorKind::BlobMissing,
             ))),
         }];
-        let err = finish(outcomes).expect_err("hard error must propagate");
+        let err = finish(outcomes, &Default::default()).expect_err("hard error must propagate");
         assert_eq!(crate::error::classify_error(&err), ExitCode::NotFound);
     }
 }

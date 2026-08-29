@@ -106,10 +106,17 @@ class CastRecorder:
         # grim never truncates its own table columns, so the PTY must be
         # wide enough to hold the full, unshortened digest -- there is no
         # post-hoc rewriting left to un-wrap a line the terminal already
-        # hard-wrapped. `grim status`'s widest row
-        # (Kind/Name/Source/Pinned@sha256-64hex/State) measures ~147 cols
-        # for the real `ghcr.io/grimoire-rs/skills/grim-usage` ref; 180
-        # leaves headroom.
+        # hard-wrapped. `grim status` is **six** columns as of the hook kind
+        # (Kind/Name/Source/Pinned/State/Note -- `Note` carries the per-client
+        # hook arming verdict, `-` for every other kind), and its widest line
+        # is the *header* row, since `print_table` trims the last column's
+        # trailing padding: 5 + 2 + 10 + 2 + 6 + 2 + 109 + 2 + 9 + 2 + 4 =
+        # **153** cols for the real `ghcr.io/grimoire-rs/skills/grim-usage`
+        # ref (its `@sha256:`-pinned form is the 109-wide cell). That is the
+        # same arithmetic that produced the previous 5-column figure of 147;
+        # `Note` adds a two-space gap plus its own 4-char header. 180 still
+        # leaves headroom -- but note the margin is now 27 cols, not 33, and
+        # a longer demo ref eats it directly.
         width: int = 180,
         height: int = 24,
         prompt: str = "$ ",

@@ -44,11 +44,21 @@ def write_config(
     rules: dict[str, str] | None = None,
     bundles: dict[str, str] | None = None,
     agents: dict[str, str] | None = None,
+    hooks: dict[str, str] | None = None,
+    options: dict[str, str] | None = None,
 ) -> Path:
-    """Write a ``grimoire.toml`` with the given skill/rule/bundle/agent refs.
+    """Write a ``grimoire.toml`` with the given skill/rule/bundle/agent/hook refs.
 
     Each value is a fully-qualified ``registry/repo:tag`` (or ``@digest``)
     string, exactly as a user would write it. Returns the config path.
+
+    ``[hooks]`` is emitted **only when non-empty**, and last — matching what
+    ``grim`` itself writes (``command::add::write_config``). An always-present
+    empty ``[hooks]`` table would change the declaration hash of every existing
+    fixture, so the emptiness check is load-bearing, not cosmetic.
+
+    ``options`` writes raw ``key = value`` lines into an ``[options]`` table
+    (values are passed through verbatim, so a string needs its own quotes).
     """
     lines: list[str] = []
     if bundles:
@@ -64,6 +74,14 @@ def write_config(
     lines.append("[agents]")
     for name, ref in (agents or {}).items():
         lines.append(f'{name} = "{ref}"')
+    if hooks:
+        lines.append("[hooks]")
+        for name, ref in hooks.items():
+            lines.append(f'{name} = "{ref}"')
+    if options:
+        lines.append("[options]")
+        for key, value in options.items():
+            lines.append(f"{key} = {value}")
     cfg = project_dir / "grimoire.toml"
     cfg.write_text("\n".join(lines) + "\n")
     return cfg
@@ -76,15 +94,64 @@ def make_bundle(
 ) -> PublishedArtifact:
     """Build and push a bundle artifact.
 
-    ``members`` is a list of ``(kind, name, id)`` tuples, where ``kind`` is
-    ``"skill"`` or ``"rule"``, ``name`` is the binding name, and ``id`` is
-    the fully-qualified member reference (floating tag or ``@digest``). The
-    bundle's single layer is the JSON members document Grimoire reads on
-    expansion.
+    ``members`` is a list of ``(kind, name, id)`` tuples, where ``kind`` is any
+    installable kind — ``"skill"``, ``"rule"``, ``"agent"``, ``"mcp"``, or
+    ``"hook"`` (never ``"bundle"``; grim rejects nesting at expansion) — ``name``
+    is the binding name, and ``id`` is the fully-qualified member reference
+    (floating tag or ``@digest``). The bundle's single layer is the JSON members
+    document Grimoire reads on expansion.
+
+    Members are written in the caller's order, deliberately: grim sorts them by
+    ``(kind, name)`` when it authors a bundle, so passing an unsorted list here
+    exercises the read path against a hand-authored layer rather than only
+    against grim's own output.
     """
     doc = {"members": [{"kind": k, "name": n, "id": i} for (k, n, i) in members]}
     layer = json.dumps(doc).encode()
     return push_artifact(repo, tag, layer, "bundle")
+
+
+def make_hook(
+    repo: str,
+    name: str,
+    tag: str = "1.0.0",
+    *,
+    event: str = "PreToolUse",
+    tier: str = "gatekeeper",
+    matcher: str = "Bash",
+) -> PublishedArtifact:
+    """Build and push a minimal valid ``hook`` artifact.
+
+    A hook is a **directory** artifact (``is_dir_artifact()``): the tar is rooted
+    at ``<name>/`` and carries ``hook.toml`` plus the payload the handler runs.
+    The payload here is inert (``exit 0``) — these tests assert declaration,
+    locking, and provenance, never that a handler fired, so a payload with any
+    observable effect would only muddy a failure.
+
+    Note the manifest ``name`` must equal the directory stem or ``grim build``
+    fails (65); the tar root and the ``name`` field are therefore both ``name``.
+    """
+    manifest = (
+        "schema      = 1\n"
+        f'name        = "{name}"\n'
+        f'description = "test hook {name}"\n'
+        "\n"
+        "[[hooks]]\n"
+        f'id      = "{name}-handler"\n'
+        f'event   = "{event}"\n'
+        f'tier    = "{tier}"\n'
+        f'matcher = "{matcher}"\n'
+        'argv    = ["sh", "${GRIM_HOOK_DIR}/handler.sh"]\n'
+        "timeout = 30\n"
+        'payload = "stdin"\n'
+    )
+    tar_bytes = _tar_of(
+        {
+            f"{name}/hook.toml": manifest,
+            f"{name}/handler.sh": "#!/bin/sh\nexit 0\n",
+        }
+    )
+    return push_artifact(repo, tag, tar_bytes, "hook")
 
 
 def make_description(repo: str, files: dict[str, str | bytes]) -> PublishedArtifact:

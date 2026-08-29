@@ -80,6 +80,13 @@ impl ConfigOptions {
             // when a client has no entry, which is already the resting
             // state — its consumer reads the table raw off `ConfigOptions`.
             vendors: _,
+            // Same reasoning again, plus one of its own: `hooks` rests at
+            // `false`, which is already the field's own default, so there is
+            // nothing to substitute here. It has **no** override at all —
+            // the flag is config-only by owner decision (2026-08-17), so
+            // there is no environment read to place anywhere, here or at a
+            // consumer.
+            experimental: _,
         } = self;
         let TuiOptions {
             default_view,
@@ -123,6 +130,7 @@ mod tests {
         // they are ignored by `resolved()` — they are read raw at their own
         // consumers, never routed into `ResolvedOptions`.
         let options = ConfigOptions {
+            experimental: Default::default(),
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
             vendors: Default::default(),

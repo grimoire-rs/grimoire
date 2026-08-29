@@ -47,7 +47,7 @@ pub struct KeySpec {
     pub constraints: Option<ValueConstraints>,
 }
 
-/// The 7 fixed `options.*` config keys, in listing order.
+/// The 8 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -57,13 +57,19 @@ pub enum ConfigKey {
     TuiGroupByType,
     TuiTreeSeparators,
     TuiExpandLevels,
+    ExperimentalHooks,
 }
 
 impl ConfigKey {
     /// Every fixed key, in the order `grim config list` emits them —
     /// pins today's `collect_entries` order: `default_registry`,
-    /// `clients`, `show_deprecated`, then the `tui.*` keys.
-    pub const ALL: [ConfigKey; 7] = [
+    /// `clients`, `show_deprecated`, then the `tui.*` keys, then the
+    /// `experimental.*` keys.
+    ///
+    /// **Append here, never insert**, for the reason spelled out on
+    /// [`RegistryField::ALL`]: this array is the row order of
+    /// `grim config list`.
+    pub const ALL: [ConfigKey; 8] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -71,6 +77,7 @@ impl ConfigKey {
         ConfigKey::TuiGroupByType,
         ConfigKey::TuiTreeSeparators,
         ConfigKey::TuiExpandLevels,
+        ConfigKey::ExperimentalHooks,
     ];
 
     /// This key's static metadata.
@@ -158,6 +165,21 @@ impl ConfigKey {
                            Defaults to `1` (registry roots only); `0` expands the tree fully.",
             constraints: None,
         };
+        const EXPERIMENTAL_HOOKS: KeySpec = KeySpec {
+            key: "options.experimental.hooks",
+            // Literal `false` rather than a `config::defaults` const: the
+            // runtime fallback is `bool::default()` on a plain field, and
+            // `experimental_hooks_spec_matches_derived_default` pins this
+            // against `ExperimentalOptions::default()`.
+            value_type: ValueType::Bool { default: false },
+            title: "Experimental hooks",
+            description: "Controls whether hooks are active — a declared hook resolves, installs, and \
+                           arms its clients. Disabled by default, so a declared hook is reported and \
+                           never armed. Config only — no environment variable overrides this; set it \
+                           with `grim config set options.experimental.hooks true`, in project or \
+                           global config.",
+            constraints: None,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -166,6 +188,7 @@ impl ConfigKey {
             Self::TuiGroupByType => &TUI_GROUP_BY_TYPE,
             Self::TuiTreeSeparators => &TUI_TREE_SEPARATORS,
             Self::TuiExpandLevels => &TUI_EXPAND_LEVELS,
+            Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
         }
     }
 
@@ -529,8 +552,11 @@ mod tests {
     /// A fully-populated `ConfigOptions` — every field set/non-empty/true so
     /// no serde skip fires, including one `[options.vendors]` entry.
     fn fully_populated_options() -> crate::config::declaration::ConfigOptions {
-        use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions, VendorOptions};
+        use crate::config::declaration::{ConfigOptions, DefaultView, ExperimentalOptions, TuiOptions, VendorOptions};
         ConfigOptions {
+            // `true`, not `Default::default()`: a defaulted table serde-skips,
+            // and this fixture exists precisely to defeat every skip.
+            experimental: ExperimentalOptions { hooks: true },
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
             tui: TuiOptions {
@@ -781,6 +807,7 @@ mod tests {
             .expect("config schema must serialize to JSON");
         let config_options = &schema["$defs"]["ConfigOptions"];
         let tui_options = resolve_ref(&schema, &config_options["properties"]["tui"]);
+        let experimental_options = resolve_ref(&schema, &config_options["properties"]["experimental"]);
         let registry_config = &schema["$defs"]["RegistryConfig"];
 
         for key in ConfigKey::ALL {
@@ -793,6 +820,7 @@ mod tests {
                 ConfigKey::TuiGroupByType => &tui_options["properties"]["group_by_type"],
                 ConfigKey::TuiTreeSeparators => &tui_options["properties"]["tree_separators"],
                 ConfigKey::TuiExpandLevels => &tui_options["properties"]["expand_levels"],
+                ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);

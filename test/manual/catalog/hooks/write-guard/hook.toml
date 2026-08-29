@@ -1,0 +1,21 @@
+# Manual-rig `gatekeeper` example. Read `test/manual/README.md` § Hooks.
+#
+# NOT a security control. The gatekeeper tier is not a security boundary in
+# this design: every layer fails open, so a guardrail that does not fire can
+# never deny you a tool call. This one exists to show how a verdict reaches
+# the client.
+
+schema = 1
+name = "write-guard"
+description = "Gatekeeper example for the manual rig: refuses a Write tool call whose payload mentions the literal `.env`, returning the refusal as a JSON verdict rather than an exit code. NOT a security control — a substring match that any rewording evades."
+
+[[hooks]]
+id = "refuse-dotenv-write"
+# `PreToolUse` is the only moment where refusing is meaningful; a verdict at
+# `PostToolUse` arrives after the write happened.
+event = "PreToolUse"
+tier = "gatekeeper"
+matcher = "Write"
+argv = ["sh", "${GRIM_HOOK_DIR}/guard.sh"]
+timeout = 5
+payload = "stdin"

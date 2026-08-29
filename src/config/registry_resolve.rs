@@ -66,8 +66,10 @@ pub fn classify_index(locator: &str) -> Option<SourceKind> {
 /// Dedup key for a declared locator (issue #28): trim whitespace, strip
 /// trailing slashes, and case-fold the scheme + host portion. The path
 /// stays case-sensitive (OCI namespaces and index paths are identity).
-/// Used only as the `seen` key — the stored url stays as first-declared.
-fn normalize_locator(locator: &str) -> String {
+/// Used as the `seen` key here — the stored url stays as first-declared —
+/// and reused by `hook::trust` for C-022 locator matching, which needs the
+/// same normalization or the two disagree about one row.
+pub fn normalize_locator(locator: &str) -> String {
     let trimmed = locator.trim().trim_end_matches('/');
     let (scheme, rest) = match trimmed.split_once("://") {
         Some((s, r)) => (Some(s), r),

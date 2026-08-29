@@ -416,7 +416,7 @@ route is `action: "unset"` with `fields: []`.
 
 `registry set`'s write report carries an always-present `fields` array — one
 element per field the call wrote, in the frozen `oci, index, default,
-include, exclude, insecure` order, each `{"field":…,"action":"set","value":…}` or
+include, exclude, insecure` order (append-only — positions never move), each `{"field":…,"action":"set","value":…}` or
 `{"field":…,"action":"cleared"}` (a cleared element has no `value` key).
 Every other write verb reports `fields: []`. It describes the write, not a
 diff: a field named with the value it already held still emits its element,

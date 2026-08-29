@@ -74,16 +74,31 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  # Two jobs with deliberately different names, because they are not the same
+  # gate. Linux runs the whole suite against a real `registry:2`. Windows
+  # cannot: the runner hosts no Linux container engine, so the registry-backed
+  # ~68% of the suite has nothing to talk to.
+  #
+  # That job used to report green anyway, at "254 passed, 528 skipped" — a
+  # green gate over a suite that mostly did not run, which is exactly what
+  # `test/conftest.py`'s registry refusal was later written to stop. The
+  # refusal was right; the job's *name* was the lie. So `GRIM_ALLOW_NO_REGISTRY`
+  # is set here **only** for Windows, and the job is called what it is.
+  #
+  # The ~254 tests that do run are worth keeping: they are the ones covering
+  # Windows path handling, junctions and PATHEXT, which no Linux job can
+  # exercise. Do not rename this back to "Acceptance" without giving Windows a
+  # reachable registry first (`GRIM_TEST_REGISTRY_HOST`).
   acceptance-tests:
-    name: Acceptance (${{ matrix.job.name }})
+    name: ${{ matrix.job.gate }} (${{ matrix.job.name }})
     needs: [build, cross-compile]
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu, ext: "" }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu, ext: "", gate: Acceptance, no_registry: "" }
+          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe", gate: Platform Check, no_registry: "1" }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,16 +116,18 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Run Acceptance Tests
+      - name: Run Tests
         shell: bash
         run: task test -- --junit-xml=results/junit.xml
         env:
           SKIP_BUILD: "true"
+          # Empty on Linux, so the registry refusal stays fully armed there.
+          GRIM_ALLOW_NO_REGISTRY: ${{ matrix.job.no_registry }}
       - name: Upload Test Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: deep-acceptance-${{ matrix.job.name }}
+          name: deep-tests-${{ matrix.job.name }}
           path: test/results/junit.xml
 
   test-results:

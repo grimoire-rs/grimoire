@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
+use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
@@ -109,6 +110,112 @@ impl Vendor for CodexVendor {
             ArtifactKind::Rule => KindSupport::Declined,
             _ => KindSupport::Native,
         }
+    }
+
+    /// Codex hooks: grim owns `$CODEX_HOME|~/.codex/hooks.json` outright.
+    ///
+    /// [`HookSurface::OwnFile`] rather than a splice, and that is forced rather
+    /// than chosen: Codex's `load_hooks_json` reads **one fixed path with no
+    /// glob**, so the file is grim's entirely or not at all. WP-B also executed
+    /// what a shared file would cost — one unknown *top-level* key anywhere in
+    /// it drops **every** hook in the file, with a single warning line — which
+    /// makes co-tenancy a silent-disarm hazard rather than an inconvenience.
+    /// (Codex's second surface, an inline `[hooks]` table in `config.toml`, is
+    /// deliberately unused for the same reason: grim already splices MCP entries
+    /// into that file and must not own the rest of it.)
+    ///
+    /// Two facts a later reader needs before touching this:
+    ///
+    /// - **Global scope only** — see [`Self::kind_surface`]. The project surface
+    ///   `<cwd>/.codex/hooks.json` *does* load (WP-B verified it; the plan's
+    ///   earlier "no surface" phrasing was wrong), and grim still declines it
+    ///   because the file is tracked and a committed registration makes the
+    ///   executed binary path environment-derived (I1, CWE-426).
+    /// - **A correct registration is not yet an armed hook.** Codex requires a
+    ///   human to approve hooks in its interactive `/hooks` TUI, there is no
+    ///   scripted verb to grant it, and an unapproved hook is skipped
+    ///   **silently** — no warning, session looks normal. C-017 models that as a
+    ///   distinct state, and the message must tell the user to run `/hooks`;
+    ///   reporting it as armed would be the most misleading thing this feature
+    ///   could do.
+    fn hook_surface(&self) -> Option<HookSurface> {
+        Some(HookSurface::OwnFile)
+    }
+
+    fn hook_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        hook_config_path(workspace, scope)
+    }
+
+    /// Codex's `hooks.json`: `{"hooks": {"<Event>": [{"matcher": …, "hooks":
+    /// [{"type": "command", …}]}]}}` — per-event **matcher groups**, the same
+    /// nesting Claude uses, and *not* copilot's flat shape.
+    ///
+    /// Two constraints from `codex-rs/config/src/hook_config.rs`, both
+    /// load-bearing:
+    ///
+    /// - `HooksFile` is `deny_unknown_fields` at the **top level** and only
+    ///   admits `description` and `hooks`, so there is no `version` key and no
+    ///   grim marker. One unknown top-level key drops **every** hook in the
+    ///   file.
+    /// - the authored timeout key is `timeout` (seconds), not `timeoutSec` —
+    ///   that spelling exists only in the generated app-server RPC view, a
+    ///   different serialization boundary.
+    ///
+    /// Match-all is the **absent** `matcher` key rather than `*`: `matcher` is
+    /// `Option<String>` upstream, and absence is the shape that cannot be
+    /// mis-read as a regex.
+    ///
+    /// One group per registration rather than a merged group per matcher. Codex
+    /// keys its *persisted trust* on the positional
+    /// `<file>:<event>:<group_index>:<handler_index>`, so any grouping choice is
+    /// equally fragile under an edit above grim's entry; one-group-per-row keeps
+    /// the document a direct projection of the desired set, which is what makes
+    /// a no-change rewrite byte-identical.
+    fn hook_file_document(&self, registrations: &[HookRegistration]) -> Option<serde_json::Value> {
+        let mut events: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for registration in registrations {
+            let HookCommand::Shell(command) = &registration.command else {
+                // `HookCommand::Argv` is never constructed in v1; refusing beats
+                // joining an argv array into a shell string here.
+                continue;
+            };
+            let mut handler = serde_json::Map::new();
+            handler.insert("type".to_string(), serde_json::Value::String("command".to_string()));
+            handler.insert("command".to_string(), serde_json::Value::String(command.clone()));
+            if let Some(windows) = &registration.command_windows {
+                handler.insert("commandWindows".to_string(), serde_json::Value::String(windows.clone()));
+            }
+            if let Some(timeout) = registration.timeout {
+                handler.insert("timeout".to_string(), serde_json::Value::from(timeout));
+            }
+            let mut group = serde_json::Map::new();
+            if let Some(matcher) = &registration.matcher {
+                group.insert("matcher".to_string(), serde_json::Value::String(matcher.clone()));
+            }
+            group.insert(
+                "hooks".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::Object(handler)]),
+            );
+            events
+                .entry(registration.event.clone())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                .as_array_mut()?
+                .push(serde_json::Value::Object(group));
+        }
+        let mut document = serde_json::Map::new();
+        document.insert("hooks".to_string(), serde_json::Value::Object(events));
+        Some(serde_json::Value::Object(document))
+    }
+
+    fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
+        // ADR amendment A1: hooks are global-scope only here. `.codex/hooks.json`
+        // is a TRACKED repository file, so a project registration would put
+        // something armable inside a repository (invariant I1, attacker T3) and
+        // would name a launcher path the repo's own environment can choose.
+        // Expressed through this scope-aware seam — the Junie-rules-at-global
+        // mechanism — never by widening `kind_support`, which `Hook` does not
+        // resolve through at all (ADR decision A).
+        !matches!((kind, scope), (ArtifactKind::Hook, ConfigScope::Project))
     }
 
     // Skill registry empty: Codex skills are agentskills-universal.
@@ -328,6 +435,24 @@ impl Vendor for CodexVendor {
         document.push_str(&table);
         Ok(Some(RenderedDoc { document, warnings }))
     }
+
+    // Hook convergence: **global scope only** (A1). `.codex/hooks.json` loads at
+    // project scope (WP-B verified it) and is a *tracked* repository file, so
+    // registering there would put something armable inside a repo (I1, T3). At
+    // global scope grim owns `$CODEX_HOME|~/.codex/hooks.json` **outright** —
+    // Codex reads one fixed path with no glob, and one unknown top-level key
+    // drops **every** hook in the file with a single warning line, so partial
+    // ownership is not an option and no grim marker goes in this file. The shape
+    // is `hook_file_document` above; the location is `hook_config_path`.
+    //
+    // A written registration is not yet an armed hook: Codex requires a human to
+    // approve hooks in its interactive `/hooks` TUI, and an unapproved hook is
+    // skipped **silently**. That third state is `grim status`'s to report; it is
+    // not an `hook_registrar::ArmRefusal`, because grim converged correctly.
+    //
+    // **No `sync_config` override** — see `vendor_claude`'s note: hook
+    // convergence runs through `hook_registrar::converge_clients`, which
+    // receives the resolved hook policy that seam cannot see.
 }
 
 /// Codex's three upstream HTTP/SSE header surfaces, classified from a
@@ -404,6 +529,25 @@ fn classify_codex_headers(
 /// anchor is rooted here. Note: this does **not** relocate Codex skills —
 /// those follow `$HOME/.agents/skills` (see
 /// [`global_skills_root`](super::vendor::global_skills_root)).
+/// The file Codex reads hook registrations from — **global scope only**.
+///
+/// `$CODEX_HOME|~/.codex/hooks.json`, which grim owns **outright**: Codex's
+/// `load_hooks_json` reads one fixed path with no glob, so "one file, full
+/// ownership or none" is upstream's shape, not grim's choice.
+///
+/// `None` at project scope, and that is A1 rather than an absent surface —
+/// `<cwd>/.codex/hooks.json` does load (WP-B verified it), but it is a *tracked*
+/// repository file, so registering there would put something armable inside a
+/// repo (I1, attacker T3). It is `None` at global scope too when no root
+/// resolves (no `$CODEX_HOME`, no home): never a CWD-relative fallback, the same
+/// rule [`CodexVendor::mcp_config_path`] follows.
+fn hook_config_path(_workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => codex_root(env_dir("CODEX_HOME"), home_dir()).map(|root| root.join("hooks.json")),
+    }
+}
+
 pub(crate) fn codex_root(codex_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     codex_home.or_else(|| home.map(|h| h.join(".codex")))
 }

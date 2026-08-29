@@ -128,6 +128,15 @@ AGENT_MATRIX=(
     "agents|reviewer|$CATALOG/agents/reviewer.md|1.0.0 1.1.0"
     "agents|release-bot|$CATALOG/agents/release-bot.md|1.0.0"
 )
+# Hooks are a directory containing `hook.toml`, which `grim release` infers
+# without a `--kind` (it tests `hook.toml` before `SKILL.md`). Publishing them
+# is safe and arming them is not automatic: a hook needs the experimental
+# feature flag AND a `trust_hooks` grant on this registry before `grim install`
+# writes anything. See README § Hooks for the walkthrough.
+HOOK_MATRIX=(
+    "hooks|tool-logger|$CATALOG/hooks/tool-logger|1.0.0"
+    "hooks|write-guard|$CATALOG/hooks/write-guard|1.0.0"
+)
 
 # 4a. Publish skills.
 for record in "${SKILL_MATRIX[@]}"; do
@@ -145,6 +154,12 @@ done
 for record in "${AGENT_MATRIX[@]}"; do
     IFS='|' read -r kind name path versions <<<"$record"
     release_versions "$path" "$kind" "$name" "$versions" agent
+done
+
+# 4d. Publish hooks (kind inferred from `hook.toml`, no --kind needed).
+for record in "${HOOK_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions"
 done
 
 # 5. Publish bundles LAST — their members must already exist. The

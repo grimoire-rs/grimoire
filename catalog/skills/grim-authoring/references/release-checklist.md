@@ -15,7 +15,10 @@ reaches a registry:
 
 1. **Catalog metadata authored** — the [default set](#metadata-defaults)
    below, in the right per-kind location: skill/agent → `metadata` map;
-   rule → top-level frontmatter; mcp/bundle → top-level TOML. If this
+   rule → top-level frontmatter; mcp/bundle → top-level TOML. **A hook is
+   the exception with nowhere to put any of it** — `hook.toml` accepts only
+   `schema`, `name`, `description`, and `[[hooks]]`, so every catalog key is
+   a hard parse error (65) and `description` carries the whole blurb. If this
    release retires a package, set the `deprecated` notice in the same
    location (a re-release without it clears the flag), and point consumers
    at the successor with `replaced-by` — authored independently of
@@ -31,9 +34,18 @@ reaches a registry:
 3. **Agents: `--kind agent` on both build and release** — a forgotten
    flag publishes a rule, with only a warning. **MCP servers: `--kind
    mcp` likewise** — though there a forgotten flag errors with a hint.
+   **Hooks need no flag** (a directory carrying `hook.toml` infers as
+   `hook`, and that arm is checked before the skill arm) — but read
+   `grim build`'s reported `Kind` column anyway, because the same ordering
+   means a stray `hook.toml` inside a *skill* tree flips the kind silently.
 4. **Bundles: members published first** — a bundle referencing unpushed
    members breaks the consumer's `grim lock`, not your release.
-5. **`grim release … --dry-run`** — prints the exact push plan: every
+5. **Hooks: the handler names an interpreter, not the payload file** —
+   `argv = ["sh", "${GRIM_HOOK_DIR}/guard.sh"]`, never
+   `command = "./guard.sh"`. A registry-delivered payload arrives without
+   an exec bit, so the direct form is refused at build (65). Full rule:
+   [hook-spec.md](hook-spec.md#payload-not-executable).
+6. **`grim release … --dry-run`** — prints the exact push plan: every
    tag and the digest each will point at, without touching the registry.
 
 ### Metadata Defaults {#metadata-defaults}
@@ -129,8 +141,8 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
 
 `grim publish` releases every package declared in a `publish.toml`
 manifest: whole-manifest validation before any push, then a fixed kind
-order (skills → rules → agents → mcp → bundles) so bundle members always
-exist first. Semantics to know ([full reference][batch-publish]):
+order (skills → rules → agents → mcp → hooks → bundles) so bundle members
+always exist first. Semantics to know ([full reference][batch-publish]):
 
 - **One version for the catalog.** A top-level `version` covers every
   entry that omits its own (or writes the literal `${version}`); an
@@ -220,10 +232,20 @@ Symptom → cause → fix:
 | `--git` on a non-git path | `--git` passed to build/release on an artifact path not inside a git repository, or no `git` on the host | Build/release an artifact that lives inside a git repo (with `git` installed), or drop `--git` — the default already derives what it can and never fails (confirm with `grim release --help`) |
 | Entry has no version | `publish.toml` entry with no per-entry `version`, no top-level `version`, no `--version` | Set the top-level `version` (or the entry's own) |
 | Companion path missing / escapes | Explicit `[description]` path that does not exist, resolves to zero files, or reaches outside the manifest dir (`..`, absolute, symlink) | Move the file inside the manifest directory; copy root-level assets in before publishing |
+| "runs the payload file … directly; a payload delivered through a registry is not executable" | A hook handler's first token names a file in the payload tree — the exec bit never survives an OCI pull | Name an interpreter: `argv = ["sh", "${GRIM_HOOK_DIR}/guard.sh"]` |
+| "unknown field 'summary', expected one of 'schema', 'name', 'description', 'hooks'" | Catalog metadata written into a `hook.toml`, which is a strict document with no such surface | Delete the key; fold the text into the hook's `description` |
+| "tier … is not valid at event …" | `mutator` outside `PreToolUse`, or `gatekeeper` on an event no client can block at | Change the tier, or the event — **never** relocate a guardrail to a later moment |
+| "invalid matcher …" / "matcher of N bytes exceeds…" / "an empty matcher is ambiguous" | A regex, a stray character, > 256 bytes, or `matcher = ""` | Use grim's glob dialect (`[A-Za-z0-9_*?./-\|]`); omit the key to match every tool |
+| "hook artifact name 'bin' is reserved" | Hook artifact named `bin` or `dispatch.json` — grim's own launcher namespace | Rename the directory and the manifest `name` together |
+| "declares both 'argv' and 'command'" / "declares no handler" | A hook entry with two handlers or none | Keep exactly one; prefer `argv` |
+| "key '…' is not a per-client override table" | A `[hooks.<x>]` table whose `<x>` is not a client grim supports (typo'd namespace) | Fix the client name — there is no free-form namespace |
 
-Bundle source errors (typo'd key, non-qualified member ref, > 512
-members) surface as config/parse failures rather than 65 — see
-[bundle-spec.md](bundle-spec.md). If the message fits no row, run
+Bundle source errors (typo'd key, an `[mcp]`/`[hooks]` member table,
+non-qualified member ref, > 512 members) surface as config/parse failures
+rather than 65 — see
+[bundle-spec.md](bundle-spec.md). Every hook row above is a `grim build`
+refusal; the full set with reproductions is
+[hook-spec.md](hook-spec.md#validation-pitfalls). If the message fits no row, run
 `grim build --format json` for the structured detail and check
 [publish-time validation][publish-val].
 
