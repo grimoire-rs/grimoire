@@ -17,6 +17,7 @@
 - [Self-Hosted GitLab Setup](./self-hosted-gitlab.md)
 - [Agent Artifacts](./agents.md)
 - [MCP Server Artifacts](./mcp-servers.md)
+- [Writing Hooks](./hooks.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)
 - [The JSON Interface](./json-interface.md)
