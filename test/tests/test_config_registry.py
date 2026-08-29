@@ -28,6 +28,7 @@ Behaviors covered:
 """
 from __future__ import annotations
 
+import os
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
@@ -1015,6 +1016,10 @@ def test_set_registry_include_with_a_bad_pattern_writes_nothing(
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="66,560 bytes of --include flags exceeds the ~32,767-char Windows command line",
+)
 def test_registry_add_over_the_aggregate_pattern_budget_exits_65(
     grim_at: object,
     project_dir: Path,

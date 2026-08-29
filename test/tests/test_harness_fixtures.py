@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 from src.runner import GrimRunner
 
@@ -135,6 +138,10 @@ def test_hostile_hook_clone_plants_dispatch_table_and_payload(
     assert str(clone.sentinel) in payload_source
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the planted payload is a POSIX sh script and this check runs /bin/sh directly",
+)
 def test_hostile_hook_clone_payload_would_fire_if_actually_executed(
     hostile_hook_clone: Callable[..., HostileHookClone],
     tmp_path: Path,
@@ -142,7 +149,12 @@ def test_hostile_hook_clone_payload_would_fire_if_actually_executed(
     """Self-check on the fixture's own mechanics, independent of grim: prove
     the planted payload is a real, executable sentinel-toucher — not a
     no-op that would make a future ``not sentinel.exists()`` assertion
-    trivially true regardless of what grim does."""
+    trivially true regardless of what grim does.
+
+    Skipped on Windows rather than adapted: this deliberately bypasses grim and
+    runs the payload itself, so there is nothing here that a Windows shell
+    would tell us. Every test that consumes the fixture *through* grim already
+    carries the same POSIX skip the hook suites do."""
     workspace = tmp_path / "hostile-clone-direct"
     clone = hostile_hook_clone(workspace)
 
