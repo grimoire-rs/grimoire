@@ -272,7 +272,7 @@ gates.
 `deprecated`/`replaced_by` on every registry-sourced item and, via a
 fresh per-artifact re-resolution, `update_available`.
 
-That re-resolution follows **the reference the config declares**, tag and
+That re-resolution follows **the reference the row declares**, tag and
 all — so `update_available` answers *would `grim update` move this pin?*,
 the same decision the TUI's `↑ outdated` badge makes. It is deliberately
 not "is a newer version out there right now": a release the declared
@@ -281,12 +281,19 @@ version pin, an unmoved advisory float, and a digest pin all report
 `false` while the repository carries a strictly higher tag. Widen the
 declared reference (`grim add <ref>` re-pins it) to follow those releases.
 
+Bundles are covered from both sides. The **bundle row** re-resolves the
+bundle's own declared reference — the only place a bundle that *added or
+dropped a member* ever shows up, because every member already in the lock
+keeps its own pin. Each **bundle member row** separately re-resolves the id
+its bundle listed, so a member sitting at a floating tag reports an update
+even while the bundle itself stays at an unchanged version.
+
 The top-level `checked` field says whether the check actually ran online;
 `checked == false` means all three of those item fields are `null`.
 When scripting against it, treat `update_available: null` as "could not
-determine", never as "up to date": it is `null` (not `false`) for a
-bundle-member row, a row with no lock pin (declared bundle, dev-install,
-path source), or a row whose own re-resolution failed. And even under
+determine", never as "up to date": it is `null` (not `false`) for a row
+with no lock pin (dev-install, path source, path-sourced bundle), or a row
+whose own re-resolution failed. And even under
 `checked == true`, one registry's catalog refresh failing degrades just
 that registry's rows' `deprecated`/`replaced_by` to `null` — partial
 data, not a failed check. Confirm the current flag set with

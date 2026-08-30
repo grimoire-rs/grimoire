@@ -1167,3 +1167,87 @@ def test_release_bundle_pin_freezes_relative_member(
     assert digest in lock, (
         f"pinned relative member must carry the frozen digest; lock:\n{lock}"
     )
+
+
+def test_status_check_reports_bundle_update_available(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim status --check` must flag a bundle whose declared tag moved.
+
+    Regression: the bundle row carried ``update_available: null``
+    unconditionally, so a bundle that gained a member stayed invisible —
+    `grim update` installed the addition, but nothing ever said one was
+    waiting.
+    """
+    sk_a = _member_skill(unique_repo, "skill-a")
+    sk_b = _member_skill(unique_repo, "skill-b")
+    bundle_repo = f"{unique_repo}/stack"
+    make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
+    write_config(project_dir, bundles={"stack": f"{REGISTRY_HOST}/{bundle_repo}:rolling"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    # The bundle rolls forward, ADDING a member. No member's own tag moves.
+    make_bundle(
+        bundle_repo,
+        [("skill", "skill-a", sk_a.fq), ("skill", "skill-b", sk_b.fq)],
+        tag="rolling",
+    )
+
+    result = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )
+    assert result["checked"] is True
+    rows = {(r["kind"], r["name"]): r for r in result["items"]}
+    bundle_row = rows[("bundle", "stack")]
+    assert bundle_row["update_available"] is True, bundle_row
+
+
+def test_status_check_reports_bundle_up_to_date(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A bundle whose tag has not moved re-resolves to the same digest ⇒
+    ``false``, never ``null`` (a completed check that found nothing newer)."""
+    sk_a = _member_skill(unique_repo, "skill-a")
+    bundle_repo = f"{unique_repo}/stack"
+    make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
+    write_config(project_dir, bundles={"stack": f"{REGISTRY_HOST}/{bundle_repo}:rolling"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )
+    rows = {(r["kind"], r["name"]): r for r in result["items"]}
+    assert rows[("bundle", "stack")]["update_available"] is False, rows
+
+
+def test_status_check_reports_bundle_member_update_available(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A member whose own floating tag moved is an available update even
+    though the bundle pin did not budge — `grim update` re-resolves every
+    member id, so the report must too."""
+    _member_skill(unique_repo, "skill-a", body="v1")
+    bundle_repo = f"{unique_repo}/stack"
+    make_bundle(
+        bundle_repo,
+        [("skill", "skill-a", f"{REGISTRY_HOST}/{unique_repo}/skill-a:stable")],
+        tag="1.0.0",
+    )
+    write_config(project_dir, bundles={"stack": f"{REGISTRY_HOST}/{bundle_repo}:1.0.0"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    # The member's own `:stable` tag rolls forward; the bundle stays at 1.0.0.
+    _member_skill(unique_repo, "skill-a", body="v2")
+
+    result = runner.json(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+    )
+    rows = {(r["kind"], r["name"]): r for r in result["items"]}
+    assert rows[("bundle", "stack")]["update_available"] is False, rows
+    assert rows[("skill", "skill-a")]["update_available"] is True, rows

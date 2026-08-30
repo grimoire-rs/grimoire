@@ -20,8 +20,9 @@
 //! `--check` adds one coordinated catalog load (the same
 //! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) that
 //! populates `deprecated`/`replaced_by` on every registry-sourced row,
-//! matched by `(registry, repository)`; and, for every directly-declared,
-//! registry-locked row, a fresh per-artifact tag re-resolution (bounded
+//! matched by `(registry, repository)`; and, for every registry-locked row
+//! — directly-declared artifacts, declared bundles, and bundle members — a
+//! fresh per-artifact tag re-resolution (bounded
 //! concurrency, the `crate::catalog::update_availability` seam the TUI's
 //! `↑ outdated` badge uses) that populates `update_available`. Both are
 //! skipped entirely when the invocation is offline (`--offline` or
@@ -85,8 +86,9 @@ pub struct StatusArgs {
     pub config: Option<std::path::PathBuf>,
 
     /// Re-check every registry-sourced artifact against the live catalog
-    /// for deprecation / replacement, and re-resolve each directly-declared
-    /// registry-locked artifact's current tag to report update availability.
+    /// for deprecation / replacement, and re-resolve each registry-locked
+    /// row's declared reference — directly-declared artifacts, declared
+    /// bundles, and bundle members — to report update availability.
     /// Requires network; skipped with a stderr warning when combined with
     /// `--offline` (or `$GRIM_OFFLINE`) — the report's `checked` field
     /// reports whether the check actually ran.
@@ -190,6 +192,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     };
 
     let mut entries = Vec::new();
+    // Per-artifact update-availability re-resolutions, filled below for every
+    // registry-locked row: declared bundles, directly-declared artifacts, and
+    // bundle members alike.
+    let mut update_checks: Vec<UpdateCheck> = Vec::new();
 
     // Declared bundles: one row each so the user sees what they declared.
     // A bundle never installs itself — its state reflects whether it has
@@ -206,6 +212,24 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
+        // A bundle's own tag is the only place an ADDED or DROPPED member can
+        // announce itself: the members already in the lock keep their pins,
+        // so nothing else on this report moves when a bundle rolls forward.
+        // Re-resolve the declared bundle reference against the `[[bundle]]`
+        // snapshot's manifest digest, exactly as a declared artifact row does
+        // against its lock pin. A path-sourced bundle has no registry pin and
+        // is skipped.
+        if let (Some(locked), Some(declared)) = (
+            lock.as_ref().and_then(|l| find_locked_bundle(l, name)),
+            decl.identifier(),
+        ) && let Some(pinned) = locked.pinned()
+        {
+            update_checks.push(UpdateCheck {
+                index: entries.len(),
+                declared: declared.clone(),
+                locked: pinned.digest(),
+            });
+        }
         entries.push(StatusEntry {
             kind: ArtifactKind::Bundle,
             name: name.clone(),
@@ -223,8 +247,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             clients_missing: Vec::new(),
             clients_extra: Vec::new(),
             clients_unresolved: Vec::new(),
-            // A bundle declaration carries no registry pin of its own —
-            // `--check` has nothing to match it against.
+            // A bundle declaration carries no registry pin of its own, so the
+            // catalog match (`deprecated`/`replaced_by`) has nothing to key
+            // on; `update_available` is populated from the `[[bundle]]`
+            // snapshot's manifest digest by the check scheduled above.
             deprecated: None,
             replaced_by: None,
             update_available: None,
@@ -233,9 +259,6 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 
     // Directly-declared skills and rules.
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
-    // Per-artifact update-availability re-resolutions, filled below only for
-    // directly-declared registry-locked rows and run under `--check`.
-    let mut update_checks: Vec<UpdateCheck> = Vec::new();
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
         let record = state.get(decl.kind, &decl.name);
@@ -267,10 +290,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 client_supports_kind(c, decl.kind, &scope.workspace, scope.scope)
             });
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
-        // A directly-declared registry-locked row is the only kind eligible
-        // for a fresh update re-resolution (issue #43): path/dev rows carry no
-        // pin, and a bundle member updates via its bundle rather than its own
-        // tag (built in the bundle-member loop below, never here). Schedule the
+        // A registry-locked row is eligible for a fresh update re-resolution
+        // (issue #43); path/dev rows carry no pin. Bundle rows and bundle
+        // members schedule their own checks (above and below respectively) —
+        // this loop only sees directly-declared names. Schedule the
         // **declared** identifier — the reference `grim update` would
         // re-resolve, tag and all — against the lock pin as the comparison
         // baseline; the entry's index is its position in `entries`. A tagless
@@ -367,6 +390,21 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                     client_supports_kind(c, member.kind, &scope.workspace, scope.scope)
                 });
             let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
+            // A member's own reference can float independently of the bundle
+            // that carries it (`stack:1.0.0` listing `code-review:stable`):
+            // `grim update` re-resolves every member id, so a moved member tag
+            // is an available update even when the bundle pin never budges.
+            // Re-resolve the id the `[[bundle]]` snapshot recorded — the
+            // declared reference, tag and all — against the member's lock pin.
+            if let (Some(pinned), Some(declared)) =
+                (member.source.pinned(), member_declared_id(l, member.kind, &member.name))
+            {
+                update_checks.push(UpdateCheck {
+                    index: entries.len(),
+                    declared,
+                    locked: pinned.digest(),
+                });
+            }
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
@@ -549,6 +587,28 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
 
 fn find_locked<'a>(lock: &'a GrimoireLock, kind: ArtifactKind, name: &str) -> Option<&'a LockedArtifact> {
     lock.iter_artifacts().find(|a| a.kind == kind && a.name == name)
+}
+
+/// The `[[bundle]]` snapshot for one config binding name.
+fn find_locked_bundle<'a>(lock: &'a GrimoireLock, name: &str) -> Option<&'a crate::lock::locked_bundle::LockedBundle> {
+    lock.bundles.iter().find(|b| b.name == name)
+}
+
+/// The reference a bundle declared for one of its members, as recorded in the
+/// lock's `[[bundle]]` snapshot (already resolved to absolute form by the
+/// resolver, so it parses without a bundle anchor).
+///
+/// This is the member's *declared* identifier — the one `grim update`
+/// re-resolves — not its pin. A member claimed by several agreeing bundles
+/// carries one id, so the first match answers for all of them; an unparseable
+/// id yields `None` and the row simply reports no update availability rather
+/// than failing a read-only report.
+fn member_declared_id(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<Identifier> {
+    lock.bundles
+        .iter()
+        .flat_map(|b| b.members.iter())
+        .find(|m| m.kind == kind && m.name == name)
+        .and_then(|m| Identifier::parse(&m.id).ok())
 }
 
 /// Build the reported `outputs` list for one declared artifact: the

@@ -701,12 +701,21 @@ degrades only that registry's rows to `null`; `checked` still reports `true`
 — the attempt was made online, it just came back partial for that source.
 
 `update_available` is populated by a **fresh per-artifact re-resolution**,
-independent of that one catalog lookup: for each directly-declared,
-registry-locked row grim re-resolves the reference the config declares —
-tag and all — and compares its digest to the lock pin. It answers *would
-[`grim update`](#update) move this pin?*, the same decision the
-[TUI](#tui)'s `↑ outdated` badge uses. The resolution is always live, so a
-tag that moved surfaces even when the cached catalog row is stale.
+independent of that one catalog lookup: for each registry-locked row grim
+re-resolves the reference that row declares — tag and all — and compares
+its digest to the lock pin. It answers *would [`grim update`](#update) move
+this pin?*, the same decision the [TUI](#tui)'s `↑ outdated` badge uses.
+The resolution is always live, so a tag that moved surfaces even when the
+cached catalog row is stale.
+
+Bundles are covered on both halves. The bundle row re-resolves the declared
+bundle reference against the pin recorded in the lock's `[[bundle]]`
+snapshot — the only place a bundle that **added or dropped a member** shows
+up, because every member already locked keeps its own pin. Each bundle
+member row separately re-resolves the id its bundle listed, so a member at
+a floating tag reports an update even while the bundle itself sits at an
+unchanged version. A path-sourced bundle carries no registry pin and stays
+`null`.
 
 Because the declared reference is what gets resolved, a release the
 declaration does not point at is **not** an available update: a

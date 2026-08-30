@@ -54,14 +54,18 @@
 //! pin) — and for any item when `checked` is `false`.
 //!
 //! `update_available` is a fresh per-artifact re-resolution under `--check`
-//! (issue #43): for a directly-declared, registry-locked item grim
-//! re-discovers the registry's current representative tag and compares its
-//! digest to the lock pin. `true` when the registry is newer, `false` when
-//! it matches (or the tag vanished — a completed re-resolve that finds
-//! nothing newer). `null` when `checked` is `false`, for a row with no lock
-//! pin (declared-bundle / dev-install / path source), for a bundle member
-//! (it updates via its bundle, not its own tag), or when the re-resolution
-//! failed — absence never lies as `false`.
+//! (issue #43): for a registry-locked item grim re-resolves the reference
+//! that row declares and compares its digest to the lock pin. `true` when
+//! the registry is newer, `false` when it matches (or the tag vanished — a
+//! completed re-resolve that finds nothing newer). Three row kinds carry a
+//! declared reference: a directly-declared item (what `grimoire.toml`
+//! names), a **declared bundle** (its own reference against the
+//! `[[bundle]]` snapshot's manifest digest — the only signal an added or
+//! dropped member emits, since the members already locked keep their pins),
+//! and a **bundle member** (the id its bundle listed, which can float
+//! independently of the bundle). `null` when `checked` is `false`, for a
+//! row with no lock pin (dev-install / path source / path-sourced bundle),
+//! or when the re-resolution failed — absence never lies as `false`.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -149,8 +153,8 @@ pub struct StatusEntry {
     pub replaced_by: Option<String>,
     /// Whether the registry carries a newer digest than the lock pin, from
     /// `--check`'s fresh per-artifact re-resolution. `null` when the check
-    /// did not run, the row has no lock pin, it is a bundle member, or the
-    /// re-resolution failed. See the module doc for the full contract.
+    /// did not run, the row has no lock pin, or the re-resolution failed.
+    /// See the module doc for the full contract.
     pub update_available: Option<bool>,
 }
 
