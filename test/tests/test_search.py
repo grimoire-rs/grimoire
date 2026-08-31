@@ -640,3 +640,84 @@ def test_tui_refresh_flag_non_tty_exits_0(
         "not a TTY" in result.stdout
         or "interactive terminal" in result.stdout
     )
+
+
+def test_search_json_reports_a_healthy_source(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The `sources` sibling is always present, not only when something failed.
+
+    A consumer must be able to read it unconditionally: one entry per browsed
+    source, `ok: true` and an explicit `error: null` on the happy path. A
+    `--registry` browse declares no alias, so `alias` is null and `locator` is
+    the flag value verbatim — the same two halves each row's own `source`
+    carries, so rows join to sources with no extra rule.
+    """
+    make_artifact(
+        f"{unique_repo}/healthy",
+        "skill",
+        {"healthy/SKILL.md": "---\nname: healthy\ndescription: fine\n---\n# H\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    locator = f"{REGISTRY_HOST}/{unique_repo}"
+
+    doc = runner.json("search", unique_repo, "--registry", locator, "--refresh")
+
+    assert doc["sources"] == [
+        {"alias": None, "locator": locator, "ok": True, "error": None}
+    ], f"a healthy `--registry` browse reports exactly one clean source: {doc['sources']!r}"
+    # Each row's `source` is the same alias/locator pair, so the join is direct.
+    for row in doc["items"]:
+        assert row["source"] == {"alias": None, "locator": locator}
+
+
+def test_search_json_names_a_source_whose_cache_will_not_parse(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A cache this binary cannot read is named in `sources`, not just on stderr.
+
+    This is the shape issue #108 was reported against: a catalog cache written
+    by a newer grim, read by an older one. Online the read is forgiving —
+    `Catalog::load_or_cold` rebuilds an unreadable cache rather than wedging
+    the source to an empty browse forever — so the failure only stands
+    `--offline`, where there is nothing to rebuild from. That is exactly the
+    case that used to render as an empty catalog with a well-formed envelope
+    and exit 0.
+    """
+    make_artifact(
+        f"{unique_repo}/cached",
+        "skill",
+        {"cached/SKILL.md": "---\nname: cached\ndescription: c\n---\n# C\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    locator = f"{REGISTRY_HOST}/{unique_repo}"
+
+    # Warm the per-locator cache, then corrupt it.
+    assert runner.json("search", "--registry", locator, "--refresh")["items"]
+    cached = list((runner.grim_home / "catalog").glob("*.json"))
+    assert cached, "the browse must have written a catalog cache"
+    for f in cached:
+        f.write_text("{ not json at all")
+
+    result = runner.run(
+        "--format", "json", "search", "--offline", "--registry", locator, check=False
+    )
+    assert result.returncode == 0, (
+        f"an unreadable cache is data, not a failure — exit stays 0; got "
+        f"{result.returncode}, stderr: {result.stderr}"
+    )
+    doc = json.loads(result.stdout)
+    assert doc["items"] == [], f"nothing loaded, so nothing is listed: {doc['items']!r}"
+    assert len(doc["sources"]) == 1, f"one browsed source, got {doc['sources']!r}"
+    source = doc["sources"][0]
+    assert source["ok"] is False, f"the unreadable source must be marked failed: {source!r}"
+    assert source["error"] == "invalid catalog file", (
+        f"the parse failure is reported verbatim as the kind — the same wording "
+        f"the stderr warning carries, with no local path: {source!r}"
+    )
+    assert str(runner.grim_home) not in source["error"], (
+        f"no machine-local path leaks into the frozen document: {source!r}"
+    )
+    assert source["locator"] == locator, f"the failed source is named: {source!r}"

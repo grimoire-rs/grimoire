@@ -1661,3 +1661,138 @@ def test_one_file_may_declare_a_locator_twice_as_two_views(
         "platform/bar",
         "internal/thing",
     }, "each view must contribute the rows its own include admits"
+
+
+# ---------------------------------------------------------------------------
+# Issue #108 — the JSON envelope names every browsed source and its load status
+# ---------------------------------------------------------------------------
+
+
+def test_search_json_reports_per_source_status(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """``search --format json`` must name each browsed source and whether it loaded.
+
+    Before this, a source that failed to load was dropped with only a
+    ``tracing::warn!`` on stderr: exit 0, a plausible-looking ``items`` list,
+    and nothing in the document saying two of three registries never answered.
+    A consumer reading stdout — the whole point of ``--format json`` — could
+    not tell "no results" from "most of your registries did not load".
+
+    The envelope now carries an always-present ``sources`` sibling, one entry
+    per browsed source in declaration order, each ``{alias, locator, ok,
+    error}``. The unreachable entry uses ``localhost:9999`` (nothing
+    listening), which refuses the connection immediately, so the test stays
+    fast and hermetic.
+    """
+    ns_good = f"grim-test/{uuid.uuid4().hex[:12]}"
+    good_locator = f"{REGISTRY_HOST}/{ns_good}"
+    bad_locator = "localhost:9999/grim-test/unreachable"
+
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\n'
+        f'alias = "good"\n'
+        f'oci = "{good_locator}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'alias = "bad"\n'
+        f'oci = "{bad_locator}"\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    make_artifact(
+        f"{ns_good}/reachable-skill",
+        "skill",
+        {"reachable-skill/SKILL.md": "---\nname: reachable-skill\ndescription: works\n---\n# OK\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Reachable artifact"},
+    )
+
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, (
+        f"a failed source stays exit 0 — the status rides the document, not the "
+        f"exit code; got {result.returncode}, stderr: {result.stderr}"
+    )
+    doc = json.loads(result.stdout)
+
+    assert "sources" in doc, (
+        f"the envelope must carry a `sources` sibling naming every browsed "
+        f"source; got keys {sorted(doc)}"
+    )
+    sources = doc["sources"]
+    assert len(sources) == 2, f"one entry per declared registry, got {sources!r}"
+
+    by_alias = {s["alias"]: s for s in sources}
+    assert set(by_alias) == {"good", "bad"}, f"both aliases named, got {sources!r}"
+
+    good = by_alias["good"]
+    assert good["ok"] is True, f"the reachable source loaded: {good!r}"
+    assert good["error"] is None, f"a healthy source carries an explicit null: {good!r}"
+    assert good["locator"] == good_locator, (
+        f"`locator` is byte-identical to the configured value: {good!r}"
+    )
+
+    bad = by_alias["bad"]
+    assert bad["ok"] is False, f"the unreachable source must be marked failed: {bad!r}"
+    assert bad["error"] == "registry access failed", (
+        f"the reported cause is the failure kind, self-contained and renderable: {bad!r}"
+    )
+    assert str(runner.grim_home) not in bad["error"], (
+        f"the local cache-file path must never be frozen into the document — a "
+        f"consumer cannot act on it and a UI would render it verbatim: {bad!r}"
+    )
+    assert bad["locator"] == bad_locator, f"the failed source is named: {bad!r}"
+
+    # The reachable registry's rows still surface — the degrade is per-source.
+    repos = [r.get("repo", "") for r in doc["items"]]
+    assert any("reachable-skill" in repo for repo in repos), (
+        f"the reachable registry's artifact must still be listed, got {repos}"
+    )
+
+
+def test_search_json_marks_every_source_failed_when_none_load(
+    grim_at, project_dir: Path
+) -> None:
+    """Total failure must not look like an empty catalog (issue #108).
+
+    This is the case a GUI cannot detect at all today: every configured source
+    fails, ``items`` is ``[]``, the exit code is 0, and the envelope is
+    well-formed. Rendered as a catalog it reads "nothing published" when the
+    truth is "nothing loaded". Every ``sources`` entry now says so.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\n'
+        'alias = "dead1"\n'
+        'oci = "localhost:9999/grim-test/dead-one"\n'
+        'default = true\n'
+        '\n'
+        '[[registries]]\n'
+        'alias = "dead2"\n'
+        'oci = "localhost:9998/grim-test/dead-two"\n'
+        '\n'
+        '[skills]\n'
+        '\n'
+        '[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, (
+        f"the browse contract is unchanged — a dead source is data, not a "
+        f"failure; got {result.returncode}, stderr: {result.stderr}"
+    )
+    doc = json.loads(result.stdout)
+
+    assert doc["items"] == [], f"nothing loaded, so nothing is listed: {doc['items']!r}"
+    sources = doc["sources"]
+    assert len(sources) == 2, f"both dead sources are still named, got {sources!r}"
+    assert all(s["ok"] is False for s in sources), (
+        f"an empty list caused by total failure must be distinguishable from an "
+        f"empty catalog: {sources!r}"
+    )
+    assert all(s["error"] for s in sources), f"each failure carries its cause: {sources!r}"

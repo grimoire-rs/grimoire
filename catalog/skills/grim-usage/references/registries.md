@@ -640,11 +640,25 @@ entry declares none (and under `--registry`); `locator` is the configured
 value verbatim, which `repo` does not carry — `repo` names the artifact's own
 registry host, and one index source serves rows from many hosts.
 
+Beside `items`, the JSON document carries a `sources` array — one
+`{alias, locator, ok, error}` object per browsed source, in declaration
+order. A source grim cannot read degrades to an empty group so the reachable
+ones still answer, and the browse still exits `0` whether one source failed
+or all of them did — `sources` is the only place in the document that says
+so. Check it before treating a short or empty `items` as the catalog:
+
 ```sh
 grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 grim search --format json | jq '.items | group_by(.source.alias // .source.locator)'
+# which sources did not load, and why
+grim search --format json | jq '.sources[] | select(.ok | not)'
 ```
+
+`ok: true` on a source whose rows are missing is not a contradiction: that
+source answered and had nothing, or a browse filter hid what it had. The
+same failure is still logged on stderr as `catalog for source '<x>'
+unavailable: …`.
 
 A registry declaring a [browse filter](#browse-filters) contributes only the
 repositories its patterns admit — to `grim search`, the TUI, and

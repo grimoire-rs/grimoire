@@ -87,8 +87,8 @@ index repository (no fork involved, or the `[announce] fork` policy
 resolved to `never`), populated with the fork's full name and whether it
 was newly created once forking activated.
 
-The newest instance is [`grim search`][search]'s `rating`
-(`{up, url}` or `null`), added with [artifact ratings][ratings]. It is the
+[`grim search`][search]'s `rating`
+(`{up, url}` or `null`), added with [artifact ratings][ratings], is the
 worked example of what always-present-null buys a consumer: `null` means
 *this artifact is unrated* — no sidecar published, no entry for the ref, or
 no votes yet — while an **absent** `rating` key means *this grim predates
@@ -98,6 +98,15 @@ pre-rating `search` shape keeps parsing unchanged, because the field was
 appended and nothing else moved. The `rating` object emits `up` and `url`
 only; the forge's opaque vote target is deliberately kept out of the frozen
 document, so no forge's node-id format is frozen with it.
+
+The newest instance is the sibling half of the same rule. [`grim
+search`][search] grew a `sources` array beside `items`, naming every
+browsed source and whether its catalog loaded — the reason the
+[`items` envelope][json-items] exists at all, since a bare top-level array
+could never have grown it. It is always present (`[]` when nothing was
+browsed), so a consumer reads it unconditionally, and a pre-existing client
+that ignores unknown keys is unaffected. See [the `sources`
+array][json-sources].
 
 Manifest *inputs* are covered by the mirror image of that rule. A minor
 release may widen what a key accepts — a new optional key, a new accepted
@@ -433,6 +442,8 @@ unaffected — they read straight from disk and never touch a manifest.
 [stats-sidecar]: ./package-index.md#spec-stats
 [ratings]: ./ratings.md
 [search]: ./commands.md#search
+[json-items]: ./json-interface.md#items-envelope
+[json-sources]: ./json-interface.md#search-sources
 [upgrading-catalog-downgrade]: ./upgrading.md#catalog-cache-downgrade
 [init]: ./commands.md#init
 [configuration]: ./configuration.md

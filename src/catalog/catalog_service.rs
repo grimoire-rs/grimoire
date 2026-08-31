@@ -187,6 +187,22 @@ pub struct CatalogGroup {
     /// (YAGNI); thread it through [`Catalog::load_or_refresh_coordinated`]'s
     /// return when one does.
     pub served_offline: bool,
+    /// Why this source's catalog failed to load, when it did; `None` when it
+    /// loaded (an empty group is then a source that genuinely listed nothing).
+    ///
+    /// The failure *kind* — never a message carrying the local cache-file
+    /// path, which is what `CatalogError`'s own `Display` prepends.
+    ///
+    /// This is the honest failure discriminator, and
+    /// [`Self::served_offline`] is not: that flag is `true` both for a
+    /// `--offline` browse and for a source that blew up, so nothing
+    /// downstream could tell a degraded group from a deliberately cached one.
+    /// The cause used to reach only `tracing::warn!` and be dropped, which is
+    /// what made `grim search --format json` render a partial browse
+    /// indistinguishable from an empty catalog (grimoire-rs/grimoire#108).
+    ///
+    /// Sibling views of one locator share a load, so they share this value.
+    pub error: Option<String>,
     /// The row count **before** this source's `include`/`exclude` browse
     /// filter ran; [`Self::rows`] is what is left **after** it. Everything
     /// the shared [`SearchQuery`] admitted, so under `grim search <query>`
@@ -256,6 +272,12 @@ impl CatalogResults {
     }
 }
 
+/// The [`CatalogGroup::error`] a group carries when its refresh task failed to
+/// join at all (a panic). The task's own error message died with it, so the
+/// group reports the only thing that is known — never `None`, which would read
+/// as a source that answered.
+const TASK_FAILED: &str = "catalog refresh task failed";
+
 /// Load (or coordinately refresh) every configured registry's catalog in
 /// parallel, filter by `query`, badge every surviving row, and return the
 /// result grouped by registry.
@@ -317,7 +339,7 @@ pub async fn load_catalog(
             })
         })
         .collect();
-    let mut set: tokio::task::JoinSet<(usize, Option<Catalog>)> = tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<(usize, Result<Catalog, String>)> = tokio::task::JoinSet::new();
     for (idx, (url, kind)) in loads.iter().copied().enumerate() {
         let path = paths.catalog_file_for(url);
         let registry = url.to_string();
@@ -334,10 +356,21 @@ pub async fn load_catalog(
                 Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, force).await
             };
             match result {
-                Ok(catalog) => (idx, Some(catalog)),
+                Ok(catalog) => (idx, Ok(catalog)),
                 Err(e) => {
+                    // Logged as before — the stderr line is a shipped signal
+                    // consumers already read — *and* carried, so a caller
+                    // rendering only stdout can name the source too (#108).
                     tracing::warn!("catalog for source '{registry}' unavailable: {e}");
-                    (idx, None)
+                    // The *kind* only, never `CatalogError`'s `Display`: that
+                    // prefixes the absolute cache-file path, which is a local
+                    // artifact of this machine that no consumer can act on and
+                    // that a UI would render verbatim. The kind is
+                    // self-contained ("invalid catalog file", "registry access
+                    // failed", "package index fetch failed for '<locator>'"),
+                    // and freezing a path shape into the JSON contract is the
+                    // one thing this field must not do.
+                    (idx, Err(e.kind.to_string()))
                 }
             }
         });
@@ -347,12 +380,16 @@ pub async fn load_catalog(
     // regardless of completion order (quality-rust JoinSet rule) with no
     // separate sort. A task that panicked is logged and its registry degrades
     // to an absent (empty) group below rather than vanishing silently.
-    let mut by_load: std::collections::BTreeMap<usize, Option<Catalog>> = std::collections::BTreeMap::new();
+    let mut by_load: std::collections::BTreeMap<usize, Result<Catalog, String>> = std::collections::BTreeMap::new();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((idx, catalog)) => {
                 by_load.insert(idx, catalog);
             }
+            // The task's own index is gone with it, so the load stays absent
+            // from the map and resolves to `TASK_FAILED` below — a panicked
+            // refresh must never leave its group looking like a healthy empty
+            // one.
             Err(e) => tracing::error!("catalog refresh task failed to join: {e}"),
         }
     }
@@ -361,9 +398,17 @@ pub async fn load_catalog(
     for (idx, reg) in registries.iter().enumerate() {
         // Cloned, not removed: sibling views of one locator read the same
         // load, and each narrows it through its own filter below.
-        let catalog = load_of.get(idx).and_then(|l| by_load.get(l)).cloned().flatten();
+        // Cloned, not removed: sibling views of one locator read the same
+        // load, and each narrows it through its own filter below. An absent
+        // entry is a task that failed to join, which is a failure — never a
+        // source that answered with nothing.
+        let catalog = load_of
+            .get(idx)
+            .and_then(|l| by_load.get(l))
+            .cloned()
+            .unwrap_or_else(|| Err(TASK_FAILED.to_string()));
         let group = match catalog {
-            Some(catalog) => {
+            Ok(catalog) => {
                 // The rows the browse filter is asked about: everything the
                 // shared `SearchQuery` admitted. Materialized so the count is
                 // available for the C-019 diagnostic below.
@@ -424,16 +469,18 @@ pub async fn load_catalog(
                     truncated: catalog.truncated(),
                     built_at: catalog.built_at().to_string(),
                     served_offline: offline,
+                    error: None,
                     rows_before_filter: considered,
                     rows,
                 }
             }
-            None => CatalogGroup {
+            Err(error) => CatalogGroup {
                 registry: reg.url.clone(),
                 alias: reg.alias.clone(),
                 truncated: false,
                 built_at: String::new(),
                 served_offline: true,
+                error: Some(error),
                 // A failed or offline-degraded source considered nothing —
                 // the group is empty for a reason no filter caused.
                 rows_before_filter: 0,
@@ -601,6 +648,43 @@ mod tests {
         }
     }
 
+    /// An access whose catalog listing succeeds with nothing in it — the
+    /// healthy-but-empty source a failed one must be distinguishable from.
+    struct EmptyAccess;
+
+    #[async_trait]
+    impl OciAccess for EmptyAccess {
+        async fn resolve_digest(&self, _: &Identifier, _: Operation) -> Result<Option<Digest>, AccessError> {
+            unreachable!("no repository to resolve")
+        }
+        async fn fetch_manifest(&self, _: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            unreachable!()
+        }
+        async fn fetch_blob(
+            &self,
+            _: &Identifier,
+            _: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            unreachable!()
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            unreachable!()
+        }
+        async fn list_catalog(&self, _: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, AccessError> {
+            unreachable!()
+        }
+        async fn push_manifest(&self, _: &Identifier, _: &OciManifest) -> Result<Digest, AccessError> {
+            unreachable!()
+        }
+        async fn put_tag(&self, _: &Identifier, _: &str, _: &Digest) -> Result<(), AccessError> {
+            unreachable!()
+        }
+    }
+
     #[tokio::test]
     async fn per_registry_failure_degrades_to_empty_group_in_input_order() {
         // A registry whose walk fails must degrade *that* group to empty
@@ -659,8 +743,66 @@ mod tests {
         for g in &results.groups {
             assert!(g.rows.is_empty(), "a failed registry yields no rows");
             assert!(g.served_offline, "a failed registry is flagged served_offline");
+            // Issue #108: the cause is *carried*, not only logged. Without it
+            // no consumer can tell this empty group from a source that
+            // genuinely had nothing to list.
+            assert_eq!(
+                g.error.as_deref(),
+                Some("registry access failed"),
+                "a failed registry carries its load error — the kind alone, with
+                 no local cache-file path baked into the reported message"
+            );
         }
         assert!(!results.any_truncated());
+    }
+
+    #[tokio::test]
+    async fn a_source_that_loaded_carries_no_error() {
+        // The counterpart to the degrade test: a healthy group's `error` is
+        // `None`, so `error.is_some()` is a sound failure discriminator rather
+        // than a field that is always set.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        let registries = vec![ResolvedRegistry {
+            insecure: false,
+            url: "registry.one/ns".to_string(),
+            alias: Some("one".to_string()),
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        }];
+        let access: Arc<dyn OciAccess> = Arc::new(EmptyAccess);
+
+        let results = load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            true,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("an empty listing is not a failure");
+
+        assert_eq!(results.groups.len(), 1);
+        assert!(results.groups[0].rows.is_empty(), "nothing published, nothing listed");
+        assert!(
+            results.groups[0].error.is_none(),
+            "a source that answered carries no error: {:?}",
+            results.groups[0].error
+        );
     }
 
     // ── C-007 / C-008 / C-019: the browse filter at the shared seam ─────────

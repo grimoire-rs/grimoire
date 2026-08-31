@@ -954,6 +954,27 @@ locator is a host plus an optional namespace for an `oci` source and the index
 url for an `index` one — and one index serves rows from many hosts. Like
 `repository`, `source` is JSON-only; the plain table keeps its five columns.
 
+Beside `items`, the JSON document carries a `sources` array — one
+`{alias, locator, ok, error}` object per browsed source, in declaration
+order. A source grim cannot read degrades to an empty group so the reachable
+ones still answer, and the exit code stays `0` whether one source failed or
+all of them did; `sources` is where that shows up. `ok` is `false` and
+`error` names the cause for a source whose catalog failed to load, so a
+short or empty `items` is never mistaken for a small or empty catalog:
+
+```json
+{
+  "items": [],
+  "sources": [
+    { "alias": "acme", "locator": "ghcr.io/acme", "ok": false, "error": "invalid catalog file" }
+  ]
+}
+```
+
+The same failure is still reported on stderr — `catalog for source '<x>'
+unavailable: …` — for anyone reading the plain output, which keeps its five
+columns. Full contract: [the `sources` array](./json-interface.md#search-sources).
+
 A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
 default** — unless it is installed in the active scope (directly or via a
 bundle), in which case it stays listed so you can see what you have. Pass

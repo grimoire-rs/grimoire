@@ -10,7 +10,7 @@
 //! representative tag. A deprecated row carries a comma-suffixed `deprecated`
 //! in its `Status` cell (e.g. `installed,deprecated`).
 //!
-//! JSON format: `{"items": [...]}` where each item is a
+//! JSON format: `{"items": [...], "sources": [...]}` where each item is a
 //! `{kind, repo, source, summary, description, version, latest_tag,
 //! repository, revision, created, deprecated, replaced_by, rating, status}`
 //! object (uniform `items` envelope, per subsystem-cli-api.md).
@@ -21,6 +21,12 @@
 //! the git provenance (`--git` opt-in) or `null`; `deprecated` is the
 //! deprecation message or `null`; `rating` is the community rating joined
 //! from the index sidecar, or `null` when the artifact is unrated.
+//!
+//! `sources` is the always-present sibling naming every browsed source in
+//! registry-declaration order — `{alias, locator, ok, error}` — so a consumer
+//! reading only stdout can tell "no results" from "some of your registries
+//! did not load". Its `alias`/`locator` are the same two halves each item's
+//! own `source` carries, so rows join to sources directly.
 
 use std::io::{self, Write};
 
@@ -53,6 +59,36 @@ pub struct SearchSource {
     /// The entry's locator, byte-identical to the configured `[[registries]]`
     /// value it was resolved from.
     pub locator: String,
+}
+
+/// One browsed source and whether its catalog loaded.
+///
+/// A source that fails to load degrades to an empty group inside
+/// [`crate::catalog::load_catalog`] — the browse never fails as a whole, and
+/// the exit code stays 0. That is right for the CLI and wrong for a consumer
+/// reading only stdout: before this, the sole trace was a `tracing::warn!` on
+/// stderr, so a partial browse and an empty catalog produced the same
+/// document (grimoire-rs/grimoire#108). Naming every source and its status
+/// makes "2 of 3 registries unavailable" readable from the document alone.
+///
+/// `alias` and `locator` are deliberately the same two halves as
+/// [`SearchSource`], which rides every row: a consumer joins `items[].source`
+/// to this array with no extra rule. `ok` is the field to branch on; `error`
+/// carries the cause when it is `false` and is an explicit `null` otherwise.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchSourceStatus {
+    /// The configured alias, or `null` when the entry declared none.
+    pub alias: Option<String>,
+    /// The entry's locator, byte-identical to the configured `[[registries]]`
+    /// value it was resolved from.
+    pub locator: String,
+    /// Whether this source's catalog loaded. `false` means its rows are
+    /// missing from `items` — not that it published nothing.
+    pub ok: bool,
+    /// Why the load failed, when it did; `None` on a source that loaded.
+    /// The same message the `catalog for source '<x>' unavailable` warning
+    /// carries on stderr.
+    pub error: Option<String>,
 }
 
 /// One row's community rating — the count and the human-facing thread link.
@@ -151,16 +187,22 @@ impl Serialize for SearchEntry {
     }
 }
 
-/// The result of a catalog search: one row per matching repository.
+/// The result of a catalog search: one row per matching repository, plus the
+/// load status of every source that was browsed to produce them.
 #[derive(Debug, Serialize)]
 pub struct SearchReport {
     items: Vec<SearchEntry>,
+    /// One entry per browsed source, in registry-declaration order. Always
+    /// present (`[]` when nothing was browsed) — an absent key would mean
+    /// *older grim*, which is exactly the distinction the field exists to
+    /// make.
+    sources: Vec<SearchSourceStatus>,
 }
 
 impl SearchReport {
     /// Build from operation results.
-    pub fn new(items: Vec<SearchEntry>) -> Self {
-        Self { items }
+    pub fn new(items: Vec<SearchEntry>, sources: Vec<SearchSourceStatus>) -> Self {
+        Self { items, sources }
     }
 }
 
@@ -271,7 +313,7 @@ mod tests {
 
     #[test]
     fn plain_single_table_with_header() {
-        let r = SearchReport::new(vec![entry("localhost:5000/acme/x", StatusBadge::Installed)]);
+        let r = SearchReport::new(vec![entry("localhost:5000/acme/x", StatusBadge::Installed)], vec![]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -282,7 +324,7 @@ mod tests {
 
     #[test]
     fn json_is_items_envelope() {
-        let r = SearchReport::new(vec![entry("localhost:5000/acme/x", StatusBadge::NotInstalled)]);
+        let r = SearchReport::new(vec![entry("localhost:5000/acme/x", StatusBadge::NotInstalled)], vec![]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -325,7 +367,7 @@ mod tests {
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.lines().next().unwrap().contains("Version"), "header renamed");
         assert!(out.contains("2.1.0"), "concrete version shown, not the moving tag");
@@ -353,7 +395,7 @@ mod tests {
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("stable"));
     }
@@ -378,7 +420,7 @@ mod tests {
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("short blurb"));
         assert!(!out.contains("much longer description"));
@@ -404,7 +446,7 @@ mod tests {
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("the description text"));
     }
@@ -432,7 +474,7 @@ mod tests {
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains(&long), "piped output keeps full text");
         assert!(!out.contains('…'), "no ellipsis when piped");
@@ -458,7 +500,7 @@ mod tests {
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["summary"], "short");
         assert_eq!(v["items"][0]["description"], "the full long description");
@@ -472,19 +514,19 @@ mod tests {
         let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
         e.repository = Some("https://github.com/acme/x".to_string());
         let mut buf = Vec::new();
-        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["repository"], "https://github.com/acme/x");
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v["items"][0]["repository"].is_null());
         // The plain table stays five columns — no URL leaks into it.
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("github.com"), "plain table unchanged");
     }
@@ -495,13 +537,13 @@ mod tests {
         e.revision = Some("abc123def456-dirty".to_string());
         e.created = Some("2026-06-29T12:00:00+00:00".to_string());
         let mut buf = Vec::new();
-        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["revision"], "abc123def456-dirty");
         assert_eq!(v["items"][0]["created"], "2026-06-29T12:00:00+00:00");
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -509,7 +551,7 @@ mod tests {
         assert!(v["items"][0]["created"].is_null());
         // The plain table stays five columns — provenance never leaks into it.
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("abc123def456"), "plain table unchanged");
     }
@@ -522,7 +564,9 @@ mod tests {
         // Plain: the Status cell gains a comma-suffixed `deprecated`; the blurb
         // cell stays unmarked (no `[deprecated]` prefix).
         let mut buf = Vec::new();
-        SearchReport::new(vec![e.clone()]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e.clone()], vec![])
+            .print_plain(&mut buf)
+            .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("installed,deprecated"),
@@ -532,12 +576,12 @@ mod tests {
         assert!(!out.contains("[deprecated]"), "the blurb prefix is gone: {out}");
         // JSON: the deprecation message rides a dedicated field.
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["deprecated"], "use acme/x-2");
         // A non-deprecated row carries no suffix and a null field.
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -546,7 +590,7 @@ mod tests {
             "key present, null when not deprecated"
         );
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_plain(&mut buf)
             .unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -558,7 +602,7 @@ mod tests {
         let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
         e.replaced_by = Some("ghcr.io/acme/skills/x2".to_string());
         let mut buf = Vec::new();
-        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
         // The full 15-field object still round-trips. This count is linked to
@@ -567,14 +611,14 @@ mod tests {
         assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v["items"][0]["replaced_by"].is_null());
         // The plain table stays five columns — no replacement leaks into it.
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("x2"), "plain table unchanged");
     }
@@ -587,7 +631,7 @@ mod tests {
             url: "https://github.com/acme/index/discussions/7".to_string(),
         });
         let mut buf = Vec::new();
-        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["rating"]["up"], 42);
         assert_eq!(
@@ -606,7 +650,7 @@ mod tests {
         // Unrated ⇒ explicit null, key always present — and never `0`, which
         // would read as "rated, nobody voted".
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -616,7 +660,7 @@ mod tests {
 
         // The plain table stays five columns — no rating leaks into it.
         let mut buf = Vec::new();
-        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("42"), "plain table unchanged: {out}");
         assert!(!out.contains("discussions"), "no thread link in the plain table");
@@ -637,7 +681,9 @@ mod tests {
             locator: "ghcr.io/acme".to_string(),
         };
         let mut buf = Vec::new();
-        SearchReport::new(vec![aliased.clone()]).print_json(&mut buf).unwrap();
+        SearchReport::new(vec![aliased.clone()], vec![])
+            .print_json(&mut buf)
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["source"]["alias"], "acme");
         assert_eq!(v["items"][0]["source"]["locator"], "ghcr.io/acme");
@@ -645,7 +691,7 @@ mod tests {
         // An unaliased entry: `alias` is an explicit null, never an absent key,
         // and the locator is still there — attribution is never guessed.
         let mut buf = Vec::new();
-        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::NotInstalled)])
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::NotInstalled)], vec![])
             .print_json(&mut buf)
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -656,7 +702,7 @@ mod tests {
 
         // The plain table stays five columns — no attribution leaks into it.
         let mut buf = Vec::new();
-        SearchReport::new(vec![aliased]).print_plain(&mut buf).unwrap();
+        SearchReport::new(vec![aliased], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("acme (ghcr.io"), "plain table unchanged");
         assert_eq!(
@@ -668,10 +714,68 @@ mod tests {
 
     #[test]
     fn empty_results_serialize_as_empty_items() {
-        let r = SearchReport::new(vec![]);
+        let r = SearchReport::new(vec![], vec![]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v, serde_json::json!({"items": []}));
+        assert_eq!(v, serde_json::json!({"items": [], "sources": []}));
+    }
+
+    #[test]
+    fn json_carries_source_status_plain_table_does_not() {
+        // Issue #108: a source that failed to load is named in the envelope
+        // with its cause, so an empty (or short) `items` is never mistaken for
+        // an empty catalog.
+        let sources = vec![
+            SearchSourceStatus {
+                alias: Some("good".to_string()),
+                locator: "ghcr.io/acme".to_string(),
+                ok: true,
+                error: None,
+            },
+            SearchSourceStatus {
+                alias: None,
+                locator: "https://index.example".to_string(),
+                ok: false,
+                error: Some("invalid catalog file".to_string()),
+            },
+        ];
+        let e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()], sources)
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        let listed = v["sources"].as_array().expect("sources is an array");
+        assert_eq!(listed.len(), 2, "one entry per browsed source: {listed:?}");
+        // A healthy source: `error` is an explicit null, never an absent key.
+        let good = listed[0].as_object().unwrap();
+        assert_eq!(good["alias"], "good");
+        assert_eq!(good["locator"], "ghcr.io/acme");
+        assert_eq!(good["ok"], true);
+        assert!(good.contains_key("error"), "key present even when healthy");
+        assert!(good["error"].is_null());
+        assert_eq!(good.len(), 4, "exactly the four halves a consumer acts on: {good:?}");
+        // A failed source: named, marked, and carrying its cause.
+        let bad = listed[1].as_object().unwrap();
+        assert!(bad["alias"].is_null(), "an unaliased entry is null, never absent");
+        assert_eq!(bad["locator"], "https://index.example");
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["error"], "invalid catalog file");
+
+        // The item shape is untouched — this is a sibling key, not a row field.
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
+
+        // The plain table stays five columns — no source status leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("index.example"), "plain table unchanged: {out}");
+        assert_eq!(
+            out.lines().next().unwrap().split_whitespace().count(),
+            5,
+            "header still five columns"
+        );
     }
 }

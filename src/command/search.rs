@@ -27,10 +27,18 @@
 //! and fails to parse is the one non-browse failure and is **not** data —
 //! it exits 78 at either scope, like every sibling command, rather than
 //! silently browsing a different registry set.
+//!
+//! Because the browse never fails, the report has to say *what happened*
+//! instead: the `sources` sibling names every browsed source and whether its
+//! catalog loaded. Without it a source that failed left only a stderr
+//! warning, so a partial browse and an empty catalog produced the same JSON
+//! document — a consumer could not tell "nothing published" from "two of your
+//! three registries did not answer" (grimoire-rs/grimoire#108). The exit code
+//! is deliberately not the carrier: it cannot name *which* source failed.
 
 use clap::Args;
 
-use crate::api::search_report::{SearchEntry, SearchRating, SearchReport, SearchSource};
+use crate::api::search_report::{SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus};
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
 use crate::catalog::{BadgeContext, SearchQuery, SortKey, SortMode};
 use crate::cli::exit_code::ExitCode;
@@ -170,6 +178,21 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // filter apart from one caused by a `_catalog`-gated registry.
     let any_rows_before_filter = results.any_rows_before_filter();
 
+    // Every browsed source and whether it loaded, read off the groups before
+    // the flatten below consumes them. Group order is registry-declaration
+    // order, the same order `grim context` lists `registries[]` in, and under
+    // `--registry` it is exactly the collapsed browse set.
+    let sources: Vec<SearchSourceStatus> = results
+        .groups
+        .iter()
+        .map(|g| SearchSourceStatus {
+            alias: g.alias.clone(),
+            locator: g.registry.clone(),
+            ok: g.error.is_none(),
+            error: g.error.clone(),
+        })
+        .collect();
+
     // Flatten the registry groups into the flat search table, carrying each
     // group's source attribution onto its rows — the alias/locator pair no
     // consumer can reconstruct from `repo` alone (an index serves rows from
@@ -236,7 +259,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         );
     }
 
-    Ok((SearchReport::new(entries), ExitCode::Success))
+    Ok((SearchReport::new(entries, sources), ExitCode::Success))
 }
 
 /// Sort the flattened rows by relevance, descending, in place.

@@ -279,6 +279,29 @@ def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: P
     assert rows == [], f"unreachable index must yield no rows, got {rows}"
 
 
+def test_search_json_names_the_failed_index_source(grim_at, project_dir: Path) -> None:
+    """A failed ``index =`` source is named in the envelope, not just on stderr.
+
+    Same contract as an unreachable OCI registry (issue #108): the browse
+    degrades that source to an empty group and exits 0, but the ``sources``
+    sibling says which source failed and why, so an empty ``items`` is never
+    mistaken for an empty index.
+    """
+    locator = "http://127.0.0.1:1/absent"
+    _index_config(project_dir, locator)
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, result.stderr
+    doc = json.loads(result.stdout)
+
+    assert doc["items"] == [], f"unreachable index yields no rows, got {doc['items']!r}"
+    assert doc["sources"] == [
+        {"alias": "hub", "locator": locator, "ok": False, "error": doc["sources"][0]["error"]}
+    ], f"the failed index source is named: {doc['sources']!r}"
+    assert doc["sources"][0]["error"], "a failed source carries a non-null error"
+
+
 # ---------------------------------------------------------------------------
 # Git transport
 # ---------------------------------------------------------------------------

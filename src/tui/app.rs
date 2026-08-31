@@ -3854,6 +3854,7 @@ mod tests {
             truncated: false,
             built_at: String::new(),
             served_offline: false,
+            error: None,
             rows_before_filter: 1,
             rows: vec![CatalogRow {
                 kind: Some("skill".to_string()),
@@ -4821,6 +4822,7 @@ mod tests {
             truncated: false,
             built_at: String::new(),
             served_offline: false,
+            error: None,
             // Unfiltered fixture: every considered row survived, so
             // `c019_filter_emptied`'s fourth gate never suppresses this
             // group. A filtered-and-emptied fixture sets this field above

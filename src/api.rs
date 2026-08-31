@@ -64,7 +64,7 @@ pub use release_report::ReleaseReport;
 #[allow(unused_imports)]
 pub use remove_report::{RemoveReport, RemoveStatus};
 #[allow(unused_imports)]
-pub use search_report::{SearchEntry, SearchReport};
+pub use search_report::{SearchEntry, SearchReport, SearchSourceStatus};
 #[allow(unused_imports)]
 pub use status_report::{StatusEntry, StatusReport};
 #[allow(unused_imports)]
