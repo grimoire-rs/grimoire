@@ -1663,6 +1663,56 @@ def test_one_file_may_declare_a_locator_twice_as_two_views(
     }, "each view must contribute the rows its own include admits"
 
 
+def test_one_file_may_declare_a_locator_twice_without_aliases(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """Two ALIAS-LESS entries over one locator are two views, and both browse.
+
+    The aliased half of this was fixed; the alias-less half was not, and no
+    test covered it. `grim config registry add` demands an alias, so this
+    shape only ever arrives by hand — and by hand is exactly how a user
+    splits an index into a wide view and a narrow one. Keying within-file
+    repeats on `(locator, alias)` made the pair a single entry: the second
+    view was dropped whole, alias, filter and all, so a browse reported the
+    first entry's rows and nothing else, with the loss on stderr alone.
+
+    Written include-first on purpose — that ordering is the worse failure,
+    because the surviving entry's `include` then hides every row the dropped
+    view was there to admit.
+    """
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_filter_tree(ns)
+
+    (project_dir / "grimoire.toml").write_text(
+        "[[registries]]\n"
+        f'oci = "{REGISTRY_HOST}/{ns}"\n'
+        f'include = {_toml_list(_ns_rel(ns, "platform"))}\n'
+        "default = true\n"
+        "\n"
+        "[[registries]]\n"
+        f'oci = "{REGISTRY_HOST}/{ns}"\n'
+        f'include = {_toml_list(_ns_rel(ns, "internal"))}\n'
+        "\n[skills]\n\n[rules]\n"
+    )
+    runner = grim_at(project_dir)
+
+    context = runner.json("context")
+    locators = [r["url"] for r in context["registries"]]
+    assert locators == [f"{REGISTRY_HOST}/{ns}"] * 2, (
+        f"both alias-less entries must resolve, in declaration order; got {locators}"
+    )
+
+    # The union of the two views. Without the second entry the first one's
+    # `include` alone admits three of the four rows, so a dropped view is
+    # visible as a missing `internal/thing`.
+    assert _visible_candidates(runner, ns) == {
+        "platform/foo",
+        "platform/foo/deep",
+        "platform/bar",
+        "internal/thing",
+    }, "each alias-less view must contribute the rows its own include admits"
+
+
 # ---------------------------------------------------------------------------
 # Issue #108 — the JSON envelope names every browsed source and its load status
 # ---------------------------------------------------------------------------

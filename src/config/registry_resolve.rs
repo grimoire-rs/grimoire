@@ -321,25 +321,36 @@ pub fn resolve_registries(
     // index locator degrades to the HTTP transport rather than panicking.
     let mut out: Vec<ResolvedRegistry> = Vec::new();
     // An entry is identified by its normalized locator **and its alias** —
-    // what the user wrote, not where they wrote it. Two entries naming one
-    // locator under two aliases are two *views* of that source (a wide one
-    // beside a narrow one, which is the whole point of per-entry browse
-    // filters) and both browse, in either file or across them. The key
-    // deliberately excludes the filters, so a field added to `RegistryConfig`
-    // later cannot quietly change what counts as a duplicate.
+    // what the user wrote, not where they wrote it. The key deliberately
+    // excludes the filters, so a field added to `RegistryConfig` later cannot
+    // quietly change what counts as a duplicate.
     //
-    // What still collapses is a genuine repeat: the same alias at the same
-    // locator, which is the shape `grim init` writes when it snapshots an
-    // index the global config already declares (issue #28 — an alias-less
-    // entry over an alias-less one). First occurrence wins, so a project
-    // entry shadows its global twin and an alias stays exactly one source.
+    // **Only layering collapses.** The key is written by project entries and
+    // read by global ones, so the sole thing that drops is a global entry a
+    // project entry repeats — the shape `grim init` writes when it snapshots
+    // an index the global config already declares (issue #28), and the
+    // project entry shadows its global twin.
+    //
+    // A repeat **inside one file** is authored, not layered: two entries over
+    // one locator are two *views* of that source, a wide one beside a narrow
+    // one, which is the whole point of per-entry browse filters. Both browse
+    // — **aliased or not**. Keying within-file repeats too collapsed the
+    // alias-less pair whole, alias, filter and all, so the rows only the
+    // second entry's `include` admitted were unreachable and the loss went to
+    // stderr alone; a duplicate alias in one file is rejected at load
+    // (`validate_registries`), so the aliased half of that pair never reached
+    // the dedup and the gap was alias-less-only.
     //
     // `load_catalog` fans its refresh out per distinct *locator*, not per
     // entry, so sibling views share one cache read and never race each other
     // for the advisory lock (which on a cold cache would serve one of them an
     // empty catalog).
-    let mut seen: std::collections::BTreeSet<(String, Option<String>)> = std::collections::BTreeSet::new();
-    for rc in project.iter().chain(global.iter()) {
+    let mut project_keys: std::collections::BTreeSet<(String, Option<String>)> = std::collections::BTreeSet::new();
+    for (rc, from_global) in project
+        .iter()
+        .map(|rc| (rc, false))
+        .chain(global.iter().map(|rc| (rc, true)))
+    {
         let (locator, kind) = match (&rc.oci, &rc.index) {
             (Some(oci), _) if !oci.trim().is_empty() => (oci.clone(), SourceKind::Registry),
             // Classified on the *trimmed* locator, the same string the stored
@@ -355,7 +366,11 @@ pub fn resolve_registries(
             // skip rather than fabricate an empty source.
             _ => continue,
         };
-        if seen.insert((normalize_locator(&locator), rc.alias.clone())) {
+        let key = (normalize_locator(&locator), rc.alias.clone());
+        if !(from_global && project_keys.contains(&key)) {
+            if !from_global {
+                project_keys.insert(key);
+            }
             // Compiled *here*, at resolve time, so `globset` stays inside
             // `src/config/` and every consumer (search, TUI, MCP,
             // `grim context`) receives an already-compiled filter.
@@ -397,20 +412,21 @@ pub fn resolve_registries(
                 insecure: rc.insecure && kind == SourceKind::Registry,
             });
         } else if !rc.include.is_empty() || !rc.exclude.is_empty() {
-            // Same alias, same locator, so the entry and the one that won are
-            // the same source — the only thing this one declared that the
-            // winner does not carry is its browse filter, which silently
-            // stops applying. Same voice as the sibling arm above, escaped
-            // for the same reason.
+            // A global entry a project entry repeats — same alias, same
+            // locator, so the two are the same source and the project one
+            // shadows it. The only thing this one declared that the winner
+            // does not carry is its browse filter, which silently stops
+            // applying. Same voice as the sibling arm above, escaped for the
+            // same reason.
             //
-            // Gated on that one observable loss. A repeat that names no
-            // filter is **deliberately unwarned**: layering a project entry
+            // Gated on that one observable loss. A shadowed entry that names
+            // no filter is **deliberately unwarned**: layering a project entry
             // over an identical global one is a legitimate setup, and warning
-            // on it would fire on every browse for no recoverable reason. An
-            // entry that merely shares a locator no longer reaches here at
-            // all — it is a second view and it browses.
+            // on it would fire on every browse for no recoverable reason. A
+            // repeat inside one file no longer reaches here at all — it is a
+            // second view and it browses.
             tracing::warn!(
-                "registry '{}': repeats an earlier entry for '{}'; ignoring its include/exclude filter",
+                "registry '{}': a project entry repeats '{}'; ignoring this entry's include/exclude filter",
                 rc.alias.as_deref().unwrap_or(&locator).escape_debug(),
                 locator.escape_debug()
             );
@@ -932,6 +948,33 @@ mod tests {
             set[1].filter.include_patterns(),
             ["mine"],
             "its own filter, not the winner's"
+        );
+        assert!(set[0].is_default, "the first entry is still the only primary");
+        assert!(!set[1].is_default);
+    }
+
+    #[test]
+    fn one_file_may_declare_the_same_locator_twice_without_aliases() {
+        // The alias-less half of the test above, and the half the dedup kept
+        // collapsing: two views written with no alias at all — the shape a
+        // hand-edited config takes, since `grim config registry add` demands
+        // one. Keying within-file repeats on `(locator, alias)` made this
+        // pair one entry, so the second view's `include` was dropped whole
+        // and every row only it admits went unreachable — a browse that
+        // reports the first entry's rows and nothing else. Only the alias
+        // could ever separate them, and `validate_registries` rejects a
+        // duplicate alias in one file, so no authored config could express
+        // two alias-less views at all.
+        let mut wide = rc_filtered("wide", "https://index.grimoire.rs", &[], &["mine"]);
+        wide.alias = None;
+        let mut mine = rc_filtered("mine", "https://index.grimoire.rs", &["mine"], &[]);
+        mine.alias = None;
+        let set = resolve_registries(&[], &[wide, mine], None, &[], None, "registry.example", None);
+        assert_eq!(set.len(), 2, "both alias-less views must survive: {set:?}");
+        assert_eq!(
+            set[1].filter.include_patterns(),
+            ["mine"],
+            "the second view keeps its own filter, not the winner's"
         );
         assert!(set[0].is_default, "the first entry is still the only primary");
         assert!(!set[1].is_default);
@@ -1482,7 +1525,7 @@ mod tests {
         assert_eq!(set.len(), 1, "the dedup itself is unchanged: {set:?}");
         assert!(set[0].filter.include_patterns().is_empty(), "the project entry won");
         assert!(
-            logs.contains("registry 'acme': repeats an earlier entry for 'GHCR.io/acme/'"),
+            logs.contains("registry 'acme': a project entry repeats 'GHCR.io/acme/'"),
             "the dropped entry must be named; captured:\n{logs}"
         );
         assert!(
