@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `providers.rating_host` in the `stats.json` sidecar *(catalog)*
 - `host_source` on the `grim rate` report — `default` / `index` / null *(rate)*
 
+### Fixed
+
+- `grim rate` against GitHub Enterprise Cloud with data residency (`api.<subdomain>.ghe.com`) dialed `/api/graphql` and matched credentials on the API host instead of `<subdomain>.ghe.com` *(rate)*
+
 ## [0.14.0] - 2026-08-28
 
 ### Added

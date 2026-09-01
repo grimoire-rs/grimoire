@@ -251,20 +251,53 @@ pub fn hosts_equal(a: &str, b: &str) -> bool {
     }
 }
 
+/// Whether `host` is a GitHub SaaS **API** host — the shape that fronts a
+/// separate site host and serves GraphQL from `/graphql`.
+///
+/// Two spellings qualify: `api.github.com`, and GitHub Enterprise Cloud
+/// with data residency (GHE.com), whose API host is
+/// `api.<subdomain>.ghe.com` — see
+/// <https://docs.github.com/en/enterprise-cloud@latest/graphql/guides/forming-calls-with-graphql>.
+///
+/// The GHE.com test is an exact shape, never a suffix match: the `api.`
+/// prefix is a whole label and the subdomain is a single label with no dot
+/// or port in it. So `api.github.com.evil.tld`, `xapi.octocorp.ghe.com`,
+/// `api.ghe.com` and `api.a.b.ghe.com` are all ordinary hosts that keep
+/// their own credentials and the instance-host layout. Getting that wrong
+/// in the widening direction would send a bearer token to a host of the
+/// attacker's choosing.
+fn is_github_saas_api_host(host: &str) -> bool {
+    host == "api.github.com"
+        || host
+            .strip_prefix("api.")
+            .and_then(|rest| rest.strip_suffix(".ghe.com"))
+            .is_some_and(|subdomain| !subdomain.is_empty() && !subdomain.contains(['.', ':']))
+}
+
 /// The site host behind an API host — what the forge CLIs and the CI
 /// environment call the same instance.
 ///
-/// Only github.com splits the two (`api.github.com` fronts `github.com`);
-/// GitHub Enterprise Server and GitLab serve their API from the instance
-/// host, so those pass through unchanged.
+/// Only the GitHub SaaS shapes split the two: `api.github.com` fronts
+/// `github.com`, and GHE.com's `api.<subdomain>.ghe.com` fronts
+/// `<subdomain>.ghe.com`, which is what `GITHUB_SERVER_URL` names and what
+/// `gh auth token --hostname` expects. GitHub Enterprise Server and GitLab
+/// serve their API from the instance host, so those pass through
+/// unchanged. See [`is_github_saas_api_host`] for the exact shape.
 pub fn site_host(host: &str) -> &str {
-    if host == "api.github.com" { "github.com" } else { host }
+    if is_github_saas_api_host(host) {
+        host.strip_prefix("api.").unwrap_or(host)
+    } else {
+        host
+    }
 }
 
 /// The GraphQL endpoint on `host`.
 ///
-/// github.com serves GraphQL from the dedicated API host at `/graphql`;
-/// every other case — GitHub Enterprise Server and GitLab, SaaS or
+/// The GitHub SaaS hosts serve GraphQL from the dedicated API host at
+/// `/graphql` — github.com, and GHE.com data residency at
+/// `https://api.<subdomain>.ghe.com/graphql`, per
+/// <https://docs.github.com/en/enterprise-cloud@latest/graphql/guides/forming-calls-with-graphql>.
+/// Every other case — GitHub Enterprise Server and GitLab, SaaS or
 /// self-managed — serves it from `/api/graphql` on the instance host.
 ///
 /// The scheme is `https://` for every host except the loopback forms, which
@@ -272,8 +305,8 @@ pub fn site_host(host: &str) -> &str {
 /// it would be a credential leak.
 pub fn graphql_endpoint(host: &str) -> String {
     let scheme = if is_loopback(host) { "http" } else { "https" };
-    if host == "api.github.com" {
-        format!("{scheme}://api.github.com/graphql")
+    if is_github_saas_api_host(host) {
+        format!("{scheme}://{host}/graphql")
     } else {
         format!("{scheme}://{host}/api/graphql")
     }
@@ -795,6 +828,48 @@ mod tests {
             graphql_endpoint("gitlab.corp.example:8443"),
             "https://gitlab.corp.example:8443/api/graphql"
         );
+    }
+
+    /// GitHub Enterprise Cloud with data residency (GHE.com) is github.com's
+    /// layout on a customer subdomain, not GHES's: GraphQL lives at
+    /// `/graphql` on `api.<subdomain>.ghe.com`, and the site host the forge
+    /// CLI and `GITHUB_SERVER_URL` name is `<subdomain>.ghe.com`.
+    ///
+    /// The negative controls are the test, not decoration. The match is an
+    /// exact shape — `api.` + one label + `.ghe.com` — so a lookalike host
+    /// keeps the GHES layout and, more importantly, keeps its credential
+    /// matched against its own host.
+    #[test]
+    fn ghe_com_data_residency_uses_the_github_com_layout() {
+        assert_eq!(
+            graphql_endpoint("api.octocorp.ghe.com"),
+            "https://api.octocorp.ghe.com/graphql"
+        );
+        assert_eq!(site_host("api.octocorp.ghe.com"), "octocorp.ghe.com");
+
+        // GHES keeps the instance-host layout and its own host.
+        assert_eq!(
+            graphql_endpoint("ghes.corp.example"),
+            "https://ghes.corp.example/api/graphql"
+        );
+        assert_eq!(site_host("ghes.corp.example"), "ghes.corp.example");
+
+        for other in [
+            // Suffix lookalike: not github.com, and not the SaaS shape.
+            "api.github.com.evil.tld",
+            // The `api.` prefix is a whole label, never a substring.
+            "xapi.octocorp.ghe.com",
+            // No subdomain label at all.
+            "api.ghe.com",
+            // A GHE.com subdomain is a single label.
+            "api.a.b.ghe.com",
+        ] {
+            assert!(
+                graphql_endpoint(other).ends_with("/api/graphql"),
+                "{other} is not the GHE.com SaaS shape and keeps /api/graphql"
+            );
+            assert_eq!(site_host(other), other, "{other} fronts no other site host");
+        }
     }
 
     /// D-1: the scheme is plain HTTP for the loopback forms only, so an
