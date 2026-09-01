@@ -5,28 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- **BREAKING:** remove `GRIM_RATING_HOST`; the index declares its rating host *(rate)*
-
-  `grim rate` resolves the forge host from the sidecar's
-  `providers.rating_host` instead of a per-machine environment variable, so a
-  self-hosted index works for every consumer with no local setup. Against an
-  index-declared host, `--token-stdin` and `GRIM_RATE_TOKEN` must be paired
-  with `--token-host <host>` or the run exits 80 before the credential is
-  read. `--token-host` no longer requires `--token-stdin` (retiring that
-  usage error). See [Upgrading](https://grimoire.rs/upgrading.html#rating-host).
+## [0.14.1] - 2026-09-01
 
 ### Added
 
-- `providers.rating_host` in the `stats.json` sidecar *(catalog)*
-- `host_source` on the `grim rate` report — `default` / `index` / null *(rate)*
+- Let the index declare its rating host *(rate)* **BREAKING**
+- **Migration:** `GRIM_RATING_HOST` is removed, and `--token-host` no longer requires `--token-stdin` (retiring that usage error). Both land before the 1.0 freeze makes the documented `GRIM_*` set a semver contract.
 
 ### Fixed
 
-- `grim rate` against GitHub Enterprise Cloud with data residency (`api.<subdomain>.ghe.com`) dialed `/api/graphql` and matched credentials on the API host instead of `<subdomain>.ghe.com` *(rate)*
+- Report update availability for bundles and their members *(status)*
+- Report per-source load status in the JSON envelope *(search)*
+- Keep alias-less registry views over one locator *(config)*
+- Dial GHE.com data residency like github.com *(rate)*
 
 ## [0.14.0] - 2026-08-28
 
@@ -802,6 +793,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.14.1]: https://github.com/grimoire-rs/grimoire/compare/v0.14.0..v0.14.1
 [0.14.0]: https://github.com/grimoire-rs/grimoire/compare/v0.13.0..v0.14.0
 [0.13.0]: https://github.com/grimoire-rs/grimoire/compare/v0.12.1..v0.13.0
 [0.12.1]: https://github.com/grimoire-rs/grimoire/compare/v0.12.0..v0.12.1
