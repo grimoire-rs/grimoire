@@ -341,29 +341,61 @@ reference][commands-rate].
 
 `github` votes against `api.github.com` and `gitlab` against `gitlab.com`.
 Neither default is right for GitHub Enterprise Server or a self-managed
-GitLab, so a voter redirects grim with an environment variable:
+GitLab — so **the index says where it rates**, in the sidecar it already
+publishes:
 
-```sh
-export GRIM_RATING_HOST=ghe.corp.example      # or gitlab.corp.example
-grim rate acme/skills/code-review
+```jsonc
+{
+  "schema_version": 1,
+  "providers": {
+    "rating": "gitlab",
+    "rating_host": "gitlab.corp.example"   // host only: no scheme, no path
+  },
+  "entries": { }
+}
 ```
 
-Three properties of that variable are load-bearing, and none of them is an
-implementation detail:
+That is the whole configuration. A consumer who set up nothing but the
+`index =` locator votes against the right instance, because the host is a
+property of the index that holds the threads rather than of the machine
+reading it. An index that declares nothing keeps the built-in per-provider
+default, exactly as before.
 
-- **It comes from the voter's own environment and nowhere else.** A
-  published `stats.json` carries a provider name, an opaque target and a
-  URL — and deliberately **no host**. There is nothing in an index-fetched
-  document that can reach this value, so a hostile index cannot redirect
-  anyone's credential.
+Taking a host from index-fetched content is a reversal of an earlier
+decision, and what makes it safe is the rule attached to it. grim's
+credential ladder splits in two:
+
+- **Credentials grim resolves itself** — a host-matched CI token, and
+  `gh`/`glab auth token --hostname` — are looked up *for the host grim is
+  about to contact*. An index naming a host you never authenticated against
+  resolves nothing, and the request goes out bare or fails. These need no
+  gate and get none.
+- **Credentials you inject** — `GRIM_RATE_TOKEN`, which is host-agnostic by
+  construction, and `--token-stdin`, which grim never looked up — are the
+  two that could follow a declaration anywhere. Against a host the *index*
+  declared, grim refuses them with exit `80` unless you also pass
+  `--token-host <host>` naming that exact host, and the refusal happens
+  **before the credential is read**.
+
+```console
+$ GRIM_RATE_TOKEN=… grim rate acme/skills/code-review --yes
+Error: this index declares its own rating host ('gitlab.corp.example'); a piped or
+GRIM_RATE_TOKEN credential must name where it may go — pass --token-host gitlab.corp.example
+$ GRIM_RATE_TOKEN=… grim rate acme/skills/code-review --yes \
+      --token-host gitlab.corp.example
+```
+
+Two more properties of the declared host are load-bearing:
+
 - **Comparison is exact.** The host is IDNA-normalised and ASCII-lowercased,
   the port is part of it, and there is **no suffix matching** whatsoever:
   `evil-github.com` and `github.com.evil.tld` are simply different hosts
   from `github.com`. Redirects are disabled outright on the vote client, so
   a `3xx` can never replay the credential at another host.
-- **It applies to whichever provider the index declared**, since it names a
-  host rather than a forge. Set it per shell or per instance, not globally
-  across a machine that browses both a public and a private index.
+- **A declaration grim will not take degrades, never errors.** Anything that
+  is not a bare `host[:port]` — a scheme, a path, userinfo, whitespace — is
+  ignored at `debug` and the provider default applies, the same way an
+  unrecognised `providers.rating` leaves ratings readable but not writable.
 
 One host set is contacted over **plain HTTP** rather than HTTPS: the
 loopback forms `localhost`, `127.0.0.1` and `[::1]`, on any port. A server
@@ -372,36 +404,42 @@ suite needs a fake forge the real CLI can vote against; the alternative was
 a test-only seam in the code that sends credentials, which is worse. The
 match is on the whole host after normalisation, never a prefix or suffix,
 so `localhost.evil.example` and `127.0.0.1.evil.example` are ordinary
-remote hosts and stay on HTTPS.
-
-It is still worth knowing what that means for a token. Point
-`GRIM_RATING_HOST` at a loopback port with `GRIM_RATE_TOKEN` exported and
-the credential reaches whatever is listening there, in the clear — before,
-the TLS handshake failed and it never left the process. Whatever binds that
-port is on your own machine, so this is a foot-gun rather than an exposure,
-but it is one the previous behaviour happened to prevent. `--token-host`
-still refuses a mismatch, and the loopback set is exactly the three forms
-above.
+remote hosts and stay on HTTPS. **A remote index may not declare one of
+those loopback forms** — that declaration is ignored — because it would
+otherwise aim a credential at a port on the reader's own machine, in the
+clear. An index served from loopback still may, which is what the
+acceptance suite runs on.
 
 A client that pipes a credential in — the [VS Code
 extension][vscode] does — can ask grim where the vote would go *before*
 authenticating, and can make grim fail closed if it guessed wrong:
 
 ```console
-$ grim rate acme/skills/code-review --dry-run --format json | jq -r .host
-ghe.corp.example
+$ grim rate acme/skills/code-review --dry-run --format json | jq -r '.host, .host_source'
+gitlab.corp.example
+index
 ```
 
+`host_source` is `default` or `index`, and it is not decoration: `index` is
+exactly when a piped or exported credential must be accompanied by
+`--token-host`, and it is what lets a consent dialog tell a user the
+destination was the index's choice rather than grim's default.
+
 Bare `--dry-run` resolves everything and mutates nothing: no credential, no
-forge request, so it works offline. Adding `--token-stdin` keeps the
+forge request, so it works offline — and it is never subject to the rule
+above, because it is how a client *learns* the host it would have to
+declare. Adding `--token-stdin` keeps the
 "mutates nothing" half and trades the other one — it consumes the
 credential for a single read-only query and reports `viewer_up`, so it
-does need the network and exits `81` under `--offline`.
+does need the network, exits `81` under `--offline`, and does need
+`--token-host` against an index-declared host.
 
-`--token-host <host>` then lets the caller *declare* which host the piped
-credential belongs to; a mismatch exits `80` naming both hosts, **before
+`--token-host <host>` lets the caller *declare* which host its credential
+belongs to; a mismatch exits `80` naming both hosts, **before
 the token reaches any header**, on the dry-run path exactly as on the
-voting one. Details in [the command reference][commands-rate].
+voting one. It stands on its own — no `--token-stdin` required — because
+`GRIM_RATE_TOKEN` needs the same declaration. Details in [the command
+reference][commands-rate].
 
 ## Rolling Back {#rollback}
 

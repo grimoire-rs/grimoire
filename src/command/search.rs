@@ -653,6 +653,7 @@ mod tests {
                 target: "t".to_string(),
                 url: "https://example/1".to_string(),
                 provider: None,
+                host: None,
             }),
             badge: StatusBadge::NotInstalled,
         };

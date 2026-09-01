@@ -294,7 +294,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `uninstall` | `{kind, name, status, retained, abandoned_entries}` — `retained` is an always-present array of absolute paths (`[]` unless something was deliberately left behind) naming the on-disk footprint grim kept while the install-state record was dropped anyway — either the containment guard refused to delete it, or it is a locally-modified copy stranded at a vendor root a release relocated, which the kept-modified rule preserves; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` | `status`: `built` |
 | `release` | `{ref, manifest_digest, tags, pushed, pushed_to}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive | `pushed`: bool (`false` = dry run) |
-| `rate` | `{ref, action, up, url, provider, host, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
+| `rate` | `{ref, action, up, url, provider, host, host_source, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `host_source` says who chose it — see [the `host_source` field](#rate-host-source); `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
@@ -303,6 +303,26 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude, insecure}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); `insecure` is that entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, authors, vendor, url, documentation, compatibility, support, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `support` is an object `{issues, chat, contact, security}` read from that companion's manifest, every field `null` when the repository publishes none ([support channels](./publishing.md#support-channels)); `compatibility` is skill-only and `null` for every other kind; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
+
+### The `rate` report's `host_source` field {#rate-host-source}
+
+`host_source` says who chose the host in `host`. It is not decoration: it
+is what tells a client whether it has to declare its credential's
+destination, and what lets a consent dialog name a destination the user
+never configured.
+
+| Value | Meaning | Consumer obligation |
+|---|---|---|
+| `"default"` | grim's built-in per-provider host (`api.github.com` / `gitlab.com`) | none |
+| `"index"` | The index declared it in `providers.rating_host` | an injected credential (`--token-stdin` or `GRIM_RATE_TOKEN`) must be accompanied by `--token-host <host>`, or the run exits `80` |
+| `null` | No host resolved, so nothing was chosen | the artifact is not votable through this grim |
+
+`null` appears exactly when `host` is `null` — a consumer never has to
+reconcile the two. The credential grim resolves itself (a CI token, a
+`gh`/`glab` stored credential) is never gated, because it is looked up for
+the host being contacted in the first place. A bare `--dry-run` is never
+gated either: it reads no credential, and it is how a client learns the
+host it would otherwise have to guess.
 
 ### The `rate` report's `viewer_up` field {#rate-viewer-up}
 

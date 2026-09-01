@@ -1058,7 +1058,7 @@ not make it unvotable.
 | `--yes` | Skip the confirmation prompt. **Required for every non-interactive run.** |
 | `--dry-run` | Resolve the row, the provider and the host, print the report, and **mutate nothing**. On its own it needs no credential and makes no forge request, so it works under `--offline`. Combined with `--token-stdin` it also reads back your own vote state — see [reading your own vote state](#rate-viewer-state). |
 | `--token-stdin` | Read the forge credential from stdin. There is intentionally **no** `--token <value>` flag — argv is world-readable. Implies a non-interactive run, so it requires `--yes` — **except under `--dry-run`**, which posts nothing and therefore has nothing to confirm. |
-| `--token-host <HOST>` | Declare which host the piped credential belongs to; grim refuses before sending anything if it does not match. Valid only with `--token-stdin`. |
+| `--token-host <HOST>` | Declare which host the injected credential (`--token-stdin` or `GRIM_RATE_TOKEN`) belongs to; grim refuses before sending anything if it does not match. Required when the host was declared by the index. |
 
 **Voting confirms by default.** A vote posts publicly under your name, so
 an interactive run prompts on stderr before it mutates anything:
@@ -1144,13 +1144,20 @@ whitespace-only input is an auth error (`80`) that deliberately does
 **not** fall through to the ladder above. A caller that said it was
 supplying a credential must not silently vote as somebody else.
 
-`github` votes against `api.github.com` and `gitlab` against `gitlab.com`.
-`GRIM_RATING_HOST` redirects that to a GitHub Enterprise Server or
-self-managed GitLab instance. It is read from your own environment only —
-a published `stats.json` carries no host at all — and compared exactly:
-IDNA-normalised, ASCII-lowercased, port included, **no suffix matching**.
-A loopback host — `localhost`, `127.0.0.1` or `[::1]`, on any port — is
-contacted over plain HTTP; every other host over HTTPS.
+`github` votes against `api.github.com` and `gitlab` against `gitlab.com`
+unless the index declares its own host in `providers.rating_host`, which
+takes precedence. Comparison is exact: IDNA-normalised, ASCII-lowercased,
+port included, **no suffix matching**. A loopback host — `localhost`,
+`127.0.0.1` or `[::1]`, on any port — is contacted over plain HTTP; every
+other host over HTTPS, and a *remote* index may not declare a loopback one.
+
+Against an index-declared host, the two credentials grim does **not** look
+up itself — `GRIM_RATE_TOKEN` and `--token-stdin` — must be accompanied by
+`--token-host <host>` naming that exact host, or the run exits `80` before
+the credential is read. The host-matched rungs (CI token, `gh`/`glab`
+stored credential) are unaffected: they only ever resolve a credential for
+the host being contacted. A bare `--dry-run` is never gated — it reads no
+credential and is how a client learns the host in the first place.
 See [voting against a private instance](./ratings.md#voting-host).
 
 ### JSON output {#rate-json}
@@ -1167,6 +1174,7 @@ one reference) with every field always present, nullable ones as explicit
   "url": "https://github.com/acme/index/discussions/117",
   "provider": "github",
   "host": "api.github.com",
+  "host_source": "default",
   "viewer_up": true
 }
 ```
@@ -1177,25 +1185,31 @@ one reference) with every field always present, nullable ones as explicit
 the index published, verbatim, so an unrecognised one is still reported.
 `host` is `null` when no host resolves — which under `--dry-run` is exactly
 the "grim cannot vote here" answer a client needs *before* it picks an
-authentication provider. `viewer_up` is the tri-state described
+authentication provider. `host_source` is `"default"` (the built-in
+per-provider host) or `"index"` (`providers.rating_host`, declared by the
+index and accepted), and `null` exactly when `host` is — see [the
+`host_source` field](./json-interface.md#rate-host-source). `viewer_up` is
+the tri-state described
 [above](#rate-viewer-state) and is `null` on every path except
 `--dry-run --token-stdin`.
 
 Plain output is a single-row table:
 `Ref | Action | Up | Voted | Provider | Host | Url`, with `-` for an absent
 value. The `Voted` cell renders `yes` / `no` / `-` — three distinct cells,
-so unknown never reads as "no".
+so unknown never reads as "no". The `Host` cell reads `<host> (index)` when
+the index declared it; there is no eighth column, because the
+machine-readable answer is `host_source`.
 
 ### Exit codes {#rate-exit-codes}
 
 | Code | Condition |
 |---|---|
 | `0` | Vote registered or retracted · confirmation declined (nothing mutated) · `--dry-run` resolved |
-| `64` | `--up` with `--remove`; malformed reference; non-interactive without `--yes`; `--token-stdin` without `--yes`; `--token-host` without `--token-stdin`; `--token-stdin` with a terminal on stdin, or with multi-line input |
+| `64` | `--up` with `--remove`; malformed reference; non-interactive without `--yes`; `--token-stdin` without `--yes`; `--token-stdin` with a terminal on stdin, or with multi-line input |
 | `65` | The row carries no rating; the index declared no rating provider; the provider is one grim cannot vote through (the raw value is in the message); the forge answered with a populated GraphQL `errors` array |
 | `69` | The forge is unreachable, answered 5xx, or applied a secondary rate limit |
 | `79` | The reference resolves to no catalog row, or the vote target no longer exists |
-| `80` | No credential resolved; the forge rejected it (401/403); `--token-stdin` received empty input; `--token-host` did not match the resolved host — refused **before** the token reached any header |
+| `80` | No credential resolved; the forge rejected it (401/403); `--token-stdin` received empty input; `--token-host` did not match the resolved host; an injected credential (`--token-stdin` or `GRIM_RATE_TOKEN`) was heading for an index-declared host without `--token-host` naming it — all refused **before** the token reached any header |
 | `81` | `--offline` (or `GRIM_OFFLINE`) — a vote hard-refuses rather than degrading silently. Bare `--dry-run` is exempt; `--dry-run --token-stdin` is **not**, because it makes a query. |
 
 Note what is *not* in that table: a failed or unauthorised
@@ -1212,6 +1226,8 @@ printf '%s' "$FORGE_TOKEN" | grim rate acme/skills/code-review \
   --dry-run --token-stdin --format json          # + viewer_up, no --yes needed
 printf '%s' "$FORGE_TOKEN" | grim rate acme/skills/code-review \
   --token-stdin --token-host ghe.corp.example --yes
+GRIM_RATE_TOKEN=… grim rate acme/skills/code-review \
+  --token-host ghe.corp.example --yes            # required when the index declared the host
 ```
 
 ## grim fetch {#fetch}

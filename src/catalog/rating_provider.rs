@@ -103,6 +103,19 @@ pub enum RateError {
     )]
     TokenHostMismatch { declared: String, resolved: String },
 
+    /// An injected credential (`--token-stdin` or `GRIM_RATE_TOKEN`) was
+    /// heading for a host the **index** declared, without `--token-host`
+    /// naming it (exit 80). Raised before the credential is read.
+    ///
+    /// The host-matched rungs of the ladder need no such gate — they only
+    /// ever resolve a credential the user already holds *for that host* —
+    /// so this fires for the two credentials nothing else binds to a
+    /// destination. See `adr_index_declared_rating_host.md`.
+    #[error(
+        "this index declares its own rating host ('{host}'); a piped or GRIM_RATE_TOKEN credential must name where it may go — pass --token-host {host}"
+    )]
+    UndeclaredTokenHost { host: String },
+
     /// No credential could be resolved (exit 80).
     #[error("{0}")]
     NoCredential(String),
@@ -284,8 +297,10 @@ pub fn graphql_endpoint(host: &str) -> String {
 /// **It widens nothing here.** A loopback address is reachable only from
 /// this machine, so a credential sent to one cannot leave it; every other
 /// host keeps `https://` exactly as before, and no other narrowing moves —
-/// `--token-host` still gates, and the endpoint still comes from the user's
-/// own environment and never from index-fetched content (plan C-007). The
+/// `--token-host` still gates. A sidecar-declared host may name this set
+/// only when the index is itself loopback, which is what stops a remote
+/// index aiming a credential at a port on the reader's own machine
+/// (`index_source::accepted_rating_host`). The
 /// rest of `127.0.0.0/8` is loopback too (RFC 1122) and would have been
 /// safe to admit; it is excluded because the accepted decision (D-1) names
 /// three forms, and a set nobody has to reason about is worth more than the
@@ -299,7 +314,7 @@ pub fn graphql_endpoint(host: &str) -> String {
 /// raw `host`: the two agree because both call sites pass what
 /// [`resolve_host`] already normalised, and a value that does not normalise
 /// is refused here outright rather than compared.
-fn is_loopback(host: &str) -> bool {
+pub fn is_loopback(host: &str) -> bool {
     // Normalised first so anything that is not a bare `host[:port]` — a
     // path, userinfo, a scheme — fails closed here exactly as it does at
     // the `--token-host` gate.

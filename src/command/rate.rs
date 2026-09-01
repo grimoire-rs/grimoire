@@ -59,15 +59,31 @@ use crate::context::Context;
 
 use super::scope_resolution;
 
-/// The environment variable naming a host override for the rating forge.
+/// Where the resolved forge host came from.
 ///
-/// Its own variable rather than a `grimoire.toml` key: the override exists
-/// for GitHub Enterprise Server and self-managed GitLab, it is per-machine
-/// rather than per-project, and `[[registries]]` already owns the
-/// project-shaped registry configuration. Read from the process
-/// environment, so it can only ever come from the user — never from
-/// index-fetched content, which is the property plan C-007 turns on.
-pub const RATING_HOST_ENV: &str = "GRIM_RATING_HOST";
+/// Not cosmetic. `Index` is exactly the case in which an *injected*
+/// credential must name its destination with `--token-host`, so a piping
+/// client reads this to know whether it has to, and a consent dialog reads
+/// it to say the destination was the index's choice rather than grim's
+/// default (`adr_index_declared_rating_host.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSource {
+    /// The built-in per-provider default (`api.github.com` / `gitlab.com`).
+    Default,
+    /// `providers.rating_host`, declared by the index and accepted at
+    /// sidecar-parse time (`index_source::accepted_rating_host`).
+    Index,
+}
+
+impl HostSource {
+    /// The wire spelling carried by the report.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Index => "index",
+        }
+    }
+}
 
 /// The environment variable naming grim's own vote credential.
 ///
@@ -157,14 +173,20 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
     }
 
     let (reference, rating) = resolve_row(ctx, &args.reference).await?;
-    // The override can only come from this process's own environment.
-    // `stats.json` carries no host at all, so index-fetched content has no
-    // path to this value (plan C-007).
-    let host_override = std::env::var(RATING_HOST_ENV).ok().filter(|v| !v.trim().is_empty());
+    // The index may name the host it rates on, and grim takes it — the
+    // reversal of C-007's "never from index-fetched content", argued in
+    // `adr_index_declared_rating_host.md`. It was already validated and
+    // normalised when the sidecar was parsed; what makes taking it safe is
+    // the gate below, not a check here.
     let host = rating
         .provider
         .as_deref()
-        .and_then(|p| rating_provider::resolve_host(p, host_override.as_deref()));
+        .and_then(|p| rating_provider::resolve_host(p, rating.host.as_deref()));
+    let host_source = if rating.host.is_some() {
+        HostSource::Index
+    } else {
+        HostSource::Default
+    };
 
     if args.dry_run {
         // Still before any credential is read, exactly as on the voting
@@ -173,6 +195,18 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
         // there is nothing for the gate to protect.
         if let Some(host) = host.as_deref() {
             super::grim(token_host_gate(args.token_host.as_deref(), host))?;
+            // `--token-stdin` alone, never `injects_credential`: this
+            // path reads the piped credential and nothing else
+            // (`viewer_state` calls `resolve_token(true, ..)`), so
+            // `GRIM_RATE_TOKEN` is not in play here. Gating on it would
+            // also break the handshake outright — a bare `--dry-run` is
+            // how a client *learns* the host it would have to declare.
+            super::grim(declared_host_gate(
+                args.token_stdin,
+                args.token_host.as_deref(),
+                host_source,
+                host,
+            ))?;
         }
         // Without a piped credential this is resolution only: no
         // credential, no forge request, no mutation (C-022). With one, it
@@ -182,7 +216,15 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
             _ => None,
         };
         return Ok((
-            build_report(reference, action, Some(rating.up), &rating, host, viewer_up),
+            build_report(
+                reference,
+                action,
+                Some(rating.up),
+                &rating,
+                host,
+                host_source,
+                viewer_up,
+            ),
             ExitCode::Success,
         ));
     }
@@ -200,8 +242,16 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
     };
 
     // Before the credential is read, not after: a mismatching caller is
-    // refused with nothing to leak (plan C-022 / S-021).
+    // refused with nothing to leak (plan C-022 / S-021), and an injected
+    // credential heading for an index-declared host is refused unless the
+    // caller named that host.
     super::grim(token_host_gate(args.token_host.as_deref(), &host))?;
+    super::grim(declared_host_gate(
+        injects_credential(args),
+        args.token_host.as_deref(),
+        host_source,
+        &host,
+    ))?;
 
     let confirm = super::grim(confirmation_mode(args.yes, std::io::stdin().is_terminal()))?;
     let token = resolve_token(args.token_stdin, &host, kind).await?;
@@ -215,12 +265,20 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
     let mut viewer: Option<ViewerIdentity> = None;
     if confirm == ConfirmMode::Prompt {
         let identity = super::grim(rating_provider::viewer_identity(&http, &rate_ctx).await)?;
-        if !prompt_for_confirmation(&confirm_prompt(provider, &identity.login))? {
+        if !prompt_for_confirmation(&confirm_prompt(provider, &identity.login, host_source, &host))? {
             // Declined: nothing was mutated, so the report is the row as
             // it stands and the exit stays 0. `viewer_up` is null — the
             // vote-state question was never asked on this path.
             return Ok((
-                build_report(reference, action, Some(rating.up), &rating, Some(host), None),
+                build_report(
+                    reference,
+                    action,
+                    Some(rating.up),
+                    &rating,
+                    Some(host),
+                    host_source,
+                    None,
+                ),
                 ExitCode::Success,
             ));
         }
@@ -239,7 +297,15 @@ pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, 
         // mutation is the freshest possible answer. Reporting null here
         // would make `grim rate --up --format json` claim it does not know
         // the thing it just did.
-        build_report(reference, action, outcome.up, &rating, Some(host), outcome.voted),
+        build_report(
+            reference,
+            action,
+            outcome.up,
+            &rating,
+            Some(host),
+            host_source,
+            outcome.voted,
+        ),
         ExitCode::Success,
     ))
 }
@@ -319,6 +385,45 @@ fn token_host_gate(declared: Option<&str>, resolved: &str) -> Result<(), RateErr
     }
 }
 
+/// Refuse an **injected** credential heading for an **index-declared**
+/// host unless the caller named that host with `--token-host`.
+///
+/// The rest of the ladder needs no gate: a CI token and a `gh`/`glab`
+/// stored credential are looked up *for the host grim is about to
+/// contact*, so an index naming a host the user never authenticated
+/// against simply resolves nothing (`adr_artifact_ratings.md` D13). The
+/// two that bypass that are `GRIM_RATE_TOKEN`, which is host-agnostic by
+/// construction, and `--token-stdin`, where the caller supplies a
+/// credential grim never looked up — so those two, and only those two,
+/// have to say where their credential belongs.
+///
+/// It runs before `resolve_token`, so a refusal happens with nothing read.
+/// It never falls through to the host-matched rungs either: voting as a
+/// different identity than the caller supplied is the same failure C-006
+/// refuses for empty `--token-stdin`.
+fn declared_host_gate(
+    injected: bool,
+    declared: Option<&str>,
+    source: HostSource,
+    resolved: &str,
+) -> Result<(), RateError> {
+    if source == HostSource::Index && injected && declared.is_none() {
+        return Err(RateError::UndeclaredTokenHost {
+            host: resolved.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether this run supplies a credential grim did not look up itself.
+///
+/// The environment is read for **presence only**, never for the value —
+/// what matters is that a host-agnostic credential is in play, not what it
+/// says.
+fn injects_credential(args: &RateArgs) -> bool {
+    args.token_stdin || std::env::var_os(RATING_TOKEN_ENV).is_some()
+}
+
 /// Assemble the report from what was actually resolved.
 fn build_report(
     reference: String,
@@ -326,8 +431,12 @@ fn build_report(
     up: Option<u32>,
     rating: &RatingSummary,
     host: Option<String>,
+    host_source: HostSource,
     viewer_up: Option<bool>,
 ) -> RateReport {
+    // No host resolved means nothing was chosen, by the index or by grim —
+    // reporting a source there would name a decision that never happened.
+    let host_source = host.as_ref().map(|_| host_source.as_str().to_string());
     RateReport::new(
         reference,
         action.as_str().to_string(),
@@ -335,6 +444,7 @@ fn build_report(
         Some(rating.url.clone()),
         rating.provider.clone(),
         host,
+        host_source,
         viewer_up,
     )
 }
@@ -392,12 +502,12 @@ async fn viewer_state(host: &str, provider: &str, target: &str) -> anyhow::Resul
 /// credential, run before anything else so a contradictory invocation
 /// fails fast and identically in every environment.
 fn usage_gate(args: &RateArgs) -> Result<(), RateError> {
-    if args.token_host.is_some() && !args.token_stdin {
-        return Err(RateError::Usage(
-            "--token-host declares which host a piped credential belongs to; it is valid only with --token-stdin"
-                .to_string(),
-        ));
-    }
+    // `--token-host` used to require `--token-stdin`. It no longer can:
+    // `GRIM_RATE_TOKEN` is injected too, and it needs the same way to
+    // declare where it may go, so the flag stands on its own. Declaring a
+    // host without supplying a credential is harmless — the declaration is
+    // still compared to the resolved host, so a wrong one is refused
+    // rather than ignored.
     // Narrowed by C-023, and only for `--dry-run`: the confirmation exists
     // because a vote posts publicly under the user's account, and a dry
     // run posts nothing at all, so there is nothing to confirm. The rule
@@ -431,9 +541,18 @@ fn confirmation_mode(yes: bool, stdin_is_tty: bool) -> Result<ConfirmMode, RateE
 }
 
 /// The confirmation line. It names the provider and the account because
-/// what the user is consenting to is a public post under that identity.
-fn confirm_prompt(provider: &str, login: &str) -> String {
-    format!("This posts publicly to your {provider} account as {login}. Continue? [y/N] ")
+/// what the user is consenting to is a public post under that identity —
+/// and the host too when the index chose it, because a destination the
+/// user never configured is the one thing they cannot infer from the
+/// provider name alone.
+fn confirm_prompt(provider: &str, login: &str, source: HostSource, host: &str) -> String {
+    match source {
+        HostSource::Default => format!("This posts publicly to your {provider} account as {login}. Continue? [y/N] "),
+        HostSource::Index => format!(
+            "This posts publicly to your {provider} account as {login} on {host}, the host the index declared. \
+             Continue? [y/N] "
+        ),
+    }
 }
 
 /// Whether a typed answer means yes. Anything else — including empty
@@ -733,9 +852,10 @@ mod tests {
             | RateError::Graphql(_) => ExitCode::DataError,
             RateError::Unavailable(_) => ExitCode::Unavailable,
             RateError::NoSuchRef { .. } | RateError::NotFound(_) => ExitCode::NotFound,
-            RateError::TokenHostMismatch { .. } | RateError::NoCredential(_) | RateError::Unauthorized(_) => {
-                ExitCode::AuthError
-            }
+            RateError::TokenHostMismatch { .. }
+            | RateError::UndeclaredTokenHost { .. }
+            | RateError::NoCredential(_)
+            | RateError::Unauthorized(_) => ExitCode::AuthError,
             RateError::Offline => ExitCode::OfflineBlocked,
         }
     }
@@ -843,10 +963,48 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn token_host_without_token_stdin_is_a_usage_error() {
-        let err = usage_gate(&parsed(&["x", "--token-host", "github.com"])).expect_err("must refuse");
-        assert_eq!(exit_of_ref(&err), ExitCode::UsageError);
-        assert!(err.to_string().contains("--token-stdin"), "names the flag: {err}");
+    fn token_host_stands_on_its_own() {
+        // It used to require `--token-stdin`. `GRIM_RATE_TOKEN` is injected
+        // too and needs the same way to declare its destination, so the
+        // flag no longer depends on a sibling. Declaring without supplying
+        // a credential stays harmless: the declaration is still compared to
+        // the resolved host, so a wrong one is refused rather than ignored.
+        usage_gate(&parsed(&["x", "--token-host", "github.com"])).expect("accepted on its own");
+        assert!(
+            token_host_gate(Some("evil.tld"), "api.github.com").is_err(),
+            "and it still gates"
+        );
+    }
+
+    /// The whole decision table for
+    /// `adr_index_declared_rating_host.md`'s credential-class gate: an
+    /// injected credential may reach an index-declared host only when the
+    /// caller named it, and nothing else changes.
+    #[test]
+    fn an_injected_credential_must_name_an_index_declared_host() {
+        let host = "gitlab.corp.example";
+        for (injected, declared, source, want_refusal) in [
+            // Index-declared destination.
+            (true, None, HostSource::Index, true),
+            (true, Some(host), HostSource::Index, false),
+            (false, None, HostSource::Index, false),
+            // The built-in default is unchanged in every combination.
+            (true, None, HostSource::Default, false),
+            (true, Some(host), HostSource::Default, false),
+            (false, None, HostSource::Default, false),
+        ] {
+            let got = declared_host_gate(injected, declared, source, host);
+            assert_eq!(
+                got.is_err(),
+                want_refusal,
+                "injected={injected} declared={declared:?} source={source:?}"
+            );
+            if let Err(err) = got {
+                assert_eq!(exit_of_ref(&err), ExitCode::AuthError);
+                assert!(err.to_string().contains("--token-host"), "names the way out: {err}");
+                assert!(err.to_string().contains(host), "names the host: {err}");
+            }
+        }
     }
 
     #[test]
@@ -959,11 +1117,22 @@ mod tests {
 
     #[test]
     fn the_prompt_names_the_provider_and_the_account() {
-        let line = confirm_prompt("github", "octocat");
+        let line = confirm_prompt("github", "octocat", HostSource::Default, "api.github.com");
         assert!(line.contains("github"), "{line}");
         assert!(line.contains("octocat"), "{line}");
         assert!(line.contains("publicly"), "the disclosure is the point: {line}");
         assert!(line.contains("[y/N]"), "the default is no: {line}");
+        assert!(
+            !line.contains("api.github.com"),
+            "a default destination needs no calling out: {line}"
+        );
+
+        // An index-declared destination is named, because it is the one
+        // thing the user cannot infer from the provider alone.
+        let declared = confirm_prompt("gitlab", "octocat", HostSource::Index, "gitlab.corp.example");
+        assert!(declared.contains("gitlab.corp.example"), "{declared}");
+        assert!(declared.contains("index"), "and says who chose it: {declared}");
+        assert!(declared.contains("[y/N]"), "the default is still no: {declared}");
     }
 
     #[test]
@@ -1097,6 +1266,7 @@ mod tests {
             target: "D_kwDOAbCdEf".to_string(),
             url: "https://github.com/acme/index/discussions/7".to_string(),
             provider: Some("github".to_string()),
+            host: None,
         };
         let report = build_report(
             "ghcr.io/acme/x".to_string(),
@@ -1104,6 +1274,7 @@ mod tests {
             Some(rating.up),
             &rating,
             Some("api.github.com".to_string()),
+            HostSource::Default,
             None,
         );
         let v = serde_json::to_value(&report).unwrap();
@@ -1112,6 +1283,7 @@ mod tests {
         assert_eq!(v["up"], 12);
         assert_eq!(v["provider"], "github");
         assert_eq!(v["host"], "api.github.com");
+        assert_eq!(v["host_source"], "default");
         assert_eq!(v["url"], "https://github.com/acme/index/discussions/7");
         assert!(
             v["viewer_up"].is_null(),
@@ -1128,6 +1300,7 @@ mod tests {
             target: "D_kwDOAbCdEf".to_string(),
             url: "https://github.com/acme/index/discussions/7".to_string(),
             provider: Some("github".to_string()),
+            host: None,
         };
         for state in [Some(true), Some(false), None] {
             let v = serde_json::to_value(build_report(
@@ -1136,6 +1309,7 @@ mod tests {
                 Some(rating.up),
                 &rating,
                 Some("api.github.com".to_string()),
+                HostSource::Default,
                 state,
             ))
             .unwrap();
@@ -1159,6 +1333,7 @@ mod tests {
             target: "t".to_string(),
             url: "u".to_string(),
             provider: Some("bitbucket".to_string()),
+            host: None,
         };
         let report = build_report(
             "ghcr.io/acme/x".to_string(),
@@ -1166,11 +1341,16 @@ mod tests {
             Some(3),
             &rating,
             None,
+            HostSource::Index,
             None,
         );
         let v = serde_json::to_value(&report).unwrap();
         assert!(v.as_object().unwrap().contains_key("host"));
         assert!(v["host"].is_null());
+        assert!(
+            v["host_source"].is_null(),
+            "no host means no decision to attribute, whatever the source argument said: {v}"
+        );
         assert_eq!(v["provider"], "bitbucket", "the raw provider is still reported");
         assert!(
             v["viewer_up"].is_null(),
@@ -1192,6 +1372,7 @@ mod tests {
             target: "t".to_string(),
             url: "u".to_string(),
             provider: Some("github".to_string()),
+            host: None,
         };
         for (voted, want) in [(Some(true), true), (Some(false), false)] {
             let report = build_report(
@@ -1200,6 +1381,7 @@ mod tests {
                 Some(8),
                 &rating,
                 Some("api.github.com".to_string()),
+                HostSource::Default,
                 voted,
             );
             let v = serde_json::to_value(&report).unwrap();
@@ -1214,6 +1396,7 @@ mod tests {
             None,
             &rating,
             Some("gitlab.com".to_string()),
+            HostSource::Default,
             None,
         );
         let v = serde_json::to_value(&report).unwrap();

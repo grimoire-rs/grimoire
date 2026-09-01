@@ -4,10 +4,12 @@
 carries the ones that need more than a line: a behaviour you will notice on
 the first command after an upgrade, and what to do about it.
 
-Nothing here is a breaking change. Grimoire is [stabilizing toward
+Almost nothing here is a breaking change. Grimoire is [stabilizing toward
 1.0][stability] and evolution is additive-only — but "additive" is a statement
 about contracts, not about what you *see*, and every one of these is visible
-enough to look like a bug if you meet it cold.
+enough to look like a bug if you meet it cold. The one exception is
+[`GRIM_RATING_HOST`](#rating-host), removed before the 1.0 freeze takes
+effect and called out as breaking where it appears.
 
 ## Adding a client changes what autodetect targets {#autodetect}
 
@@ -224,6 +226,44 @@ it exits, so a follow-up `grim install --client <name>` completes without
 re-adding anything. If you *want* the old behaviour, name the clients
 explicitly; nothing else recovers it, and that is deliberate.
 
+## `GRIM_RATING_HOST` is gone; the index declares its rating host {#rating-host}
+
+**This one is breaking**, and it is deliberate: it lands before the 1.0
+freeze that makes the documented `GRIM_*` set a semver contract.
+
+`grim rate` used to resolve its forge host from a built-in per-provider
+default plus `GRIM_RATING_HOST`, an environment variable each voter set on
+each machine. That made every self-hosted deployment misconfigured by
+default and silently — one team, one index, N machines, and a vote that
+went to gitlab.com until somebody exported the variable. The host is a
+property of the index that holds the threads, so the index now states it:
+`providers.rating_host` in [`stats.json`](./package-index.md#spec-stats).
+
+**What you will see.** `GRIM_RATING_HOST` is no longer read. If you export
+it, nothing happens; if you relied on it, the vote resolves to the
+provider default until the index declares a host.
+
+**What to do**, in one of two roles:
+
+- **Index operator** — add `providers.rating_host` to your published
+  sidecar (the [indexer][indexer] derives it from the CI-provided GraphQL
+  endpoint). Every consumer then votes against your instance with no
+  per-machine setup at all.
+- **Voter** — unset the variable. If your index does not declare a host
+  yet, ask its operator to; there is no per-machine override any more, and
+  that is the point.
+
+**One new refusal comes with it.** Because the host now arrives in fetched
+content, the two credentials grim does *not* look up itself are bound to
+it: against an index-declared host, `--token-stdin` and `GRIM_RATE_TOKEN`
+must be accompanied by `--token-host <host>` naming it, or the run exits
+`80` before the credential is read. A CI token or a `gh`/`glab` stored
+credential is unaffected — grim only ever resolves those for the host it is
+about to contact. `--token-host` no longer requires `--token-stdin`, which
+retires the `64` that combination used to produce.
+
+Background: [Voting against a private instance](./ratings.md#voting-host).
+
 ## Downgrading to 0.13 after browsing a rated index {#catalog-cache-downgrade}
 
 [Artifact ratings][ratings] add one field to the catalog cache
@@ -308,6 +348,7 @@ annotation and restores the 0.13.0 manifest shape exactly.
 [git-provenance]: ./publishing.md#git-provenance
 [browse-filters]: ./configuration.md#browse-filters
 [ratings]: ./ratings.md
+[indexer]: ./hosting-an-index.md
 [stability]: ./stability.md
 [unstable]: ./stability.md#unstable
 [status]: ./commands.md#status

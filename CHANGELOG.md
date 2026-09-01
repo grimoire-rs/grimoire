@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING:** remove `GRIM_RATING_HOST`; the index declares its rating host *(rate)*
+
+  `grim rate` resolves the forge host from the sidecar's
+  `providers.rating_host` instead of a per-machine environment variable, so a
+  self-hosted index works for every consumer with no local setup. Against an
+  index-declared host, `--token-stdin` and `GRIM_RATE_TOKEN` must be paired
+  with `--token-host <host>` or the run exits 80 before the credential is
+  read. `--token-host` no longer requires `--token-stdin` (retiring that
+  usage error). See [Upgrading](https://grimoire.rs/upgrading.html#rating-host).
+
+### Added
+
+- `providers.rating_host` in the `stats.json` sidecar *(catalog)*
+- `host_source` on the `grim rate` report — `default` / `index` / null *(rate)*
+
 ## [0.14.0] - 2026-08-28
 
 ### Added

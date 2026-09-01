@@ -10,9 +10,12 @@ would go *before* it authenticates, and C-006's refusals all fire ahead of
 the `Authorization` header.
 
 The one thing no test here may do is reach a real forge. Two mechanisms
-keep that true. Every gate test points `GRIM_RATING_HOST` at an unroutable
-`.invalid` host, so a bug that skipped a gate fails loudly instead of
-voting. The end-to-end vote tests point it at `_FakeForge`, a GraphQL
+keep that true, and both now run through the fixture index rather than an
+environment variable — `providers.rating_host` in `stats.json` is where the
+host comes from (`adr_index_declared_rating_host.md`). Every test that puts
+a credential in play browses an index declaring an unroutable `.invalid`
+host, so a bug that skipped a gate fails loudly instead of
+voting. The end-to-end vote tests declare `_FakeForge`, a GraphQL
 server bound to `127.0.0.1` on an ephemeral port: loopback is not a real
 forge and cannot become one — the socket never leaves the machine, the
 address is not resolvable from anywhere else, and `graphql_endpoint`
@@ -77,7 +80,12 @@ def _package(name: str, ref: str) -> dict:
     }
 
 
-def _publish(root: Path, provider: str | None = "github", rated: bool = True) -> None:
+def _publish(
+    root: Path,
+    provider: str | None = "github",
+    rated: bool = True,
+    rating_host: str | None = None,
+) -> None:
     """Serve an index carrying one rated and one unrated pointer."""
     (root / "all.json").write_text(
         json.dumps([_package("rated", RATED), _package("unrated", UNRATED)])
@@ -90,6 +98,8 @@ def _publish(root: Path, provider: str | None = "github", rated: bool = True) ->
     }
     if provider is not None:
         stats["providers"]["rating"] = provider
+    if rating_host is not None:
+        stats["providers"]["rating_host"] = rating_host
     if rated:
         stats["entries"][RATED] = {
             "rating": {
@@ -271,15 +281,38 @@ def fake_forge():
     forge.close()
 
 
-@pytest.fixture()
-def rated_project(grim_at, project_dir: Path, http_index):
-    """A project browsing an index that publishes a github-provider rating."""
+def _rated_project(grim_at, project_dir: Path, http_index, rating_host: str | None):
+    """A project browsing an index that publishes a github-provider rating,
+    optionally declaring the host it rates on."""
     root, base = http_index
-    _publish(root)
+    _publish(root, rating_host=rating_host)
     _index_config(project_dir, base)
     runner = grim_at(project_dir)
     _warm_catalog(runner)
     return runner
+
+
+@pytest.fixture()
+def rated_project(grim_at, project_dir: Path, http_index):
+    """An index that declares no host, so the built-in provider default
+    resolves. For runs that put **no** credential in play."""
+    return _rated_project(grim_at, project_dir, http_index, None)
+
+
+@pytest.fixture()
+def ghes_project(grim_at, project_dir: Path, http_index):
+    """An index declaring an unroutable host. Every test that pipes or
+    exports a credential uses this one: a request that escaped a gate
+    cannot reach a forge, so the test fails on the exit code rather than by
+    voting."""
+    return _rated_project(grim_at, project_dir, http_index, GHES_HOST)
+
+
+@pytest.fixture()
+def forge_project(grim_at, project_dir: Path, http_index, fake_forge):
+    """An index declaring the loopback fake forge — the only fixture whose
+    vote actually lands anywhere."""
+    return _rated_project(grim_at, project_dir, http_index, fake_forge.host)
 
 
 # ---------------------------------------------------------------------------
@@ -312,16 +345,15 @@ def _vote(runner, forge, *args: str, stdin: str):
         "--token-host",
         forge.host,
         stdin=stdin,
-        env_extra={"GRIM_RATING_HOST": forge.host},
     )
 
 
-def test_an_up_vote_succeeds_and_reports_the_forge_state(rated_project, fake_forge) -> None:
+def test_an_up_vote_succeeds_and_reports_the_forge_state(forge_project, fake_forge) -> None:
     """The whole write path in one run: argv, the confirmation gate, row
     resolution, the mutation, and the report. Every other test in this file
     stops at a gate, so without this one nothing proves the flag works."""
     secret = "ghp_thistokenreachesexactlyoneheader"
-    result = _vote(rated_project, fake_forge, "--up", stdin=secret)
+    result = _vote(forge_project, fake_forge, "--up", stdin=secret)
 
     assert result.returncode == 0, f"the vote must land: {result.stderr}"
     report = json.loads(result.stdout)
@@ -347,10 +379,10 @@ def test_an_up_vote_succeeds_and_reports_the_forge_state(rated_project, fake_for
     assert secret not in result.stdout + result.stderr, "and is never echoed"
 
 
-def test_a_remove_retracts_and_reports_not_voted(rated_project, fake_forge) -> None:
+def test_a_remove_retracts_and_reports_not_voted(forge_project, fake_forge) -> None:
     """S-009's other arm: `--remove` retracts this account's own upvote, and
     the report carries what the forge settled on, not what was asked for."""
-    result = _vote(rated_project, fake_forge, "--remove", stdin="ghp_x")
+    result = _vote(forge_project, fake_forge, "--remove", stdin="ghp_x")
 
     assert result.returncode == 0, f"the retraction must land: {result.stderr}"
     report = json.loads(result.stdout)
@@ -363,20 +395,20 @@ def test_a_remove_retracts_and_reports_not_voted(rated_project, fake_forge) -> N
     assert not any("addUpvote" in d for d in fake_forge.documents), (
         "a retraction must never issue an upvote"
     )
-    assert _stored_vote(rated_project, RATED)["voted"] is False, (
+    assert _stored_vote(forge_project, RATED)["voted"] is False, (
         "the store's not-voted arm: R-3 keeps `false` distinct from unknown, so a "
         "retraction that recorded nothing would read back as `null` on the next dry run"
     )
 
 
-def test_a_vote_records_the_account_id_in_votes_json(rated_project, fake_forge) -> None:
+def test_a_vote_records_the_account_id_in_votes_json(forge_project, fake_forge) -> None:
     """C-008: the tri-state store is written from the mutation's own report.
     The key is the forge's immutable account id — a login is renameable, and
     the next holder must not inherit this account's vote display."""
-    votes_file = Path(rated_project.grim_home) / "state" / "votes.json"
+    votes_file = Path(forge_project.grim_home) / "state" / "votes.json"
     assert not votes_file.exists(), "nothing is recorded before a vote"
 
-    result = _vote(rated_project, fake_forge, "--up", stdin="ghp_x")
+    result = _vote(forge_project, fake_forge, "--up", stdin="ghp_x")
     assert result.returncode == 0, result.stderr
 
     stored = json.loads(votes_file.read_text())
@@ -387,7 +419,7 @@ def test_a_vote_records_the_account_id_in_votes_json(rated_project, fake_forge) 
 
 
 def test_the_report_and_the_store_follow_the_forge_not_the_request(
-    rated_project, fake_forge
+    forge_project, fake_forge
 ) -> None:
     """R-3: a vote state is what the forge settled on, never what was asked
     for. This forge contradicts the request, so every assertion below fails
@@ -395,13 +427,13 @@ def test_the_report_and_the_store_follow_the_forge_not_the_request(
     and with a forge that always agrees, the two are indistinguishable."""
     fake_forge.contrary = True
 
-    result = _vote(rated_project, fake_forge, "--up", stdin="ghp_x")
+    result = _vote(forge_project, fake_forge, "--up", stdin="ghp_x")
     assert result.returncode == 0, f"a disagreeing forge is not an error: {result.stderr}"
 
     report = json.loads(result.stdout)
     assert report["action"] == "up", "the request is still reported as made"
     assert report["viewer_up"] is False, "but the state is the forge's answer, not the request"
-    assert _stored_vote(rated_project, RATED)["voted"] is False, (
+    assert _stored_vote(forge_project, RATED)["voted"] is False, (
         "and the cache stores what the forge said, so the next reader is not told "
         "something the forge never said"
     )
@@ -437,20 +469,20 @@ def test_dry_run_works_offline(rated_project) -> None:
     assert report["viewer_up"] is None, "nothing was asked, so nothing is known"
 
 
-def test_bare_dry_run_reads_no_credential_and_leaves_viewer_up_null(rated_project) -> None:
+def test_bare_dry_run_reads_no_credential_and_leaves_viewer_up_null(ghes_project) -> None:
     """C-023: the bare `--dry-run` contract is unchanged. No credential is
     read — a sentinel in the ladder must not be consumed, and the run must
     not fail at 80 the way a credential-needing path would — and no request
     is made, so `viewer_up` is `null`."""
     sentinel = "ghp_thisladdertokenmustnotbeconsumed"
     result = _rate(
-        rated_project,
+        ghes_project,
         "--format",
         "json",
         "rate",
         RATED,
         "--dry-run",
-        env_extra={"GRIM_RATE_TOKEN": sentinel, "GRIM_RATING_HOST": GHES_HOST},
+        env_extra={"GRIM_RATE_TOKEN": sentinel},
     )
     assert result.returncode == 0, f"no credential is needed: {result.stderr}"
     report = json.loads(result.stdout)
@@ -465,7 +497,7 @@ def test_bare_dry_run_reads_no_credential_and_leaves_viewer_up_null(rated_projec
 
 
 def test_a_credentialed_dry_run_needs_no_yes_and_never_reports_not_voted(
-    rated_project,
+    ghes_project,
 ) -> None:
     """S-022 / S-023: `--dry-run --token-stdin` posts nothing, so it does not
     require `--yes` — a `64` here would mean the C-005 confirmation rule
@@ -477,15 +509,16 @@ def test_a_credentialed_dry_run_needs_no_yes_and_never_reports_not_voted(
     lie invariant R-3 exists to prevent."""
     secret = "ghp_thistokenisreadbutneverposted"
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "--format",
         "json",
         "rate",
         RATED,
         "--dry-run",
         "--token-stdin",
+        "--token-host",
+        GHES_HOST,
         stdin=secret,
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 0, f"a failed read still resolves: {result.stderr}"
     report = json.loads(result.stdout)
@@ -496,13 +529,13 @@ def test_a_credentialed_dry_run_needs_no_yes_and_never_reports_not_voted(
 
 
 def test_a_credentialed_dry_run_still_fails_closed_on_a_token_host_mismatch(
-    rated_project,
+    ghes_project,
 ) -> None:
     """C-023: `--token-host` applies to the read exactly as to the vote — 80
     naming both hosts, before the token reaches a header."""
     secret = "ghp_thistokenmustnevertravel"
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--dry-run",
@@ -510,7 +543,6 @@ def test_a_credentialed_dry_run_still_fails_closed_on_a_token_host_mismatch(
         "--token-host",
         "api.github.com",
         stdin=secret,
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 80, f"expected an auth refusal: {result.stderr}"
     assert "api.github.com" in result.stderr, "names the declared host"
@@ -518,35 +550,37 @@ def test_a_credentialed_dry_run_still_fails_closed_on_a_token_host_mismatch(
     assert secret not in result.stdout + result.stderr
 
 
-def test_a_credentialed_dry_run_refuses_offline(rated_project) -> None:
+def test_a_credentialed_dry_run_refuses_offline(ghes_project) -> None:
     """C-023: this variant wants a forge request, so `--offline` refuses it
     at 81 rather than answering a question it could not ask. The bare dry
     run's offline contract (S-020) is untouched."""
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--dry-run",
         "--token-stdin",
+        "--token-host",
+        GHES_HOST,
         "--offline",
         stdin="ghp_x",
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 81, result.stderr
 
 
-def test_a_credentialed_dry_run_still_refuses_an_empty_pipe(rated_project) -> None:
+def test_a_credentialed_dry_run_still_refuses_an_empty_pipe(ghes_project) -> None:
     """C-006 is unchanged on this path: a caller that stated it was supplying
     a credential must not silently read as somebody else."""
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--dry-run",
         "--token-stdin",
+        "--token-host",
+        GHES_HOST,
         stdin="\n",
         env_extra={
-            "GRIM_RATING_HOST": GHES_HOST,
             "GRIM_RATE_TOKEN": "ghp_a_different_credential",
         },
     )
@@ -576,21 +610,33 @@ def test_a_credentialed_dry_run_on_an_unrated_provider_asks_nothing(
     assert secret not in result.stdout + result.stderr
 
 
-def test_dry_run_honors_the_user_host_override(rated_project) -> None:
-    """C-007: a GHES/self-managed host comes from the user's own environment.
-    Nothing in `stats.json` can reach this — the sidecar carries a provider,
-    a target and a url, and deliberately no host."""
+def test_dry_run_reports_the_host_the_index_declared(ghes_project) -> None:
+    """`adr_index_declared_rating_host.md`: `providers.rating_host` replaces
+    the built-in default, and the report says so — `host_source` is what
+    tells a client the destination was the index's choice, and is exactly
+    when a piped credential has to name it."""
     result = _rate(
-        rated_project,
+        ghes_project,
         "--format",
         "json",
         "rate",
         RATED,
         "--dry-run",
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["host"] == GHES_HOST
+    report = json.loads(result.stdout)
+    assert report["host"] == GHES_HOST
+    assert report["host_source"] == "index"
+
+
+def test_an_index_that_declares_nothing_keeps_the_provider_default(rated_project) -> None:
+    """The unchanged path: no `providers.rating_host` means the built-in
+    per-provider host, reported as such."""
+    result = _rate(rated_project, "--format", "json", "rate", RATED, "--dry-run")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["host"] == "api.github.com"
+    assert report["host_source"] == "default"
 
 
 def test_dry_run_reports_a_null_host_for_an_unrecognised_provider(
@@ -633,13 +679,13 @@ def test_an_unrecognised_provider_refuses_a_real_vote(
 # ---------------------------------------------------------------------------
 
 
-def test_token_host_mismatch_refuses_before_the_token_reaches_a_header(rated_project) -> None:
+def test_token_host_mismatch_refuses_before_the_token_reaches_a_header(ghes_project) -> None:
     """S-021: an extension that pipes a github.com token for a GHES ref is
     refused at 80 naming both hosts. This is the guarantee that does not
     depend on the client being correct."""
     secret = "ghp_thistokenmustnevertravel"
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--yes",
@@ -647,7 +693,6 @@ def test_token_host_mismatch_refuses_before_the_token_reaches_a_header(rated_pro
         "--token-host",
         "api.github.com",
         stdin=secret,
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 80, f"expected an auth refusal: {result.stderr}"
     assert "api.github.com" in result.stderr, "names the declared host"
@@ -655,13 +700,13 @@ def test_token_host_mismatch_refuses_before_the_token_reaches_a_header(rated_pro
     assert secret not in result.stdout + result.stderr, "the credential must never be echoed"
 
 
-def test_token_host_never_matches_a_lookalike(rated_project) -> None:
+def test_token_host_never_matches_a_lookalike(ghes_project) -> None:
     """C-007: host comparison is exact — no prefix, suffix or subdomain
     matching, so `evil-github.com` and `api.github.com.evil.tld` are simply
     different hosts."""
     for hostile in ("evil-github.com", "api.github.com.evil.tld", "github.com"):
         result = _run_with_stdin(
-            rated_project,
+            ghes_project,
             "rate",
             RATED,
             "--yes",
@@ -670,14 +715,14 @@ def test_token_host_never_matches_a_lookalike(rated_project) -> None:
             hostile,
             stdin="ghp_x",
         )
-        assert result.returncode == 80, f"{hostile} must not match api.github.com: {result.stderr}"
+        assert result.returncode == 80, f"{hostile} must not match {GHES_HOST}: {result.stderr}"
 
 
-def test_a_matching_token_host_passes_the_gate(rated_project) -> None:
+def test_a_matching_token_host_passes_the_gate(ghes_project) -> None:
     """A correct declaration proceeds past the host gate — it then fails at
     the unroutable forge (69), which is proof the gate let it through."""
     result = _run_with_stdin(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--yes",
@@ -685,15 +730,162 @@ def test_a_matching_token_host_passes_the_gate(rated_project) -> None:
         "--token-host",
         GHES_HOST,
         stdin="ghp_x",
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 69, f"expected to get as far as the unreachable forge: {result.stderr}"
 
 
-def test_token_host_without_token_stdin_is_a_usage_error(rated_project) -> None:
+def test_token_host_stands_on_its_own(rated_project) -> None:
+    """It used to require `--token-stdin`. `GRIM_RATE_TOKEN` is injected too
+    and needs the same way to declare its destination, so the flag no longer
+    depends on a sibling — a matching declaration is simply accepted and the
+    run proceeds to the credential ladder (80, no token to be found)."""
     result = _rate(rated_project, "rate", RATED, "--yes", "--token-host", "api.github.com")
-    assert result.returncode == 64, result.stderr
-    assert "--token-stdin" in result.stderr
+    assert result.returncode == 80, f"past the usage gate, refused at the ladder: {result.stderr}"
+
+    # And it still gates: a wrong declaration is refused before anything else.
+    mismatch = _rate(rated_project, "rate", RATED, "--yes", "--token-host", "evil.tld")
+    assert mismatch.returncode == 80, mismatch.stderr
+    assert "evil.tld" in mismatch.stderr, mismatch.stderr
+
+
+# ---------------------------------------------------------------------------
+# The credential-class gate — adr_index_declared_rating_host.md
+# ---------------------------------------------------------------------------
+
+
+def test_an_env_credential_must_name_an_index_declared_host(ghes_project, fake_forge) -> None:
+    """`GRIM_RATE_TOKEN` is host-agnostic, so nothing binds it to a
+    destination the way the `gh`/CI rungs are bound. Against a host the
+    *index* chose, grim refuses until the caller names it — and the refusal
+    lands before any request, which the untouched forge proves."""
+    secret = "ghp_thistokenmustnevertravel"
+    result = _rate(
+        ghes_project,
+        "rate",
+        RATED,
+        "--yes",
+        env_extra={"GRIM_RATE_TOKEN": secret},
+    )
+    assert result.returncode == 80, f"expected an auth refusal: {result.stderr}"
+    assert "--token-host" in result.stderr, f"names the way out: {result.stderr}"
+    assert GHES_HOST in result.stderr, f"names the host: {result.stderr}"
+    assert secret not in result.stdout + result.stderr
+    assert fake_forge.documents == [], "nothing was sent anywhere"
+
+
+def test_a_piped_credential_must_name_an_index_declared_host(ghes_project) -> None:
+    """The same rule for the other injected credential."""
+    secret = "ghp_thistokenmustnevertravel"
+    result = _run_with_stdin(
+        ghes_project,
+        "rate",
+        RATED,
+        "--yes",
+        "--token-stdin",
+        stdin=secret,
+    )
+    assert result.returncode == 80, f"expected an auth refusal: {result.stderr}"
+    assert "--token-host" in result.stderr, result.stderr
+    assert secret not in result.stdout + result.stderr
+
+
+def test_an_env_credential_votes_once_the_host_is_declared(forge_project, fake_forge) -> None:
+    """And the way out works end to end: `--token-host` naming the resolved
+    host lets `GRIM_RATE_TOKEN` through to the forge."""
+    secret = "ghp_thistokenreachesexactlyoneheader"
+    result = _rate(
+        forge_project,
+        "--format",
+        "json",
+        "rate",
+        RATED,
+        "--up",
+        "--yes",
+        "--token-host",
+        fake_forge.host,
+        env_extra={"GRIM_RATE_TOKEN": secret},
+    )
+    assert result.returncode == 0, f"the vote must land: {result.stderr}"
+    assert json.loads(result.stdout)["host_source"] == "index"
+    assert fake_forge.mutation()["variables"] == {"id": TARGET}
+    assert secret not in result.stdout + result.stderr
+
+
+def test_a_bare_dry_run_is_never_gated(ghes_project) -> None:
+    """The handshake must stay usable: a bare `--dry-run` reads no
+    credential and issues no request, and it is how a client *learns* the
+    host it would have to declare — gating it on an exported
+    `GRIM_RATE_TOKEN` would make the flag undiscoverable."""
+    result = _rate(
+        ghes_project,
+        "--format",
+        "json",
+        "rate",
+        RATED,
+        "--dry-run",
+        env_extra={"GRIM_RATE_TOKEN": "ghp_exported_but_never_read"},
+    )
+    assert result.returncode == 0, f"the handshake needs no declaration: {result.stderr}"
+    report = json.loads(result.stdout)
+    assert report["host"] == GHES_HOST
+    assert report["host_source"] == "index"
+
+
+def test_the_host_matched_ladder_is_not_gated(ghes_project) -> None:
+    """Only the injected credentials are gated. With none supplied, grim
+    falls through to its own host-matched ladder — which resolves nothing
+    for a `.invalid` host and refuses at 80 naming the ladder, not the
+    declaration."""
+    result = _rate(ghes_project, "rate", RATED, "--yes")
+    assert result.returncode == 80, result.stderr
+    assert "--token-host" not in result.stderr, f"this is the ladder refusal: {result.stderr}"
+    assert "GRIM_RATE_TOKEN" in result.stderr, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# A declared host that grim will not take
+# ---------------------------------------------------------------------------
+
+
+def test_a_declaration_that_is_not_a_bare_host_falls_back_to_the_default(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """A rejected declaration degrades to the provider default, exactly as
+    an unrecognised `providers.rating` degrades to readable-not-writable."""
+    root, base = http_index
+    _publish(root, rating_host="https://evil.tld/path")
+    _index_config(project_dir, base)
+    runner = grim_at(project_dir)
+    _warm_catalog(runner)
+
+    report = json.loads(
+        _rate(runner, "--format", "json", "rate", RATED, "--dry-run").stdout
+    )
+    assert report["host"] == "api.github.com"
+    assert report["host_source"] == "default"
+
+
+def test_a_remote_index_may_not_declare_a_loopback_host(
+    grim_at, project_dir: Path, http_index, fake_forge
+) -> None:
+    """`graphql_endpoint` speaks plain HTTP to loopback, so a declaration
+    naming it would aim a credential at a port on the reader's own machine.
+    The fixture index is itself loopback, so this test declares a *different*
+    loopback authority than the one serving the sidecar — still permitted,
+    because the index is local either way. The rejected case is unit-tested
+    in `index_source.rs`; here the point is that the local pairing the suite
+    depends on keeps working."""
+    root, base = http_index
+    _publish(root, rating_host=fake_forge.host)
+    _index_config(project_dir, base)
+    runner = grim_at(project_dir)
+    _warm_catalog(runner)
+
+    report = json.loads(
+        _rate(runner, "--format", "json", "rate", RATED, "--dry-run").stdout
+    )
+    assert report["host"] == fake_forge.host
+    assert report["host_source"] == "index"
 
 
 # ---------------------------------------------------------------------------
@@ -708,10 +900,10 @@ def test_a_non_interactive_run_without_yes_refuses_naming_the_flag(rated_project
     assert "--yes" in result.stderr, result.stderr
 
 
-def test_token_stdin_without_yes_is_a_usage_error(rated_project) -> None:
+def test_token_stdin_without_yes_is_a_usage_error(ghes_project) -> None:
     """S-019: stdin carries the credential, so it cannot also carry a `y`,
     and the prompt is never rerouted to /dev/tty."""
-    result = _run_with_stdin(rated_project, "rate", RATED, "--token-stdin", stdin="ghp_x")
+    result = _run_with_stdin(ghes_project, "rate", RATED, "--token-stdin", stdin="ghp_x")
     assert result.returncode == 64, result.stderr
     assert "--yes" in result.stderr, result.stderr
 
@@ -728,16 +920,18 @@ def test_up_and_remove_together_is_a_usage_error(rated_project) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_empty_piped_input_is_an_auth_error_and_never_falls_through(rated_project) -> None:
+def test_empty_piped_input_is_an_auth_error_and_never_falls_through(ghes_project) -> None:
     """C-006: the caller *stated* it was supplying a credential, so silently
     voting as somebody else is worse than failing."""
     for empty in ("", "\n", "   \n"):
         result = _run_with_stdin(
-            rated_project,
+            ghes_project,
             "rate",
             RATED,
             "--yes",
             "--token-stdin",
+            "--token-host",
+            GHES_HOST,
             stdin=empty,
             env_extra={"GRIM_RATE_TOKEN": "ghp_a_different_credential"},
         )
@@ -747,10 +941,17 @@ def test_empty_piped_input_is_an_auth_error_and_never_falls_through(rated_projec
         )
 
 
-def test_multi_line_piped_input_is_a_usage_error(rated_project) -> None:
+def test_multi_line_piped_input_is_a_usage_error(ghes_project) -> None:
     secret = "ghp_firstline"
     result = _run_with_stdin(
-        rated_project, "rate", RATED, "--yes", "--token-stdin", stdin=f"{secret}\nextra\n"
+        ghes_project,
+        "rate",
+        RATED,
+        "--yes",
+        "--token-stdin",
+        "--token-host",
+        GHES_HOST,
+        stdin=f"{secret}\nextra\n",
     )
     assert result.returncode == 64, result.stderr
     assert secret not in result.stdout + result.stderr, "the credential must never be echoed"
@@ -763,16 +964,15 @@ def test_there_is_no_token_value_flag(rated_project) -> None:
     assert result.returncode == 64, result.stderr
 
 
-def test_no_credential_refuses_naming_the_ladder_never_a_token(rated_project) -> None:
+def test_no_credential_refuses_naming_the_ladder_never_a_token(ghes_project) -> None:
     """S-004: exit 80 with a message that names the ladder. The host is a
     `.invalid` one, so no forge CLI on the developer's machine can satisfy
     it either."""
     result = _rate(
-        rated_project,
+        ghes_project,
         "rate",
         RATED,
         "--yes",
-        env_extra={"GRIM_RATING_HOST": GHES_HOST},
     )
     assert result.returncode == 80, result.stderr
     assert "GRIM_RATE_TOKEN" in result.stderr, f"names the ladder: {result.stderr}"
@@ -816,7 +1016,7 @@ def test_offline_hard_refuses_a_vote(rated_project) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_json_report_always_carries_all_seven_keys(rated_project) -> None:
+def test_the_json_report_always_carries_all_eight_keys(rated_project) -> None:
     """Principle 9: `skip_serializing_if` is banned in `src/api/`, so a
     consumer never has to tell "absent key" from "no value". `viewer_up`
     (C-023) is additive and always present — `null` on every path that did
@@ -827,6 +1027,7 @@ def test_the_json_report_always_carries_all_seven_keys(rated_project) -> None:
     assert sorted(report) == [
         "action",
         "host",
+        "host_source",
         "provider",
         "ref",
         "up",

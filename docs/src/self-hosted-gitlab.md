@@ -205,6 +205,14 @@ that wants both a private index and ratings needs the HTTP transport,
 which means a reachable (and therefore public, or otherwise
 grim-reachable) Pages site.
 
+That Pages site is on a different host from the instance itself — GitLab
+requires a separate Pages domain — so the sidecar carries the forge host
+explicitly. Set `providers.rating_host` to your instance
+(`gitlab.corp.example`), and every consumer votes against it with no
+per-machine configuration; see [Voting against a private
+instance](./ratings.md#voting-host) for the credential rule that comes with
+it.
+
 <!-- external -->
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/pull/

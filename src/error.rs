@@ -225,9 +225,10 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                     | RateError::Graphql(_) => ExitCode::DataError,
                     RateError::Unavailable(_) => ExitCode::Unavailable,
                     RateError::NoSuchRef { .. } | RateError::NotFound(_) => ExitCode::NotFound,
-                    RateError::TokenHostMismatch { .. } | RateError::NoCredential(_) | RateError::Unauthorized(_) => {
-                        ExitCode::AuthError
-                    }
+                    RateError::TokenHostMismatch { .. }
+                    | RateError::UndeclaredTokenHost { .. }
+                    | RateError::NoCredential(_)
+                    | RateError::Unauthorized(_) => ExitCode::AuthError,
                     RateError::Offline => ExitCode::OfflineBlocked,
                 }),
                 Error::Announce(ae) => Classification::new(match ae {

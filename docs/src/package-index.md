@@ -179,7 +179,13 @@ a second endpoint and without a version bump for consumers that ignore it.
     // tagged union: `target` and `url` are hoisted onto the entry, so this
     // carries no read-path data and an unrecognised value degrades to
     // "readable, not writable".
-    "rating": "github"
+    "rating": "github",
+
+    // Where those threads live. Host authority only — no scheme, no path,
+    // port significant. Omit it on a SaaS index; declare it and every
+    // consumer of a GHES or self-managed instance votes against the right
+    // host with no per-machine configuration.
+    "rating_host": "api.github.com"
   },
 
   // Keyed by artifact ref, exactly as it appears in all.json's `ref`.
@@ -206,6 +212,7 @@ a second endpoint and without a version bump for consumers that ignore it.
 | `schema_version` | integer | yes | Monotonic, **not** semver. This document specifies `1`. |
 | `generated_at` | string | yes | RFC3339 UTC timestamp of the run that produced the document. |
 | `providers` | object | no | One key per statistic, naming its producer. `providers.rating` is `"github"` or `"gitlab"` — the forge `grim rate` votes through. Absent, or an unrecognised value, leaves every rating **readable but not votable**. |
+| `providers.rating_host` | string | no | The forge host those threads live on: host authority only (`host` or `host:port`), no scheme and no path. Absent ⇒ the consumer's built-in per-provider default (`api.github.com` / `gitlab.com`). A value that is not a bare host is ignored and the default applies; a **remote** index declaring one of the loopback forms (`localhost`, `127.0.0.1`, `[::1]`) is ignored too. Against a host declared here, `grim rate` requires `--token-host` for a `--token-stdin` or `GRIM_RATE_TOKEN` credential — see [Voting against a private instance](./ratings.md#voting-host). |
 | `entries` | object | no | Keyed by artifact ref, spelled exactly as `all.json` spells it. Absent means nothing is rated yet. |
 | `entries[ref].rating` | object | no | `{up, target, url}`. `up` is a non-negative integer count; `target` and `url` are **opaque** — never parsed or constructed by any client. A ref with zero votes is omitted rather than carrying `"up": 0`. |
 

@@ -171,6 +171,17 @@ pub struct RatingSummary {
     /// rejected and rebuilt — the S-015 path, not an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The sidecar's `providers.rating_host` — the forge host `grim rate`
+    /// sends this artifact's vote to, already normalised and already
+    /// checked against the URL the sidecar was served from
+    /// (`index_source::accepted_rating_host`). `None` for a sidecar that
+    /// declared none, one whose declaration was rejected, and every cache
+    /// written before this field existed; `grim rate` then falls back to
+    /// the built-in provider default.
+    ///
+    /// Per entry and additive for the same reasons as `provider` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// One repository's catalog record.
@@ -1193,6 +1204,7 @@ mod tests {
                     target: "D_kwDOAbCdEf".to_string(),
                     url: "https://github.com/acme/index/discussions/7".to_string(),
                     provider: Some("github".to_string()),
+                    host: None,
                 }),
                 fetched_at: ts(10),
             },

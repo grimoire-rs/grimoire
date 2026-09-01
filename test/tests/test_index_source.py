@@ -699,13 +699,21 @@ def test_install_from_http_index_lands_in_claude_config_dir(
 # ---------------------------------------------------------------------------
 
 
-def _write_stats(root: Path, entries: dict, schema_version: int = 1) -> None:
+def _write_stats(
+    root: Path,
+    entries: dict,
+    schema_version: int = 1,
+    rating_host: str | None = None,
+) -> None:
+    providers: dict = {"rating": "github"}
+    if rating_host is not None:
+        providers["rating_host"] = rating_host
     (root / "stats.json").write_text(
         json.dumps(
             {
                 "schema_version": schema_version,
                 "generated_at": "2026-08-18T00:00:00Z",
-                "providers": {"rating": "github"},
+                "providers": providers,
                 "entries": entries,
             }
         )
@@ -768,6 +776,46 @@ def test_http_index_joins_the_ratings_sidecar_by_ref(
     assert "ghcr.io/acme/skills/ghost" not in cached, (
         "the sidecar joins onto index rows; it never adds one"
     )
+
+
+def test_a_declared_rating_host_lands_in_the_cache_normalised(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """`adr_index_declared_rating_host.md`: `providers.rating_host` rides
+    onto every rated entry, already normalised, so what the cache holds is
+    what `grim rate` would dial."""
+    root, base = http_index
+    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    _write_stats(
+        root,
+        {"ghcr.io/acme/skills/rated": {"rating": {"up": 1, "target": "t", "url": "u"}}},
+        rating_host="GitLab.Corp.Example.",
+    )
+    _index_config(project_dir, base)
+    _search_rows(grim_at(project_dir))
+
+    rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]
+    assert rating["host"] == "gitlab.corp.example", "case-folded, trailing root dot stripped"
+
+
+def test_a_rejected_rating_host_leaves_the_entry_hostless(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """A declaration that is not a bare host never reaches the cache — the
+    row stays readable and the vote falls back to the provider default,
+    the same degradation an unrecognised `providers.rating` gets."""
+    root, base = http_index
+    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    _write_stats(
+        root,
+        {"ghcr.io/acme/skills/rated": {"rating": {"up": 1, "target": "t", "url": "u"}}},
+        rating_host="https://evil.tld/path",
+    )
+    _index_config(project_dir, base)
+    _search_rows(grim_at(project_dir))
+
+    rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]
+    assert "host" not in rating, f"a rejected declaration is stored as nothing: {rating}"
 
 
 def test_http_index_without_a_sidecar_reads_unrated_and_warns_nothing(

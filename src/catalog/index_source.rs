@@ -26,6 +26,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
+use crate::catalog::rating_provider;
 use crate::catalog::registry_catalog::{CatalogEntry, RatingSummary};
 use crate::config::registry_resolve::SourceKind;
 
@@ -178,6 +179,19 @@ struct StatsFile {
 struct WireProviders {
     #[serde(default)]
     rating: Option<String>,
+    /// The forge host the rating threads live on — host authority only, no
+    /// scheme and no path, port significant. Absent ⇒ the built-in
+    /// per-provider default.
+    ///
+    /// This is index-fetched content that selects a credential
+    /// *destination*, which `adr_artifact_ratings.md` D13 forbade outright.
+    /// [`adr_index_declared_rating_host.md`] supersedes that clause: the
+    /// host-matched rungs of the credential ladder resolve nothing for a
+    /// host the user never authenticated against, and the two credentials
+    /// that are *not* host-bound — `GRIM_RATE_TOKEN` and `--token-stdin` —
+    /// are gated in `grim rate` instead of closed off here.
+    #[serde(default)]
+    rating_host: Option<String>,
 }
 
 /// One ref's bag of stats. Every signal key is independently absent-first
@@ -207,14 +221,52 @@ impl WireRating {
     /// yet nothing in the catalog layout guarantees that, and `grim rate`
     /// needs to know which mutation to issue for the specific row it
     /// resolved. Absent ⇒ the artifact is readable but not votable.
-    fn into_summary(self, provider: Option<&str>) -> RatingSummary {
+    ///
+    /// `host` rides along for the same reason and is already validated —
+    /// see [`accepted_rating_host`]. Absent ⇒ the provider default.
+    fn into_summary(self, provider: Option<&str>, host: Option<&str>) -> RatingSummary {
         RatingSummary {
             up: self.up,
             target: self.target,
             url: self.url,
             provider: provider.map(str::to_string),
+            host: host.map(str::to_string),
         }
     }
+}
+
+/// Validate a sidecar-declared `providers.rating_host` against the URL the
+/// sidecar was served from, returning the normalised host to store.
+///
+/// Two rules, and a rejection is never an error — it degrades to the
+/// built-in provider default at `debug`, exactly as an unrecognised
+/// `providers.rating` degrades to "readable, not writable".
+///
+/// 1. It must survive [`rating_provider::normalize_host`], which rejects a
+///    scheme, a path, userinfo and whitespace. This is the same
+///    normalisation the vote client compares with, so what is stored is
+///    what would be dialled.
+/// 2. It may name the loopback set only when the index itself is loopback.
+///    `rating_provider::graphql_endpoint` speaks **plain HTTP** to
+///    `localhost`/`127.0.0.1`/`[::1]`, so without this a remote index could
+///    aim a credential at a port on the reader's own machine in the clear.
+///    A loopback index declaring a loopback forge is the acceptance
+///    suite's fake-forge shape and stays permitted.
+fn accepted_rating_host(declared: &str, stats_url: &str) -> Option<String> {
+    let host = rating_provider::normalize_host(declared)?;
+    if rating_provider::is_loopback(&host) && !index_is_loopback(stats_url) {
+        tracing::debug!("ratings sidecar at '{stats_url}' declared loopback host '{host}'; ignoring it");
+        return None;
+    }
+    Some(host)
+}
+
+/// Whether the sidecar was itself served from a loopback address.
+fn index_is_loopback(stats_url: &str) -> bool {
+    reqwest::Url::parse(stats_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| rating_provider::is_loopback(&host))
 }
 
 /// Fetch the package list for `locator` over the transport `kind`.
@@ -366,11 +418,21 @@ fn parse_ratings(bytes: &[u8], url: &str) -> Option<BTreeMap<String, RatingSumma
         return None;
     }
     let provider = stats.providers.rating;
+    // Validated once for the whole document rather than per entry: the
+    // declaration is a property of the sidecar, and a rejected one has to
+    // degrade identically for every row it would have applied to.
+    let host = stats
+        .providers
+        .rating_host
+        .as_deref()
+        .and_then(|declared| accepted_rating_host(declared, url));
     Some(
         stats
             .entries
             .into_iter()
-            .filter_map(|(r#ref, entry)| Some((r#ref, entry.rating?.into_summary(provider.as_deref()))))
+            .filter_map(|(r#ref, entry)| {
+                Some((r#ref, entry.rating?.into_summary(provider.as_deref(), host.as_deref())))
+            })
             .collect(),
     )
 }
@@ -815,6 +877,110 @@ mod tests {
             ),
             None,
             "a future schema is unobserved, not an observation of no ratings"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // providers.rating_host — adr_index_declared_rating_host.md
+    // -----------------------------------------------------------------
+
+    fn stats_with_host(host: &str) -> String {
+        format!(
+            r#"{{
+                "schema_version": 1,
+                "providers": {{"rating": "gitlab", "rating_host": "{host}"}},
+                "entries": {{"ghcr.io/acme/skills/one": {{"rating": {{"up": 7, "target": "t", "url": "u"}}}}}}
+            }}"#
+        )
+    }
+
+    fn declared_host(body: &str, url: &str) -> Option<String> {
+        parse_ratings(body.as_bytes(), url)
+            .expect("a parsed document is a completed observation")
+            .get("ghcr.io/acme/skills/one")
+            .expect("the ref is rated")
+            .host
+            .clone()
+    }
+
+    #[test]
+    fn a_declared_rating_host_is_normalised_onto_every_entry() {
+        // Stored normalised, so what the cache holds is what the vote
+        // client would dial — trailing root dot stripped, case folded.
+        assert_eq!(
+            declared_host(
+                &stats_with_host("GitLab.Corp.Example."),
+                "https://idx.example/stats.json"
+            ),
+            Some("gitlab.corp.example".to_string())
+        );
+        // A port is part of the identity and survives.
+        assert_eq!(
+            declared_host(
+                &stats_with_host("gitlab.corp.example:8443"),
+                "https://idx.example/stats.json"
+            ),
+            Some("gitlab.corp.example:8443".to_string())
+        );
+    }
+
+    #[test]
+    fn a_declaration_that_is_not_a_bare_host_is_ignored() {
+        // Same degradation as an unrecognised `providers.rating`: the row
+        // stays readable and the vote falls back to the provider default.
+        for bad in [
+            "https://gitlab.corp.example",
+            "gitlab.corp.example/../evil.tld",
+            "user@evil.tld",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                declared_host(&stats_with_host(bad), "https://idx.example/stats.json"),
+                None,
+                "'{bad}' must not become a credential destination"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_index_may_not_declare_a_loopback_host() {
+        // `graphql_endpoint` speaks plain HTTP to the loopback set, so a
+        // remote index naming one would aim a credential at a port on the
+        // reader's own machine, in the clear.
+        for local in ["localhost", "127.0.0.1", "[::1]", "127.0.0.1:8080"] {
+            assert_eq!(
+                declared_host(&stats_with_host(local), "https://idx.example/stats.json"),
+                None,
+                "'{local}' declared by a remote index must be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loopback_index_may_declare_a_loopback_host() {
+        // The acceptance suite's shape: a fake index and a fake forge both
+        // bound to loopback. Nothing leaves the machine either way.
+        assert_eq!(
+            declared_host(&stats_with_host("127.0.0.1:9411"), "http://127.0.0.1:9410/stats.json"),
+            Some("127.0.0.1:9411".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sidecar_declaring_no_host_leaves_the_entry_hostless() {
+        // The pre-existing shape, unchanged: absent means the built-in
+        // provider default, not an error and not an empty string.
+        assert_eq!(
+            declared_host(
+                r#"{
+                    "schema_version": 1,
+                    "providers": {"rating": "github"},
+                    "entries": {"ghcr.io/acme/skills/one": {"rating": {"up": 7, "target": "t", "url": "u"}}}
+                }"#,
+                "https://idx.example/stats.json",
+            ),
+            None
         );
     }
 
