@@ -125,5 +125,12 @@
   },
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true
-  }
+  },
+  "claudeMdExcludes": [
+    "**/.claude/rules/docs-quality/**",
+    "**/.claude/rules/typescript-quality/**",
+    "**/.claude/rules/rust-cargo/**",
+    "**/.claude/rules/rust-quality/**",
+    "**/.claude/rules/python-quality/**"
+  ]
 }
